@@ -311,6 +311,26 @@ class TestEnsureConnectedFailed:
         hook.on_ensure_connected_failed()
         alert_svc.send_alert.assert_called_once()
 
+    def test_bot_variant_says_exiting(self, broker, alert_svc):
+        # Default (strategy bot) framing: the bot IS about to exit/restart.
+        hook = IBKRAlertHooks(broker, alert_svc)
+        hook.on_ensure_connected_failed("competing session")
+        kwargs = alert_svc.send_alert.call_args.kwargs
+        assert "HYDRA" in kwargs["title"] and "session lost" in kwargs["title"]
+        assert "bot exiting" in kwargs["message"]
+
+    def test_broker_variant_says_broker_stays_up(self, broker, alert_svc):
+        # Broker framing (will_restart=False): broker does NOT exit; must not
+        # claim a bot is restarting, and must name calypso-broker.
+        hook = IBKRAlertHooks(broker, alert_svc)
+        hook.on_ensure_connected_failed("broker session re-auth gate", will_restart=False)
+        kwargs = alert_svc.send_alert.call_args.kwargs
+        assert "calypso-broker" in kwargs["title"]
+        assert "does NOT exit" in kwargs["message"]
+        assert "bot exiting" not in kwargs["message"]
+        assert "broker session re-auth gate" in kwargs["message"]
+        assert "HIGH" in str(kwargs["priority"])
+
 
 # ─── Defensive: alert_service raising never crashes the loop ──────────────
 

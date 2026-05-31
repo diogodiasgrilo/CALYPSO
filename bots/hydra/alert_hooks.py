@@ -102,27 +102,50 @@ class IBKRAlertHooks:
             # Defensive: a bug in this module must NEVER take down main.py.
             logger.exception("IBKRAlertHooks.poll() error (non-fatal): %s", e)
 
-    def on_ensure_connected_failed(self, reason: str = "") -> None:
-        """Fire the highest-value alert in the polish pass (A1.3): main.py's
-        intraday ensure_connected() returned False. The bot is about to
-        ``break`` out of the monitoring loop for a systemd restart, but
-        without this Telegram the operator only sees the bot vanish.
+    def on_ensure_connected_failed(self, reason: str = "", *, will_restart: bool = True) -> None:
+        """Fire the highest-value alert in the polish pass (A1.3): an intraday
+        ``ensure_connected()`` returned False.
+
+        Two callers, two framings:
+
+        * **Strategy bot** (``will_restart=True``, default): main.py is about to
+          ``break`` out of its loop for a systemd restart — without this
+          Telegram the operator only sees the bot vanish.
+        * **Shared broker** (``will_restart=False``): calypso-broker does NOT
+          exit — it stays up and keeps retrying re-auth — so the wording and
+          expectation differ. The broker only calls this after **≥2 consecutive
+          failed re-auth cycles**; the routine ~01:00 ET IBKR reset clears in a
+          single cycle and must NOT alert (that was a nightly false HIGH).
 
         Args:
             reason: short human-readable reason (e.g. ``"competing session"``,
                 ``"LST handshake failed"``, ``"connect() exception: ..."``).
                 Appended to the alert body if provided.
+            will_restart: see above — selects bot-exit vs broker-stays-up wording.
         """
         try:
-            body = (
-                "IBKR session lost mid-day — bot exiting for systemd "
-                "restart — likely competing session or LST expiry."
-            )
+            if will_restart:
+                title = "HYDRA — IBKR session lost"
+                body = (
+                    "IBKR session lost mid-day — bot exiting for systemd "
+                    "restart — likely competing session or LST expiry."
+                )
+            else:
+                title = "calypso-broker — IBKR re-auth failing"
+                body = (
+                    "Shared broker IBKR re-auth has FAILED for 2+ consecutive "
+                    "cycles (~30+ min). The broker stays UP and keeps retrying "
+                    "(it does NOT exit), but A/B/C cannot trade until the "
+                    "session is restored. The routine ~01:00 ET IBKR reset "
+                    "normally clears in one cycle — if this fired during market "
+                    "hours, investigate LST/consumer-key or a competing session "
+                    "on the same IBKR username."
+                )
             if reason:
                 body = f"{body}\n\nReason: {reason}"
             self._alerts.send_alert(
                 alert_type=_alert_type("API_ERROR"),
-                title="HYDRA — IBKR session lost",
+                title=title,
                 message=body,
                 priority=_alert_priority("HIGH"),
             )
