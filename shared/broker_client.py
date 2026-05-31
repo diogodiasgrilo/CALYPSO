@@ -95,9 +95,20 @@ class BrokerClient:
         if not isinstance(resp, dict):
             raise BrokerError(f"broker {method}: malformed response {resp!r}")
         if "error" in resp:
-            raise BrokerError(
-                f"broker {method}: {resp.get('type', 'Error')}: {resp['error']}"
-            )
+            etype = resp.get("type", "Error")
+            msg = f"broker {method}: {etype}: {resp['error']}"
+            # Preserve the ONE exception type whose CLASS the caller branches on:
+            # AmbiguousOrderError signals "order may be live but unconfirmed —
+            # ABORT, do not resubmit". If it collapsed to a generic BrokerError
+            # over the wire, bots/hydra/strategy._place_leg_order's
+            # `except AmbiguousOrderError` would miss it and the progressive
+            # retry loop would re-place under a new cOID → double-fill. Re-raise
+            # the same class the bot imports so the abort path fires in broker
+            # mode exactly as it does on the direct IBClient path.
+            if etype == "AmbiguousOrderError":
+                from shared.ib_client import AmbiguousOrderError
+                raise AmbiguousOrderError(msg)
+            raise BrokerError(msg)
         # Reverse any JSON-safe transforms the broker applied to non-JSON-native
         # return shapes (e.g. qualify_option_strikes' tuple-keyed dict) so the
         # strategy sees exactly what a direct IBClient would have returned.

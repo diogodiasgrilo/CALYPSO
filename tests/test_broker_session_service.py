@@ -141,6 +141,26 @@ class TestBrokerContract:
         with pytest.raises(BrokerError):
             client.get_vix_price()
 
+    def test_ambiguous_order_error_survives_the_rpc_boundary(self):
+        """Audit #3/double-fill: an AmbiguousOrderError raised in the broker
+        process must re-raise as AmbiguousOrderError on the client side (not a
+        generic BrokerError) — else _place_leg_order's `except
+        AmbiguousOrderError` misses it and the loop re-places under a new cOID
+        (double-fill). The dispatcher preserves the type name; BrokerClient maps
+        it back to the class the bot branches on."""
+        from shared.ib_client import AmbiguousOrderError
+
+        def amb_transport(method, args, kwargs):
+            return {"error": "unconfirmed place — aborting", "type": "AmbiguousOrderError"}
+
+        client = BrokerClient(transport=amb_transport)
+        with pytest.raises(AmbiguousOrderError):
+            client.place_and_wait_for_fill(conid=1, side="BUY", quantity=1)
+        # A generic error still raises the generic BrokerError.
+        client2 = BrokerClient(transport=lambda m, a, k: {"error": "boom", "type": "ValueError"})
+        with pytest.raises(BrokerError):
+            client2.get_vix_price()
+
     def test_connect_ok_when_broker_holds_session(self):
         _, client = _make()
         client.health = lambda: {"status": "ok", "connected": True}

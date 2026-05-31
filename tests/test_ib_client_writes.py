@@ -864,6 +864,31 @@ class TestBuildFillResultDict:
         assert out["filled_quantity"] == 0
         assert out["avg_fill_price"] is None
 
+    def test_filled_status_authoritative_when_qty_field_unknown(self):
+        """Audit #3 hardening: the exact order/status fill-quantity key is not
+        confirmed against a captured IBKR payload. If NONE of the known keys
+        parse but the order reached terminal 'filled', that status is
+        authoritative → report the full requested quantity (NOT 0, which would
+        drive a cancel+retry double-fill). Field-name-independent."""
+        from shared.ib_client import _build_fill_result_dict
+        out = _build_fill_result_dict(
+            order_id="abc",
+            raw={"order_status": "Filled", "some_future_qty_key": 1},  # unknown key
+            status="filled",
+            requested_quantity=1,
+        )
+        assert out["filled_quantity"] == 1  # not 0 → no double-fill
+
+    def test_non_filled_status_does_not_fabricate_quantity(self):
+        """The authoritative-fill fallback must ONLY fire on terminal 'filled';
+        a cancelled/timed_out order with no qty stays 0."""
+        from shared.ib_client import _build_fill_result_dict
+        for st in ("cancelled", "timed_out", "rejected"):
+            out = _build_fill_result_dict(
+                order_id="abc", raw={"status": st}, status=st, requested_quantity=4,
+            )
+            assert out["filled_quantity"] == 0, f"{st} must not fabricate a fill"
+
     def test_bad_values_dont_crash(self):
         """Defensive: malformed responses shouldn't raise. Bad int → 0, bad float → None."""
         from shared.ib_client import _build_fill_result_dict

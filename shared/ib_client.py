@@ -325,6 +325,7 @@ def _build_fill_result_dict(
     order_id: str,
     raw: dict,
     status: str,
+    requested_quantity: int = 0,
 ) -> dict:
     """Build the normalized result dict returned by place_and_wait_for_fill.
 
@@ -352,6 +353,28 @@ def _build_fill_result_dict(
         filled_quantity = int(float(filled_qty_raw))
     except (TypeError, ValueError):
         filled_quantity = 0
+
+    # Field-name-independent safety net (audit #3 hardening). The exact fill-
+    # quantity key on /iserver/account/order/status/{id} is NOT confirmed
+    # against a captured payload (`cum_fill` is inferred from IBKR docs). If we
+    # could not parse ANY quantity but the order reached the TERMINAL "filled"
+    # state, that status is authoritative — the order is fully filled — so
+    # report the full requested quantity rather than 0 (which would otherwise
+    # drive a cancel+retry double-fill). Log the raw keys so the first real
+    # fill reveals the actual field name and we can pin it down.
+    if (
+        filled_quantity == 0
+        and requested_quantity
+        and str(status).strip().lower() == "filled"
+    ):
+        logger.warning(
+            "order %s reported status=filled but no parseable fill-quantity "
+            "field — treating as fully filled (qty=%d) via authoritative "
+            "status; raw keys=%s",
+            order_id, requested_quantity,
+            sorted(raw.keys()) if isinstance(raw, dict) else type(raw).__name__,
+        )
+        filled_quantity = int(requested_quantity)
 
     avg_price_raw = (
         raw.get("avg_fill_price")
@@ -2714,6 +2737,7 @@ class IBClient:
                     pass  # order purged post-fill — fall back to place_resp
             return _build_fill_result_dict(
                 order_id=str(order_id), raw=fill_raw, status=initial_status,
+                requested_quantity=quantity,
             )
 
         # Poll for terminal state. Each poll is its own _ib_call with
@@ -2770,6 +2794,7 @@ class IBClient:
                     order_id=str(order_id),
                     raw=last_status_resp,
                     status=status,
+                    requested_quantity=quantity,
                 )
             time.sleep(poll_interval_s)
 
