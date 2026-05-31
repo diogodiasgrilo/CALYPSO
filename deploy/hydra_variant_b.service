@@ -81,8 +81,8 @@ PrivateTmp=yes
 ProtectSystem=strict
 ProtectControlGroups=yes
 ProtectKernelTunables=yes
-# AUD2-L4 — see hydra.service for rationale
-ProtectDevices=yes
+# AUD2-L4 — PrivateDevices=yes (ProtectDevices is ignored on systemd 252; see hydra.service)
+PrivateDevices=yes
 ReadWritePaths=/opt/calypso
 
 [Install]

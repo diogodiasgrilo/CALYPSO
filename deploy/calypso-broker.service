@@ -55,17 +55,21 @@ StandardError=journal
 SyslogIdentifier=calypso-broker
 
 # ─── Sandboxing (defense-in-depth for a brokerage-credential service) ───────
-# ProtectDevices=yes blocks /dev/* access (other than /dev/null, /dev/zero,
-# /dev/random, etc.) — supported since systemd v183, so it is fully effective
-# on the deploy host's build (252) and on the most sensitive service (the ONE
-# process holding all decrypted OAuth private keys). Do NOT remove it.
-# Verify with `systemd-analyze security calypso-broker`.
+# PrivateDevices=yes gives this service — the ONE process holding all decrypted
+# OAuth private keys — a private /dev with only the safe pseudo nodes (null,
+# zero, full, random, urandom, tty); physical devices are hidden, so even a
+# code-execution bug can't read /dev/tpm0 or hardware RNG directly.
+# NB: the broader ProtectDevices=yes is SILENTLY IGNORED on this host's Debian
+# systemd 252 build (verified: `systemctl show -p ProtectDevices` returns empty
+# and `systemd-analyze verify` reports "Unknown key"), so we use the supported
+# PrivateDevices=yes for the same /dev isolation. Verify with
+# `systemd-analyze security calypso-broker`.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict
 ProtectControlGroups=yes
 ProtectKernelTunables=yes
-ProtectDevices=yes
+PrivateDevices=yes
 ReadWritePaths=/opt/calypso
 
 [Install]
