@@ -54,8 +54,11 @@ def evaluate_breach(
     side: "call" or "put". Caller passes the decel walls relevant to that side
         (call → walls above entry spot; put → walls below).
     spot_now: current SPX.
-    decel_walls: positive-gamma clusters captured at entry. Empty tuple = no
-        breach signal possible.
+    decel_walls: positive-gamma clusters re-read from the current GEX profile
+        each tick (the caller recomputes these live; the profile itself rides
+        the shared-cache ~3-min TTL, so the wall set can change intraday rather
+        than being a fixed entry-time snapshot). Empty tuple = no breach signal
+        possible.
     state: per-side state from the previous tick.
     now: current timestamp.
     confirmation_seconds: how long the breach must persist before would_close

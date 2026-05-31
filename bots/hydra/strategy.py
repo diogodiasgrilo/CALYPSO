@@ -44,7 +44,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from bots.hydra.order_types import BuySell
-from shared.ib_client import IBClient, _normalize_position_dict
+from shared.ib_client import IBClient, AmbiguousOrderError, _normalize_position_dict
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_hours import get_us_market_time, is_early_close_day
 from shared.technical_indicators import get_current_ema, calculate_atr
@@ -599,8 +599,14 @@ class HydraStrategy(MEICStrategy):
         # regime is disabled.
         _call_floor = strategy_config.get("call_credit_floor", None)
         _put_floor = strategy_config.get("put_credit_floor", None)
-        self.call_credit_floor = float(_call_floor) * 100 if _call_floor is not None else self.min_viable_credit_per_side - 10
-        self.put_credit_floor = float(_put_floor) * 100 if _put_floor is not None else self.min_viable_credit_put_side - 10
+        # AUDIT #62: the legacy "min - $0.10" fallback floor MUST stay a positive
+        # credit. For sub-$0.10 regime/min credits it would otherwise go to 0 or
+        # negative, and the credit-viability gate (which accepts a side when
+        # estimated >= floor) would then pass a net-DEBIT spread as a "minimum
+        # viable CREDIT". Clamp to 1 cent. Explicit operator-set floors are
+        # honored as-is.
+        self.call_credit_floor = float(_call_floor) * 100 if _call_floor is not None else max(1, self.min_viable_credit_per_side - 10)
+        self.put_credit_floor = float(_put_floor) * 100 if _put_floor is not None else max(1, self.min_viable_credit_put_side - 10)
         logger.info(
             f"  Min viable credit - call: ${self.min_viable_credit_per_side / 100:.2f} "
             f"(floor: ${self.call_credit_floor / 100:.2f}), "
@@ -2008,6 +2014,21 @@ class HydraStrategy(MEICStrategy):
                 limit_price=limit_price,
                 coid=coid,
             )
+        except AmbiguousOrderError as e:
+            # The POST may have landed but is unconfirmed. Surface a distinct
+            # `ambiguous` flag so the caller ABORTS instead of re-placing under
+            # a new cOID (which would double-fill). Logged CRITICAL so ARGUS /
+            # the watchdog page it.
+            logger.critical(
+                f"_place_leg_order({instrument_id} {side} x{quantity} "
+                f"{ib_type}) AMBIGUOUS — order may be LIVE but unconfirmed "
+                f"(coid={coid}): {e}. Aborting leg, NOT resubmitting."
+            )
+            return {
+                "success": False, "filled": False, "ambiguous": True,
+                "order_id": None, "fill_price": None, "position_id": None,
+                "raw": None,
+            }
         except Exception as e:
             logger.warning(
                 f"_place_leg_order({instrument_id} {side} x{quantity} "
@@ -3156,8 +3177,8 @@ class HydraStrategy(MEICStrategy):
             realized_loss = credit_received - actual_close_cost
             self.daily_state.total_realized_pnl += realized_loss
 
-        # Commission: 2 legs × $2.50 × contracts
-        commission_added = 2 * 2.50 * contracts
+        # Commission: 2 legs × commission_per_leg × contracts
+        commission_added = 2 * self.commission_per_leg * contracts
         self.daily_state.total_commission += commission_added
 
         logger.info(
@@ -4779,6 +4800,28 @@ class HydraStrategy(MEICStrategy):
             if spx_low is not None:
                 day_range = self.market_data.spx_high - spx_low
 
+            # AUDIT #76: daily_summaries.entries_stopped / entries_expired are
+            # displayed per-DAY (i.e. per-ENTRY) by the dashboard. Compute them
+            # per-entry directly from daily_state.entries instead of summing the
+            # PER-SIDE counters (call_stops + put_stops): summing per-side stops
+            # double-counts a double-stopped entry (2 instead of 1), and deriving
+            # entries_expired = completed - (call_stops + put_stops) then drove
+            # expired to 0 whenever an entry was stopped on both sides, hiding
+            # genuinely-expired entries. Buckets are disjoint: an entry is
+            # "stopped" if either side stopped; otherwise "expired" if either
+            # side expired.
+            entries_stopped_per_entry = 0
+            entries_expired_per_entry = 0
+            for _e in self.daily_state.entries:
+                _stopped = (getattr(_e, "call_side_stopped", False)
+                            or getattr(_e, "put_side_stopped", False))
+                _expired = (getattr(_e, "call_side_expired", False)
+                            or getattr(_e, "put_side_expired", False))
+                if _stopped:
+                    entries_stopped_per_entry += 1
+                elif _expired:
+                    entries_expired_per_entry += 1
+
             self._data_recorder.record_daily_summary({
                 "date": date_str,
                 "spx_open": self.market_data.spx_open,
@@ -4789,8 +4832,8 @@ class HydraStrategy(MEICStrategy):
                 "vix_open": self.market_data.vix_open,
                 "vix_close": self.current_vix,
                 "entries_placed": summary.get("entries_completed", 0),
-                "entries_stopped": summary.get("call_stops", 0) + summary.get("put_stops", 0),
-                "entries_expired": max(0, summary.get("entries_completed", 0) - (summary.get("call_stops", 0) + summary.get("put_stops", 0))),
+                "entries_stopped": entries_stopped_per_entry,
+                "entries_expired": entries_expired_per_entry,
                 "gross_pnl": summary.get("total_pnl", 0),
                 "net_pnl": summary.get("total_pnl", 0) - summary.get("total_commission", 0),
                 "commission": summary.get("total_commission", 0),
@@ -5507,6 +5550,24 @@ class HydraStrategy(MEICStrategy):
                     # Calculate stop losses
                     self._calculate_stop_levels_hydra(entry)
 
+                    # AUDIT #27: Persist state NOW — as soon as the legs are
+                    # confirmed filled, the entry is tracked, and its stop
+                    # levels are computed — and BEFORE the logging / Sheets / DB
+                    # / alert block below. Previously the only save was at the
+                    # very end (after all that work), leaving a wide crash window
+                    # in which the four legs were LIVE on the broker but absent
+                    # from the state file. Recovery is state-file-authoritative
+                    # (_load_state_file_history → _reconcile_recovered_entries_with_broker),
+                    # so a crash in that window would orphan the untracked legs
+                    # AND let the same slot be re-entered on restart. Saving here
+                    # closes the window: the entry is now in daily_state.entries
+                    # (no orphan) and recovery derives _next_entry_index from
+                    # max(entry_number) (no double-entry) even though
+                    # _next_entry_index is not advanced until below. The final
+                    # _save_state_to_disk() at the end still runs to capture the
+                    # advanced index and any later mutations.
+                    self._save_state_to_disk()
+
                     # Log to Google Sheets
                     self._log_entry(entry)
 
@@ -6011,34 +6072,33 @@ class HydraStrategy(MEICStrategy):
         self.state = MEICState.STOP_TRIGGERED
         stop_time = get_us_market_time().isoformat()
 
+        # CRITICAL C1: Do NOT mark the side stopped / clear the conid / book
+        # the loss yet. The short close can fail for the entire retry budget
+        # (broker unreachable or rejecting). We only commit the stop bookkeeping
+        # below AFTER the SHORT close actually succeeds, so that on failure the
+        # side stays ACTIVE (uic intact) and _check_stop_losses re-attempts the
+        # close on later ticks. Here we only select the leg to close + level.
         if side == "call":
-            entry.call_side_stopped = True
-            entry.call_stop_time = stop_time
-            self.daily_state.call_stops_triggered += 1
             # MKT-025: Only close the short leg — long expires at settlement
             positions_to_close = [
                 (entry.short_call_position_id, "short_call", entry.short_call_uic),
             ]
             stop_level = entry.call_side_stop
         else:
-            entry.put_side_stopped = True
-            entry.put_stop_time = stop_time
-            self.daily_state.put_stops_triggered += 1
             # MKT-025: Only close the short leg — long expires at settlement
             positions_to_close = [
                 (entry.short_put_position_id, "short_put", entry.short_put_uic),
             ]
             stop_level = entry.put_side_stop
 
-        # Check for double stop
-        if entry.call_side_stopped and entry.put_side_stopped:
-            self.daily_state.double_stops += 1
-            logger.warning(f"DOUBLE STOP on Entry #{entry.entry_number}")
-
         # Track actual fill prices for accurate P&L calculation
         actual_close_cost = 0.0  # Cost to close the short leg only
         fill_prices_captured = True
         deferred_legs = []
+        # CRITICAL C1: dry-run is treated as a successful close (it places no
+        # real order and returns (True, None, None)); the live path sets this
+        # from the actual close result below.
+        close_succeeded = self.dry_run
 
         if self.dry_run:
             logger.info(f"[DRY RUN] Would close {side} SHORT of Entry #{entry.entry_number}")
@@ -6066,10 +6126,14 @@ class HydraStrategy(MEICStrategy):
                 # the stop as a profit.
                 if uic:
                     # v8: pass entry.contracts (MKT-025 short-only stop of legacy entry)
-                    _, fill_price, order_id = self._close_position_with_retry(
+                    # CRITICAL C1: capture and HONOR the success flag — on a
+                    # failed close we must NOT mark the side stopped, clear the
+                    # conid, or book the loss (see fail-closed block below).
+                    success, fill_price, order_id = self._close_position_with_retry(
                         pos_id, leg_name, uic=uic, entry_number=entry.entry_number,
                         contracts=entry.contracts,
                     )
+                    close_succeeded = success
                     if fill_price is not None:
                         # Short leg: we BUY to close (costs money)
                         actual_close_cost += fill_price * 100 * entry.contracts
@@ -6079,6 +6143,70 @@ class HydraStrategy(MEICStrategy):
                         logger.info(f"MKT-025: No immediate fill price for {leg_name}, will use deferred lookup")
                         if order_id:
                             deferred_legs.append((order_id, uic, leg_name))
+                else:
+                    # No conid to close — the short is already flat (e.g. cleared
+                    # by a prior settlement/salvage). Nothing live to close, so
+                    # treat the stop as resolved rather than looping forever.
+                    logger.info(
+                        f"MKT-025: {leg_name} has no conid — short already flat, "
+                        f"booking stop without a close order"
+                    )
+                    close_succeeded = True
+
+        # CRITICAL C1: FAIL CLOSED on a failed short close.
+        # _close_position_with_retry returns success=False only after the FULL
+        # retry budget is exhausted (broker unreachable / rejecting), having
+        # already fired its CRITICAL EMERGENCY/CIRCUIT_BREAKER alert and logged
+        # an EMERGENCY_CLOSE_FAILED safety event. In that case the breached
+        # short is STILL LIVE and unhedged. We must NOT mark the side stopped,
+        # NOT clear its conid, and NOT book the loss as realized — doing so
+        # would orphan a live naked short and book a fake closed P&L. Leave the
+        # side ACTIVE (uic intact) so _check_stop_losses re-confirms the breach
+        # and re-attempts the close on subsequent ticks until the short is
+        # confirmed flat. Persist state so the breach context survives a crash.
+        if not close_succeeded:
+            logger.critical(
+                f"MKT-025 STOP CLOSE FAILED: Entry #{entry.entry_number} {side} "
+                f"SHORT did NOT close after full retry budget — leaving side "
+                f"ACTIVE (conid intact) for retry on next tick. NOT marking "
+                f"stopped, NOT booking loss. Live unhedged short remains open!"
+            )
+            self._log_safety_event(
+                event_type="MKT-025_STOP_CLOSE_FAILED",
+                details=(
+                    f"Entry #{entry.entry_number} {side} short close failed; side "
+                    f"kept active for retry. stop_level=${stop_level:.2f}"
+                ),
+                result="Retry pending",
+            )
+            self.state = MEICState.MONITORING
+            self._save_state_to_disk()
+            # Flush the alerts already queued by the retry path.
+            time.sleep(0.1)
+            self._flush_batched_alerts()
+            return (
+                f"MKT-025 Stop loss FAILED to close Entry #{entry.entry_number} "
+                f"{side} SHORT — side kept active, will retry next tick"
+            )
+
+        # CRITICAL C1: The short close SUCCEEDED (or dry-run). NOW commit the
+        # stop bookkeeping that the old code did up front: mark the side
+        # stopped, stamp the time, bump the per-side stop counter, and run the
+        # double-stop check. This guarantees these only fire once the short is
+        # actually flat.
+        if side == "call":
+            entry.call_side_stopped = True
+            entry.call_stop_time = stop_time
+            self.daily_state.call_stops_triggered += 1
+        else:
+            entry.put_side_stopped = True
+            entry.put_stop_time = stop_time
+            self.daily_state.put_stops_triggered += 1
+
+        # Check for double stop
+        if entry.call_side_stopped and entry.put_side_stopped:
+            self.daily_state.double_stops += 1
+            logger.warning(f"DOUBLE STOP on Entry #{entry.entry_number}")
 
         # Fix #86: Clear SHORT position IDs and UICs for the stopped side.
         # MKT-025 only closes the short — long stays open for settlement.
@@ -7075,7 +7203,9 @@ class HydraStrategy(MEICStrategy):
         # Batch-fetch ALL option prices in a single API call
         self._batch_update_entry_prices()
 
-        # Price-based stop: fetch SPX price once per loop (refreshed by WebSocket)
+        # Price-based stop: SPX price from the per-loop REST snapshot taken in
+        # _update_market_data (no streaming in REST-only mode); freshness is
+        # bounded by the heartbeat cadence.
         price_stop_pts = self.price_based_stop_points  # None = use credit-based stop
         spx_now = self.current_price if price_stop_pts is not None else 0.0
 
@@ -9809,18 +9939,29 @@ class HydraStrategy(MEICStrategy):
     def _expected_position_quantities(self) -> Dict[Any, int]:
         """Net contract quantity HYDRA expects open per conid (F4.4).
 
-        Sums every active entry's still-tracked legs — short legs
+        Sums every TRACKED entry's still-tracked legs — short legs
         negative, long legs positive. A leg whose ``*_uic`` has been
         cleared (closed / settled / sold) contributes nothing. Two
         entries on the same conid sum naturally, so a merged broker
         position reconciles cleanly instead of looking "missing".
         See ``docs/migration/F4_POSITION_FLOW_DESIGN.md`` §4.
 
+        AUDIT #45: iterate ``daily_state.entries`` (ALL tracked entries),
+        NOT ``active_entries``. Under MKT-025 short-only stops, a stop
+        closes only the SHORT leg and leaves the LONG leg open until 0DTE
+        settlement, but the entry's ``active_entries`` membership flips to
+        "done" the moment both sides are stopped. Keying expected on
+        active_entries therefore dropped the still-open longs of a fully
+        short-only-stopped entry, so settlement declared the day complete
+        while those longs were still live on the broker. Driving expected
+        off every still-tracked ``*_uic`` keeps each open leg in the set
+        until the broker actually shows quantity 0.
+
         Returns:
             ``{conid: signed_net_quantity}``.
         """
         expected: Dict[Any, int] = {}
-        for entry in self.daily_state.active_entries:
+        for entry in self.daily_state.entries:
             contracts = getattr(entry, "contracts", 1) or 1
             for leg in ("short_call", "long_call", "short_put", "long_put"):
                 uic = getattr(entry, f"{leg}_uic", None)
@@ -9863,9 +10004,13 @@ class HydraStrategy(MEICStrategy):
         human.
         """
         for conid, (exp_qty, act_qty) in discrepant.items():
+            # AUDIT #45: iterate ALL tracked entries (matches the expected set,
+            # which is now keyed off daily_state.entries) so a discrepancy on a
+            # surviving long leg of a fully short-only-stopped entry can still
+            # be resolved instead of falling through to "ambiguous".
             legs = [
                 (entry, leg)
-                for entry in self.daily_state.active_entries
+                for entry in self.daily_state.entries
                 for leg in ("short_call", "long_call", "short_put", "long_put")
                 if getattr(entry, f"{leg}_uic", None) == conid
             ]
@@ -10235,6 +10380,25 @@ class HydraStrategy(MEICStrategy):
                             f"{self._next_entry_index} → {new_idx} "
                             f"(dropped {dropped_count} base entries from front)"
                         )
+                        # AUDIT #70: TIME-002 (_skip_missed_entries) runs on the
+                        # FULL pre-truncation schedule before the VIX regime
+                        # applies, so on a mid-day restart it counted each slot
+                        # it advanced past as a "skipped" entry. The slots it
+                        # advanced through are the same `dropped`-front slots the
+                        # truncation removes here — they were not real skips (the
+                        # restart re-points at the correct, still-pending slot, and
+                        # in the filled-slot case the entry was already placed).
+                        # Roll back exactly the over-count so entries_skipped is
+                        # not inflated for an already-filled / re-pointed slot.
+                        spurious_skips = self._next_entry_index - new_idx
+                        if spurious_skips > 0 and self.daily_state.entries_skipped > 0:
+                            rollback = min(spurious_skips, self.daily_state.entries_skipped)
+                            self.daily_state.entries_skipped -= rollback
+                            logger.info(
+                                f"VIX regime: rolled back {rollback} spurious "
+                                f"entries_skipped over-counted by TIME-002 on the "
+                                f"pre-truncation schedule"
+                            )
                         self._next_entry_index = new_idx
                 logger.info(f"VIX regime: VIX={vix:.1f}, regime={regime}, capped to {cap} base entries (dropped earliest)")
 
@@ -10255,14 +10419,18 @@ class HydraStrategy(MEICStrategy):
         if regime < len(mcc) and mcc[regime] is not None:
             old = self.min_viable_credit_per_side
             self.min_viable_credit_per_side = mcc[regime] * 100
-            self.call_credit_floor = self.min_viable_credit_per_side - 10
-            logger.info(f"VIX regime: min_call_credit ${old/100:.2f} → ${self.min_viable_credit_per_side/100:.2f}")
+            # AUDIT #62: clamp to a positive credit (1 cent). For a sub-$0.10
+            # regime min credit, "min - $0.10" goes 0/negative and the credit
+            # gate would then accept a net-DEBIT spread as a "viable credit".
+            self.call_credit_floor = max(1, self.min_viable_credit_per_side - 10)
+            logger.info(f"VIX regime: min_call_credit ${old/100:.2f} → ${self.min_viable_credit_per_side/100:.2f} (floor ${self.call_credit_floor/100:.2f})")
         mpc = self.vix_regime_min_put_credit
         if regime < len(mpc) and mpc[regime] is not None:
             old = self.min_viable_credit_put_side
             self.min_viable_credit_put_side = mpc[regime] * 100
-            self.put_credit_floor = self.min_viable_credit_put_side - 10
-            logger.info(f"VIX regime: min_put_credit ${old/100:.2f} → ${self.min_viable_credit_put_side/100:.2f}")
+            # AUDIT #62: clamp to a positive credit (see call side above).
+            self.put_credit_floor = max(1, self.min_viable_credit_put_side - 10)
+            logger.info(f"VIX regime: min_put_credit ${old/100:.2f} → ${self.min_viable_credit_put_side/100:.2f} (floor ${self.put_credit_floor/100:.2f})")
 
         self._vix_regime_applied = True
         logger.info(f"VIX regime applied: VIX={vix:.1f}, regime={regime}/{len(self.vix_regime_breakpoints)}")

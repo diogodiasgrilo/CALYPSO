@@ -145,13 +145,33 @@ def main() -> None:
                         if consec_reauth_failures % 4 == 2:  # cycles 2, 6, 10, …
                             alert_hooks.on_ensure_connected_failed(fail_reason, will_restart=False)
 
-    threading.Thread(target=_maintain, name="broker-maintain", daemon=True).start()
+    maintain_thread = threading.Thread(
+        target=_maintain, name="broker-maintain", daemon=True
+    )
+    maintain_thread.start()
 
     app = create_app(BrokerDispatcher(ib))
 
     @app.on_event("shutdown")
     def _on_shutdown() -> None:  # graceful: stop the loop + release the session
+        # Findings #36/#67: stop.set() only short-circuits the NEXT loop
+        # iteration — it cannot interrupt an in-flight ensure_connected() that
+        # already entered the disconnect()+connect() reconnect. If we called
+        # ib.disconnect() now, the maintenance thread could finish building a
+        # brand-new IbkrClient (fresh Tickler + live ssodh/init session) AFTER
+        # our teardown, orphaning a live IBKR brokerage session and risking the
+        # one-session-per-username eviction war this service exists to avoid.
+        # So join the maintenance thread first (bounded, since it's a daemon and
+        # connect()/disconnect() are serialized under IBClient._call_lock) so no
+        # reconnect is in flight, THEN release the session — making this final
+        # disconnect() authoritative over whatever client exists.
         stop.set()
+        maintain_thread.join(timeout=30)
+        if maintain_thread.is_alive():
+            logger.warning(
+                "broker-maintain thread did not stop within 30s; releasing "
+                "session anyway (reconnect may still be in flight)"
+            )
         try:
             ib.disconnect()
         except Exception:

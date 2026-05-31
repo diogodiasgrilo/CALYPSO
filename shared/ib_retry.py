@@ -10,11 +10,14 @@ Design:
     breaker keyed by an "endpoint family" string ('oauth', 'market',
     'orders', 'portfolio', 'session'). Opens after N consecutive
     failures OR ≥X% failure rate over a sliding window. Half-open
-    probe interval is configurable.
+    probe interval is configurable. HALF_OPEN admits exactly ONE
+    in-flight probe (single-probe gate); concurrent callers short-
+    circuit until the probe's outcome is recorded.
 
   • retry_with_backoff decorator: exponential backoff + jitter on a
     configurable set of retryable exception types. Optional integration
-    with a CircuitBreaker — if breaker is OPEN, retry call short-circuits.
+    with a CircuitBreaker — if breaker is OPEN (or HALF_OPEN with a
+    probe already in flight), the retry call short-circuits.
 
   • RetryPolicy preset: sensible defaults for our use case (5 retries,
     1s base, 30s max, jitter 0.5, retry 429/500/502/503/504).
@@ -38,10 +41,28 @@ from functools import wraps
 from typing import Callable, Optional
 
 # HTTP status codes that signal a transient, retryable server condition.
-# Matched as standalone alphanumeric tokens (``\b...\b``) — NOT bare
-# substrings — so digit runs embedded in conids/strikes/order-ids/notionals
-# (e.g. "conid 5031", "order 504123", "$5,025") can't masquerade as a 5xx.
-_HTTP_RETRYABLE_CODE_RE = re.compile(r"\b(?:429|500|502|503|504)\b")
+#
+# Retryability is decided primarily from the STRUCTURED status code carried
+# by ibind's ExternalBrokerError (``exc.status_code``); see
+# RetryPolicy.is_retryable. This regex is the *text fallback* for exceptions
+# that don't carry a structured code, and it deliberately matches a code only
+# where it appears as a real HTTP status token — NOT as a bare number anywhere
+# in the message. The previous ``\b(?:429|...)\b`` form matched a digit run
+# that happened to equal a code even when it was an embedded price/size/
+# notional (e.g. "limit price 500.00", "quantity 503", "$1,500.00"), which
+# could misclassify a permanent order reject as retryable and trip the orders
+# breaker. We now match only:
+#   • ibind's framing status slot ``:: <code> ::`` (the authoritative slot —
+#     a body number after it is ignored), or
+#   • an http/status[_code] keyword immediately preceding the code, or
+#   • a leading status line ``^<code> <reason-phrase>``.
+_HTTP_RETRYABLE_CODE_RE = re.compile(
+    r"(?:"
+    r"::\s*(?:429|500|502|503|504)\s*::"
+    r"|(?:http|status(?:[_ ]?code)?)[\s:=\"']*\(?(?:429|500|502|503|504)\b"
+    r"|^\s*(?:429|500|502|503|504)\s+[a-z]"
+    r")"
+)
 
 
 logger = logging.getLogger(__name__)
@@ -65,8 +86,15 @@ class CircuitBreaker:
       • ≥50% failure rate over a 20-request / 60-second window
 
     OPEN state lasts at least half_open_after_seconds. After that, the
-    NEXT request is allowed through as a "probe" (HALF_OPEN state).
-    If the probe succeeds → CLOSED. If it fails → back to OPEN.
+    breaker moves to HALF_OPEN and allows exactly ONE request through as a
+    "probe"; while that single probe is in flight, every other concurrent
+    caller short-circuits (allow_request() → False) just as in OPEN. If the
+    probe succeeds → CLOSED. If it fails → back to OPEN. This single-probe
+    gate matters because one IBClient (and one breaker per family) is shared
+    across strategies + the alert thread, and some read paths fan out many
+    concurrent calls; without the gate an OPEN→HALF_OPEN transition would let
+    all of them stampede the still-degraded broker at once and a single lucky
+    success could prematurely re-CLOSE the breaker.
 
     Thread-safe via internal lock.
     """
@@ -81,6 +109,10 @@ class CircuitBreaker:
     _state: CircuitState = CircuitState.CLOSED
     _consecutive_failures: int = 0
     _opened_at: Optional[float] = None
+    # Single-probe gate: True once allow_request() has admitted the lone
+    # HALF_OPEN probe and until its outcome is recorded. Concurrent callers
+    # short-circuit while it is set.
+    _probe_in_flight: bool = False
     _outcomes: deque = field(default_factory=lambda: deque(maxlen=20))
     _lock: threading.RLock = field(default_factory=threading.RLock)
 
@@ -95,10 +127,28 @@ class CircuitBreaker:
             return self._state
 
     def allow_request(self) -> bool:
-        """Returns True if a request may proceed; False if the breaker is OPEN."""
+        """Returns True if a request may proceed; False if it must short-circuit.
+
+        CLOSED  → always True.
+        OPEN    → always False.
+        HALF_OPEN → True for exactly ONE caller (the probe), which atomically
+                    claims the in-flight slot here; every other concurrent
+                    caller gets False until the probe's outcome is recorded
+                    via record_success()/record_failure(). This is the
+                    single-probe gate — it stops a concurrent stampede onto a
+                    still-degraded broker on OPEN→HALF_OPEN.
+        """
         with self._lock:
             self._maybe_transition_to_half_open()
-            return self._state != CircuitState.OPEN
+            if self._state == CircuitState.OPEN:
+                return False
+            if self._state == CircuitState.HALF_OPEN:
+                if self._probe_in_flight:
+                    return False
+                # Claim the lone probe slot for this caller.
+                self._probe_in_flight = True
+                return True
+            return True
 
     def record_success(self) -> None:
         with self._lock:
@@ -108,18 +158,22 @@ class CircuitBreaker:
                 logger.info("CircuitBreaker[%s] HALF_OPEN → CLOSED (probe success)", self.name)
                 self._state = CircuitState.CLOSED
                 self._opened_at = None
+            # Release the single-probe slot (no-op outside HALF_OPEN).
+            self._probe_in_flight = False
 
     def record_failure(self) -> None:
         with self._lock:
             self._outcomes.append((time.monotonic(), False))
             self._consecutive_failures += 1
             if self._state == CircuitState.HALF_OPEN:
-                # Probe failed — back to OPEN with fresh timer
+                # Probe failed — back to OPEN with fresh timer. Release the
+                # probe slot so the NEXT half-open window can issue a probe.
                 logger.warning(
                     "CircuitBreaker[%s] HALF_OPEN → OPEN (probe failure)", self.name,
                 )
                 self._state = CircuitState.OPEN
                 self._opened_at = time.monotonic()
+                self._probe_in_flight = False
                 return
             # Check trip conditions
             if self._consecutive_failures >= self.consecutive_failures_threshold:
@@ -130,6 +184,19 @@ class CircuitBreaker:
                     f"failure rate ≥{self.failure_rate_threshold:.0%} "
                     f"over {self.window_seconds}s window"
                 )
+
+    def release_probe(self) -> None:
+        """Release the single-probe slot WITHOUT recording an outcome.
+
+        Used when a HALF_OPEN probe call ends in a way that should not count
+        for or against the breaker (e.g. a non-retryable exception, which by
+        design never records a breaker failure). Leaving the slot claimed
+        would wedge the breaker in HALF_OPEN with every caller short-
+        circuiting forever. The breaker stays HALF_OPEN so the next caller
+        re-probes. No-op when no probe is in flight.
+        """
+        with self._lock:
+            self._probe_in_flight = False
 
     def _trip(self, reason: str) -> None:
         if self._state != CircuitState.OPEN:
@@ -151,6 +218,9 @@ class CircuitBreaker:
                 self.name,
             )
             self._state = CircuitState.HALF_OPEN
+            # Fresh half-open window — no probe claimed yet. The next
+            # allow_request() caller claims the lone probe slot.
+            self._probe_in_flight = False
 
     def _failure_rate_exceeded(self) -> bool:
         """True if the recent-window failure rate ≥ threshold."""
@@ -168,6 +238,7 @@ class CircuitBreaker:
             self._state = CircuitState.CLOSED
             self._consecutive_failures = 0
             self._opened_at = None
+            self._probe_in_flight = False
             self._outcomes.clear()
 
 
@@ -208,11 +279,27 @@ class RetryPolicy:
         misuse-of-503 pattern shows up for "already filled or canceled"
         responses to a cancel on a terminated order. Both must propagate
         immediately as non-retryable.
+
+        Retryability is decided primarily from the STRUCTURED status code
+        carried by ibind's ExternalBrokerError (``exc.status_code``), which
+        is the authoritative signal. Only when no structured code is present
+        do we fall back to matching the stringified message via
+        `_HTTP_RETRYABLE_CODE_RE`, which matches a code only where it appears
+        as a real HTTP status token (ibind's ``:: <code> ::`` slot, an
+        http/status keyword prefix, or a leading status line) — NOT as a bare
+        number embedded in a price/size/order-id/notional. The earlier
+        bare-token form still matched a body number that happened to equal a
+        code (e.g. "limit price 500.00", "quantity 503"), which could
+        misclassify a permanent order reject as retryable and trip the orders
+        breaker on the safety-critical path.
         """
         msg = str(exc).lower()
 
         # IBKR permanent-error patterns served via 5xx — short-circuit
-        # BEFORE the generic 5xx match so they don't get retried.
+        # BEFORE any status-code match so they don't get retried. This runs
+        # ahead of the structured status_code check too: ibind tags the
+        # "order is not found" 503 with status_code=503, but it is
+        # semantically permanent and must NOT retry.
         for permanent_pattern in (
             "is not found",          # /order/status/{id} on purged order
             "no longer found",       # variant
@@ -223,12 +310,21 @@ class RetryPolicy:
             if permanent_pattern in msg:
                 return False
 
-        # HTTP 429/5xx — matched as standalone tokens (see
-        # _HTTP_RETRYABLE_CODE_RE). The previous bare-substring test
-        # (`"503" in msg`) misclassified permanent rejects whose message
-        # merely embedded a digit run (conids, strikes, order-ids,
-        # notionals) as retryable, causing retry storms + false orders-
-        # breaker trips on the safety-critical order path.
+        # Authoritative signal: ibind's ExternalBrokerError carries the raw
+        # HTTP status as a structured int (`status_code`). Prefer it over any
+        # text heuristic — it cannot be confused by body numbers. Note ibind
+        # also tags some non-HTTP failures (e.g. invalid-JSON) with
+        # status_code=None, which simply falls through to the text/type
+        # checks below.
+        status_code = getattr(exc, "status_code", None)
+        if isinstance(status_code, int):
+            return status_code in (429, 500, 502, 503, 504)
+
+        # HTTP 429/5xx text fallback — matched only as a real status token
+        # (see _HTTP_RETRYABLE_CODE_RE) so digit runs embedded in conids,
+        # strikes, order-ids or notionals can't masquerade as a 5xx and
+        # cause retry storms + false orders-breaker trips on the safety-
+        # critical order path.
         if _HTTP_RETRYABLE_CODE_RE.search(msg) or "rate limit" in msg:
             return True
         if any(t in msg for t in (
@@ -315,6 +411,13 @@ def retry_with_backoff(
                     if br is not None and is_retryable:
                         br.record_failure()
                     if not is_retryable:
+                        # Non-retryable errors never record a breaker failure
+                        # (caller-side fault, not broker degradation). But if
+                        # this attempt was the lone HALF_OPEN probe, we must
+                        # release the probe slot so the breaker doesn't wedge
+                        # in HALF_OPEN with every future caller short-circuiting.
+                        if br is not None:
+                            br.release_probe()
                         raise
                     name = getattr(fn, "__name__", repr(fn))
                     if attempt >= pol.max_attempts:

@@ -47,9 +47,13 @@ class TestIsRetryableTokenMatch:
             Exception("HTTP 503"), Exception("HTTP 504"),
             Exception("503 Service Unavailable"),
             Exception("429 Too Many Requests"),
-            Exception("503"),  # bare token — start/end boundaries
         ):
             assert self.pol.is_retryable(exc), f"{exc!r} should be retryable"
+        # A CONTEXT-FREE bare number is intentionally NOT retryable (audit #50):
+        # it can't be told apart from a price/size/order-id. Real transient 5xx
+        # carry a structured status_code (ExternalBrokerError) or HTTP context
+        # ("HTTP 503" / "503 Service Unavailable"), both still retried above.
+        assert not self.pol.is_retryable(Exception("503"))
 
     def test_embedded_digit_runs_not_retryable(self):
         """The bug: '503'/'504'/'500' embedded inside a larger number was

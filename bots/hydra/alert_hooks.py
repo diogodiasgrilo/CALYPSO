@@ -46,6 +46,21 @@ logger = logging.getLogger(__name__)
 STUCK_OPEN_REMINDER_INTERVAL_S = 15 * 60   # 15 min between reminders
 STUCK_OPEN_REMINDERS_PER_DAY = 4            # cap reminders so we don't spam
 
+# Grace period after which a breaker that has settled into HALF_OPEN (and
+# stayed there, never re-tripping to OPEN) is treated as recovered.
+#
+# Reading `breaker.state` is side-effecting: it drives OPEN→HALF_OPEN once
+# `half_open_after_seconds` elapses, but HALF_OPEN→CLOSED only happens on a
+# real successful probe (record_success). A recovered-but-idle family (e.g.
+# `orders` outside the brief entry windows) therefore never sees a closing
+# probe and would otherwise stay pinned in HALF_OPEN forever — firing false
+# HIGH "still degraded" reminders every day and never emitting a recovery
+# alert. After this many seconds of *continuous* HALF_OPEN with no re-trip to
+# OPEN, we end the outage and send the recovery alert. A genuinely-unhealthy
+# breaker keeps flipping back to OPEN on failing probes, which resets this
+# timer, so it keeps reminding correctly.
+HALF_OPEN_RECOVERY_GRACE_S = 5 * 60        # 5 min stable HALF_OPEN ⇒ recovered
+
 # DATA_QUALITY 25+-exhaustions-today threshold (A1.2).
 SNAPSHOT_EXHAUSTION_SEVERE_THRESHOLD = 25
 
@@ -78,6 +93,12 @@ class IBKRAlertHooks:
         self._stuck_open_since: dict[str, float] = {}
         self._stuck_open_last_reminder: dict[str, float] = {}
         self._stuck_open_reminders_today: dict[str, int] = {}
+        # When (monotonic) a family first read HALF_OPEN within the current
+        # outage. Reset whenever it re-trips to OPEN. Used to treat a family
+        # that has settled into a stable HALF_OPEN (no failing probes) as
+        # recovered after HALF_OPEN_RECOVERY_GRACE_S, so reminders don't fire
+        # forever on a recovered-but-idle family.
+        self._half_open_since: dict[str, float] = {}
         # Day-keyed alert flags (reset by mark_new_day).
         self._warmup_first_alert_sent_today = False
         self._warmup_severe_alert_sent_today = False
@@ -182,6 +203,14 @@ class IBKRAlertHooks:
             if current != previous:
                 self._handle_breaker_transition(family, previous, current)
                 self._last_breaker_states[family] = current
+            # If the family has settled into a stable HALF_OPEN (reading
+            # breaker.state drove OPEN→HALF_OPEN but no real probe has run to
+            # close it), treat it as recovered after a bounded grace period so
+            # we don't remind forever on a recovered-but-idle family. This must
+            # run before the reminder so a just-resolved outage doesn't also
+            # fire a "still degraded" reminder in the same cycle.
+            if family in self._stuck_open_since:
+                self._maybe_resolve_stable_half_open(family, current)
             # Outage reminder fires on a TIME cadence whenever the family is
             # in an active outage — independent of transitions. This covers a
             # breaker stuck OPEN *and* one flapping OPEN↔HALF_OPEN on failing
@@ -213,9 +242,49 @@ class IBKRAlertHooks:
             # Recovered to CLOSED (covers OPEN→CLOSED and HALF_OPEN→CLOSED).
             self._stuck_open_since.pop(family, None)
             self._stuck_open_last_reminder.pop(family, None)
+            self._half_open_since.pop(family, None)
             self._fire_breaker_recovered(family)
         # else: OPEN↔HALF_OPEN flap inside an outage, or CLOSED→CLOSED — no
         # per-transition alert; the cadence reminder covers "still degraded".
+        # The stable-HALF_OPEN-since timer is maintained in
+        # _maybe_resolve_stable_half_open (re-armed on any read of OPEN).
+
+    def _maybe_resolve_stable_half_open(self, family: str, current: Any) -> None:
+        """End an outage whose breaker has settled into a stable HALF_OPEN.
+
+        Reading ``breaker.state`` drives OPEN→HALF_OPEN once the probe interval
+        elapses, but HALF_OPEN→CLOSED only happens on a *real* successful probe
+        (``record_success``). A recovered-but-idle family (e.g. ``orders``
+        outside the brief entry windows) therefore never sees a closing probe
+        and would stay pinned in HALF_OPEN — firing false HIGH "still degraded"
+        reminders forever and never emitting a recovery alert.
+
+        We track when the family first read HALF_OPEN within this outage. Any
+        read of OPEN (a failing probe re-tripped it) re-arms the timer, so a
+        genuinely-unhealthy breaker is never presumed recovered. Once the
+        family has stayed continuously HALF_OPEN for HALF_OPEN_RECOVERY_GRACE_S,
+        we end the outage and fire a (presumed) recovery alert.
+        """
+        if self._is_open(current):
+            # A failing probe re-tripped the breaker — restart the HALF_OPEN
+            # stability timer; this is a real ongoing outage.
+            self._half_open_since.pop(family, None)
+            return
+        if not self._is_half_open(current):
+            # CLOSED is handled by the transition path; anything else: ignore.
+            return
+        now = time.monotonic()
+        since = self._half_open_since.get(family)
+        if since is None:
+            self._half_open_since[family] = now
+            return
+        if now - since < HALF_OPEN_RECOVERY_GRACE_S:
+            return
+        # Stable HALF_OPEN past the grace period — presume recovered.
+        self._stuck_open_since.pop(family, None)
+        self._stuck_open_last_reminder.pop(family, None)
+        self._half_open_since.pop(family, None)
+        self._fire_breaker_recovered(family, presumed=True)
 
     def _maybe_fire_stuck_open_reminder(self, family: str) -> None:
         """If this family has been OPEN long enough and we haven't sent
@@ -282,16 +351,33 @@ class IBKRAlertHooks:
         except Exception as e:
             logger.exception("breaker-opened alert failed for %s: %s", family, e)
 
-    def _fire_breaker_recovered(self, family: str) -> None:
-        """Fire on OPEN → CLOSED (or HALF_OPEN → CLOSED) — LOW priority."""
+    def _fire_breaker_recovered(self, family: str, *, presumed: bool = False) -> None:
+        """Fire when a family's outage ends — LOW priority.
+
+        ``presumed=False`` (default): an actual probe closed the breaker
+        (OPEN→CLOSED or HALF_OPEN→CLOSED). ``presumed=True``: the breaker
+        settled into a stable HALF_OPEN with no failing probes for the grace
+        period and is presumed recovered without a closing probe having run
+        (a quiet family with no traffic to drive the closing probe)."""
+        if presumed:
+            message = (
+                f"The IBKR `{family}` circuit breaker has been in HALF_OPEN "
+                f"with no further failures for "
+                f"{int(HALF_OPEN_RECOVERY_GRACE_S / 60)}m and is presumed "
+                f"recovered (no request traffic ran a closing probe). It will "
+                f"fully CLOSE on the next successful call. Clearing the outage "
+                f"so reminders stop."
+            )
+        else:
+            message = (
+                f"The IBKR `{family}` circuit breaker is CLOSED "
+                f"again. Normal operation resumed."
+            )
         try:
             self._alerts.send_alert(
                 alert_type=_alert_type("CONNECTION_RESTORED"),
                 title=f"HYDRA — {family} breaker recovered",
-                message=(
-                    f"The IBKR `{family}` circuit breaker is CLOSED "
-                    f"again. Normal operation resumed."
-                ),
+                message=message,
                 priority=_alert_priority("LOW"),
             )
         except Exception as e:
@@ -354,6 +440,10 @@ class IBKRAlertHooks:
     @staticmethod
     def _is_open(state: Any) -> bool:
         return getattr(state, "value", str(state)).lower() == "open"
+
+    @staticmethod
+    def _is_half_open(state: Any) -> bool:
+        return getattr(state, "value", str(state)).lower() == "half_open"
 
     @staticmethod
     def _is_degraded(state: Any) -> bool:

@@ -1,5 +1,5 @@
 {
-  "_comment_variant": "HYDRA Variant C — Brandon Trojan Horse stack with Brandon's narrow 5/10pt spread widths (his actual rule from the interview). Same Brandon feature stack as variant B; only spread width differs. Dry-run for the first 4 weeks. After observation: B vs C tells us whether narrow widths help on top of Brandon's additions.",
+  "_comment_variant": "HYDRA Variant C — Brandon Trojan Horse stack with Brandon's narrow 5/10pt spread widths (his actual rule from the interview). Identical Brandon feature stack AND identical narrow_spread widths to variant B (both: 5pt at VIX < 22, 10pt at VIX >= 22). B and C do NOT differ on spread width. The real differences are: a sparser 3-slot morning grid (10:15 / 10:45 / 11:15 vs B's 4 slots 09:45 / 10:45 / 11:15 / 11:45), a tighter concurrency cap (vix_regime.max_entries [2,2,2,1] vs B's [4,4,3,2]), and a looser per-underlying cap (max_contracts_per_underlying 180 vs B's 60). Dry-run for the first 4 weeks. B vs C therefore tests entry cadence / concurrency, NOT spread width.",
   "bot_name": "HYDRA",
   "dry_run": true,
   "_comment_credentials": "IBKR OAuth credentials are loaded from systemd $CREDENTIALS_DIRECTORY on the VM, or env vars in dev. Not in this file.",
@@ -39,7 +39,7 @@
     "whipsaw_range_skip_mult": 1.75,
     "max_vix_entry": 999,
     "contracts_per_entry": 10,
-    "_comment_safety_caps": "ORDER-006 caps raised vs 1c default (10 / 30) to accommodate Brandon narrow-spread sizing. 2026-05-13 cut from 15c → 10c per the same commission-drag review that trimmed B's slot grid: at $2.50/leg × 4 legs × 15c = $150 round-trip per IC, the wins-to-fees ratio on B/C from 5/4-5/12 was unfavorable. 10c × 3 entries × 4 legs = 120 worst-case open contracts on SPX. 15 per-order cap leaves headroom for size adjustments without disabling the bug-protection check entirely.",
+    "_comment_safety_caps": "ORDER-006 caps raised vs 1c default (10 / 30) to accommodate Brandon narrow-spread sizing. 2026-05-13 cut from 15c → 10c per the same commission-drag review that trimmed B's slot grid: at $2.50/leg × 4 legs × 15c = $150 round-trip per IC, the wins-to-fees ratio on B/C from 5/4-5/12 was unfavorable. Worst-case open contracts on SPX is bounded by vix_regime.max_entries (peak 2, below) not by entry_times count: 10c × 2 concurrent ICs × 4 legs = 80 counted contracts (_get_current_position_size adds contracts_per_entry per open leg; one full IC = 40). The 180 per-underlying cap is intentionally looser than B's 60 — B (max_entries peak 4) is deliberately throttled to ~1.5 ICs to share the margin pool, whereas C (max_entries peak 2) is left with headroom above its 80-contract ceiling. 15 per-order cap leaves headroom for size adjustments without disabling the bug-protection check entirely.",
     "max_contracts_per_order": 15,
     "max_contracts_per_underlying": 180,
     "_comment_min_bp_per_ic": "ORDER-004 BP-per-contract floor lowered $5000 → $500 because narrow 5pt × $100 = $500/contract margin (Brandon narrow-spread economics). Default is sized for wide HYDRA-baseline; without this override, every entry trips required vs available — same bug pattern as MAX_CONTRACTS_PER_ORDER yesterday.",
@@ -100,7 +100,7 @@
       "pre_entry_defer_minutes": 15
     },
     "brandon": {
-      "_comment": "Identical Brandon stack to variant B; only narrow_spread.enabled differs. Per Brandon: 5pt at VIX < 22, 10pt at VIX >= 22 (plus a 25pt safety ceiling). All other Brandon features are fully LIVE (TP / strike adjuster / breach exit / overlay). Only shadow behavior is hydra_stop_shadow — same as variant B.",
+      "_comment": "Identical Brandon stack to variant B, INCLUDING narrow_spread (both variants set enabled=true, breakpoint_vix=22.0, width_low=5, width_high=10 — they do NOT differ on spread width). Per Brandon: 5pt at VIX < 22, 10pt at VIX >= 22 (plus a 25pt safety ceiling). All Brandon features are fully LIVE (TP / strike adjuster / breach exit / overlay). Only shadow behavior is hydra_stop_shadow — same as variant B. B vs C differs only at the top-level config (entry_times, vix_regime.max_entries, max_contracts_per_underlying), not inside this brandon block.",
       "enabled": true,
       "_comment_disable_tightening": "Same rationale as variant B: HYDRA's MKT-020/MKT-022 tighteners chase credit by walking strikes toward ATM, which clashes with Brandon's GEX-zone strike selection. C's E#2 on 2026-05-07 was tightened from 125pt OTM to 25pt OTM (P:7340) right on the 7330 wall — when the wall broke, the breach close cost was $2,925 vs the recorded $0. Disabled here so Brandon GEX-ADJ is the sole strike-selection mechanism.",
       "disable_progressive_tightening": true,

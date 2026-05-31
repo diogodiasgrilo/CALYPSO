@@ -27,8 +27,9 @@
 #
 # Usage: /opt/calypso/services/argus/health_check.sh
 # Requires: bash, systemctl, python3 (the venv at /opt/calypso/.venv —
-#           used for JSON parsing in Check 2 + Check 7), gsutil
-#           (Check 8 only; gracefully degrades if absent).
+#           used for JSON parsing in Check 2 + Check 7 and broker-log
+#           timestamp windowing in Check 3), gsutil (Check 8 only;
+#           gracefully degrades if absent).
 # AUD2-L3: prior comment listed `jq (preferred) or python3 (fallback)`
 # but the script always uses Python (no jq calls anywhere).
 
@@ -42,6 +43,11 @@ INCIDENT_DIR="${CALYPSO_DIR}/intel/argus/incidents"
 NOTIFY_SCRIPT="${CALYPSO_DIR}/services/argus/notify.py"
 STATE_FILE="${CALYPSO_DIR}/data/hydra_state.json"
 GCS_BACKUPS="gs://calypso-backups"
+# Circuit breakers live in the calypso-broker process (P5a/commit 13776d6), not
+# in hydra, and the broker logs to a rotating FILE (not journald). Check 3 scans
+# this file for the breaker-OPEN line. Path matches services/broker/main.py:54
+# (CALYPSO_BROKER_LOG default) + entry_window_watch.py:48.
+BROKER_LOG="${CALYPSO_DIR}/logs/broker/broker.log"
 
 # Thresholds
 STATE_HEARTBEAT_MAX_AGE_MIN=5   # State-file `last_heartbeat_at` older than this during market = FAIL
@@ -167,15 +173,63 @@ fi
 
 # =========================================================================
 # CHECK 3: Circuit-breaker OPEN events in last 15 minutes (NEW IBKR-era)
-# Polish Item 2: grep journalctl for the canonical breaker-OPEN log line
-# from shared/ib_retry.py:130 — "CircuitBreaker[ib.<family>] CLOSED → OPEN".
+# Polish Item 2: scan the broker log for the canonical breaker-OPEN log line
+# from shared/ib_retry.py:137 — "CircuitBreaker[ib.<family>] <state> → OPEN — <reason>".
 # Any match on a BREAKER_OPEN_FAIL_FAMILIES family = FAIL. Any other
 # family OPEN = WARN.
+#
+# SOURCE: the five ib.* breakers live in the calypso-broker process's
+# IBClient (shared/ib_client.py:560), NOT in hydra — the strategies use a
+# BrokerClient with circuit_breakers={}. The broker writes to a rotating
+# FILE (BROKER_LOG), not journald, so we scan that file (+ its most recent
+# rotation) and window by the ET timestamp the broker stamps on each line
+# ("YYYY-MM-DD HH:MM:SS,mmm | LEVEL | calypso-broker | ..."). Fails CLOSED:
+# any parse/read error yields NO suppression of a real OPEN — we simply emit
+# whatever lines we can positively match within the window.
 # =========================================================================
 breaker_status="ok"
 breaker_opens_today="0"
-breaker_log=$(journalctl -u hydra --since '15 minutes ago' --no-pager 2>/dev/null \
-    | grep -E "CircuitBreaker\[ib\.[a-z]+\] (CLOSED|HALF_OPEN) → OPEN" || true)
+# Extract breaker-OPEN lines from the last 15 minutes out of the broker's
+# ET-stamped rotating log. Done in Python so we can parse the timestamp prefix
+# (journalctl's --since is unavailable for a flat file).
+breaker_log=$("${VENV_PYTHON}" -c "
+import os, re, sys
+from datetime import datetime, timedelta
+try:
+    from zoneinfo import ZoneInfo
+    et = ZoneInfo('America/New_York')
+except Exception:
+    et = None
+now = datetime.now(et) if et else datetime.now()
+cutoff = now - timedelta(minutes=15)
+line_re = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})')
+# ib_retry logs the prior state as the LOWERCASE enum value (CircuitState.value
+# = "closed"/"half_open"); match case-insensitively so the orders-breaker trip
+# is actually detected (the safety-critical FAIL path).
+open_re = re.compile(r'CircuitBreaker\[ib\.[a-z_]+\] (?:closed|half_open) . OPEN', re.IGNORECASE)
+out = []
+for path in ('${BROKER_LOG}', '${BROKER_LOG}.1'):
+    try:
+        with open(path, 'r', encoding='utf-8', errors='replace') as fh:
+            for ln in fh:
+                if not open_re.search(ln):
+                    continue
+                m = line_re.match(ln)
+                if not m:
+                    # No parseable timestamp — keep it (fail closed: don't drop a real OPEN)
+                    out.append(ln.rstrip('\n'))
+                    continue
+                ts = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S')
+                if et:
+                    ts = ts.replace(tzinfo=et)
+                if ts >= cutoff:
+                    out.append(ln.rstrip('\n'))
+    except FileNotFoundError:
+        continue
+    except Exception:
+        continue
+print('\n'.join(out))
+" 2>/dev/null)
 if [[ -n "${breaker_log}" ]]; then
     breaker_opens_today=$(echo "${breaker_log}" | wc -l | tr -d ' ')
     # Check if any of our FAIL families are in the matched lines.

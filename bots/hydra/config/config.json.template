@@ -176,6 +176,14 @@
     "_comment": "Skip trading on FOMC announcement days due to high volatility",
     "fomc_blackout": true
   },
+  "google_sheets": {
+    "_comment": "Top-level google_sheets block — schema GoogleSheetsLogger.__init__ actually reads (shared/logger_service.py). The logging.* keys are read by LocalFileLogger and a few other consumers, but Sheets-specific config lives here. spreadsheet_name mirrors logging.spreadsheet_name (variant A live workbook).",
+    "enabled": true,
+    "credentials_file": "config/google_credentials.json",
+    "spreadsheet_name": "Calypso_HYDRA_Live_Data",
+    "worksheet_name": "Trades",
+    "strategy_type": "hydra"
+  },
   "alerts": {
     "_comment": "Alert settings - phone/email loaded from Secret Manager in cloud",
     "enabled": true,

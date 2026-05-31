@@ -592,9 +592,20 @@ class DataRecorder:
         """Write daily_summaries row with enrichment fields.
 
         Uses INSERT OR IGNORE — DataRecorder writes first (settlement ~4PM),
-        HOMER writes second (5:30PM). First writer wins. HOMER can UPDATE
-        specific columns (day_type from Claude narrative) after its INSERT
-        is ignored.
+        HOMER writes second (7:30PM, deploy/homer.timer OnCalendar 19:30 ET).
+        First writer wins, so on a normal day the bot's row is the one that
+        persists.
+
+        IMPORTANT: HOMER currently has NO UPDATE path for daily_summaries —
+        services/homer/db_manager.py.insert_daily_summary is also INSERT OR
+        IGNORE, so when the bot's row already exists HOMER's insert is silently
+        dropped. HOMER-only enrichment columns it computes (notably day_type,
+        and realized_volatility) therefore never reach the DB on a normal day
+        and stay NULL; they only land on the rare path where the bot crashed
+        before settlement and HOMER's insert wins. See cross_file_notes /
+        audit finding: HOMER needs an explicit UPDATE (or ON CONFLICT DO
+        UPDATE) for those columns to close this data-loss gap. Do not rely on
+        an UPDATE happening here today — it does not.
         """
         def _write():
             cols = [

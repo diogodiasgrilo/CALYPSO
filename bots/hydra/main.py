@@ -183,6 +183,19 @@ def load_config(config_path: str = "bots/hydra/config/config.json") -> dict:
     return config
 
 
+def _variant_bot_name() -> str:
+    """Derive the monitor-log bot_name from HYDRA_VARIANT_ID so the shared
+    logs/monitor.log can attribute each line to the variant that emitted it.
+
+    All three variants (A/B/C) append to the SAME logs/monitor.log, where each
+    line is tagged with the bot_name column. Variant A leaves HYDRA_VARIANT_ID
+    unset (-> "HYDRA"); B/C set it (hydra_variant_b/c.service) -> "HYDRA_B" /
+    "HYDRA_C". Mirrors the variant read at kill_existing_instances():125.
+    """
+    variant = (os.environ.get("HYDRA_VARIANT_ID", "") or "").strip().lower()
+    return f"HYDRA_{variant.upper()}" if variant else "HYDRA"
+
+
 def print_banner():
     """Print the application banner."""
     banner = """
@@ -227,8 +240,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     """Run the main trading bot loop."""
     global shutdown_requested
 
-    # Initialize logging service
-    trade_logger = setup_logging(config, bot_name="HYDRA")
+    # Initialize logging service. bot_name is variant-derived so the shared
+    # monitor.log can attribute each line to A/B/C (was hardcoded "HYDRA").
+    trade_logger = setup_logging(config, bot_name=_variant_bot_name())
     trade_logger.log_event("=" * 60)
     trade_logger.log_event("HYDRA BOT STARTING")
     trade_logger.log_event(f"Mode: {'DRY RUN (Simulation)' if dry_run else 'LIVE TRADING'}")
@@ -513,9 +527,20 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 # above only fires once/day, so a mid-session 401/410
                 # (the 24h LST TTL elapsing mid-day, IBKR-side restart,
                 # a competing login) would silently leave the bot
-                # trading on a dead session. Re-verify every 15 minutes —
-                # ensure_connected() round-trips auth/status (one cheap
-                # call if healthy) and re-establishes if not.
+                # trading on a dead session. Re-verify every 15 minutes via
+                # ensure_connected(). Behavior depends on the broker object:
+                #   - legacy direct IBClient (CALYPSO_BROKER_URL unset):
+                #     ensure_connected() itself round-trips auth/status (one
+                #     cheap call if healthy) and re-establishes if not.
+                #   - deployed BrokerClient (CALYPSO_BROKER_URL set): it GETs the
+                #     broker's /health, which is now AUTHORITATIVE — the broker
+                #     performs a LIVE check_auth_status() round-trip per call
+                #     (audit #13), reporting connected only when the session is
+                #     authenticated AND connected AND not competing (5s cached).
+                #     Session RE-ESTABLISH still happens in calypso-broker's own
+                #     maintenance loop, not here. Either way a dead session
+                #     reports connected=False here, so this gate fails CLOSED and
+                #     breaks for restart.
                 now_ = datetime.now()
                 if (now_ - last_intraday_session_check).total_seconds() >= INTRADAY_SESSION_CHECK_INTERVAL_S:
                     if not broker.ensure_connected():
@@ -832,7 +857,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
 
 def show_status(config: dict):
     """Show current status without entering trading loop."""
-    trade_logger = setup_logging(config, bot_name="HYDRA")
+    trade_logger = setup_logging(config, bot_name=_variant_bot_name())
     # P7-audit H4: connect() raises on failure — it never returns False.
     try:
         broker = _build_broker()

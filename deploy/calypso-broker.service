@@ -21,9 +21,15 @@ Environment="GCP_PROJECT=calypso-trading-bot"
 Environment="CALYPSO_BROKER_HOST=127.0.0.1"
 Environment="CALYPSO_BROKER_PORT=8788"
 
-# ─── IBKR OAuth 1.0a credentials — ONLY the broker holds these now ──────────
-# (the hydra* strategy units drop LoadCredentialEncrypted once cut over to the
-# BrokerClient; the broker is the single OAuth identity / session owner.)
+# ─── IBKR OAuth 1.0a credentials ────────────────────────────────────────────
+# This broker is the single OAuth identity / session owner: all three hydra*
+# strategy units now set Environment="CALYPSO_BROKER_URL=http://127.0.0.1:8788"
+# (committed in their unit files) so each runs as a BrokerClient proxy and opens
+# NO direct IBKR session — eliminating the one-session-per-username eviction war.
+# The hydra* units still carry their own LoadCredentialEncrypted= entries as a
+# now-UNUSED fallback (they only matter on the direct-IBClient branch, which the
+# committed CALYPSO_BROKER_URL disables); that cleanup is deferred — see
+# docs/migration/PROJECT_STATUS.md.
 LoadCredentialEncrypted=ibkr_consumer_key:/etc/calypso/ibkr/consumer_key.cred
 LoadCredentialEncrypted=ibkr_access_token:/etc/calypso/ibkr/access_token.cred
 LoadCredentialEncrypted=ibkr_access_token_secret:/etc/calypso/ibkr/access_token_secret.cred
@@ -49,8 +55,11 @@ StandardError=journal
 SyslogIdentifier=calypso-broker
 
 # ─── Sandboxing (defense-in-depth for a brokerage-credential service) ───────
-# Note: ProtectDevices is silently unsupported on the deploy host's systemd
-# build (252) — the rest apply. Verify with `systemd-analyze security calypso-broker`.
+# ProtectDevices=yes blocks /dev/* access (other than /dev/null, /dev/zero,
+# /dev/random, etc.) — supported since systemd v183, so it is fully effective
+# on the deploy host's build (252) and on the most sensitive service (the ONE
+# process holding all decrypted OAuth private keys). Do NOT remove it.
+# Verify with `systemd-analyze security calypso-broker`.
 NoNewPrivileges=yes
 PrivateTmp=yes
 ProtectSystem=strict

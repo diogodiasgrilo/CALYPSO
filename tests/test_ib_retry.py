@@ -58,19 +58,21 @@ class TestCircuitBreakerConsecutiveFailures:
 
 class TestCircuitBreakerFailureRate:
     def test_low_volume_does_not_trip(self):
+        # Tall consecutive threshold so ONLY the failure-rate path can trip;
+        # this lets us exercise the real under-window guard via record_failure().
         cb = CircuitBreaker(
-            name="t", window_size=20, failure_rate_threshold=0.5,
+            name="t",
+            consecutive_failures_threshold=999,  # disable consecutive trip
+            window_size=20,
+            failure_rate_threshold=0.5,
         )
-        # Only 5 outcomes — under window_size, rate not yet evaluable
-        for _ in range(5):
+        # Drive failures through the public API, strictly below window_size.
+        # Each record_failure() invokes _failure_rate_exceeded(), which must
+        # decline to trip while the rolling window is not yet full.
+        for _ in range(window_failures := 19):
             cb.record_failure()
-        # consecutive_failures_threshold (default 5) WOULD trip — adjust
-        # for this test by giving us a tall consecutive threshold
-        cb._consecutive_failures = 0
-        cb._state = CircuitState.CLOSED  # reset
-        for _ in range(5):
-            cb._outcomes.append((time.monotonic(), False))
-        assert cb.state == CircuitState.CLOSED  # under window_size
+        assert window_failures < cb.window_size
+        assert cb.state == CircuitState.CLOSED  # under window_size — no trip
 
     def test_high_rate_trips_when_window_full(self):
         cb = CircuitBreaker(
@@ -264,7 +266,10 @@ class TestRetryDecorator:
         assert fn.call_count == 3
 
     def test_exhausts_retries_then_raises(self):
-        fn = MagicMock(side_effect=Exception("503"))
+        # Realistic retryable 5xx token (leading HTTP status line). A bare
+        # "503" with no status framing is intentionally NOT retryable now —
+        # see RetryPolicy.is_retryable / _HTTP_RETRYABLE_CODE_RE.
+        fn = MagicMock(side_effect=Exception("503 Service Unavailable"))
         wrapped = retry_with_backoff(
             RetryPolicy(max_attempts=3, base_delay_s=0.001, jitter_fraction=0)
         )(fn)
@@ -307,7 +312,8 @@ class TestRetryDecorator:
 
     def test_breaker_records_failure_on_retryable_error(self):
         cb = CircuitBreaker(name="t", consecutive_failures_threshold=10)
-        fn = MagicMock(side_effect=Exception("503"))
+        # Realistic retryable 5xx token (see _HTTP_RETRYABLE_CODE_RE).
+        fn = MagicMock(side_effect=Exception("503 Service Unavailable"))
         wrapped = retry_with_backoff(
             RetryPolicy(max_attempts=3, base_delay_s=0.001, jitter_fraction=0),
             breaker=cb,

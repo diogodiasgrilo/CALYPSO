@@ -448,19 +448,26 @@ def get_next_market_open() -> Tuple[datetime, int]:
         return now, 0
 
     # Calculate next market open
-    # Start with today at market open time
-    next_open = datetime.combine(current_date, MARKET_OPEN_TIME)
-    next_open = US_EASTERN.localize(next_open)
+    # Start with today's date at market open time.
+    # NOTE: advance by *calendar date* and re-localize on each step. Adding a
+    # timedelta to an already-localized (tz-aware) datetime adds exact 24h
+    # wall-clock and freezes the original UTC offset, so across a US DST
+    # boundary the wall-clock open time would drift by ~1h and the offset would
+    # be wrong. Rebuilding from the date keeps the open pinned at 9:30 ET.
+    next_date = current_date
 
     # If we're past today's market hours, start from tomorrow
     if now.time() >= MARKET_CLOSE_TIME:
-        next_open = next_open + timedelta(days=1)
+        next_date = next_date + timedelta(days=1)
+
+    next_open = US_EASTERN.localize(datetime.combine(next_date, MARKET_OPEN_TIME))
 
     # Skip weekends and holidays
     max_attempts = 10  # Prevent infinite loop
     attempts = 0
     while (is_weekend(next_open) or is_market_holiday(next_open)) and attempts < max_attempts:
-        next_open = next_open + timedelta(days=1)
+        next_date = next_date + timedelta(days=1)
+        next_open = US_EASTERN.localize(datetime.combine(next_date, MARKET_OPEN_TIME))
         attempts += 1
 
     # Calculate seconds until market open

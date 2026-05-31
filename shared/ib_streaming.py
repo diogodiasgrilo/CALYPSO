@@ -191,17 +191,28 @@ class StreamingManager:
                 return
             self._stop_event.set()
 
-        # Unsubscribe all conids
+        # Join the background threads BEFORE tearing down subscriptions. The
+        # refresh loop's umd→sleep→smd sequence runs under _io_lock and can be
+        # mid-flight (ibind's subscribe() blocks ~10s); if we unsubscribed
+        # first, its trailing _send_subscribe could land AFTER our umd and
+        # re-subscribe the conid — leaving a live smd topic on IBKR after
+        # shutdown (audit #54). The refresh thread's join timeout must cover
+        # that worst-case blocking subscribe so it can't outlive stop().
+        for t in (self._refresh_thread, self._consume_thread):
+            if t and t.is_alive():
+                t.join(timeout=15.0)
+
+        # Unsubscribe all conids. Hold _io_lock around each wire call to match
+        # the documented invariant (it is the ONLY lock held across an ibind
+        # wire op) and to serialize against any straggling refresh-loop op that
+        # didn't join in time.
         for conid in list(self._subscriptions.keys()):
             try:
-                self._send_unsubscribe(conid)
+                with self._io_lock:
+                    self._send_unsubscribe(conid)
             except Exception as exc:
                 logger.warning("Unsubscribe failed for conid %s: %s", conid, exc)
 
-        # Wait for threads
-        for t in (self._refresh_thread, self._consume_thread):
-            if t and t.is_alive():
-                t.join(timeout=5.0)
         with self._lock:
             self._started = False
             self._subscriptions.clear()

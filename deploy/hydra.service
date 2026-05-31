@@ -5,6 +5,12 @@ Description=HYDRA 0DTE iron-condor bot (Interactive Brokers / ibind OAuth 1.0a)
 # has DNS+TLS available at startup.
 After=network-online.target
 Wants=network-online.target
+# Shared IBKR session: this strategy proxies all brokerage calls through
+# calypso-broker (CALYPSO_BROKER_URL below). IBKR allows ONE session per
+# username, so the broker must be up first — ordering + a soft dependency so
+# `systemctl start hydra` pulls in calypso-broker, and it starts before us.
+Wants=calypso-broker.service
+After=calypso-broker.service
 # Restart rate-limiter. StartLimitIntervalSec/StartLimitBurst are [Unit]
 # directives — in [Service] systemd silently ignores them. If the bot
 # crash-loops (e.g. expired IBKR credentials), systemd gives up after
@@ -19,7 +25,22 @@ Group=calypso
 WorkingDirectory=/opt/calypso
 Environment="PYTHONUNBUFFERED=1"
 
+# ─── Shared IBKR session (broker-proxy mode) ────────────────────────────
+# bots/hydra/main.py:_build_broker() returns a BrokerClient (proxying the
+# single shared calypso-broker session) when CALYPSO_BROKER_URL is set, and
+# otherwise falls back to a direct IBClient that opens its OWN IBKR OAuth
+# session. With A/B/C all running, three direct sessions on one paper
+# username triggers the IBKR session-eviction crash-loop the broker pivot
+# fixed — so the broker URL MUST be the tracked default, not a VM hand-edit.
+Environment="CALYPSO_BROKER_URL=http://127.0.0.1:8788"
+
 # ─── IBKR OAuth 1.0a credentials (P7 Step 4, option B) ──────────────────
+# NOTE: in broker-proxy mode (CALYPSO_BROKER_URL above) the OAuth session is
+# owned by calypso-broker.service, which holds these credentials. The
+# LoadCredentialEncrypted= entries below are now redundant here and can be
+# cleaned up in a follow-up pass once the cutover is confirmed on the VM;
+# they are left in place for now so a fallback to direct-IBClient mode (URL
+# unset) still has credentials available.
 # systemd decrypts each credential into a file under $CREDENTIALS_DIRECTORY
 # named exactly by its ID; shared/ib_oauth.load_credentials() reads them
 # there. Credentials are NOT process env vars — not in /proc/<pid>/environ,

@@ -41,10 +41,14 @@ STRATEGIES = ["hydra", "hydra_variant_b", "hydra_variant_c"]
 SERVICES = ["calypso-broker", *STRATEGIES]
 WINDOW_MIN = 12
 LOG_ROOT = "/opt/calypso/logs"
-# The broker service is sandboxed (its /proc/<pid>/fd is not readable from the
-# watchdog), so /proc-resolution returns nothing for it — scan its known log
-# path directly instead. Bots keep /proc-resolution (their paths are messy:
-# shared file + logrotate renaming a file out from under an open fd).
+# The broker writes to a known RotatingFileHandler path (broker.log). Its
+# /proc/<pid>/fd is resolvable from the watchdog (the broker runs under the same
+# User=calypso with the same sandbox posture as the bots — no ProtectProc/
+# ProcSubset hides /proc fd), so /proc-resolution normally finds it too. We add
+# BROKER_LOG as a redundant supplement in case the broker's fd is momentarily
+# unresolvable (restart/rotation). Bots rely on /proc-resolution because their
+# paths are messy: shared file + logrotate renaming a file out from under an
+# open fd.
 BROKER_LOG = "/opt/calypso/logs/broker/broker.log"
 TAIL_BYTES = 512 * 1024  # plenty to cover a 12-min window on any of our logs
 
@@ -59,13 +63,16 @@ except Exception:  # pragma: no cover - zoneinfo always present on 3.9+
 # INFO lines that happen to mention an auth endpoint (the broker logs
 # "POST .../iserver/auth/ssodh/init" at INFO on every re-auth) do NOT false-
 # trigger. Plus multiline-traceback bodies and explicit broker-comms phrases.
-# DATA-003/004 (zero option prices) only matters if it PERSISTS — a one-off
-# mid-warmup is benign — so it's counted separately.
+# DATA-004 (zero option prices, logged at WARNING in base_strategy) only matters
+# if it PERSISTS — a one-off mid-warmup is benign — so it's counted separately
+# and only alerts at >=5 occurrences. DATA-003 (impossible P&L) is a different
+# condition logged at ERROR, so it matches ERR_RE first and alerts immediately
+# as an error (it is NOT subject to the persistence threshold).
 ERR_RE = re.compile(
     r"\|\s*(?:ERROR|CRITICAL)\s*\||Traceback|BrokerError|broker unreachable",
     re.IGNORECASE,
 )
-ZEROPRICE_RE = re.compile(r"DATA-00[34]|call side prices are zero|zero prices", re.I)
+ZEROPRICE_RE = re.compile(r"DATA-004|call side prices are zero|zero prices", re.I)
 TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})")
 
 
@@ -114,7 +121,19 @@ def _open_log_files(pid: int) -> set:
 
 
 def _cutoff() -> datetime:
-    now = datetime.now(_ET) if _ET else datetime.now()
+    # Log lines are ET-stamped and parsed as naive ET in _scan_file, so the
+    # cutoff MUST be ET too. If zoneinfo is unavailable we CANNOT fall back to
+    # the host clock (the VM runs in UTC, ~4-5h ahead of ET) — a UTC cutoff
+    # would push the whole real window into the "future" and silently exclude
+    # every genuine ET log line, making the watchdog report a false OK. A safety
+    # watchdog must fail CLOSED, so raise instead of comparing against a
+    # mismatched clock; main() turns this into an alert + non-zero exit.
+    if _ET is None:
+        raise RuntimeError(
+            "zoneinfo America/New_York unavailable — cannot align the scan "
+            "window to ET log timestamps (refusing to scan against host UTC)"
+        )
+    now = datetime.now(_ET)
     return (now - timedelta(minutes=WINDOW_MIN)).replace(tzinfo=None)
 
 
@@ -162,19 +181,38 @@ def main() -> int:
     except Exception as e:
         problems.append(f"calypso-broker /health unreachable: {type(e).__name__}: {e}")
 
-    # 2. services active
+    # 2. services active. Track each bot's resolved log files per-unit so we can
+    #    catch a bot that is `active` but whose /proc/fd resolved nothing — that
+    #    state means we'd scan ZERO of its lines and must NOT be masked by the
+    #    broker fallback below (see the coverage guard in step 3).
     log_files = set()
+    per_unit_files: dict[str, set] = {}
     for unit in SERVICES:
         st = _active(unit)
         if st != "active":
             problems.append(f"{unit} is {st!r} (expected active)")
             continue
-        log_files |= _open_log_files(_main_pid(unit))
+        resolved = _open_log_files(_main_pid(unit))
+        per_unit_files[unit] = resolved
+        log_files |= resolved
 
-    # The broker's /proc fd is sandbox-hidden (resolves to nothing), so add its
-    # known log path directly — otherwise the broker would never be log-scanned.
+    # The broker's /proc/fd is normally resolvable too (same User=calypso, same
+    # sandbox posture as the bots), but add its known RotatingFileHandler path as
+    # a redundant supplement in case its fd is momentarily unresolvable. This is
+    # a SUPPLEMENT, not a substitute — it must not mask a bot whose own logs were
+    # never opened (the coverage guard below checks bots explicitly).
     if os.path.exists(BROKER_LOG):
         log_files.add(BROKER_LOG)
+
+    # Coverage guard: every bot that systemctl reports `active` must contribute at
+    # least one resolved log file, or we'd silently scan none of its lines and
+    # report a false "OK" — the exact blindness this watchdog exists to kill.
+    for unit in STRATEGIES:
+        if unit in per_unit_files and not per_unit_files[unit]:
+            problems.append(
+                f"{unit} active but no open log file resolved "
+                f"(cannot scan its entry-path logs)"
+            )
 
     # 3. entry-path errors in the window, scanning the union of all open log
     #    files (A/B/C + broker). B/C share a file and all carry bot_name=HYDRA,
@@ -183,23 +221,30 @@ def main() -> int:
     if not log_files:
         problems.append("no open log files resolved for A/B/C/broker (all PIDs dead?)")
     else:
-        cutoff = _cutoff()
-        all_errs = []
-        all_zeros = []
-        for path in sorted(log_files):
-            e, z = _scan_file(path, cutoff)
-            all_errs += e
-            all_zeros += z
-        if all_errs:
-            problems.append(
-                f"{len(all_errs)} entry-path error line(s) in last {WINDOW_MIN}m; "
-                f"last: {all_errs[-1][-160:].strip()}"
-            )
-        elif len(all_zeros) >= 5:  # persistent zero-price = real (chain/quote) problem
-            problems.append(
-                f"{len(all_zeros)} zero-price stop-skip lines in last {WINDOW_MIN}m "
-                f"(chain/quote problem?)"
-            )
+        cutoff = None
+        try:
+            cutoff = _cutoff()
+        except RuntimeError as e:
+            # Fail closed: a mismatched clock would make the scan silently blind,
+            # so flag it as a problem rather than scanning against the wrong clock.
+            problems.append(str(e))
+        if cutoff is not None:
+            all_errs = []
+            all_zeros = []
+            for path in sorted(log_files):
+                e, z = _scan_file(path, cutoff)
+                all_errs += e
+                all_zeros += z
+            if all_errs:
+                problems.append(
+                    f"{len(all_errs)} entry-path error line(s) in last {WINDOW_MIN}m; "
+                    f"last: {all_errs[-1][-160:].strip()}"
+                )
+            elif len(all_zeros) >= 5:  # persistent zero-price = real (chain/quote) problem
+                problems.append(
+                    f"{len(all_zeros)} zero-price stop-skip lines in last {WINDOW_MIN}m "
+                    f"(chain/quote problem?)"
+                )
 
     if problems:
         summary = "Entry-window watchdog found issue(s):\n- " + "\n- ".join(problems[:8])

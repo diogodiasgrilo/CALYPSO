@@ -22,6 +22,7 @@ import sys
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from shared.ib_client import (
+    AmbiguousOrderError,
     DEFAULT_GREEKS_FIELDS,
     DEFAULT_QUOTE_FIELDS,
     FIELD_BID,
@@ -127,7 +128,7 @@ class TestQualifyContract:
         mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
         # Step 2: secdef chain
         mock_ibkr.search_secdef_info_by_conid.return_value = _mk_result(
-            [{"conid": 999111, "tradingClass": "SPXW"}]
+            [{"conid": 999111, "tradingClass": "SPXW", "maturityDate": "20260516"}]
         )
         conid = client.qualify_contract(
             "SPX", expiry=date(2026, 5, 16), strike=5500, right="C",
@@ -146,8 +147,8 @@ class TestQualifyContract:
         client, mock_ibkr = connected_client
         mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
         mock_ibkr.search_secdef_info_by_conid.return_value = _mk_result([
-            {"conid": 111, "tradingClass": "SPX"},   # NOT 0DTE
-            {"conid": 222, "tradingClass": "SPXW"},  # 0DTE
+            {"conid": 111, "tradingClass": "SPX", "maturityDate": "20260516"},   # NOT 0DTE
+            {"conid": 222, "tradingClass": "SPXW", "maturityDate": "20260516"},  # 0DTE
         ])
         conid = client.qualify_contract(
             "SPX", expiry=date(2026, 5, 16), strike=5500, right="C",
@@ -224,22 +225,52 @@ class TestQualifyContract:
         assert "20260515" in msg, f"Expected available expiry in error: {msg!r}"
         assert "20260520" in msg, f"Expected available expiry in error: {msg!r}"
 
-    def test_option_expiry_filter_back_compat_when_field_absent(
+    def test_option_expiry_filter_fails_closed_when_field_absent(
         self, connected_client,
     ):
-        """Test mocks (and some legacy IBKR endpoints) omit the expiry
-        field entirely. In that case, fall through and accept the row —
-        preserves all prior tests' assumptions."""
+        """Audit #20: a secdef row with NO parseable expiry field must be
+        REJECTED (fail-closed), not accepted — accepting it could land on a
+        wrong-dated/already-expired conid (the 2026-05-16 'Order is already
+        expired' 500). The permissive 'accept when absent' behavior survives
+        ONLY behind the test-only `_allow_missing_expiry` escape hatch."""
         client, mock_ibkr = connected_client
         mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
         mock_ibkr.search_secdef_info_by_conid.return_value = _mk_result(
             [{"conid": 777, "tradingClass": "SPXW"}]  # no maturityDate
         )
+        # Production default (flag off) → fail closed.
+        assert client._allow_missing_expiry is False
+        with pytest.raises(IBClientError):
+            client.qualify_contract(
+                "SPX", expiry=date(2026, 5, 18), strike=5500, right="C",
+                trading_class="SPXW",
+            )
+        # Escape hatch on → legacy permissive behavior for field-less mocks.
+        client._allow_missing_expiry = True
+        client._conid_cache.clear()  # don't serve a cached miss
         conid = client.qualify_contract(
             "SPX", expiry=date(2026, 5, 18), strike=5500, right="C",
             trading_class="SPXW",
         )
         assert conid == 777
+
+    def test_option_expiry_accepts_iso_string_over_rpc_wire(self, connected_client):
+        """Audit #4: over the calypso-broker RPC wire a datetime.date argument
+        arrives as an isoformat STRING ('2026-05-16'). qualify_contract (and
+        get_option_chain / qualify_option_strikes) must coerce it back to a date
+        so option-chain resolution works in broker-proxy mode — not only on the
+        direct path. Without the coercion, _ib_month_str/strftime raise and the
+        strategy silently never enters a trade."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
+        mock_ibkr.search_secdef_info_by_conid.return_value = _mk_result(
+            [{"conid": 999111, "tradingClass": "SPXW", "maturityDate": "20260516"}]
+        )
+        conid = client.qualify_contract(
+            "SPX", expiry="2026-05-16",  # the RPC-wire string form
+            strike=5500, right="C", trading_class="SPXW",
+        )
+        assert conid == 999111
 
     def test_underlying_index_strict_filter_picks_cboe_ind_from_sections(
         self, connected_client,
@@ -668,28 +699,41 @@ class TestGetQuote:
         assert (mock_ibkr.live_marketdata_snapshot.call_count
                 == 1 + _SNAPSHOT_MAX_WARMUP_POLLS)
 
-    def test_warmup_detects_data_in_any_row(self, connected_client):
-        """Batch snapshot: if ANY of the rows has a populated field,
-        consider the cache warm. Prevents waiting forever when one
-        instrument is illiquid but others are fine."""
+    def test_warmup_waits_for_all_conids(self, connected_client):
+        """Audit #19: batch warmup must wait until ALL requested conids have
+        data, not exit as soon as ANY row warms — otherwise the still-cold
+        conids come back all-None and downstream treats them as 'illiquid,
+        skip', silently biasing strike selection."""
         client, mock_ibkr = connected_client
-        # First call: both rows metadata-only
         meta_pair = _mk_result([
             {"conid": 111, "_updated": 1}, {"conid": 222, "_updated": 1},
         ])
-        # Second: one populated, one still metadata-only — counts as warm
-        mixed_pair = _mk_result([
+        one_warm = _mk_result([
             {"conid": 111, FIELD_BID: "1.0"}, {"conid": 222, "_updated": 1},
         ])
-        mock_ibkr.live_marketdata_snapshot.side_effect = [
-            meta_pair,  # preflight
-            meta_pair,  # warmup poll 1
-            mixed_pair, # warmup poll 2 → exits
-        ]
+        both_warm = _mk_result([
+            {"conid": 111, FIELD_BID: "1.0"}, {"conid": 222, FIELD_BID: "2.0"},
+        ])
+        # preflight, poll1(both cold), poll2(only 111 warm — must NOT exit),
+        # poll3+ → both warm.
+        seq = [meta_pair, meta_pair, one_warm]
+        calls = {"n": 0}
+
+        def _snap(**kwargs):
+            i = calls["n"]
+            calls["n"] += 1
+            return seq[i] if i < len(seq) else both_warm
+
+        mock_ibkr.live_marketdata_snapshot.side_effect = _snap
         with patch("shared.ib_client.time.sleep"):
             rows = client.get_quotes_batch([111, 222])
+        # Both conids ended warm...
         assert any(r.get("bid") == 1.0 for r in rows)
-        assert mock_ibkr.live_marketdata_snapshot.call_count == 3
+        assert any(r.get("bid") == 2.0 for r in rows)
+        # ...and it did NOT exit at the one-warm poll (that would be 3 calls).
+        assert calls["n"] >= 4, (
+            f"warmup exited early with one conid still cold ({calls['n']} calls)"
+        )
 
 
 class TestGetQuotesBatch:
@@ -1443,20 +1487,47 @@ class TestPlaceOrderCoidRetrySafety:
         client._retry_policy.base_delay_s = 0.001
         client._retry_policy.jitter_fraction = 0.0
 
-    def test_retried_place_uses_same_coid(self, connected_client):
-        """Place a single-leg order whose first attempt 503's. Verify the
-        cOID on the second (successful) attempt is identical to the first.
-        Without this guarantee, a network-timeout retry could double-fill."""
+    def test_place_503_unconfirmed_raises_ambiguous_not_resubmitted(self, connected_client):
+        """A place POST that 503's AND whose live state can't be confirmed must
+        NOT be re-POSTed (the production caller uses a per-attempt cOID, so a
+        retry is a NEW order → double-fill). _submit_order must raise
+        AmbiguousOrderError and call place_order exactly ONCE."""
         client, mock_ibkr = connected_client
         self._short_policy(client)
+        # Lookup inconclusive → cannot prove the order landed.
+        client._find_order_by_coid = lambda coid: None
 
         captured_coids = []
 
         def _flaky_place_order(*, order_request, answers, account_id):
             captured_coids.append(order_request.coid)
-            if len(captured_coids) == 1:
-                raise Exception("503 Service Unavailable")
-            return _mk_result({"order_id": "12345", "order_status": "Submitted"})
+            raise Exception("503 Service Unavailable")
+
+        mock_ibkr.place_order.side_effect = _flaky_place_order
+        with pytest.raises(AmbiguousOrderError):
+            client.place_order(
+                conid=416904, side="BUY", quantity=1,
+                order_type="LMT", price=1.25,
+            )
+        assert len(captured_coids) == 1, (
+            f"order was re-POSTed on an unconfirmed transient failure "
+            f"({len(captured_coids)} POSTs) — double-fill risk"
+        )
+
+    def test_place_503_but_order_live_returns_existing(self, connected_client):
+        """If the POST 503'd but the cOID IS found live, return the existing
+        order — never resubmit, never raise."""
+        client, mock_ibkr = connected_client
+        self._short_policy(client)
+        client._find_order_by_coid = lambda coid: {
+            "order_id": "12345", "order_status": "Submitted", "cOID": coid,
+        }
+
+        captured_coids = []
+
+        def _flaky_place_order(*, order_request, answers, account_id):
+            captured_coids.append(order_request.coid)
+            raise Exception("503 Service Unavailable")
 
         mock_ibkr.place_order.side_effect = _flaky_place_order
         out = client.place_order(
@@ -1464,11 +1535,7 @@ class TestPlaceOrderCoidRetrySafety:
             order_type="LMT", price=1.25,
         )
         assert out.get("order_id") == "12345"
-        assert len(captured_coids) == 2, "expected 1 retry"
-        assert captured_coids[0] == captured_coids[1], (
-            f"cOID changed across retry: {captured_coids[0]!r} → "
-            f"{captured_coids[1]!r} — would double-fill"
-        )
+        assert len(captured_coids) == 1, "must not re-POST when order is found live"
 
     def test_caller_supplied_coid_preserved_verbatim(self, connected_client):
         """When the caller passes coid='MY_CUSTOM_COID', the order placed

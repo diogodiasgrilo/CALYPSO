@@ -7,6 +7,12 @@ Description=HYDRA Variant B (Brandon Trojan Horse stack — narrow widths + 4-sl
 # this branch — variant would have failed to start on a clean VM.
 After=network-online.target
 Wants=network-online.target
+# Audit #2: this variant MUST proxy through the shared calypso-broker session
+# (CALYPSO_BROKER_URL below). IBKR allows ONE brokerage session per username,
+# so if this unit started without the URL it would open its OWN session and
+# re-trigger the eviction crash-loop. Order after the broker so it is up first.
+Wants=calypso-broker.service
+After=calypso-broker.service
 # Restart rate-limiter. StartLimitIntervalSec/StartLimitBurst MUST be in
 # [Unit]; in [Service] systemd silently ignores them (P7-audit H5).
 StartLimitIntervalSec=600
@@ -19,6 +25,9 @@ Group=calypso
 WorkingDirectory=/opt/calypso
 Environment="HYDRA_VARIANT_ID=b"
 Environment="PYTHONUNBUFFERED=1"
+# Route all IBKR access through the shared broker (drop-in default committed so
+# a clean redeploy reproduces broker-proxy mode, not direct-session mode).
+Environment="CALYPSO_BROKER_URL=http://127.0.0.1:8788"
 
 # Variant-isolated state file paths (Polish Item 5 — pre-start snapshot).
 # Each variant has its own data/variant_<id>/ tree so the variants don't

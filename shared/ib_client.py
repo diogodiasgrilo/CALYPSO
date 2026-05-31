@@ -56,8 +56,8 @@ import threading
 import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
-from datetime import date
+from dataclasses import dataclass, replace
+from datetime import date, datetime
 from typing import Iterable, Optional
 
 from ibind import IbkrClient, OrderRequest, QuestionType  # module-level so tests can patch cleanly
@@ -121,6 +121,21 @@ _SNAPSHOT_METADATA_KEYS = frozenset(
 )
 
 
+def _snapshot_row_has_data(row) -> bool:
+    """True if a single snapshot row has at least one non-metadata field.
+
+    Any key beyond the metadata set ({conid, conidEx, _updated, ...}) means
+    a price/Greek field is populated. The IBKR field-code keys are short
+    numeric strings like "31", "84", "7308" — those count as data here.
+    """
+    if not isinstance(row, dict):
+        return False
+    for key in row.keys():
+        if key not in _SNAPSHOT_METADATA_KEYS:
+            return True
+    return False
+
+
 def _snapshot_has_data(payload) -> bool:
     """True if the snapshot payload has at least one row with at least one
     non-metadata field. Used to decide whether to continue warmup polling.
@@ -128,16 +143,34 @@ def _snapshot_has_data(payload) -> bool:
     if not payload:
         return False
     rows = payload if isinstance(payload, list) else [payload]
+    return any(_snapshot_row_has_data(row) for row in rows)
+
+
+def _snapshot_ready_conids(payload) -> set:
+    """Set of conids (as str) in `payload` whose row has non-metadata data.
+
+    Used by batch warmup to decide whether ALL requested conids are warm,
+    not just the first one (audit #19). A row with no recoverable conid
+    key is ignored for the purpose of per-conid readiness.
+    """
+    ready: set = set()
+    if not payload:
+        return ready
+    rows = payload if isinstance(payload, list) else [payload]
     for row in rows:
         if not isinstance(row, dict):
             continue
-        # Any key beyond {conid, conidEx, _updated} means a price/Greek field
-        # is populated. The IBKR field-code keys are short numeric strings
-        # like "31", "84", "7308" — those count as data here.
-        for key in row.keys():
-            if key not in _SNAPSHOT_METADATA_KEYS:
-                return True
-    return False
+        if not _snapshot_row_has_data(row):
+            continue
+        conid = row.get("conid")
+        if conid is None:
+            conidex = row.get("conidEx")
+            if conidex is not None:
+                # conidEx is "<conid>;..." for combos — take the leading id.
+                conid = str(conidex).split(";", 1)[0]
+        if conid is not None:
+            ready.add(str(conid))
+    return ready
 
 
 # ─── place_and_wait_for_fill tuning ────────────────────────────────────────
@@ -304,6 +337,14 @@ def _build_fill_result_dict(
     filled_qty_raw = (
         raw.get("filled_quantity")
         or raw.get("filledQuantity")
+        # /iserver/account/order/status/{id} reports the cumulative fill
+        # under snake_case `cum_fill` (alongside `average_price` /
+        # `total_size`), NOT `filledQuantity` (which belongs to the
+        # live_orders/sor envelope — see research_scratch/09_cpapi...md
+        # :437-441). Mirror the snake_case `average_price` consumed just
+        # below; without this a fully-filled order reports
+        # filled_quantity=0 and drives a cancel+retry double-fill.
+        or raw.get("cum_fill")
         or raw.get("filled")
         or 0
     )
@@ -349,6 +390,24 @@ _IB_MONTHS = (
 def _ib_month_str(d: date) -> str:
     """Format a date as IBKR's 3-letter-month + 2-digit year, e.g. 'MAY26'."""
     return f"{_IB_MONTHS[d.month - 1]}{d.year % 100:02d}"
+
+
+def _coerce_expiry(expiry):
+    """Accept a ``datetime.date`` OR an ISO/compact date string.
+
+    Audit #4: over the calypso-broker RPC wire a ``datetime.date`` argument is
+    JSON-serialized to its isoformat string (e.g. ``"2026-05-29"``), so the
+    broker process receives a ``str`` where these methods require a ``date``
+    (``_ib_month_str``/``strftime``/``isoformat`` would all raise on a str).
+    Coercing here makes get_option_chain/qualify_option_strikes/qualify_contract
+    work identically on the direct AND the RPC path. Returns the value unchanged
+    for a ``date`` (or ``None``); raises ValueError on an unparseable string
+    (which fails CLOSED upstream — no trade).
+    """
+    if isinstance(expiry, str):
+        s = expiry.strip()
+        return date.fromisoformat(s) if "-" in s else datetime.strptime(s, "%Y%m%d").date()
+    return expiry
 
 # Default answers for IBKR's order-reply prompts. Caller can override per-call.
 #
@@ -407,6 +466,18 @@ class IBConnectionError(IBClientError):
     """
 
 
+class AmbiguousOrderError(IBClientError):
+    """A place_order POST may have landed but it could NOT be confirmed.
+
+    Raised by ``_submit_order`` when a *retryable* failure occurred during/
+    after the order POST AND the subsequent cOID lookup was inconclusive — so
+    the order might be working at IBKR or might not be. The caller MUST NOT
+    resubmit (a fresh order under a new cOID could double-fill); it must ABORT
+    the placement and let reconciliation/alerting handle the unknown order.
+    Audit: place_order retry double-execution.
+    """
+
+
 # ─── Config dataclass ───────────────────────────────────────────────────────
 
 
@@ -423,9 +494,18 @@ class IBConfig:
       account_id: optional pinned account ID; if None, discovered from
                   managedAccounts on connect (typical case for single-account
                   setups)
-      tickle_interval_seconds: ibind's Tickler thread cadence to keep the
+      tickle_interval_seconds: INTENDED Tickler cadence to keep the
                   brokerage session warm (default 60s; IBKR idle timeout
-                  is ~6 minutes)
+                  is ~6 minutes). NOT YET wired (audit #43): connect()
+                  constructs IbkrClient(use_oauth=True, oauth_config=...)
+                  and ibind starts its own Tickler from maintain_oauth=True
+                  at the fixed `var.IBIND_TICKLER_INTERVAL` (60s) default —
+                  this field is not passed through, so setting it has no
+                  effect on the real cadence. It only matches behavior at
+                  the 60s default. Wiring it (set var.IBIND_TICKLER_INTERVAL
+                  before construction, or start_tickler(interval=...)) is a
+                  tracked follow-up; until then treat the cadence as fixed
+                  at ibind's 60s default.
       connection_timeout_seconds: advisory connect-handshake budget (default
                   30s). NOT YET enforced as a hard cap in connect() (audit M1):
                   a hung handshake is bounded instead by ibind's own
@@ -434,9 +514,14 @@ class IBConfig:
                   (deploy/hydra.service). Wiring a true watchdog cap that
                   raises IBConnectionError on expiry is a tracked follow-up;
                   until then do not rely on this as a guaranteed ceiling.
-      debug_log_payloads: if True, log full IBKR responses at DEBUG level.
-                  NEVER enable in production (responses may contain account
-                  values, order IDs, etc.)
+      debug_log_payloads: if True, allow the diagnostic log sites that
+                  would otherwise dump a full IBKR response (the snapshot
+                  warmup-exhausted WARNING and the place_order
+                  no-order-id WARNING) to include the raw payload. When
+                  False (the default), those sites log only a
+                  non-sensitive summary (conids / entry count / keys).
+                  NEVER enable in production (raw responses may contain
+                  account values, order IDs, etc.)
     """
     credentials: IBKRCredentials
     account_id: Optional[str] = None
@@ -516,6 +601,16 @@ class IBClient:
         # NEVER reset within a session — the day-rollover dedup logic
         # lives in main.py to keep IBClient broker-agnostic.
         self._snapshot_warmup_exhausted_count = 0
+        # FAIL-CLOSED expiry guard (audit #20). The maturityDate filter in
+        # qualify_contract / qualify_option_strikes is the SOLE thing
+        # preventing landing on a wrong-dated (e.g. already-expired or
+        # later-weekly) option conid — a month=MAY26 secdef query returns
+        # ALL May expiries mixed together. A secdef row that lacks a
+        # parseable expiry field must therefore be REJECTED, not accepted
+        # for today's 0DTE date. This test-only escape hatch lets unit
+        # mocks that omit maturityDate keep resolving; it is NEVER set in
+        # production code paths. Default False = fail-closed.
+        self._allow_missing_expiry = False
 
     # ─── Connection lifecycle ──────────────────────────────────────────────
 
@@ -634,7 +729,11 @@ class IBClient:
         if not self._account_id:
             self._account_id = self._discover_account_id()
 
-        self._connected = True
+        # Audit #12: publish _connected under the lock so a concurrent
+        # _require_connected/_ib_call sees a consistent (client-built +
+        # connected) state, never the True flag ahead of a usable client.
+        with self._call_lock:
+            self._connected = True
         logger.info(
             "IBClient connected successfully — account=%s",
             self._account_id,
@@ -690,35 +789,50 @@ class IBClient:
         Returns False if the session is down and could not be
         re-established — the caller should then exit so systemd restarts
         the process with a fresh ``connect()`` (the most reliable reset).
-        """
-        try:
-            status = self._read_auth_status() if self._connected else {}
-            if (status.get("authenticated")
-                    and status.get("connected")
-                    and not status.get("competing")):
-                return True
-            logger.info(
-                "ensure_connected: session stale (status=%r) — reconnecting",
-                status,
-            )
-        except Exception as exc:
-            logger.warning(
-                "ensure_connected: auth status read failed (%s) — reconnecting",
-                exc,
-            )
 
-        try:
-            self.disconnect()
-        except Exception as exc:
-            logger.warning(
-                "ensure_connected: disconnect during reconnect failed (%s)",
-                exc,
-            )
-        try:
-            return self.connect()
-        except Exception as exc:
-            logger.error("ensure_connected: reconnect failed (%s)", exc)
-            return False
+        Concurrency (audit #11/#12): the status-read + ``disconnect()`` +
+        ``connect()`` are performed as ONE atomic transaction under
+        ``self._call_lock``. Uvicorn dispatches each /rpc on a threadpool
+        worker, so other threads can be inside ``_ib_call`` while the
+        broker-maintenance thread reconnects. Holding ``_call_lock`` for
+        the whole transaction means an in-flight RPC either completes
+        before the swap or blocks until the new ``self._client`` is in
+        place — it can never observe a half-torn-down session (``_client``
+        set but ``_connected`` False, or a closed client). ``_call_lock``
+        is an ``RLock``, so the inner re-acquisitions in
+        ``_read_auth_status`` / ``disconnect`` / ``connect`` / ``_ib_call``
+        on THIS thread are free and cannot deadlock; cross-thread callers
+        serialize behind it as intended.
+        """
+        with self._call_lock:
+            try:
+                status = self._read_auth_status() if self._connected else {}
+                if (status.get("authenticated")
+                        and status.get("connected")
+                        and not status.get("competing")):
+                    return True
+                logger.info(
+                    "ensure_connected: session stale (status=%r) — reconnecting",
+                    status,
+                )
+            except Exception as exc:
+                logger.warning(
+                    "ensure_connected: auth status read failed (%s) — reconnecting",
+                    exc,
+                )
+
+            try:
+                self.disconnect()
+            except Exception as exc:
+                logger.warning(
+                    "ensure_connected: disconnect during reconnect failed (%s)",
+                    exc,
+                )
+            try:
+                return self.connect()
+            except Exception as exc:
+                logger.error("ensure_connected: reconnect failed (%s)", exc)
+                return False
 
     def _discover_account_id(self) -> str:
         """Look up the IBKR account ID via portfolio_accounts.
@@ -787,20 +901,26 @@ class IBClient:
                 logger.error("WS client shutdown failed: %s", exc)
             self._ws_client = None
 
-        if self._client:
-            try:
-                with self._call_lock:
+        # Audit #11/#12: close the ibind client AND flip the session-state
+        # flags as a single locked unit, so a concurrent _ib_call/
+        # _require_connected never observes a torn state (e.g. _connected
+        # still True against an already-closed _client). _call_lock is an
+        # RLock so this composes with ensure_connected holding the same
+        # lock across the whole disconnect→connect transaction.
+        with self._call_lock:
+            if self._client:
+                try:
                     # ibind 0.1.23: IbkrClient.close() runs oauth_shutdown()
                     # (which calls stop_tickler + logout) and then the parent
                     # RestClient.close(). No separate close_session() exists.
                     self._client.close()
-            except Exception as exc:
-                unclean += 1
-                logger.error("IBClient session close failed: %s", exc)
+                except Exception as exc:
+                    unclean += 1
+                    logger.error("IBClient session close failed: %s", exc)
 
-        self._connected = False
-        self._conid_cache.clear()
-        self._iserver_primed = False
+            self._connected = False
+            self._conid_cache.clear()
+            self._iserver_primed = False
         if unclean:
             logger.error(
                 "IBClient disconnect completed with %d unclean step(s); "
@@ -870,7 +990,15 @@ class IBClient:
     # ─── Internal helpers ─────────────────────────────────────────────────
 
     def _require_connected(self) -> None:
-        if not self._connected or self._client is None:
+        # Audit #12: read _connected + _client as one snapshot under
+        # _call_lock so this can't observe a torn state mid-reconnect
+        # (e.g. _connected flipped but _client not yet rebuilt). _call_lock
+        # is an RLock, so a caller already holding it (e.g. inside a public
+        # method that wraps a locked region) re-acquires for free.
+        with self._call_lock:
+            connected = self._connected
+            client = self._client
+        if not connected or client is None:
             raise IBClientError(
                 "IBClient not connected — call connect() first"
             )
@@ -885,7 +1013,12 @@ class IBClient:
             raise IBClientError(f"ibind error: {err}")
         return getattr(result, "data", result)
 
-    def _ib_call(self, family: str, fn, *args, _serialize: bool = True, **kwargs):
+    def _ib_call(
+        self, family: str, fn, *args,
+        _serialize: bool = True,
+        _policy: Optional["RetryPolicy"] = None,
+        **kwargs,
+    ):
         """Run an ibind call through retry + per-family circuit breaker + unwrap.
 
         Every API call from public IBClient methods should route through here.
@@ -939,8 +1072,13 @@ class IBClient:
             # verified the endpoint is concurrency-safe.
             return fn(*args, **kwargs)
 
+        # `_policy` (keyword-only, default None): per-call RetryPolicy
+        # override. Used by the order-WRITE path (_submit_order) to run
+        # with max_attempts=1 so a transient failure does NOT blindly
+        # re-POST the order — see _submit_order (audit: place_order retry
+        # double-execution). Defaults to the shared self._retry_policy.
         wrapped = retry_with_backoff(
-            policy=self._retry_policy, breaker=breaker,
+            policy=_policy or self._retry_policy, breaker=breaker,
         )(_invoke)
         return self._unwrap(wrapped())
 
@@ -1031,6 +1169,7 @@ class IBClient:
             conid (int)
         """
         self._require_connected()
+        expiry = _coerce_expiry(expiry)  # accept ISO string over the RPC wire (#4)
         if sec_type is None:
             sec_type = "OPT" if strike is not None else "IND"
 
@@ -1162,18 +1301,30 @@ class IBClient:
                 rows = secdef_data if isinstance(secdef_data, list) else [secdef_data]
 
                 def _matches_expiry(d: dict) -> bool:
-                    """True if d's expiry matches the requested date, OR if
-                    no expiry field is present (back-compat with mocks +
-                    partial responses).
+                    """True only if d's expiry parses AND equals the requested
+                    date. FAIL-CLOSED (audit #20): a row with no parseable
+                    expiry field is REJECTED, not accepted — accepting it
+                    could land on a wrong-dated (e.g. already-expired) conid,
+                    and this filter is the only expiry guard before
+                    place_iron_condor. The permissive "field absent → accept"
+                    behavior is gated behind the test-only
+                    `_allow_missing_expiry` flag (never set in production).
                     """
                     for key in ("maturityDate", "expirationDate", "expiry"):
                         val = d.get(key)
                         if val:
                             return str(val) == want_yyyymmdd
-                    return True  # field absent — preserve legacy behavior
+                    # No expiry field present.
+                    return self._allow_missing_expiry
 
                 def _matches_trading_class(d: dict) -> bool:
-                    tc = d.get("tradingClass", "")
+                    # `d.get(key, "")` returns the default only when the key
+                    # is ABSENT — a present `tradingClass: null` yields None,
+                    # whose .upper() would raise AttributeError (propagating a
+                    # raw error to the caller instead of the typed
+                    # IBClientError this method otherwise raises). Coerce so a
+                    # None value is treated as a non-match.
+                    tc = d.get("tradingClass") or ""
                     return tc == trading_class or trading_class.upper() == tc.upper()
 
                 matches = [
@@ -1267,6 +1418,7 @@ class IBClient:
                 option-resolution failures do NOT raise.
         """
         self._require_connected()
+        expiry = _coerce_expiry(expiry)  # accept ISO string over the RPC wire (#4)
         unique_strikes = sorted({float(s) for s in strikes})
         if not unique_strikes:
             return {}
@@ -1315,20 +1467,31 @@ class IBClient:
                 for d in rows:
                     if not isinstance(d, dict):
                         continue
-                    # Trading-class filter (SPXW vs SPX monthly)
-                    tc = d.get("tradingClass", "")
+                    # Trading-class filter (SPXW vs SPX monthly). Coerce so a
+                    # present `tradingClass: null` (None) is a non-match
+                    # rather than an AttributeError on .upper().
+                    tc = d.get("tradingClass") or ""
                     if not (tc == trading_class
                             or trading_class.upper() == tc.upper()):
                         continue
                     # Exact-expiry filter — a strike can be listed across
-                    # many May expiries (probe 7: strike 6750 had 7).
+                    # many May expiries (probe 7: strike 6750 had 7). FAIL-
+                    # CLOSED (audit #20): a row with no parseable expiry is
+                    # skipped, not accepted — accepting an undated row could
+                    # land on a wrong-dated (e.g. already-expired) conid, and
+                    # this is the only expiry guard before place_iron_condor.
+                    # The permissive "missing expiry → accept" path is gated
+                    # behind the test-only `_allow_missing_expiry` flag.
                     mat = str(
                         d.get("maturityDate")
                         or d.get("expirationDate")
                         or d.get("expiry")
                         or ""
                     )
-                    if mat and mat != want_yyyymmdd:
+                    if mat:
+                        if mat != want_yyyymmdd:
+                            continue
+                    elif not self._allow_missing_expiry:
                         continue
                     right = (d.get("right") or "").strip().upper()
                     if right not in ("C", "P"):
@@ -1386,10 +1549,16 @@ class IBClient:
         is the `/iserver/accounts` call. Idempotent: primed once per
         session, reset on `disconnect()`.
         """
-        if self._iserver_primed:
-            return
-        self._ib_call("session", self._client.receive_brokerage_accounts)
-        self._iserver_primed = True
+        # Audit #12: check-and-set under _call_lock so a disconnect()
+        # racing in between the read and the prime call can't leave
+        # _iserver_primed=True against a torn-down session. _call_lock is
+        # an RLock, so the nested _ib_call acquisition on this thread is
+        # free. The actual /iserver/accounts call is cheap + idempotent.
+        with self._call_lock:
+            if self._iserver_primed:
+                return
+            self._ib_call("session", self._client.receive_brokerage_accounts)
+            self._iserver_primed = True
 
     def _snapshot_with_preflight(self, conids: str, fields: list[str]):
         """Call live_marketdata_snapshot with the required pre-flights.
@@ -1408,9 +1577,15 @@ class IBClient:
         `_updated`) with all price fields absent on the second call, even
         in active market hours. Subsequent calls populate. We poll the
         snapshot endpoint up to `_SNAPSHOT_MAX_WARMUP_POLLS` times after
-        the preflight, sleeping `_SNAPSHOT_POLL_INTERVAL_S` between each,
-        until any non-metadata field appears. Returns whatever the LAST
-        call produced (may still be metadata-only if the conid genuinely
+        the preflight, sleeping `_SNAPSHOT_POLL_INTERVAL_S` between each.
+
+        For a multi-conid batch we wait until EVERY requested conid has a
+        non-metadata field (audit #19) — exiting on the first populated
+        conid would leave the still-cold conids reading all-None with no
+        signal. If the budget is exhausted with only SOME conids warm, that
+        partial warmup is counted in `snapshot_warmup_exhausted_count` and
+        logged with the specific missing conids. Returns whatever the LAST
+        call produced (rows may still be metadata-only if a conid genuinely
         has no entitlement / is stale — caller checks via _parse_quote_row).
 
         ibind's own `live_marketdata_snapshot_by_symbol` also calls the
@@ -1428,17 +1603,54 @@ class IBClient:
             conids=conids, fields=fields,
         )
 
-        # Data call + warmup polling — return on first populated response
+        # Requested conids — `conids` is the comma-separated string the
+        # endpoint expects. Audit #19: for multi-conid batches we must NOT
+        # stop the instant ANY one conid populates (the old `_snapshot_has_data`
+        # exit), or the still-cold conids silently return all-None — and
+        # nothing counts/alerts that partial warmup. Track per-conid
+        # readiness and keep polling until EVERY requested conid is warm or
+        # the budget is exhausted.
+        requested = {c.strip() for c in str(conids).split(",") if c.strip()}
+
+        # Data call + warmup polling — return only when ALL requested conids
+        # have data (or budget exhausted, handled below).
         data = None
         for attempt in range(_SNAPSHOT_MAX_WARMUP_POLLS):
             data = self._ib_call(
                 "market", self._client.live_marketdata_snapshot,
                 conids=conids, fields=fields,
             )
-            if _snapshot_has_data(data):
+            ready = _snapshot_ready_conids(data)
+            if requested:
+                if requested.issubset(ready):
+                    return data
+            elif _snapshot_has_data(data):
+                # No parseable requested set (shouldn't happen) — fall back
+                # to the legacy "any data" exit so we don't loop forever.
                 return data
             if attempt < _SNAPSHOT_MAX_WARMUP_POLLS - 1:
                 time.sleep(_SNAPSHOT_POLL_INTERVAL_S)
+
+        # Budget exhausted. Distinguish full vs partial warmup so the
+        # operator sees that N of M conids never warmed (audit #19): a
+        # partial warmup still degrades stop monitoring / credit estimation
+        # for the cold conids even though some rows are populated.
+        ready_final = _snapshot_ready_conids(data)
+        missing = sorted(requested - ready_final) if requested else []
+        if missing and ready_final:
+            # PARTIAL: some conids warmed, some didn't. Count it the same as
+            # a full exhaustion (it is a data-quality degradation event) and
+            # alert with the specific missing conids.
+            self._snapshot_warmup_exhausted_count += 1
+            logger.warning(
+                "snapshot warmup PARTIAL for conids=%s — %d of %d conid(s) "
+                "never returned price fields within the warmup budget "
+                "(missing=%s). Likely no entitlement / stale conid(s) for "
+                "those; the rest returned data. Cold conids will read as "
+                "all-None.",
+                conids, len(missing), len(requested), missing,
+            )
+            return data if isinstance(data, list) else [data] if data else []
         # P7-audit M17: warmup budget exhausted. A non-empty `data` here
         # is metadata-only (`{conid, _updated}` with no price fields) —
         # truthy but useless to the caller; an empty `data` is "broker
@@ -1452,14 +1664,28 @@ class IBClient:
         # exhaustion + a follow-up alert at 25+ exhaustions/day.
         self._snapshot_warmup_exhausted_count += 1
         if data:
-            logger.warning(
-                "snapshot warmup exhausted for conids=%s — returning "
-                "metadata-only rows (no price fields). "
-                "Likely causes: no real-time entitlement for this conid, "
-                "stale/invalid conid, or IBKR snapshot service degraded. "
-                "Last response: %r",
-                conids, data,
-            )
+            # Audit #41: the raw response is gated behind
+            # debug_log_payloads so the documented "never log full IBKR
+            # responses in production" contract actually holds. Without the
+            # flag we log only the conids + row count (non-sensitive).
+            if self.cfg.debug_log_payloads:
+                logger.warning(
+                    "snapshot warmup exhausted for conids=%s — returning "
+                    "metadata-only rows (no price fields). "
+                    "Likely causes: no real-time entitlement for this conid, "
+                    "stale/invalid conid, or IBKR snapshot service degraded. "
+                    "Last response: %r",
+                    conids, data,
+                )
+            else:
+                logger.warning(
+                    "snapshot warmup exhausted for conids=%s — returning "
+                    "metadata-only rows (no price fields). "
+                    "Likely causes: no real-time entitlement for this conid, "
+                    "stale/invalid conid, or IBKR snapshot service degraded. "
+                    "(set debug_log_payloads to log the raw response)",
+                    conids,
+                )
         else:
             logger.warning(
                 "snapshot warmup exhausted for conids=%s — broker "
@@ -1976,6 +2202,7 @@ class IBClient:
         SaxoClient.get_option_chain() equivalent.
         """
         self._require_connected()
+        expiry = _coerce_expiry(expiry)  # accept ISO string over the RPC wire (#4)
         # Resolve underlying conid first
         underlying_conid = self.qualify_contract(symbol, sec_type="IND")
         month = _ib_month_str(expiry)
@@ -2721,6 +2948,96 @@ class IBClient:
             account_id=self.account_id,
         ) or {}
 
+    def _find_order_by_coid(self, coid: str) -> Optional[dict]:
+        """Return the live_orders envelope whose cOID matches `coid`, or None.
+
+        Used by the order-WRITE failure path to decide whether a transient
+        place_order failure (e.g. a 503/timeout AFTER the order POST already
+        landed) left a working order behind. IBKR surfaces the customer
+        order id under a few key spellings depending on endpoint/version
+        (`cOID`, `coid`, `order_ref`, `orderRef`), so match all of them.
+
+        Returns None on ANY uncertainty — including a failed lookup — so the
+        caller fails CLOSED (does NOT resubmit unless absence is positively
+        confirmed).
+        """
+        if not coid:
+            return None
+        try:
+            orders = self.get_open_orders()
+        except Exception as exc:
+            # Lookup itself failed — we cannot prove absence. Treat as
+            # "unknown", caller must not resubmit.
+            logger.warning(
+                "_find_order_by_coid: live_orders lookup failed (%s) — "
+                "cannot confirm order %s state", exc, coid,
+            )
+            return None
+        for o in orders or []:
+            if not isinstance(o, dict):
+                continue
+            for key in ("cOID", "coid", "order_ref", "orderRef"):
+                if str(o.get(key) or "") == coid:
+                    return o
+        return None
+
+    def _normalize_place_response(self, data) -> dict:
+        """Normalize ibind's place_order response into a single dict.
+
+        ibind returns a list when the order resolves to multiple entries
+        (one per leg for combos, one per child for OCA brackets). We promote
+        the first entry to the top-level dict for caller convenience and
+        stash the remaining entries under "_legs" so nothing is silently
+        dropped — callers that need per-leg fill tracking read order["_legs"].
+
+        P7-audit M15: prefer entries that look like real order responses
+        (carry `order_id` or `id`) over reply-prompt entries (which carry
+        `message`/`messageIds` but not `order_id`).
+        """
+        data = data or {}
+        if isinstance(data, list):
+            if not data:
+                return {}
+            if len(data) == 1:
+                return data[0] if isinstance(data[0], dict) else {"_first": data[0]}
+
+            def _looks_like_order(d):
+                return isinstance(d, dict) and (
+                    d.get("order_id") or d.get("id")
+                )
+            ordered = [d for d in data if _looks_like_order(d)]
+            if ordered:
+                head = ordered[0]
+                rest = [d for d in data if d is not head]
+            else:
+                # Audit #41: the raw order response carries order IDs /
+                # account context — gate the dump behind debug_log_payloads
+                # so the documented "never log full IBKR responses in
+                # production" contract holds. Without the flag, log only the
+                # entry count + keys.
+                if self.cfg.debug_log_payloads:
+                    logger.warning(
+                        "place_order: list response had no entry with "
+                        "order_id/id (possible unresolved reply prompt); "
+                        "promoting first entry. raw=%r", data,
+                    )
+                else:
+                    logger.warning(
+                        "place_order: list response had no entry with "
+                        "order_id/id (possible unresolved reply prompt); "
+                        "promoting first entry (%d entries; first keys=%s; "
+                        "set debug_log_payloads to log the raw response)",
+                        len(data),
+                        sorted(data[0].keys())
+                        if isinstance(data[0], dict) else type(data[0]).__name__,
+                    )
+                head = data[0]
+                rest = list(data[1:])
+            out = dict(head) if isinstance(head, dict) else {"_first": head}
+            out["_legs"] = rest
+            return out
+        return data
+
     def _submit_order(
         self,
         order: OrderRequest,
@@ -2731,59 +3048,79 @@ class IBClient:
         Reply-prompt handling: pass our DEFAULT_ORDER_ANSWERS unless caller
         overrides. ibind walks the reply loop until IBKR's prompt chain is
         cleared or rejects an unknown prompt (in which case it raises).
+
+        Double-execution safety (audit: place_order retry double-execution):
+        ibind's place_order FIRST POSTs the order and THEN runs the reply
+        loop (more POSTs to /iserver/reply/{id}). If the order POST SUCCEEDS
+        but a later reply POST hits a transient 503/timeout, blindly
+        retrying the whole place_order (the old behavior, via the shared
+        retry policy) could create a SECOND working order: the cOID server-
+        side dedup is only demonstrated for an order that is already
+        *registered*, not one still mid-reply. So we run the place call with
+        max_attempts=1 (NO blind re-POST) and, on a *retryable* failure,
+        look up the order by cOID before deciding:
+          • found  → the order is live; return it, do NOT resubmit;
+          • lookup inconclusive → raise AmbiguousOrderError so the caller
+            ABORTS the placement (it must NOT resubmit under a fresh cOID —
+            the production caller uses a per-attempt cOID, so a "retry" would
+            be a genuinely new order and could double-fill). The maybe-live
+            order is left for reconciliation/alerting.
+        Non-retryable errors (auth/validation) propagate immediately — the
+        order did not land, so the caller may safely try the next rung.
         """
         a = answers if answers is not None else DEFAULT_ORDER_ANSWERS
-        # Retry is safe here because _ensure_coid guarantees every order
-        # carries a client_order_id (cOID) — IBKR dedupes server-side on
-        # cOID, so a timed-out place that secretly succeeded won't double
-        # fill on retry. See _ensure_coid docstring.
-        data = self._ib_call(
-            "orders", self._client.place_order,
-            order_request=order,
-            answers=a,
-            account_id=self.account_id,
-        ) or {}
-        # ibind returns a list when the order resolves to multiple entries
-        # (one per leg for combos, one per child for OCA brackets). We
-        # promote the first entry to the top-level dict for caller
-        # convenience and stash the remaining entries under "_legs" so
-        # nothing is silently dropped — callers that need per-leg fill
-        # tracking can read order["_legs"].
-        #
-        # P7-audit M15: prefer entries that look like real order responses
-        # (carry `order_id` or `id`) over reply-prompt entries (which
-        # carry `message` / `messageIds` but not `order_id`). Reply
-        # prompts SHOULD be fully consumed by ibind's reply loop against
-        # the `answers` dict, but if an unknown prompt slips through, we
-        # don't want to promote it to "the order" and have the caller
-        # then read `order_id=None` as a fill failure. If no entry
-        # carries an id, fall back to the legacy "first dict" behavior
-        # and log a warning so the operator notices.
-        if isinstance(data, list):
-            if not data:
-                data = {}
-            elif len(data) == 1:
-                data = data[0]
-            else:
-                def _looks_like_order(d):
-                    return isinstance(d, dict) and (
-                        d.get("order_id") or d.get("id")
-                    )
-                ordered = [d for d in data if _looks_like_order(d)]
-                if ordered:
-                    head = ordered[0]
-                    rest = [d for d in data if d is not head]
-                else:
-                    logger.warning(
-                        "place_order: list response had no entry with "
-                        "order_id/id (possible unresolved reply prompt); "
-                        "promoting first entry. raw=%r", data,
-                    )
-                    head = data[0]
-                    rest = list(data[1:])
-                data = dict(head) if isinstance(head, dict) else {"_first": head}
-                data["_legs"] = rest
-        return data
+        coid = getattr(order, "coid", None)
+        # No-blind-retry policy for the WRITE POST.
+        no_retry = replace(self._retry_policy, max_attempts=1)
+
+        def _place():
+            return self._ib_call(
+                "orders", self._client.place_order,
+                _policy=no_retry,
+                order_request=order,
+                answers=a,
+                account_id=self.account_id,
+            )
+
+        try:
+            data = _place()
+        except CircuitBreakerOpen:
+            # Broker degraded — surface, never resubmit.
+            raise
+        except Exception as exc:
+            # Only the place POST can have side effects we must not repeat.
+            # If the failure is non-retryable (validation/auth), the order
+            # almost certainly never landed — but we STILL fail closed:
+            # only resubmit when we can positively confirm absence via the
+            # cOID lookup.
+            if not self._retry_policy.is_retryable(exc):
+                raise
+            logger.warning(
+                "_submit_order: place_order raised retryable error (%s); "
+                "checking live_orders for coid=%s before any resubmit "
+                "(double-execution guard)", exc, coid,
+            )
+            existing = self._find_order_by_coid(coid)
+            if existing is not None:
+                logger.info(
+                    "_submit_order: order coid=%s already present after "
+                    "transient place failure — returning existing, NOT "
+                    "resubmitting", coid,
+                )
+                return self._normalize_place_response(existing)
+            # Could not confirm the order is present. _find_order_by_coid
+            # returns None both for "confirmed absent" and "lookup failed",
+            # so we cannot prove the POST did not land. Fail CLOSED: raise a
+            # DISTINCT AmbiguousOrderError so the caller ABORTS rather than
+            # re-placing under a fresh per-attempt cOID (which would be a new
+            # order → double-fill). The maybe-live order is surfaced to
+            # reconciliation/alerting instead.
+            raise AmbiguousOrderError(
+                f"place_order coid={coid} failed transiently and the order's "
+                f"live state is unconfirmed; aborting to avoid a double-fill"
+            ) from exc
+
+        return self._normalize_place_response(data)
 
     # ─── Streaming (Phase A.5 integration) ────────────────────────────────
 

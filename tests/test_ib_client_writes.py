@@ -78,6 +78,12 @@ def connected_client(paper_creds):
     with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr):
         client = IBClient(IBConfig(credentials=paper_creds))
         client.connect()
+    # Audit #20: qualify_* now FAIL CLOSED on a secdef row with no parseable
+    # expiry. These order-construction tests use bare {conid,tradingClass} mocks
+    # (they exercise conidex/pricing/coid, not expiry resolution), so enable the
+    # test-only escape hatch. Expiry-resolution fail-closed is covered by the
+    # dedicated tests in test_ib_client_reads.py against a flag-less client.
+    client._allow_missing_expiry = True
     return client, mock_ibkr
 
 

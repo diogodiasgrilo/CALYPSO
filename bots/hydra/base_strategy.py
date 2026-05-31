@@ -394,8 +394,10 @@ class IronCondorEntry:
     put_side_merged: bool = False   # Put positions merged with another entry
 
     # Commission tracking (display only - does not affect P&L calculations)
-    # Open commission: $2.50 per leg × 4 legs = $10 per IC (charged on entry)
-    # Close commission: $2.50 per leg × 2 legs per side (only charged when closed, not expired)
+    # Open commission: commission_per_leg × 4 legs per IC (charged on entry)
+    # Close commission: commission_per_leg × 2 legs per side (only charged when closed, not expired)
+    # NOTE: commission_per_leg is the live configured rate ($1.15 since the
+    # 2026-05-29 IBKR cutover; the old $2.50/$5.00 Saxo-era figures are stale).
     open_commission: float = 0.0   # Commission paid to open this IC
     close_commission: float = 0.0  # Commission paid to close legs (accumulated on stops)
 
@@ -647,6 +649,13 @@ class MarketData:
     vix: float = 0.0
     last_spx_update: Optional[datetime] = None
     last_vix_update: Optional[datetime] = None
+    # #17/#18: last broker freshness flag seen for each feed (IBKR field 6509:
+    # 'R'=real-time, 'D'=delayed, 'Z'=stale). None when the broker didn't
+    # surface it. Used so staleness is derived from the QUOTE, not the local
+    # fetch time — a frozen-but-responding feed (repeated 'Z') no longer reads
+    # as "fresh" just because the bot keeps polling.
+    last_spx_availability: Optional[str] = None
+    last_vix_availability: Optional[str] = None
 
     # Intraday OHLC tracking
     spx_open: float = 0.0
@@ -678,15 +687,38 @@ class MarketData:
         now = get_us_market_time()
         return (now.hour, now.minute) >= (9, 30)
 
-    def update_spx(self, price: float):
+    def update_spx(self, price: float, availability: Optional[str] = None):
         """Update SPX price with timestamp and track open/high/low.
 
         SPX live price (and flash-crash velocity tracking) is updated for
         every valid tick, including pre-market. But intraday-OHLC capture
         is gated to regular session (>= 9:30 ET) — see _is_regular_session_or_later
         for the rationale.
+
+        #17/#18: ``availability`` is the broker's freshness flag (IBKR field
+        6509: 'R'=real-time, 'D'=delayed, 'Z'=stale). When it is 'Z' the broker
+        is serving a STALE tick — we record the flag but DO NOT advance
+        ``last_spx_update``, so ``is_spx_stale`` / DATA-001 trips on a frozen
+        upstream feed instead of being reset by every local poll. None (the
+        default) preserves the prior behavior for callers/tests that don't plumb
+        availability.
         """
         if price > 0:
+            avail = availability.upper() if isinstance(availability, str) else None
+            self.last_spx_availability = avail
+            if avail == "Z":
+                # Stale upstream tick: keep the last price for display but do
+                # NOT refresh the freshness clock — fail closed.
+                logger.warning(
+                    "DATA-001: SPX quote flagged STALE by broker (availability="
+                    "'Z'); not refreshing freshness timestamp"
+                )
+                return
+            if avail == "D":
+                logger.warning(
+                    "DATA: SPX quote is DELAYED (availability='D') — proceeding "
+                    "but data may lag real-time"
+                )
             self.spx_price = price
             self.last_spx_update = get_us_market_time()
 
@@ -709,14 +741,30 @@ class MarketData:
             if price < self.spx_low:
                 self.spx_low = price
 
-    def update_vix(self, vix: float):
+    def update_vix(self, vix: float, availability: Optional[str] = None):
         """Update VIX with timestamp and track open/high/low/average.
 
         Same gating as update_spx: pre-market VIX (if available) updates
         the live `vix` field but does NOT contribute to vix_open/high/low
         or the samples list.
+
+        #17/#18: like update_spx, a broker 'Z' (stale) availability flag does
+        NOT advance ``last_vix_update`` so a frozen VIX feed is detectable;
+        'D' (delayed) logs a warning. None preserves prior behavior.
         """
         if vix > 0:
+            avail = availability.upper() if isinstance(availability, str) else None
+            self.last_vix_availability = avail
+            if avail == "Z":
+                logger.warning(
+                    "DATA-001: VIX quote flagged STALE by broker (availability="
+                    "'Z'); not refreshing freshness timestamp"
+                )
+                return
+            if avail == "D":
+                logger.warning(
+                    "DATA: VIX quote is DELAYED (availability='D')"
+                )
             self.vix = vix
             self.last_vix_update = get_us_market_time()
 
@@ -736,7 +784,15 @@ class MarketData:
             self.vix_samples.append(vix)
 
     def is_spx_stale(self, max_age: int = MAX_DATA_STALENESS_SECONDS) -> bool:
-        """Check if SPX data is stale."""
+        """Check if SPX data is stale.
+
+        #17/#18: freshness is now derived from the broker QUOTE, not merely the
+        local fetch cadence. update_spx refuses to advance last_spx_update on a
+        broker 'Z' (stale) availability flag, so a frozen-but-responding upstream
+        feed (repeated 'Z') ages out and trips this check — the local poll no
+        longer resets the clock on data the broker itself flagged as not
+        real-time.
+        """
         if not self.last_spx_update:
             return True
         age = (get_us_market_time() - self.last_spx_update).total_seconds()
@@ -2410,6 +2466,21 @@ class MEICStrategy:
                     coid=attempt_coid,
                 )
 
+            # ORDER double-execution guard: a placement whose live state could
+            # NOT be confirmed (retryable failure during/after the POST + an
+            # inconclusive cOID lookup) must ABORT the whole leg — NOT advance
+            # to the next progressive rung, which uses a NEW cOID and would be
+            # a genuinely new order (double-fill). The maybe-live order is left
+            # for reconciliation; a CRITICAL alert already fired in
+            # _place_leg_order.
+            if result and result.get("ambiguous"):
+                logger.critical(
+                    f"  ORDER-DBL: aborting {leg_description} after an "
+                    f"unconfirmed placement (coid={attempt_coid}) — will NOT "
+                    f"retry under a new cOID; reconcile the possibly-open order."
+                )
+                return None
+
             if result and result.get("filled"):
                 fill_price = result.get("fill_price") or expected_price
 
@@ -2441,17 +2512,61 @@ class MEICStrategy:
             # so the IC builder unwinds cleanly (this leg ends flat).
             partial_qty = (result or {}).get("filled_quantity") or 0
             if result and 0 < partial_qty < self.contracts_per_entry:
+                order_id = result.get("order_id")
                 logger.critical(
                     f"  ORDER-010: PARTIAL FILL {partial_qty}/"
                     f"{self.contracts_per_entry} on {leg_description} "
-                    f"(order {result.get('order_id')}) — cancelling remainder "
-                    f"+ flattening the {partial_qty} filled contract(s)"
+                    f"(order {order_id}) — cancelling remainder + flattening "
+                    f"the actually-filled contract(s)"
                 )
-                if result.get("order_id"):
-                    self._cancel_order(result["order_id"])
+                if order_id:
+                    self._cancel_order(order_id)
+
+                # ORDER-010 (race fix): `partial_qty` is a pre-cancel snapshot
+                # from the last poll while the order was still WORKING. The
+                # remainder can fill MORE contracts between that snapshot and the
+                # cancel taking effect at IBKR (cancel is async). Flattening the
+                # stale snapshot would leave the extra fills as an untracked
+                # naked 0DTE short — the exact outcome this block must prevent.
+                # Re-fetch the order's TERMINAL cumulative fill after the cancel
+                # and flatten THAT actual count. If the post-cancel status can't
+                # be read, fall back to the snapshot — strictly no worse than the
+                # prior behavior, and flattening the known-filled portion is safer
+                # than leaving it (a residual from a late fill is then caught by
+                # the post-flatten orphan check + hourly POS-003 reconciliation).
+                flatten_qty = partial_qty
+                if order_id:
+                    status = self._get_order_status(order_id)
+                    final_qty = self._extract_filled_quantity(status)
+                    if final_qty is None:
+                        logger.warning(
+                            "  ORDER-010: could not read post-cancel fill for "
+                            f"order {order_id} on {leg_description} — falling back "
+                            f"to pre-cancel snapshot {partial_qty}; a late fill "
+                            f"during cancel may leave a residual for POS-003"
+                        )
+                    elif final_qty != partial_qty:
+                        logger.warning(
+                            f"  ORDER-010: post-cancel fill {final_qty} differs "
+                            f"from pre-cancel snapshot {partial_qty} on "
+                            f"{leg_description} (remainder filled during cancel) "
+                            f"— flattening the actual {final_qty}"
+                        )
+                        flatten_qty = final_qty
+                    else:
+                        flatten_qty = final_qty
+
+                if flatten_qty <= 0:
+                    # Nothing actually filled after reconciliation — leg is flat.
+                    logger.info(
+                        f"  ORDER-010: {leg_description} ended flat after "
+                        f"cancel (0 contracts filled) — nothing to flatten"
+                    )
+                    return None
+
                 close_side = "SELL" if side == "BUY" else "BUY"
                 flat = self._place_leg_order(
-                    instrument_id=conid, side=close_side, quantity=partial_qty,
+                    instrument_id=conid, side=close_side, quantity=flatten_qty,
                     order_type="MKT",
                     coid=f"{external_ref}_{placement_nonce}flat{attempt}",
                 )
@@ -2461,7 +2576,7 @@ class MEICStrategy:
                         f"{leg_description} — MANUAL INTERVENTION REQUIRED"
                     )
                     self._add_orphaned_order(
-                        result.get("order_id") or f"PARTIAL_{conid}"
+                        order_id or f"PARTIAL_{conid}"
                     )
                 return None
 
@@ -2488,6 +2603,30 @@ class MEICStrategy:
             f"  ✗ {leg_description} failed all "
             f"{len(PROGRESSIVE_RETRY_SEQUENCE)} attempts (IBKR)"
         )
+        return None
+
+    @staticmethod
+    def _extract_filled_quantity(status: dict) -> Optional[int]:
+        """ORDER-010: best-effort cumulative filled quantity from an order
+        status dict.
+
+        ``_get_order_status`` returns IBKR's raw order-status dict, whose
+        filled-quantity field name varies by endpoint (snake_case vs
+        camelCase, ``cum_fill`` on the per-order status endpoint). Mirror the
+        defensive lookup in :func:`shared.ib_client._build_fill_result_dict`.
+
+        Returns the int filled quantity, or ``None`` when no usable quantity
+        field is present (empty/failed status) so the caller can fail closed
+        (orphan + manual review) instead of trusting a stale snapshot.
+        """
+        if not status:
+            return None
+        for key in ("filled_quantity", "filledQuantity", "cum_fill", "filled"):
+            if key in status and status[key] is not None and status[key] != "":
+                try:
+                    return int(float(status[key]))
+                except (TypeError, ValueError):
+                    continue
         return None
 
     def _add_orphaned_order(self, order_id: str):
@@ -2947,6 +3086,19 @@ class MEICStrategy:
                     logger.error(f"Registry error unregistering {pos_id}: {reg_e}")
                 self._log_safety_event("NAKED_SHORT_CLOSED", f"{leg_name} position {pos_id} closed successfully", "Closed")
             else:
+                # Audit fix: a non-full / timed-out market BUY-to-close leaves the
+                # order WORKING in IBKR's book (place_and_wait_for_fill documents
+                # this) — it could fill late and double-close. Cancel the working
+                # remainder BEFORE escalating so we don't leave an unmanaged order
+                # on the highest-risk naked-short state (mirrors the cancel in
+                # _close_position_with_retry_ib).
+                leftover_id = _res.get("order_id") if _res else None
+                if leftover_id:
+                    logger.warning(
+                        f"  Cancelling unfilled naked-short close order "
+                        f"{leftover_id} before escalating"
+                    )
+                    self._cancel_order(leftover_id)
                 logger.critical(f"FAILED to close naked short {pos_id}!")
                 self._log_safety_event("NAKED_SHORT_CLOSE_FAILED", f"{leg_name} position {pos_id} - close returned false", "Failed")
                 self._trigger_critical_intervention(f"Cannot close naked short {pos_id}")
@@ -3007,6 +3159,13 @@ class MEICStrategy:
                             logger.error(f"Registry error unregistering {pos_id}: {reg_e}")
                         logger.info(f"Unwound {leg_name}: {pos_id} via order {result.get('OrderId')}")
                     else:
+                        # Audit fix: a non-full / timed-out market close leaves the
+                        # order WORKING and able to fill late (double-close).
+                        # Cancel the leftover before giving up so we don't leave an
+                        # unmanaged order on a partially-filled IC unwind.
+                        leftover_id = _res.get("order_id") if _res else None
+                        if leftover_id:
+                            self._cancel_order(leftover_id)
                         logger.error(f"Failed to unwind {leg_name}: no result from close order")
                 except Exception as e:
                     logger.error(f"Failed to unwind {leg_name}: {e}")
@@ -3032,6 +3191,15 @@ class MEICStrategy:
 
         stop_time = get_us_market_time().isoformat()
 
+        # CRITICAL #7: capture whether the other side was already stopped
+        # BEFORE we mark this one, so a fail-closed revert (short close failed)
+        # can undo BOTH this side's stopped flag and the double-stop counter
+        # without corrupting the case where the other side was genuinely
+        # stopped earlier.
+        other_side_already_stopped = (
+            entry.put_side_stopped if side == "call" else entry.call_side_stopped
+        )
+
         if side == "call":
             entry.call_side_stopped = True
             entry.call_stop_time = stop_time
@@ -3042,6 +3210,7 @@ class MEICStrategy:
                 (entry.long_call_position_id, "long_call", entry.long_call_uic)
             ]
             stop_level = entry.call_side_stop
+            short_uic_for_side = entry.short_call_uic
         else:
             entry.put_side_stopped = True
             entry.put_stop_time = stop_time
@@ -3052,10 +3221,13 @@ class MEICStrategy:
                 (entry.long_put_position_id, "long_put", entry.long_put_uic)
             ]
             stop_level = entry.put_side_stop
+            short_uic_for_side = entry.short_put_uic
 
         # Check for double stop
+        double_stop_counted = False
         if entry.call_side_stopped and entry.put_side_stopped:
             self.daily_state.double_stops += 1
+            double_stop_counted = True
             logger.warning(f"DOUBLE STOP on Entry #{entry.entry_number}")
 
         # FIX #42 (2026-02-05): Track actual fill prices for accurate P&L calculation
@@ -3065,7 +3237,21 @@ class MEICStrategy:
         fill_prices_captured = True  # Track if we got actual prices
         deferred_legs = []  # FIX #75: Moved before dry_run check for async access
 
+        # CRITICAL #7: track per-leg close outcomes so we only clear the
+        # short leg's tracking (uic / position id) and book the loss when the
+        # SHORT close actually succeeded. A breached 0DTE short whose buy-back
+        # fails MUST stay tracked + retryable (fail closed) — never null its
+        # uic, never mark it stopped-and-done, never book a theoretical loss as
+        # if it were flat. Defaults below cover the dry-run path (no real
+        # short leg exists) and the no-short-leg case (treated as "succeeded"
+        # so the long leg can still clear normally).
+        short_leg_present = bool(short_uic_for_side)
+        short_close_succeeded = not short_leg_present  # vacuously true if no short
+
         if self.dry_run:
+            # Dry run never places a real close — treat the short as closed so
+            # the existing simulate-and-clear behavior is unchanged.
+            short_close_succeeded = True
             logger.info(f"[DRY RUN] Would close {side} side of Entry #{entry.entry_number}")
             # Path-B realism: estimate close cost from current real bid/ask.
             # Close-both semantics: BUY back short at ask, SELL long at bid.
@@ -3129,6 +3315,11 @@ class MEICStrategy:
                     )
                     if success:
                         legs_actually_closed += 1
+                    # CRITICAL #7: record the short-leg outcome specifically.
+                    # The short is the naked-risk leg; its close MUST succeed
+                    # before we forget it.
+                    if leg_name.startswith("short"):
+                        short_close_succeeded = bool(success)
                     if fill_price is not None:
                         # Short leg: we BUY to close (cost us money)
                         # Long leg: we SELL to close (gives us money back)
@@ -3153,6 +3344,73 @@ class MEICStrategy:
             # Fall through to theoretical P&L path below, then spawn background
             # thread to correct P&L with actual fill prices (~10s later).
 
+        # CRITICAL #7: FAIL CLOSED on a breached short whose buy-back failed.
+        # _close_position_with_retry returns success=False after exhausting
+        # EMERGENCY_CLOSE_MAX_ATTEMPTS market-order attempts (broker outage,
+        # repeated rejects, halt). If THIS side's short leg is still open we
+        # must NOT (a) null its uic — the only handle to re-find/re-close it,
+        # (b) leave the side marked stopped — that suppresses re-monitoring in
+        # _check_stop_losses, or (c) book a theoretical net_loss as if flat.
+        # Instead: keep the short tracked, re-arm the side so the next
+        # _check_stop_losses tick retries the close, escalate, and return
+        # WITHOUT the clear/book/commission/close-alert below. Only the long
+        # leg (no naked risk; expires worthless) is cleared here.
+        if not short_close_succeeded:
+            # Mirrors the MKT-025 sibling (strategy.py CRITICAL C1): on a failed
+            # short close we leave the side ACTIVE so _check_stop_losses
+            # re-confirms the breach and re-attempts the close on later ticks.
+            # We do NOT call _trigger_critical_intervention here — that halts the
+            # bot (run_strategy_check short-circuits on _critical_intervention_
+            # required) and would DEFEAT the retry. The retry path
+            # (_close_position_with_retry_ib) has already fired its CRITICAL
+            # EMERGENCY/CIRCUIT_BREAKER alert + logged EMERGENCY_CLOSE_FAILED, so
+            # the operator is notified without a hard halt.
+            logger.critical(
+                f"CRITICAL #7: short {side} leg of Entry #{entry.entry_number} "
+                f"FAILED to close after full retry budget (conid "
+                f"{short_uic_for_side}) — leaving side ACTIVE (uic intact) for "
+                f"retry on next tick. NOT marking stopped, NOT booking loss. "
+                f"Live unhedged short remains open!"
+            )
+            # Re-arm the side (revert the up-front mark) so _check_stop_losses
+            # re-evaluates it, and revert the counters we incremented up front so
+            # a multi-tick retry doesn't inflate them on every pass.
+            if side == "call":
+                entry.call_side_stopped = False
+                entry.call_stop_time = ""
+                self.daily_state.call_stops_triggered -= 1
+                # Long call carries no naked risk — clear its tracking (it
+                # expires worthless / was already closed or skipped above).
+                entry.long_call_position_id = None
+                entry.long_call_uic = None
+            else:
+                entry.put_side_stopped = False
+                entry.put_stop_time = ""
+                self.daily_state.put_stops_triggered -= 1
+                entry.long_put_position_id = None
+                entry.long_put_uic = None
+            if double_stop_counted:
+                self.daily_state.double_stops -= 1
+            self._log_safety_event(
+                "STOP_CLOSE_FAILED_SHORT_OPEN",
+                f"Entry #{entry.entry_number} {side} short (conid "
+                f"{short_uic_for_side}) still open after retries — side kept "
+                f"active for retry. stop_level=${stop_level:.2f}",
+                "Retry Pending",
+            )
+            # Return to monitoring so the next tick re-runs the stop check
+            # (only if the OTHER side isn't itself mid-stop).
+            if not other_side_already_stopped:
+                self.state = MEICState.MONITORING
+            self._save_state_to_disk()
+            # Flush the alerts already queued by the retry path.
+            time.sleep(0.1)
+            self._flush_batched_alerts()
+            return (
+                f"Stop loss FAILED to close Entry #{entry.entry_number} {side} "
+                f"short — side kept active, will retry next tick"
+            )
+
         # Fix #86: Clear position IDs and UICs for the stopped side immediately
         # after closing. Without this, all_position_ids still returns the closed
         # positions' IDs, and the hourly POS-003 reconciliation sees them as
@@ -3161,6 +3419,8 @@ class MEICStrategy:
         # _close_position_with_retry, but the entry object still held stale IDs.
         # UICs are also cleared to avoid unnecessary price fetches in
         # _batch_update_entry_prices (Fix #29 pattern).
+        # CRITICAL #7: only reached when the short close SUCCEEDED (or there was
+        # no short leg / dry run), so clearing the short's uic here is safe.
         if side == "call":
             entry.short_call_position_id = None
             entry.long_call_position_id = None
@@ -3357,6 +3617,29 @@ class MEICStrategy:
         # short leg → BUY to close; long leg → SELL to close
         side = "BUY" if leg_name.startswith("short") else "SELL"
 
+        # #14/#44/#46: track partial closes. A market close can partial-fill on
+        # an illiquid SPXW leg (only possible when close_contracts >= 2). We must
+        # treat that as PARTIALLY done: cancel the working remainder, reduce the
+        # quantity we re-place by what already filled (NEVER re-place the full
+        # size — that over-closes, potentially eating a co-located entry's short
+        # on a merged conid book), and fold the partial's fill price into the
+        # returned close cost so P&L stays accurate.
+        qty_remaining = int(close_contracts)
+        filled_price_qty = 0.0   # Σ fill_price_i × filled_qty_i (priced legs only)
+        filled_qty_priced = 0    # Σ filled_qty_i for legs that carried a price
+        any_partial = False
+        last_order_id = None
+
+        def _blended_fill_price():
+            # Volume-weighted avg across all partials that carried a price; the
+            # caller multiplies this by the FULL close_contracts, and since we
+            # only return success once qty_remaining == 0 (everything closed),
+            # vwap × close_contracts reconstructs the true total cost. None when
+            # no partial carried a usable price (caller falls back to theoretical).
+            if filled_qty_priced > 0:
+                return filled_price_qty / filled_qty_priced
+            return None
+
         for attempt in range(EMERGENCY_CLOSE_MAX_ATTEMPTS):
             attempt_num = attempt + 1
             try:
@@ -3366,24 +3649,78 @@ class MEICStrategy:
                         f"EMERGENCY-001: {leg_name} (conid {uic}) already "
                         f"closed — skipping retry"
                     )
-                    return True, None, None
+                    # Only report a blended price if we actually priced the full
+                    # size via partials; otherwise some contracts were closed
+                    # without an observed price (e.g. settled/merged) — return
+                    # None so the caller uses theoretical/deferred P&L rather
+                    # than scaling a partial VWAP up to the full quantity.
+                    out_price = (
+                        _blended_fill_price()
+                        if filled_qty_priced >= close_contracts else None
+                    )
+                    return True, out_price, last_order_id
 
                 logger.info(
                     f"EMERGENCY-001: Closing {leg_name} via MARKET order "
-                    f"(conid={uic}, {side}, amount={close_contracts})"
+                    f"(conid={uic}, {side}, amount={qty_remaining})"
                 )
                 res = self._close_leg_order(
-                    instrument_id=uic, side=side, quantity=close_contracts,
+                    instrument_id=uic, side=side, quantity=qty_remaining,
                 )
+                last_order_id = res.get("order_id") or last_order_id
                 if res.get("filled"):
                     fill_price = res.get("fill_price")
+                    # Fold this final fill into the blended price so a prior
+                    # partial isn't dropped from the accounted close cost.
+                    if fill_price is not None:
+                        filled_price_qty += fill_price * qty_remaining
+                        filled_qty_priced += qty_remaining
+                    if any_partial:
+                        # Only return a blended price if EVERY closed contract
+                        # carried a price (filled_qty_priced == close_contracts);
+                        # otherwise the caller would scale a partial VWAP up to
+                        # the full size and mis-state cost — return None so it
+                        # falls back to theoretical/deferred P&L.
+                        out_price = (
+                            _blended_fill_price()
+                            if filled_qty_priced >= close_contracts else None
+                        )
+                    else:
+                        out_price = fill_price
                     logger.info(
                         f"EMERGENCY-001: Verified {leg_name} closed on "
                         f"attempt {attempt_num}, "
-                        + (f"fill_price=${fill_price:.2f}" if fill_price
+                        + (f"fill_price=${out_price:.2f}" if out_price is not None
                            else "fill_price=unknown")
                     )
-                    return True, fill_price, res.get("order_id")
+                    return True, out_price, res.get("order_id")
+
+                # #14/#44/#46: partial fill — SOME contracts closed but not all.
+                # filled_quantity is the count from THIS order (each retry is a
+                # fresh order). Credit them toward the close, cancel the working
+                # remainder, shrink qty_remaining, and re-place ONLY the residual.
+                partial_qty = int(res.get("filled_quantity") or 0)
+                if 0 < partial_qty < qty_remaining:
+                    any_partial = True
+                    fill_price = res.get("fill_price")
+                    if fill_price is not None:
+                        filled_price_qty += fill_price * partial_qty
+                        filled_qty_priced += partial_qty
+                    qty_remaining -= partial_qty
+                    logger.warning(
+                        f"EMERGENCY-001: close {leg_name} attempt {attempt_num} "
+                        f"PARTIAL fill {partial_qty} contract(s) "
+                        f"(fill_price="
+                        + (f"${fill_price:.2f}" if fill_price is not None
+                           else "unknown")
+                        + f"); {qty_remaining} remaining — cancelling working "
+                        f"remainder + retrying residual only (no over-close)."
+                    )
+                    if res.get("order_id"):
+                        self._cancel_order(res["order_id"])
+                    if attempt < EMERGENCY_CLOSE_MAX_ATTEMPTS - 1:
+                        time.sleep(EMERGENCY_CLOSE_RETRY_DELAY_SECONDS)
+                    continue
 
                 logger.warning(
                     f"EMERGENCY-001: close {leg_name} attempt {attempt_num} "
@@ -3436,9 +3773,18 @@ class MEICStrategy:
             if attempt < EMERGENCY_CLOSE_MAX_ATTEMPTS - 1:
                 time.sleep(EMERGENCY_CLOSE_RETRY_DELAY_SECONDS)
 
+        # #14/#44/#46: surface any partial progress so a manual close targets the
+        # right residual size. Still fail closed — qty_remaining > 0 means the leg
+        # is NOT fully closed, so we return success=False (caller keeps it tracked
+        # + retries) and do NOT book the partial as a realized close.
+        partial_note = (
+            f" ({close_contracts - qty_remaining}/{close_contracts} contract(s) "
+            f"partially closed, {qty_remaining} still open)"
+            if qty_remaining != close_contracts else ""
+        )
         error_msg = (
-            f"EMERGENCY-001 CRITICAL: FAILED to close {leg_name} (conid "
-            f"{uic}) after {EMERGENCY_CLOSE_MAX_ATTEMPTS} attempts!"
+            f"EMERGENCY-001 CRITICAL: FAILED to fully close {leg_name} (conid "
+            f"{uic}) after {EMERGENCY_CLOSE_MAX_ATTEMPTS} attempts!{partial_note}"
         )
         logger.critical(error_msg)
         self.alert_service.send_alert(
@@ -3691,6 +4037,21 @@ class MEICStrategy:
     # MARKET DATA
     # =========================================================================
 
+    @staticmethod
+    def _split_index_read(read_result):
+        """#17/#18: normalize the return of `_read_index_price`.
+
+        Historically `_read_index_price` returns a bare float (or None). The
+        staleness fix wants the broker freshness flag (IBKR field 6509:
+        'R'/'D'/'Z') alongside the price. To remain compatible whether or not
+        the strategy-layer counterpart has been updated, accept BOTH shapes:
+        a float/None, or a ``(price, availability)`` tuple. Returns
+        ``(price, availability)`` with availability None when not supplied.
+        """
+        if isinstance(read_result, (tuple, list)) and len(read_result) == 2:
+            return read_result[0], read_result[1]
+        return read_result, None
+
     def _update_market_data(self):
         """Update SPX and VIX spot prices from the active broker.
 
@@ -3698,16 +4059,28 @@ class MEICStrategy:
         helper. This sets `self.current_price` (SPX spot, used in every
         strike calc) and `self.current_vix` — it had no IBKR path
         before F7.
-        """
-        price = self._read_index_price("SPX")
-        if price:
-            self.market_data.update_spx(price)
-            self.current_price = price
 
-        vix = self._read_index_price("VIX")
+        #17/#18: the broker's per-quote freshness flag (availability
+        'R'/'D'/'Z') is plumbed into update_spx/update_vix so a STALE ('Z')
+        tick does not refresh the freshness clock (DATA-001 can then trip on a
+        frozen feed). See _split_index_read for the compatibility shim.
+        """
+        price, spx_avail = self._split_index_read(self._read_index_price("SPX"))
+        if price:
+            self.market_data.update_spx(price, availability=spx_avail)
+            # #17/#18: only treat the SPX spot as current when the broker did
+            # NOT flag it stale — otherwise keep the previous current_price so
+            # strike calc / price-based stops don't act on a frozen quote.
+            avail = spx_avail.upper() if isinstance(spx_avail, str) else None
+            if avail != "Z":
+                self.current_price = price
+
+        vix, vix_avail = self._split_index_read(self._read_index_price("VIX"))
         if vix:
-            self.market_data.update_vix(vix)
-            self.current_vix = vix
+            self.market_data.update_vix(vix, availability=vix_avail)
+            avail = vix_avail.upper() if isinstance(vix_avail, str) else None
+            if avail != "Z":
+                self.current_vix = vix
 
     # P7-audit L4: removed dead Saxo-shaped `_extract_price` and
     # `_check_quote_freshness`. They read `quote["Quote"]["Bid"]` /
@@ -3715,9 +4088,16 @@ class MEICStrategy:
     # IBKR's `IBClient.get_quote()` doesn't populate. Zero production
     # callers remain (verified via repo-wide grep on 2026-05-22). The
     # IBKR equivalent for "extract a usable price" is the explicit
-    # `is not None` ladder in `strategy._read_index_price` / `_read_option_quote`;
-    # freshness on IBKR is handled by the broker (real-time vs delayed
-    # via the `availability` field on each quote — `'R'`/`'D'`/`'Z'`).
+    # `is not None` ladder in `strategy._read_index_price` / `_read_option_quote`.
+    #
+    # #17/#18 staleness: IBKR's per-quote `availability` flag (field 6509:
+    # 'R'=real-time / 'D'=delayed / 'Z'=stale) is now ACTUALLY consumed —
+    # _update_market_data plumbs it into MarketData.update_spx/update_vix, which
+    # refuse to advance the freshness timestamp on a 'Z' tick (so DATA-001 trips
+    # on a frozen-but-responding feed) and log on 'D'. This requires the
+    # strategy-layer `_read_index_price` to surface availability alongside the
+    # price (return `(price, availability)`); until/unless it does, the shim in
+    # _split_index_read leaves availability None and behavior is unchanged.
 
     # =========================================================================
     # CIRCUIT BREAKER
@@ -4216,13 +4596,41 @@ class MEICStrategy:
     # =========================================================================
 
     def _load_cumulative_metrics(self) -> Dict:
-        """Load cumulative metrics from disk."""
+        """Load cumulative metrics from disk.
+
+        Durability fix: a PRESENT-but-corrupt metrics file means the multi-day
+        running P&L / win-rate / credit history is about to be reset to zeros.
+        That is data loss, not a normal fresh start, so it is logged at ERROR
+        and alerted (recoverable from the daily GCS backup — see RB-7) rather
+        than swallowed with a warning. A genuinely ABSENT file (first run) is
+        the expected fresh-start path and stays quiet.
+        """
+        file_exists = os.path.exists(self.metrics_file)
         try:
-            if os.path.exists(self.metrics_file):
+            if file_exists:
                 with open(self.metrics_file, 'r') as f:
                     return json.load(f)
         except Exception as e:
-            logger.warning(f"Could not load cumulative metrics: {e}")
+            # File exists but could not be parsed → corruption / truncation.
+            logger.error(
+                f"CORRUPT cumulative metrics file {self.metrics_file}: {e}. "
+                f"Resetting multi-day history to ZERO — restore from the daily "
+                f"GCS backup (RB-7) to recover prior P&L/win-rate history."
+            )
+            try:
+                self.alert_service.send_alert(
+                    alert_type=AlertType.CIRCUIT_BREAKER,
+                    title="Cumulative Metrics Reset (corruption)",
+                    message=(
+                        f"{self.BOT_NAME}: {self.metrics_file} was unreadable "
+                        f"({e}); multi-day P&L history reset to 0. Restore from "
+                        f"GCS backup if accurate cumulative totals are needed."
+                    ),
+                    priority=AlertPriority.HIGH,
+                )
+            except Exception:
+                # Alerting must never block startup.
+                pass
 
         return {
             "cumulative_pnl": 0.0,
@@ -4252,10 +4660,36 @@ class MEICStrategy:
             # Previous code used get_us_market_time().isoformat() which caused midnight
             # settlement for day N to store day N+1's date, blocking day N+1's summary
             self.cumulative_metrics["last_updated"] = trading_date or get_us_market_time().strftime("%Y-%m-%d")
-            with open(self.metrics_file, 'w') as f:
+            # Durability fix: write atomically (temp + fsync + os.replace) so a
+            # crash / power loss / disk-full mid-write can never leave a
+            # truncated/empty hydra_metrics.json that _load_cumulative_metrics
+            # would silently reset to zeros, destroying multi-day P&L history.
+            # Mirrors HYDRA's _atomic_write_json contract for hydra_state.json.
+            tmp_file = self.metrics_file + ".tmp"
+            with open(tmp_file, 'w') as f:
                 json.dump(self.cumulative_metrics, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_file, self.metrics_file)
+            # fsync the parent dir so the rename itself is durable.
+            try:
+                dir_fd = os.open(os.path.dirname(self.metrics_file), os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                # Directory fsync is best-effort (not all filesystems support
+                # it); the temp+rename already gives whole-or-old-file atomicity.
+                pass
         except Exception as e:
             logger.error(f"Failed to save cumulative metrics: {e}")
+            # Clean up a half-written temp file so it can't be mistaken for state.
+            try:
+                if os.path.exists(self.metrics_file + ".tmp"):
+                    os.remove(self.metrics_file + ".tmp")
+            except OSError:
+                pass
 
     # =========================================================================
     # RISK & RETURN METRICS
@@ -4949,20 +5383,23 @@ class MEICStrategy:
         """
         ORDER-004: Check if we have sufficient buying power for a new IC entry.
 
-        Queries Saxo /port/v1/balances endpoint and verifies that available
-        margin exceeds MIN_BUYING_POWER_PER_IC before allowing a new entry.
+        Verifies that available margin exceeds MIN_BUYING_POWER_PER_IC before
+        allowing a new entry.
 
-        Fix #85 (2026-03-16): Previous field names were wrong — code checked for
-        "AvailableMargin", "CashAvailable", "MarginAvailable" which don't exist
-        in Saxo's response. The 4th fallback "NetEquityForMargin" DID exist but
-        represents TOTAL equity (credit limit), not AVAILABLE margin (credit limit
-        minus used). This meant the check never caught margin exhaustion.
+        IBKR path (current): _read_account_balance maps IBKR's
+        get_balance()['tradable'] to the single field MarginAvailableForTrading,
+        plus a _raw blob. IBKR does NOT surface per-position used-margin or a
+        utilization percentage, so the diagnostic margin_used / utilization /
+        total_value reads below .get() those with a 0 default and the snapshot
+        log line reports 0 for them. The gate decision itself uses only
+        MarginAvailableForTrading (available < required), which is correct.
 
-        Correct Saxo balance fields (verified via live diagnostic):
-          - MarginAvailableForTrading: Available margin after subtracting positions
-          - SpendingPower: Same value, alternative name
-          - CashAvailableForTrading: Cash portion available
-          - NetEquityForMargin: Total equity for margin (last resort fallback)
+        The extra field names in the fallback loop below (SpendingPower,
+        CashAvailableForTrading, NetEquityForMargin) and the used-margin /
+        utilization / total_value reads are Saxo-era leftovers retained only as
+        harmless no-ops on the IBKR path — they never match and so never affect
+        the decision. They are kept for backwards-compat with the Saxo balance
+        shape should that broker be reattached.
 
         Returns:
             Tuple of (has_sufficient_bp, message)
@@ -4979,9 +5416,11 @@ class MEICStrategy:
                 logger.warning("ORDER-004: Could not fetch account balance")
                 return True, "Balance check skipped (API unavailable)"
 
-            # Fix #85: Use correct Saxo field names (verified 2026-03-16).
-            # Priority: MarginAvailableForTrading (best) → SpendingPower (same value)
-            # → CashAvailableForTrading → NetEquityForMargin (total equity, last resort)
+            # IBKR path: only MarginAvailableForTrading is populated (from
+            # get_balance()['tradable']); the remaining names are inert Saxo-era
+            # fallbacks (see docstring). Priority order preserved for the Saxo
+            # shape: MarginAvailableForTrading → SpendingPower → CashAvailableForTrading
+            # → NetEquityForMargin (total equity, last resort).
             available = None
             field_used = None
             for field in ["MarginAvailableForTrading", "SpendingPower",
@@ -4998,7 +5437,11 @@ class MEICStrategy:
                 )
                 return True, "Balance check skipped (no margin field)"
 
-            # Log margin snapshot for diagnostics + store for DataRecorder
+            # Log margin snapshot for diagnostics + store for DataRecorder.
+            # On the IBKR path these three fields are absent (IBKR doesn't
+            # surface used-margin / utilization / total value), so they default
+            # to 0 — the snapshot will read "Used: $0.00, Utilization: 0.0%,
+            # Account: $0.00". Diagnostic only; the gate uses `available`.
             margin_used = balance.get("MarginUsedByCurrentPositions", 0)
             margin_pct = balance.get("MarginUtilizationPct", 0)
             total_value = balance.get("TotalValue", 0)
@@ -5085,12 +5528,21 @@ class MEICStrategy:
             # returns a usable price (mid→last→mark) or None; a None
             # while the schedule says open is the halt heuristic — no
             # broker exposes a trading-halt flag directly.
-            price = self._read_index_price("SPX")
+            # #17/#18: a broker 'Z' (stale) availability flag is treated as
+            # no usable data here too — a frozen-but-nonzero quote during the
+            # session is exactly the degraded-feed/halt case this guards.
+            price, avail = self._split_index_read(self._read_index_price("SPX"))
             if not price:
                 logger.warning(
                     "MKT-005: No SPX price available — possible market halt"
                 )
                 return True, "No SPX price available"
+            if isinstance(avail, str) and avail.upper() == "Z":
+                logger.warning(
+                    "MKT-005: SPX quote flagged STALE (availability='Z') — "
+                    "treating as no data / possible halt"
+                )
+                return True, "SPX price stale (availability='Z')"
 
             return False, "Market trading normally"
 

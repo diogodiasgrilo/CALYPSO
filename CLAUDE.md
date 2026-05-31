@@ -226,6 +226,8 @@ Long reports (HERMES/APOLLO/CLIO) split at paragraph/line boundaries with `(1/N)
 
 ### Authentication
 
+> **In broker mode (the DEPLOYED topology), this handshake runs ONCE, inside `calypso-broker`** — the A/B/C strategy processes do NOT perform it; they proxy data calls to the broker via `BrokerClient`. See the [calypso-broker section](#calypso-broker-shared-session-service). The description below is the handshake `calypso-broker` runs (and the legacy single-bot path runs when `CALYPSO_BROKER_URL` is unset).
+
 OAuth 1.0a via `ibind`. `IBClient.connect()` is a 3-stage handshake:
 
 1. **LST handshake** — `IbkrClient(use_oauth=True, oauth_config=...)` triggers the live-session-token exchange. 401 / "invalid consumer" → `IBAuthError`; other errors → `IBConnectionError`.
@@ -236,14 +238,16 @@ After connect, `account_id` is pinned via `_discover_account_id()` (calls `portf
 
 ### The morning re-auth gate
 
-`IBClient.ensure_connected()` (called at the start of every monitoring iteration in `main.py:run_bot()`) is the once-per-trading-day stale-session check:
+> **Broker mode (the DEPLOYED topology — A/B/C):** the session lifecycle described below lives in **`calypso-broker`**, NOT in the strategy process. See the [calypso-broker section](#calypso-broker-shared-session-service). When `CALYPSO_BROKER_URL` is set, `main.py:run_bot()` calls `BrokerClient.ensure_connected()`, which is **only an HTTP `GET /health` probe** (`shared/broker_client.py`): it returns `bool(connected)`, performs **no** `disconnect()`/`connect()`, and **cannot re-establish** anything. The real daily + 15-min re-auth loop runs inside `calypso-broker` (`services/broker/main.py:_maintain()`, every `CALYPSO_BROKER_SESSION_CHECK_S`, default 900s). **A session fault is fixed by restarting `calypso-broker`, never by restarting a `hydra*` unit** — a strategy restart cannot repair a session owned by a separate process. The `IBClient` description below applies ONLY to the legacy single-bot fallback (`CALYPSO_BROKER_URL` unset).
+
+In the **legacy direct-IBClient path** (`CALYPSO_BROKER_URL` unset — single-bot only), `IBClient.ensure_connected()` (called at the start of every monitoring iteration in `main.py:run_bot()`) is the once-per-trading-day stale-session check:
 
 - Healthy session → no-op (no round-trip to IBKR — checks `_connected` then auth/status, no reconnect).
 - `authenticated=false` OR `connected=false` OR `competing=true` → `disconnect()` + `connect()` fresh.
 - Auth-status read exception → triggers full reconnect.
 - `_connected=False` → skips status read and reconnects directly.
 
-**Intraday re-check (P7-audit H6):** Every 15 minutes (`INTRADAY_SESSION_CHECK_INTERVAL_S = 15 * 60`), the main loop calls `ensure_connected()` again. Failure → `break` so systemd restarts cleanly with `Restart=always` + `RestartSec=30`.
+**Intraday re-check (P7-audit H6):** Every 15 minutes (`INTRADAY_SESSION_CHECK_INTERVAL_S = 15 * 60`), the main loop calls `ensure_connected()` again. In the legacy direct-IBClient path that re-runs the reconnect logic above; **in broker mode it is the same `GET /health` probe** (recovery still happens inside `calypso-broker`, not here). Failure → `break` so systemd restarts the strategy cleanly with `Restart=always` + `RestartSec=30` — note that in broker mode this restart only re-probes the broker's health, it does NOT re-auth the broker's session.
 
 ### The /iserver/accounts preflight (P7-audit C2)
 
@@ -304,7 +308,49 @@ Three authoritative sources (in priority order):
 - **WebSocket streaming** — `StreamingManager` exists but is OFF by default. HYDRA is REST-only on this branch; quotes are snapshot-driven via the warmup-polled `_snapshot_with_preflight`.
 - **`shared/saxo_client.py`** — deleted in P5c. Any import would fail at module load.
 - **`shared/token_coordinator.py`** — present (kept for `main`-branch back-compat) but never imported by HYDRA. The Saxo `token_keeper.service` is dead on this branch; do not start it.
-- **`broker` abstraction layer (`shared/broker/`)** — deleted in P5c. HYDRA's strategy reads IBClient directly via its inherited `self.broker` attribute.
+- **`broker` abstraction layer (`shared/broker/`)** — deleted in P5c. HYDRA's strategy reads `self.broker` directly; that object is a `BrokerClient` in the deployed (broker-mode) topology, or a direct `IBClient` in the legacy single-bot fallback (see the [calypso-broker section](#calypso-broker-shared-session-service)).
+
+---
+
+## calypso-broker (shared-session service)
+
+> **This is the DEPLOYED topology for A/B/C** (cut over 2026-05-29). Read this before troubleshooting any session/auth problem — the [morning re-auth gate](#the-morning-re-auth-gate) and [Authentication](#authentication) sections above describe the *legacy single-bot* path, which is the fallback, not the live config.
+
+### Why it exists
+
+IBKR OAuth 1.0a allows only **one brokerage session per username**. Three concurrent strategy processes (A/B/C) each opening their own session set `compete:true` and evict each other in a crash-loop. `calypso-broker` solves this by owning the **ONE** IBKR session for all strategies. Design + rollback: [`docs/migration/BROKER_SESSION_SERVICE_DESIGN.md`](docs/migration/BROKER_SESSION_SERVICE_DESIGN.md); constraint research: [`docs/migration/IBKR_MULTI_SESSION.md`](docs/migration/IBKR_MULTI_SESSION.md).
+
+### Topology
+
+```
+hydra.service (A) ┐
+hydra_variant_b   ├─ BrokerClient ──HTTP/loopback──► calypso-broker ──OAuth──► IBKR
+hydra_variant_c   ┘  (CALYPSO_BROKER_URL=          (owns the 1 IBClient:
+                      http://127.0.0.1:8788)         LST + ssodh/init + Tickler
+                                                     + daily/15-min re-auth loop
+                                                     + 6 OAuth creds + breakers)
+```
+
+- **Session owner:** `calypso-broker` (`services/broker/main.py` + `deploy/calypso-broker.service`). It holds the only `IBClient`, runs `connect()` (LST handshake + `ssodh/init` + Tickler), and runs the re-auth loop in `_maintain()` every `CALYPSO_BROKER_SESSION_CHECK_S` (default 900s = 15 min). `Restart=always` keeps it up; the `hydra*` units depend on it softly (`Wants=`).
+- **Strategies (A/B/C):** `main.py:_build_broker()` returns a `BrokerClient` when `CALYPSO_BROKER_URL` is set (per-host `broker.conf` systemd drop-in, not in the committed `.service` files), else a direct `IBClient` (legacy single-bot). `BrokerClient` (`shared/broker_client.py`) proxies the 16 allowlisted data methods over loopback `/rpc` and returns the IDENTICAL shapes `IBClient` would — no strategy code changes. The strategies open **NO** IBKR session of their own (~0.9 combined req/s, well under the ~10/s ceiling).
+- **OAuth credentials live in `calypso-broker` only.** The `hydra*` units still carry now-unused `LoadCredentialEncrypted=` lines (harmless; flagged for cleanup in PROJECT_STATUS). Only the broker needs the 6 creds.
+- **Circuit breakers + breaker/warmup alerting** run inside the broker process (it owns the `IBClient`). `BrokerClient.circuit_breakers` is an empty dict so the strategy-side alert poll is a harmless no-op (no duplicate alerts).
+
+### Session lifecycle in broker mode
+
+- `BrokerClient.connect()` → `GET /health`; raises `BrokerError` (strategy fails to start) if the broker is not holding a session. It does NOT open a session.
+- `BrokerClient.ensure_connected()` → `GET /health`, returns `bool(connected)`, **never raises, never reconnects**. The strategy's session gate treats `False` as a transient broker/data outage (skip the tick / `break` for a systemd restart).
+- **Session recovery happens ONLY in `calypso-broker`** (`_maintain()` re-auth loop + `Restart=always`). Restarting a `hydra*` unit cannot repair the session.
+
+### Operator rule of thumb
+
+| Symptom | Act on |
+|---|---|
+| Session stale / auth failed / `compete:true` (broker mode) | `systemctl restart calypso-broker` — NOT the hydra units |
+| A single strategy misbehaving (entry logic, config) | restart that `hydra*` unit |
+| Emergency stop of trading | stop the `hydra*` units (the broker is a passive session holder; stop it too only if you intend to drop the IBKR session entirely — see Emergency stop below) |
+
+RUNBOOKS RB-1 / RB-4 still describe the legacy `ensure_connected()` self-reconnect and tell you to restart `hydra` for a session fault; **in broker mode those steps target the wrong unit** — resolve session faults at `calypso-broker`.
 
 ---
 
@@ -549,25 +595,34 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 ### Service lifecycle
 
+> **Broker mode (deployed):** `calypso-broker` owns the IBKR session and the OAuth creds — the `hydra*` units talk to it over loopback. Stopping the `hydra*` units does NOT touch the IBKR session (the broker keeps holding it). A **session/auth fault is fixed by restarting `calypso-broker`**, not the `hydra*` units (see the [calypso-broker section](#calypso-broker-shared-session-service)). There is no Saxo `token_keeper` on this branch.
+
 ```bash
-# Stop HYDRA + variants (does NOT affect IBKR OAuth — no token keeper to worry about)
+# Stop HYDRA + variants (broker keeps the IBKR session — strategies stop trading; session stays up)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c"
 
 # Stop just HYDRA
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
 
-# Start HYDRA + variants (run pre-start verification first — see deploy/IBKR_CREDENTIALS_SETUP.md)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start hydra hydra_variant_b hydra_variant_c"
+# Start the broker FIRST (it owns the session the strategies depend on), then HYDRA + variants
+# (run pre-start verification first — see deploy/IBKR_CREDENTIALS_SETUP.md)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start calypso-broker hydra hydra_variant_b hydra_variant_c"
 
-# Restart HYDRA (config change pickup)
+# Restart HYDRA (config / strategy change pickup — does NOT re-auth the IBKR session)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart hydra"
+
+# Restart the broker (session/auth fault, OAuth re-auth — the strategies degrade gracefully through it)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart calypso-broker"
 ```
 
 ### Status / logs
 
 ```bash
-# All active HYDRA-related services
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status hydra hydra_variant_b hydra_variant_c dashboard"
+# All active HYDRA-related services (calypso-broker = the shared IBKR session owner)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status calypso-broker hydra hydra_variant_b hydra_variant_c dashboard"
+
+# Broker session health + re-auth loop logs (where session/auth problems show up in broker mode)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u calypso-broker -n 50 --no-pager"
 
 # HYDRA logs (50 lines)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -n 50 --no-pager"
@@ -588,10 +643,15 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u h
 ### Emergency stop (everything)
 
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c"
+# Stop all trading immediately. The hydra* units are the ones that place orders;
+# stopping them halts trading. calypso-broker is a passive session holder (it does
+# not trade on its own) — add it to also drop the shared IBKR session.
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c calypso-broker"
 ```
 
-There is **no** `token_keeper` to worry about on this branch — IBKR OAuth 1.0a is unattended and survives bot restarts without external help.
+Stopping `calypso-broker` drops the one shared IBKR session; the `hydra*` units will fail their `ensure_connected()` health probe and `break` (then systemd retries them, but they stay down without a healthy broker). Bring the broker back FIRST when restarting.
+
+There is **no** Saxo `token_keeper` to worry about on this branch — IBKR OAuth 1.0a is unattended and the broker's re-auth loop survives strategy restarts without external help.
 
 ---
 

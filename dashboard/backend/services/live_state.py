@@ -44,14 +44,29 @@ class LiveStateProvider:
         gross_pnl = state.get("total_realized_pnl", 0)
         commission = state.get("total_commission", 0)
 
-        # Count stopped and expired entries (per entry, not per side)
+        # Count entries the SAME way the authoritative daily_summaries row does
+        # (bots/hydra/strategy.py record_daily_summary, lines ~4798-4808): PER
+        # ENTRY, with DISJOINT stopped/expired buckets. NOT a sum of per-side
+        # counters (that double-counts a both-sides-stopped IC → 2 not 1) and
+        # NOT a residual (completed - stopped mis-attributes). Per-entry on the
+        # *_side_stopped flags also correctly counts Brandon TP/BREACH closes,
+        # which set those flags but do NOT bump call_stops_triggered/
+        # put_stops_triggered. This keeps the live fallback and the DB row
+        # identical so the calendar/analytics numbers don't flip at the HOMER
+        # handoff.
+        #   entries_placed  = entries_completed (excludes skipped/failed)
+        #   entries_stopped = entries with call_side_stopped OR put_side_stopped
+        #   entries_expired = entries NOT stopped AND (call/put _side_expired)
         stopped = 0
         expired = 0
         for e in entries:
             if e.get("call_side_stopped") or e.get("put_side_stopped"):
                 stopped += 1
-            if e.get("call_side_expired") or e.get("put_side_expired"):
+            elif e.get("call_side_expired") or e.get("put_side_expired"):
                 expired += 1
+        completed = state.get("entries_completed")
+        if completed is None:
+            completed = sum(1 for e in entries if e.get("is_complete"))
 
         # After market close (4 PM ET), add unrealized credits from active entries
         # that will expire worthless. total_realized_pnl only includes settled entries,
@@ -78,16 +93,19 @@ class LiveStateProvider:
         # Today's SPX/VIX. Prefer the bot's tracked intraday OHLC, which is
         # ALWAYS written to state.market_data_ohlc. The per-entry
         # spx_at_entry/vix_at_entry are NOT written by the bot (audit FP6), so
-        # the old reads were always None and relied on the DB fallback. Close/
-        # current has no state field → take the last pnl_history/market_tick.
+        # the old reads were always None and relied on the DB fallback. The
+        # state file has NO close price (market_data_ohlc only carries
+        # open/high/low, and pnl_history points are {"time","pnl"} with no
+        # price keys), so close comes only from the market_ticks DB fallback
+        # below and otherwise falls back to open (see spx_close/vix_close `or`
+        # defaulting after the fallback).
         ohlc = state.get("market_data_ohlc", {}) or {}
-        pnl_history = state.get("pnl_history", [])
         spx_open = ohlc.get("spx_open") or (entries[0].get("spx_at_entry") if entries else None)
         spx_high = ohlc.get("spx_high")
         spx_low = ohlc.get("spx_low")
-        spx_close = pnl_history[-1].get("spx") if pnl_history else None
+        spx_close = None
         vix_open = ohlc.get("vix_open") or (entries[0].get("vix_at_entry") if entries else None)
-        vix_close = pnl_history[-1].get("vix") if pnl_history else None
+        vix_close = None
 
         # Fill any STILL-missing SPX/VIX (esp. close) from today's market_ticks.
         # Uses `or` so the exact OHLC above is preserved when present.
@@ -131,7 +149,7 @@ class LiveStateProvider:
             "day_range": round(spx_high - spx_low, 2) if spx_high and spx_low else None,
             "vix_open": vix_open,
             "vix_close": vix_close,
-            "entries_placed": len(entries),
+            "entries_placed": completed,
             "entries_stopped": stopped,
             "entries_expired": expired,
             "gross_pnl": gross_pnl,
@@ -193,23 +211,31 @@ class LiveStateProvider:
         result = []
         for e in state.get("entries", []):
             entry_num = e.get("entry_number")
-            for side, flag, time_key, stop_key in [
-                ("call", "call_side_stopped", "call_stop_time", "call_side_stop"),
-                ("put", "put_side_stopped", "put_stop_time", "put_side_stop"),
+            for side, flag, time_key, stop_key, actual_key in [
+                ("call", "call_side_stopped", "call_stop_time", "call_side_stop", "actual_call_stop_debit"),
+                ("put", "put_side_stopped", "put_stop_time", "put_side_stop", "actual_put_stop_debit"),
             ]:
                 if not e.get(flag):
                     continue
                 credit_key = f"{side}_spread_credit"
                 side_credit = e.get(credit_key, 0) or 0
                 stop_level = e.get(stop_key, 0) or 0
+                # Prefer the real fill cost (includes slippage) the bot serialized
+                # in actual_*_stop_debit; fall back to the trigger level when it is
+                # absent/zero (dry-run or fills unavailable). Mirrors the canonical
+                # pattern in bots/hydra/base_strategy.py (~lines 473-491) and the
+                # bot's own DB write (record_stop: trigger_level=stop_level,
+                # actual_debit=actual_close_cost).
+                actual_debit_val = e.get(actual_key, 0) or 0
+                debit = actual_debit_val if actual_debit_val > 0 else stop_level
                 result.append({
                     "date": today,
                     "entry_number": entry_num,
                     "side": side,
                     "stop_time": e.get(time_key),
                     "trigger_level": stop_level,
-                    "actual_debit": stop_level,  # Best estimate from state
-                    "net_pnl": side_credit - stop_level if stop_level else None,
+                    "actual_debit": debit,
+                    "net_pnl": side_credit - debit if debit else None,
                 })
         return result
 

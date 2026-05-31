@@ -2,9 +2,12 @@
 Tests for v1.2.7 Daily Summary column redesign.
 
 Covers:
-1. MarketData OHLC tracking (spx_open, vix_open, vix_low + existing fields)
-2. get_daily_summary() P&L breakdown (stop_loss_debits, expired_credits)
-3. logger_service.py header/row alignment (34 cols)
+1. MarketData OHLC tracking (spx_open, vix_open, vix_low + existing fields),
+   including the pre-market session gate that excludes extended-hours quotes.
+2. get_daily_summary() P&L breakdown (stop_loss_debits, expired_credits) —
+   the REAL FIX #78 derivation: stop_loss_debits = max(0, expired_credits -
+   total_realized_pnl), exercised via the production method.
+3. logger_service.py HYDRA header/row alignment (42 cols, A..AP).
 4. State file OHLC persistence and restoration
 5. log_daily_summary() sheets_summary construction
 
@@ -17,6 +20,7 @@ import json
 import tempfile
 from dataclasses import dataclass, field
 from datetime import datetime
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch, PropertyMock
 
 import pytest
@@ -24,7 +28,7 @@ import pytest
 # Add project root to path
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from bots.hydra.base_strategy import MarketData
+from bots.hydra.base_strategy import MarketData, MEICStrategy
 
 
 @pytest.fixture(autouse=True)
@@ -246,57 +250,137 @@ class TestMarketDataOHLC:
         md.update_vix(16.0)
         assert md.vix_low == 16.0
 
+    def test_premarket_tick_updates_live_price_but_not_ohlc(self, monkeypatch):
+        """Pre-market tick must set live spx_price/vix but NOT capture OHLC.
+
+        Overrides the autouse RTH fixture to force the session gate False,
+        exercising the early-return branch in update_spx/update_vix
+        (base_strategy.py ~698-699 / ~723-724). This is the entire reason the
+        gate exists: pre-market Saxo extended-hours quotes must not contaminate
+        the session open/high/low anchor.
+        """
+        monkeypatch.setattr(
+            MarketData, "_is_regular_session_or_later", staticmethod(lambda: False)
+        )
+        md = MarketData()
+        md.update_spx(6950.0)
+        # Live price is updated (flash-crash tracking works pre-market)...
+        assert md.spx_price == 6950.0
+        assert len(md.price_history) == 1
+        # ...but OHLC anchors are untouched.
+        assert md.spx_open == 0.0
+        assert md.spx_high == 0.0
+        assert md.spx_low == float('inf')
+
+        md.update_vix(17.5)
+        assert md.vix == 17.5
+        assert md.vix_open == 0.0
+        assert md.vix_high == 0.0
+        assert md.vix_low == float('inf')
+        assert len(md.vix_samples) == 0
+
+    def test_first_rth_tick_captures_open_after_premarket(self, monkeypatch):
+        """After pre-market ticks (no capture), first RTH tick sets the open.
+
+        Verifies the gate flips capture on at 9:30 ET: the session open must be
+        the first regular-session print, not the earlier pre-market print.
+        """
+        # Pre-market: gate False, no capture.
+        monkeypatch.setattr(
+            MarketData, "_is_regular_session_or_later", staticmethod(lambda: False)
+        )
+        md = MarketData()
+        md.update_spx(6900.0)   # 4am print - must NOT become the open
+        md.update_vix(16.0)
+        assert md.spx_open == 0.0
+        assert md.vix_open == 0.0
+
+        # Regular session: gate True, capture begins.
+        monkeypatch.setattr(
+            MarketData, "_is_regular_session_or_later", staticmethod(lambda: True)
+        )
+        md.update_spx(6950.0)
+        md.update_vix(17.5)
+        assert md.spx_open == 6950.0   # open is the first RTH tick, not 6900
+        assert md.spx_high == 6950.0
+        assert md.spx_low == 6950.0
+        assert md.vix_open == 17.5
+        assert md.vix_samples == [17.5]
+
 
 # ============================================================
 # 2. get_daily_summary() P&L Breakdown Tests
 # ============================================================
 
 class TestGetDailySummaryPnLBreakdown:
-    """Test P&L breakdown computation in get_daily_summary().
+    """Test the REAL P&L breakdown computed by MEICStrategy.get_daily_summary().
 
-    Identity: Expired Credits - Stop Loss Debits (net) - Commission = Daily P&L
-    Stop Loss Debits = net loss per stop = stop_level - credit_for_that_side
+    Production (FIX #78, base_strategy.py:4025-4034) derives the breakdown from
+    the actual realized P&L instead of theoretical stop trigger levels, because
+    market-order slippage means actual_close_cost != stop_level:
+
+        expired_credits   = sum(call_spread_credit / put_spread_credit
+                                 over sides flagged *_side_expired)
+        stop_loss_debits  = max(0.0, expired_credits - total_realized_pnl)
+
+    These tests call the real get_daily_summary via a lightweight stub so a
+    regression in that derivation is actually caught (the previous version of
+    this class re-implemented an abandoned theoretical-stop formula and tested
+    nothing in production).
     """
 
-    def _make_mock_entry(self, call_stopped=False, put_stopped=False,
-                          call_expired=False, put_expired=False,
-                          call_side_stop=0.0, put_side_stop=0.0,
+    def _make_mock_entry(self, call_expired=False, put_expired=False,
                           call_spread_credit=0.0, put_spread_credit=0.0):
-        """Create a mock IronCondorEntry with specific fields."""
+        """Create a mock IronCondorEntry exposing the fields get_daily_summary reads.
+
+        get_daily_summary only inspects *_side_expired and *_spread_credit when
+        accumulating expired_credits (it derives debits from realized P&L, not
+        from per-entry stop levels), so those are the only fields modelled here.
+        """
         entry = MagicMock()
-        entry.call_side_stopped = call_stopped
-        entry.put_side_stopped = put_stopped
         entry.call_side_expired = call_expired
         entry.put_side_expired = put_expired
-        entry.call_side_stop = call_side_stop
-        entry.put_side_stop = put_side_stop
         entry.call_spread_credit = call_spread_credit
         entry.put_spread_credit = put_spread_credit
         return entry
 
-    def _compute_breakdown(self, entries):
-        """Replicate the P&L breakdown logic from get_daily_summary()."""
-        stop_loss_debits = 0.0
-        expired_credits = 0.0
-        for entry in entries:
-            if entry.call_side_stopped:
-                stop_loss_debits += entry.call_side_stop - entry.call_spread_credit
-            if entry.put_side_stopped:
-                stop_loss_debits += entry.put_side_stop - entry.put_spread_credit
-            if entry.call_side_expired:
-                expired_credits += entry.call_spread_credit
-            if entry.put_side_expired:
-                expired_credits += entry.put_spread_credit
-        return stop_loss_debits, expired_credits
+    def _compute_breakdown(self, entries, total_realized_pnl=0.0):
+        """Call the REAL MEICStrategy.get_daily_summary breakdown logic.
+
+        Builds a minimal stub exposing exactly the attributes/methods the
+        method touches, then invokes the unbound production method against it.
+        Returns (stop_loss_debits, expired_credits) read from the real result.
+        """
+        daily_state = SimpleNamespace(
+            entries=list(entries),
+            total_realized_pnl=total_realized_pnl,
+            date="2026-02-10",
+            entries_completed=len(entries),
+            entries_failed=0,
+            entries_skipped=0,
+            total_credit_received=0.0,
+            call_stops_triggered=0,
+            put_stops_triggered=0,
+            double_stops=0,
+            circuit_breaker_opens=0,
+            total_commission=0.0,
+        )
+        stub = SimpleNamespace(
+            daily_state=daily_state,
+            _get_total_saxo_pnl=lambda: 0.0,
+            _check_pnl_sanity=lambda *a, **k: True,
+        )
+        result = MEICStrategy.get_daily_summary(stub)
+        return result["stop_loss_debits"], result["expired_credits"]
 
     def test_no_entries_returns_zero(self):
         """No entries means zero debits and zero expired credits."""
-        debits, credits = self._compute_breakdown([])
+        debits, credits = self._compute_breakdown([], total_realized_pnl=0.0)
         assert debits == 0.0
         assert credits == 0.0
 
     def test_all_expired_no_stops(self):
-        """All entries expired = credits earned, no stop debits."""
+        """All entries expired = credits earned, debits clamp to 0 when realized >= credits."""
         entries = [
             self._make_mock_entry(
                 call_expired=True, put_expired=True,
@@ -307,147 +391,131 @@ class TestGetDailySummaryPnLBreakdown:
                 call_spread_credit=1.10, put_spread_credit=1.15
             ),
         ]
-        debits, credits = self._compute_breakdown(entries)
+        # All expired with no slippage: realized P&L == total expired credit.
+        debits, credits = self._compute_breakdown(entries, total_realized_pnl=4.80)
         assert debits == 0.0
         assert abs(credits - 4.80) < 0.01
 
     def test_one_side_stopped_other_expired_full_ic(self):
-        """Full IC: put stopped, call expired. Net debit = stop - put_credit."""
-        # Full IC: $2.50 total credit ($1.25/$1.30), stop level = $2.50
+        """Full IC: put stopped, call expired. Debit derived from realized P&L."""
+        # Full IC: $2.50 total credit ($1.25/$1.30). Call side expires (keep $1.25),
+        # put side stopped with slippage -> realized P&L = +0.05 (gross).
         entries = [
             self._make_mock_entry(
-                call_expired=True, put_stopped=True,
+                call_expired=True,
                 call_spread_credit=1.25, put_spread_credit=1.30,
-                put_side_stop=2.50
             ),
         ]
-        debits, credits = self._compute_breakdown(entries)
-        # Net debit = 2.50 - 1.30 = 1.20
+        # Only the call side is flagged expired -> expired_credits = 1.25.
+        # Realized P&L of +0.05 implies stop_loss_debits = 1.25 - 0.05 = 1.20.
+        debits, credits = self._compute_breakdown(entries, total_realized_pnl=0.05)
         assert abs(debits - 1.20) < 0.01
         assert abs(credits - 1.25) < 0.01
-        # Identity: credits - debits = gross P&L = 1.25 - 1.20 = 0.05
-        gross_pnl = credits - debits
-        assert abs(gross_pnl - 0.05) < 0.01
+        # Identity: expired_credits - stop_loss_debits == realized (gross) P&L.
+        assert abs((credits - debits) - 0.05) < 0.01
 
     def test_double_stop_full_ic(self):
-        """Both sides stopped - net debit = total credit."""
-        # Full IC: $2.50 total ($1.20/$1.30), both stopped at $2.50
+        """Both sides stopped (no expirations) - debit = abs(realized loss)."""
+        # Full IC: $2.50 total ($1.20/$1.30), both stopped -> lost the credit.
         entries = [
             self._make_mock_entry(
-                call_stopped=True, put_stopped=True,
                 call_spread_credit=1.20, put_spread_credit=1.30,
-                call_side_stop=2.50, put_side_stop=2.50
             ),
         ]
-        debits, credits = self._compute_breakdown(entries)
-        # Net debit = (2.50 - 1.20) + (2.50 - 1.30) = 1.30 + 1.20 = 2.50 = total_credit
+        # No side flagged expired -> expired_credits = 0; realized P&L = -2.50.
+        debits, credits = self._compute_breakdown(entries, total_realized_pnl=-2.50)
+        # stop_loss_debits = max(0, 0 - (-2.50)) = 2.50
         assert abs(debits - 2.50) < 0.01
         assert credits == 0.0
-        # Identity: 0 - 2.50 = -2.50 gross P&L (lost total credit)
-        assert abs(credits - debits - (-2.50)) < 0.01
+        # Identity: 0 - 2.50 == -2.50 gross P&L (lost total credit)
+        assert abs((credits - debits) - (-2.50)) < 0.01
 
     def test_one_sided_entry_stopped(self):
-        """One-sided (put-only): stop = 2x credit, net debit = credit."""
+        """One-sided (put-only) stopped: debit = abs(realized loss)."""
         entries = [
-            self._make_mock_entry(
-                put_stopped=True,
-                put_spread_credit=1.28,
-                put_side_stop=2.56  # 2x credit (Fix #40)
-            ),
+            self._make_mock_entry(put_spread_credit=1.28),  # not expired
         ]
-        debits, credits = self._compute_breakdown(entries)
-        # Net debit = 2.56 - 1.28 = 1.28 (lost exactly one credit)
+        # Put-only stop at 2x credit (Fix #40) -> net realized loss = -1.28.
+        debits, credits = self._compute_breakdown(entries, total_realized_pnl=-1.28)
         assert abs(debits - 1.28) < 0.01
         assert credits == 0.0
 
     def test_one_sided_entry_expired(self):
         """One-sided (put-only): expired = credit kept, no debit."""
         entries = [
-            self._make_mock_entry(
-                put_expired=True,
-                put_spread_credit=1.28
-            ),
+            self._make_mock_entry(put_expired=True, put_spread_credit=1.28),
         ]
-        debits, credits = self._compute_breakdown(entries)
+        # Expired and kept -> realized P&L == credit, debits clamp to 0.
+        debits, credits = self._compute_breakdown(entries, total_realized_pnl=1.28)
         assert debits == 0.0
         assert abs(credits - 1.28) < 0.01
 
     def test_identity_feb10(self):
-        """Feb 10: Expired Credits - Debits = Gross P&L ($380)."""
-        # 5 one-sided entries (put-only), 1 put stop, 4 expired
-        # Total credit = $640, Commission = $30, Net P&L = $350
-        # Using representative per-entry credits that sum to $640
+        """Feb 10: Expired Credits - Debits = realized (gross) P&L."""
+        # 5 one-sided entries (put-only): 4 expired, 1 stopped.
+        # Expired credits = 128+130+126+128 = 512.
+        # Stopped entry lost net ~128 (2x credit stop) -> realized = 512 - 128 = 384.
         entries = [
             self._make_mock_entry(put_expired=True, put_spread_credit=128.0),
             self._make_mock_entry(put_expired=True, put_spread_credit=130.0),
             self._make_mock_entry(put_expired=True, put_spread_credit=126.0),
             self._make_mock_entry(put_expired=True, put_spread_credit=128.0),
-            self._make_mock_entry(
-                put_stopped=True, put_spread_credit=128.0,
-                put_side_stop=256.0  # 2x credit for one-sided
-            ),
+            self._make_mock_entry(put_spread_credit=128.0),  # stopped (not expired)
         ]
-        debits, credits = self._compute_breakdown(entries)
-        gross_pnl = credits - debits
-        commission = 30.0
-        net_pnl = gross_pnl - commission
-        # Expired = 128+130+126+128 = 512
-        # Net debit = 256 - 128 = 128
-        # Gross = 512 - 128 = 384, Net = 384 - 30 = 354
-        # (Not exactly $350 because we're using representative credits, not actuals)
-        assert debits == 128.0
+        debits, credits = self._compute_breakdown(entries, total_realized_pnl=384.0)
+        # expired_credits = 512, stop_loss_debits = max(0, 512 - 384) = 128
         assert credits == 512.0
-        assert debits < credits  # Identity: debits always < credits on profitable day
+        assert debits == 128.0
+        assert debits < credits  # debits always < credits on a profitable day
 
     def test_identity_always_holds(self):
-        """Verify: Expired Credits - Net Debits - Commission = Net P&L for any mix."""
-        # 3 full ICs: 2 with one side stopped, 1 both expired
-        # Full IC credit = $2.60 ($1.30/$1.30), stop = $2.60
+        """Verify: Expired Credits - stop_loss_debits == realized P&L for any mix."""
+        # 3 full ICs ($1.30/$1.30 each): entry1 put stopped/call expired,
+        # entry2 both expired, entry3 call stopped/put expired.
         entries = [
-            # Entry 1: call expired, put stopped
             self._make_mock_entry(
-                call_expired=True, put_stopped=True,
+                call_expired=True,  # put side stopped (not flagged expired)
                 call_spread_credit=1.30, put_spread_credit=1.30,
-                put_side_stop=2.60
             ),
-            # Entry 2: both expired
             self._make_mock_entry(
                 call_expired=True, put_expired=True,
                 call_spread_credit=1.30, put_spread_credit=1.30,
             ),
-            # Entry 3: call stopped, put expired
             self._make_mock_entry(
-                call_stopped=True, put_expired=True,
+                put_expired=True,  # call side stopped (not flagged expired)
                 call_spread_credit=1.30, put_spread_credit=1.30,
-                call_side_stop=2.60
             ),
         ]
-        debits, credits = self._compute_breakdown(entries)
-        commission = 45.0  # 3 entries × $15
-
-        # Expired: 1.30 + 1.30 + 1.30 + 1.30 = 5.20 (4 expired sides)
-        # Net debits: (2.60-1.30) + (2.60-1.30) = 1.30 + 1.30 = 2.60 (2 stopped sides)
+        # Expired sides: 1.30*4 = 5.20. Two stops lost net 1.30 each -> realized:
+        # total credit 7.80 - gross stop debits 2.60 = 5.20... realized (gross) = 2.60.
+        debits, credits = self._compute_breakdown(entries, total_realized_pnl=2.60)
         assert abs(credits - 5.20) < 0.01
+        # stop_loss_debits = max(0, 5.20 - 2.60) = 2.60
         assert abs(debits - 2.60) < 0.01
+        # Identity: expired_credits - stop_loss_debits == realized (gross) P&L.
+        assert abs((credits - debits) - 2.60) < 0.01
 
-        # Total credit = 3 × 2.60 = 7.80
-        # Gross P&L = Total Credit - Gross Stop Debits = 7.80 - (2.60 + 2.60) = 2.60
-        # Also: Expired Credits - Net Debits = 5.20 - 2.60 = 2.60 ✓
-        gross_pnl = credits - debits
-        assert abs(gross_pnl - 2.60) < 0.01
+    def test_debits_clamp_at_zero(self):
+        """stop_loss_debits never goes negative even if realized > expired credits.
 
-        net_pnl = gross_pnl - commission
-        assert abs(net_pnl - (2.60 - 45.0)) < 0.01  # -42.40
+        Long-salvage revenue (MKT-033) can push realized P&L above the summed
+        expired credits; production clamps with max(0.0, ...). Guard that.
+        """
+        entries = [
+            self._make_mock_entry(put_expired=True, put_spread_credit=100.0),
+        ]
+        debits, credits = self._compute_breakdown(entries, total_realized_pnl=150.0)
+        assert credits == 100.0
+        assert debits == 0.0  # max(0, 100 - 150) clamps, not -50
 
     def test_skipped_sides_not_counted(self):
-        """Skipped sides (one-sided entries) should not appear in debits or credits."""
+        """Skipped sides (one-sided entries) should not appear in expired credits."""
         entry = self._make_mock_entry(
             call_expired=True,
-            put_stopped=False, put_expired=False,
             call_spread_credit=1.50,
-            put_spread_credit=0.0,
+            put_spread_credit=0.0,  # skipped side, not flagged expired
         )
-        debits, credits = self._compute_breakdown([entry])
+        debits, credits = self._compute_breakdown([entry], total_realized_pnl=1.50)
         assert debits == 0.0
         assert credits == 1.50
 
@@ -457,33 +525,58 @@ class TestGetDailySummaryPnLBreakdown:
 # ============================================================
 
 class TestLoggerServiceColumnAlignment:
-    """Test that header and row have exactly 34 elements in correct order."""
+    """Test that header and row have exactly 42 elements in correct order.
+
+    Mirrors the production HYDRA "Daily Summary" layout in
+    shared/logger_service.py (header at lines ~508-538, row builder at
+    ~2129-2184, worksheet created with cols=42). The 34-column layout these
+    tests previously asserted is stale: Phase 2 added Early Close (2),
+    cumulative-ROC metrics (4), Long Salvage (1) and Contracts (1) for 42 total.
+    NOTE: EXPECTED_HEADERS / the row builder below are hand-copied from
+    logger_service.py and must be kept in sync with it (see cross-file note:
+    the long-term fix is a shared module-level header constant + row builder).
+    """
 
     EXPECTED_HEADERS = [
+        # Market Context (9 cols)
         "Date", "SPX Open", "SPX Close", "SPX High", "SPX Low",
         "VIX Open", "VIX Close", "VIX High", "VIX Low",
+        # Bot Activity (7 cols)
         "Entries Completed", "Entries Skipped",
         "Full ICs", "One-Sided Entries",
         "Bullish Signals", "Bearish Signals", "Neutral Signals",
+        # Position Outcomes (4 cols)
         "Total Credit ($)", "Call Stops", "Put Stops", "Double Stops",
+        # P&L Breakdown (7 cols)
         "Stop Loss Debits ($)", "Commission ($)", "Expired Credits ($)",
         "Daily P&L ($)", "Daily P&L (EUR)",
         "Cumulative P&L ($)", "Cumulative P&L (EUR)",
+        # Performance & Risk (6 cols)
         "Win Rate (%)",
         "Capital Deployed ($)", "Return on Capital (%)", "Sortino Ratio",
         "Max Loss Stops ($)", "Max Loss Catastrophic ($)",
-        "Notes"
+        # MKT-018 Early Close (2 cols)
+        "Early Close", "Early Close Time",
+        # Other
+        "Notes",
+        # Cumulative ROC metrics (4 cols)
+        "Avg Capital Deployed ($)", "Cumulative ROC (%)",
+        "Avg Daily ROC (%)", "Annualized Return (%)",
+        # MKT-033 Long salvage (1 col)
+        "Long Salvage ($)",
+        # Phase 2 D-4 Contracts per entry (1 col)
+        "Contracts",
     ]
 
-    def test_header_count_is_34(self):
-        """Header list should have exactly 34 elements."""
-        assert len(self.EXPECTED_HEADERS) == 34
+    def test_header_count_is_42(self):
+        """Header list should have exactly 42 elements."""
+        assert len(self.EXPECTED_HEADERS) == 42
 
     def test_header_starts_with_date(self):
         assert self.EXPECTED_HEADERS[0] == "Date"
 
-    def test_header_ends_with_notes(self):
-        assert self.EXPECTED_HEADERS[-1] == "Notes"
+    def test_header_ends_with_contracts(self):
+        assert self.EXPECTED_HEADERS[-1] == "Contracts"
 
     def test_market_context_group(self):
         """First 9 columns are Market Context."""
@@ -527,8 +620,24 @@ class TestLoggerServiceColumnAlignment:
             "Max Loss Stops ($)", "Max Loss Catastrophic ($)",
         ]
 
-    def test_row_builder_produces_34_elements(self):
-        """Build a row from sample data and verify it has 34 elements."""
+    def test_early_close_group(self):
+        """Columns 34-35 are MKT-018 Early Close."""
+        early_close = self.EXPECTED_HEADERS[33:35]
+        assert early_close == ["Early Close", "Early Close Time"]
+
+    def test_notes_then_roc_and_salvage_tail(self):
+        """Columns 36-42: Notes, ROC metrics (4), Long Salvage, Contracts."""
+        tail = self.EXPECTED_HEADERS[35:42]
+        assert tail == [
+            "Notes",
+            "Avg Capital Deployed ($)", "Cumulative ROC (%)",
+            "Avg Daily ROC (%)", "Annualized Return (%)",
+            "Long Salvage ($)",
+            "Contracts",
+        ]
+
+    def test_row_builder_produces_42_elements(self):
+        """Build a row from sample data and verify it has 42 elements."""
         summary = {
             "date": "2026-02-14",
             "spx_open": 6950.55,
@@ -564,10 +673,18 @@ class TestLoggerServiceColumnAlignment:
             "sortino_ratio": 1.5,
             "max_loss_stops": 850.50,
             "max_loss_catastrophic": 11649.50,
+            "early_close": "No",
+            "early_close_time": "",
             "notes": "Post-settlement",
+            "avg_capital_deployed": 12000.00,
+            "cumulative_roc": 5.5,
+            "avg_daily_roc": 0.2750,
+            "annualized_return": 42.3,
+            "long_salvage_revenue": 0.0,
+            "contracts_per_entry": 2,
         }
 
-        # Replicate the row builder logic from logger_service.py
+        # Replicate the row builder logic from logger_service.py (HYDRA, 42 cols)
         entries_completed = summary.get("entries_completed", 0)
         full_ics = summary.get("full_ics", 0)
         one_sided = summary.get("one_sided_entries", 0)
@@ -626,11 +743,24 @@ class TestLoggerServiceColumnAlignment:
             f"{summary.get('sortino_ratio', 0):.2f}",
             f"{summary.get('max_loss_stops', 0):.2f}",
             f"{summary.get('max_loss_catastrophic', 0):.2f}",
+            # MKT-018 Early Close (2 cols)
+            summary.get("early_close", "No"),
+            summary.get("early_close_time", ""),
             # Other
-            summary.get("notes", "")
+            summary.get("notes", ""),
+            # Cumulative ROC metrics (4 cols)
+            f"{summary.get('avg_capital_deployed', 0):.2f}",
+            f"{summary.get('cumulative_roc', 0):.2f}",
+            f"{summary.get('avg_daily_roc', 0):.4f}",
+            f"{summary.get('annualized_return', 0):.1f}",
+            # MKT-033 Long salvage (1 col)
+            f"{summary.get('long_salvage_revenue', 0):.2f}",
+            # Phase 2 D-4 Contracts per entry (1 col)
+            str(summary.get("contracts_per_entry") or 1),
         ]
 
-        assert len(row) == 34, f"Row has {len(row)} elements, expected 34"
+        assert len(row) == 42, f"Row has {len(row)} elements, expected 42"
+        assert len(row) == len(self.EXPECTED_HEADERS)
 
     def test_row_values_match_header_positions(self):
         """Verify that row values match their expected header positions."""
@@ -667,10 +797,18 @@ class TestLoggerServiceColumnAlignment:
             "sortino_ratio": 1.5,
             "max_loss_stops": 850.50,
             "max_loss_catastrophic": 11649.50,
+            "early_close": "No",
+            "early_close_time": "",
             "notes": "Post-settlement",
+            "avg_capital_deployed": 12000.00,
+            "cumulative_roc": 5.5,
+            "avg_daily_roc": 0.2750,
+            "annualized_return": 42.3,
+            "long_salvage_revenue": 0.0,
+            "contracts_per_entry": 2,
         }
 
-        # Build row (same logic)
+        # Build row (same logic, HYDRA 42-col layout)
         entries_completed = summary.get("entries_completed", 0)
         full_ics = summary.get("full_ics", 0)
         one_sided = summary.get("one_sided_entries", 0)
@@ -717,8 +855,19 @@ class TestLoggerServiceColumnAlignment:
             f"{summary.get('sortino_ratio', 0):.2f}",
             f"{summary.get('max_loss_stops', 0):.2f}",
             f"{summary.get('max_loss_catastrophic', 0):.2f}",
-            summary.get("notes", "")
+            summary.get("early_close", "No"),
+            summary.get("early_close_time", ""),
+            summary.get("notes", ""),
+            f"{summary.get('avg_capital_deployed', 0):.2f}",
+            f"{summary.get('cumulative_roc', 0):.2f}",
+            f"{summary.get('avg_daily_roc', 0):.4f}",
+            f"{summary.get('annualized_return', 0):.1f}",
+            f"{summary.get('long_salvage_revenue', 0):.2f}",
+            str(summary.get("contracts_per_entry") or 1),
         ]
+
+        # Row length must equal the header length (alignment guard).
+        assert len(row) == len(self.EXPECTED_HEADERS) == 42
 
         # Spot-check specific positions
         assert row[0] == "2026-02-10"               # Date
@@ -735,7 +884,15 @@ class TestLoggerServiceColumnAlignment:
         assert row[23] == "350.00"                   # Daily P&L
         assert row[25] == "350.00"                   # Cumulative P&L
         assert row[26] == "294.27"                   # Cumulative P&L EUR
-        assert row[33] == "Post-settlement"          # Notes
+        assert row[33] == "No"                       # Early Close
+        assert row[34] == ""                         # Early Close Time
+        assert row[35] == "Post-settlement"          # Notes
+        assert row[36] == "12000.00"                 # Avg Capital Deployed
+        assert row[37] == "5.50"                     # Cumulative ROC
+        assert row[38] == "0.2750"                   # Avg Daily ROC
+        assert row[39] == "42.3"                     # Annualized Return
+        assert row[40] == "0.00"                     # Long Salvage
+        assert row[41] == "2"                        # Contracts
 
 
 # ============================================================
@@ -743,7 +900,19 @@ class TestLoggerServiceColumnAlignment:
 # ============================================================
 
 class TestStateFileOHLCPersistence:
-    """Test OHLC save to state file and restore from state file."""
+    """Test OHLC save-to / restore-from state file.
+
+    These mirror the production guards in bots/hydra/strategy.py:
+      - save:    _save_state_to_disk() lines ~9713-9720 (spx_low/vix_low ==
+                 float('inf') -> 0.0 so the state JSON stays serializable;
+                 an un-guarded inf would make json.dumps raise and the day's
+                 state would silently fail to persist)
+      - restore: _initialize_from_state_file() lines ~10885-10896 (low > 0 ->
+                 set, otherwise keep the float('inf') default)
+    The save/restore arithmetic is hand-copied here, not called from the
+    strategy (constructing a full HydraStrategy pulls in IBKR/Saxo deps); the
+    copies MUST be kept in sync with those source lines. See cross-file note for
+    the durable fix (extract the OHLC pack/unpack into testable helpers)."""
 
     def test_save_ohlc_to_state_data(self):
         """Verify OHLC dict is correctly constructed for state file."""
@@ -755,7 +924,7 @@ class TestStateFileOHLCPersistence:
         md.update_vix(21.0)
         md.update_vix(15.2)
 
-        # Replicate save logic from _save_state_to_disk()
+        # Mirror save logic from strategy._save_state_to_disk() (~9713-9720)
         ohlc_dict = {
             "spx_open": md.spx_open,
             "spx_high": md.spx_high,
@@ -818,7 +987,7 @@ class TestStateFileOHLCPersistence:
             "vix_low": 17.14,
         }
 
-        # Replicate restore logic from hydra/strategy.py
+        # Mirror restore logic from strategy._initialize_from_state_file() (~10885-10896)
         if ohlc:
             md.spx_open = ohlc.get("spx_open", 0.0)
             md.spx_high = ohlc.get("spx_high", 0.0)
@@ -979,31 +1148,15 @@ class TestSheetsSummaryConstruction:
         assert spx_low == 6950.0
         assert vix_low == 17.5
 
-    def test_cumulative_pnl_computation(self):
-        """cumulative_pnl should be previous_cumulative + today's net_pnl."""
-        cumulative_metrics = {"cumulative_pnl": 500.0}
-        net_pnl = 150.0
-
-        cumulative_pnl = cumulative_metrics.get("cumulative_pnl", 0) + net_pnl
-        assert cumulative_pnl == 650.0
-
-    def test_cumulative_pnl_eur_conversion(self):
-        """cumulative_pnl_eur should be cumulative_pnl * fx_rate."""
-        cumulative_pnl = 650.0
-        rate = 0.84  # Example EUR/USD rate
-
-        cumulative_pnl_eur = cumulative_pnl * rate
-        assert abs(cumulative_pnl_eur - 546.0) < 0.01
-
-    def test_eur_conversion_fallback_on_error(self):
-        """If FX rate fetch fails, EUR values should be 0."""
-        # Simulate exception in get_fx_rate
-        daily_pnl_eur = 0
-        cumulative_pnl_eur = 0
-
-        # These should be the fallback values
-        assert daily_pnl_eur == 0
-        assert cumulative_pnl_eur == 0
+    # NOTE: The previous test_cumulative_pnl_computation /
+    # test_cumulative_pnl_eur_conversion / test_eur_conversion_fallback_on_error
+    # were removed: they asserted hand-computed arithmetic (650==650, 546==546,
+    # 0==0) with no production code involved, so they could never catch a
+    # regression. The real cumulative-P&L roll-up lives in
+    # base_strategy._send_daily_summary (~line 4092) and the EUR conversion /
+    # fail-to-0 fallback in log_daily_summary (~lines 4711-4719); exercising
+    # those requires a full strategy + alert_service / _read_fx_rate harness and
+    # belongs in an integration test (see cross-file note), not a tautology here.
 
     def test_sheets_summary_contains_all_new_keys(self):
         """Verify sheets_summary has all new OHLC and P&L breakdown keys."""
@@ -1040,11 +1193,42 @@ class TestSheetsSummaryConstruction:
         for key in new_keys:
             assert key in sheets_summary, f"Missing key: {key}"
 
-    def test_format_range_ah1_covers_34_columns(self):
-        """Verify A1:AH1 covers exactly 34 columns (A=1, AH=34)."""
-        # A=1, B=2, ..., Z=26, AA=27, AB=28, ..., AH=34
-        col_number = (ord('A') - ord('A') + 1) * 26 + (ord('H') - ord('A') + 1)  # 26 + 8 = 34
-        assert col_number == 34
+    @staticmethod
+    def _col_letter_to_number(letters: str) -> int:
+        """Convert a spreadsheet column label (e.g. 'AH') to a 1-based index."""
+        n = 0
+        for ch in letters:
+            n = n * 26 + (ord(ch) - ord('A') + 1)
+        return n
+
+    def test_a1_to_ap1_covers_42_columns(self):
+        """The HYDRA daily-summary header occupies 42 columns -> A..AP.
+
+        A=1, B=2, ..., Z=26, AA=27, ..., AP=42. The 34-col / A1:AH1 layout
+        these tests previously assumed is stale (Phase 2 added 8 columns).
+        """
+        expected_cols = len(TestLoggerServiceColumnAlignment.EXPECTED_HEADERS)
+        assert expected_cols == 42
+        # Column index of the last header equals the header count.
+        assert self._col_letter_to_number("AP") == expected_cols
+        assert self._col_letter_to_number("A") == 1
+
+    def test_production_bold_format_range_is_a1_aj1(self):
+        """Document the production bold-format range used in logger_service.py.
+
+        Production formats the header row with range "A1:AJ1" (AJ=36). NOTE:
+        this is narrower than the 42-column header, so the last 6 header cells
+        (AK..AP: Cumulative ROC, Avg Daily ROC, Annualized Return, Long Salvage,
+        Contracts and one ROC col) are NOT bolded. This is a cosmetic-only
+        production gap (Sheets formatting, no data impact); recorded so the
+        constant stays visible if the layout changes. See cross-file note.
+        """
+        expected_cols = len(TestLoggerServiceColumnAlignment.EXPECTED_HEADERS)
+        production_format_range = "A1:AJ1"  # shared/logger_service.py:549
+        end_col = production_format_range.split(":")[1].rstrip("1")
+        assert self._col_letter_to_number(end_col) == 36
+        # The bold range currently under-covers the 42-col header (cosmetic).
+        assert self._col_letter_to_number(end_col) < expected_cols
 
 
 if __name__ == "__main__":

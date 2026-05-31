@@ -1284,6 +1284,7 @@ class TestExpectedPositionQuantities:
     def _strategy(self, entries):
         s = HydraStrategy.__new__(HydraStrategy)
         s.daily_state = MagicMock(spec=MEICDailyState)
+        s.daily_state.entries = entries
         s.daily_state.active_entries = entries
         return s
 
@@ -1356,6 +1357,7 @@ class TestHandlePositionDiscrepancies:
     def _strategy(self, entries):
         s = HydraStrategy.__new__(HydraStrategy)
         s.daily_state = MagicMock(spec=MEICDailyState)
+        s.daily_state.entries = entries
         s.daily_state.active_entries = entries
         return s
 
@@ -1407,6 +1409,7 @@ class TestHourlyReconciliationBody:
         s.BOT_NAME = "HYDRA"
         s.contracts_per_entry = 1
         s.daily_state = MagicMock(spec=MEICDailyState)
+        s.daily_state.entries = entries
         s.daily_state.active_entries = entries
         s.alert_service = MagicMock()
         s._save_state_to_disk = MagicMock()
@@ -1555,6 +1558,7 @@ class TestCheckAfterHoursSettlement:
         s._settlement_reconciliation_complete = False
         s.daily_state = MagicMock(spec=MEICDailyState)
         s.daily_state.entries = entries
+        s.daily_state.entries = entries
         s.daily_state.active_entries = entries
         s.daily_state.total_realized_pnl = 100.0
         s.daily_state.total_commission = 10.0
@@ -1688,6 +1692,7 @@ class TestReconcileRecoveredEntriesWithBroker:
         s = HydraStrategy.__new__(HydraStrategy)
         s.broker = None
         s.daily_state = MagicMock(spec=MEICDailyState)
+        s.daily_state.entries = entries
         s.daily_state.active_entries = entries
         s._handle_position_discrepancies = MagicMock()
         s._save_state_to_disk = MagicMock()
@@ -2865,6 +2870,7 @@ class TestGetTotalBrokerPnl:
         s.broker = MagicMock()
         s.client = None
         s.daily_state = MagicMock(spec=MEICDailyState)
+        s.daily_state.entries = entries
         s.daily_state.active_entries = entries
         return s
 

@@ -2,9 +2,9 @@
 
 **This file is the single-source-of-truth for the current state of the `hydra-ibkr-standalone` branch.** Any Claude session arriving at this repo should read this file first, before CLAUDE.md. CLAUDE.md is the operator reference (what the bot does, how to deploy, troubleshoot); this file is the *project state* (what's been done, what's in flight, what's blocked).
 
-**Last updated:** 2026-05-29
-**Last commit on branch:** `2e276af` (use `git rev-parse HEAD` to verify)
-**Commits ahead of `main`:** 115 (use `git log --oneline main..HEAD | wc -l` to verify)
+**Last updated:** 2026-05-31
+**Last commit on branch:** `3f67bc7` (use `git rev-parse HEAD` to verify)
+**Commits ahead of `main`:** 134 (use `git log --oneline main..HEAD | wc -l` to verify)
 **Test suite:** 953 unit tests pass, 16 integration/optional tests skipped pending live paper account. The suite is now deterministic at any wall-clock hour (the intraday-OHLC tests were time-gated; fixed 2026-05-28).
 **Branch is pushed to `origin`** (github.com/diogodiasgrilo/CALYPSO) as of 2026-05-29 — no longer laptop-only.
 
@@ -18,6 +18,8 @@
 > - **✅ Dashboard audited + wired to IBKR (2026-05-29).** Swept all 26 endpoints against the live deployment — `health / hydra.state / summary / entries (DB, with spx_at_entry) / market.ohlc / metrics.{cumulative,daily,performance,entries} / agents / widget` all return real IBKR + full Feb→today history. Two fixes: (1) **enabled comparison mode** (`DASHBOARD_COMPARISON_MODE_ENABLED=true`) so the A-vs-B-vs-C `/api/variants/*` view works (was 503 — off on Saxo too); (2) `live_state` today-SPX/VIX now sourced from `state.market_data_ohlc` (exact) instead of absent per-entry fields (closes audit FP6). Dashboard stays localhost-bound (M12).
 > - **Telegram alert formatting fixed (2026-05-29).** The `process-trading-alert` Cloud Function (`cloud_functions/alert_processor/`) 400'd on every alert's Markdown (unbalanced `_`/`*` from snake_case fields) and fell back to plain text. `_md_escape()` now escapes dynamic content → valid Markdown. Redeployed (revision 00012); no 400s since. **Confirm formatted delivery in the Telegram chat** (a "Broker fix test ✅" was sent).
 > - **Entry-window watchdog deployed.** `entry-window-watch.timer` runs the watchdog Mon–Fri at 10:20/10:50/11:20/11:35 ET (just after the 10:15/10:45/11:15 windows): verifies broker `/health` connected + A/B/C active + no entry-path errors; Telegram-alerts on any problem. Self-contained on the VM. Verified OK on a manual run.
+> - **Commission model corrected to IBKR (2026-05-29, `078049f`).** `strategy.commission_per_leg` previously fell back to the Saxo $2.50/leg default on every broker (display/reported-P&L only; not strategy logic), overstating IBKR fees by ~$1.35/leg. Set to **$1.15/leg** (~$0.65 IBKR Pro base + ~$0.45 CBOE index + ~$0.05 ORF/OCC/CAT) across all three live VM configs (A/B/C) — decisive for judging B/C's dry-run P&L (the Saxo-vs-IBKR gap was ~$170–450/day at their leg counts). Applied + restarted; NRestarts=0.
+> - **✅ Overnight session-lost incident handled + hardened (2026-05-31, `3f67bc7`).** A 01:02 ET HIGH alert fired on a routine IBKR ~01:00 ET auth-server reset; the broker's 15-min `ensure_connected()` caught the one-cycle drop, alerted, and re-authed next cycle (**self-healed, NRestarts=0**). The investigation surfaced + fixed 3 defects: (1) **nightly false HIGH** — the broker now alerts only after ≥2 consecutive `ensure_connected` failures (a routine reset clears in one) with broker-accurate wording (`will_restart=False` → "broker stays UP and keeps retrying"); the bot path (`will_restart=True`) is unchanged; (2) **watchdog was blind** — it grepped journald, but these units log to FILES; it now resolves each bot's open log via `/proc/<MainPID>/fd` + scans the broker's known path, with level-based `| ERROR |` matching so normal `ssodh/init` INFO no longer false-triggers; (3) **broker had no persistent log** — added a `RotatingFileHandler` at `/opt/calypso/logs/broker/broker.log`. Deployed + verified on the VM. +2 tests.
 > - **Now = Gate 2 paper-smoke watch:** observe A/B/C + the broker through the session + overnight + **Monday's** morning re-auth gate + entry windows (tomorrow is Saturday) before flipping to live-paper or merging. Still-open items to confirm by observation: Telegram command handler responsiveness (`/status`), and the full dry-run entry evaluation through the broker at Monday's windows (the watchdog flags failures).
 
 ---
@@ -183,9 +185,9 @@ Procedure: `docs/migration/MERGE_PLAN.md` (8-chunk squash, backup branch, byte-i
 
 ---
 
-## Active work (none — branch is at a stable rest point)
+## Active work (none — branch is deployed and in the Gate 2 paper-smoke watch)
 
-No code work is in flight. The AUD3 preflight audit + its 20 fixes are committed (`6882e82`, `09e1641`, `2e276af`) and pushed; the suite is green at any hour. The branch is in a deployment-ready pre-flight state, gated on the Gate 1 probe. **A Claude session should not start new code work unless the user explicitly requests it** — but note the deferred items under "AUD3 detail" (the POS-004 settlement-merge bug especially) if asked what's left.
+No code work is in flight. The AUD3 preflight audit + its 20 fixes are committed (`6882e82`, `09e1641`, `2e276af`) and pushed; the suite is green at any hour. The Saxo→IBKR **cutover has executed** (2026-05-29 — see the "read this first" blockquote at the top), and follow-up work landed after the preflight snapshot: the calypso-broker shared-session service + entry-window watchdog (`91b9088`..`a90430e`), the IBKR commission-model fix (`078049f`, 2026-05-29), and the overnight session-lost incident hardening (`3f67bc7`, 2026-05-31). The branch is **deployed on `calypso-bot` (A live dry-run on IBKR paper; B/C dry-run via the broker)** and in the Gate 2 paper-smoke watch (no longer merely pre-flight). **A Claude session should not start new code work unless the user explicitly requests it** — but note the deferred items under "AUD3 detail" (the POS-004 settlement-merge bug especially) if asked what's left.
 
 If the user asks "what's next" or "where are we", point them at the Gates above + their external timing, and the cutover runbook (`GATE2_DEPLOY_RUNBOOK.md`).
 

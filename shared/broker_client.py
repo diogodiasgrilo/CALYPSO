@@ -15,9 +15,34 @@ from __future__ import annotations
 import logging
 from typing import Any, Callable, Optional
 
-from shared.broker_service import ALLOWED_METHODS
+from shared.broker_service import ALLOWED_METHODS, _json_default
 
 logger = logging.getLogger(__name__)
+
+
+def _decode_wire(value: Any) -> Any:
+    """Reverse the JSON-safe transforms broker_service.to_jsonable applies to
+    types JSON can't natively carry, so the strategy sees the SAME object an
+    in-process IBClient would have returned.
+
+    Currently the only non-JSON-native shape is ``qualify_option_strikes``'s
+    ``dict[(strike, right) -> conid]``: tuple keys are illegal in JSON, so the
+    broker (broker_service._encode_strike_conid_map) encodes it as
+    ``{"__kind__": "strike_conid_map", "items": [{"strike":.., "right":..,
+    "conid":..}, ...]}``. Rebuild the tuple-keyed dict here so the consumer's
+    ``for (strike, right), conid in conid_map.items()`` is unchanged. Recurse
+    through plain dicts/lists so a marker nested anywhere is still decoded; any
+    value without the marker is returned untouched."""
+    if isinstance(value, dict):
+        if value.get("__kind__") == "strike_conid_map":
+            return {
+                (item["strike"], item["right"]): item["conid"]
+                for item in value.get("items", [])
+            }
+        return {k: _decode_wire(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_decode_wire(v) for v in value]
+    return value
 
 
 class BrokerError(RuntimeError):
@@ -73,14 +98,30 @@ class BrokerClient:
             raise BrokerError(
                 f"broker {method}: {resp.get('type', 'Error')}: {resp['error']}"
             )
-        return resp.get("result")
+        # Reverse any JSON-safe transforms the broker applied to non-JSON-native
+        # return shapes (e.g. qualify_option_strikes' tuple-keyed dict) so the
+        # strategy sees exactly what a direct IBClient would have returned.
+        return _decode_wire(resp.get("result"))
 
     def _http_transport(self, method: str, args: list, kwargs: dict) -> dict:
+        import json
+
         import requests
         try:
+            # Serialize the request body with the SAME _json_default the broker's
+            # return path (broker_service.to_jsonable) uses, so JSON-incompatible
+            # args — notably the datetime.date passed to get_option_chain /
+            # qualify_option_strikes — serialize via isoformat() instead of
+            # raising TypeError. requests' json= path uses the stdlib encoder
+            # with no default=, which is why we build the body explicitly here.
+            body = json.dumps(
+                {"method": method, "args": args, "kwargs": kwargs},
+                default=_json_default,
+            )
             r = requests.post(
                 f"{self._base_url}/rpc",
-                json={"method": method, "args": args, "kwargs": kwargs},
+                data=body,
+                headers={"Content-Type": "application/json"},
                 timeout=self._timeout,
             )
             r.raise_for_status()
@@ -116,7 +157,17 @@ class BrokerClient:
             return False
 
     def health(self) -> dict:
+        # Convert any transport failure (broker down/unreachable at startup,
+        # bad status, bad JSON) into BrokerError so connect()'s documented
+        # contract holds — it always fails-to-start as BrokerError, which is
+        # what main.py's connect-failure handler catches (so the logger is shut
+        # down cleanly). ensure_connected() swallows this into False itself.
         import requests
-        r = requests.get(f"{self._base_url}/health", timeout=5)
-        r.raise_for_status()
-        return r.json()
+        try:
+            r = requests.get(f"{self._base_url}/health", timeout=5)
+            r.raise_for_status()
+            return r.json()
+        except Exception as e:  # noqa: BLE001
+            raise BrokerError(
+                f"broker health check failed: {type(e).__name__}: {e}"
+            ) from e

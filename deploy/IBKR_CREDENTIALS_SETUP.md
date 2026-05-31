@@ -1,10 +1,23 @@
 # IBKR OAuth 1.0a credentials — VM setup (P7 Step 4, option B)
 
-HYDRA authenticates to Interactive Brokers with OAuth 1.0a. The six
-credentials are delivered to the bot by **systemd encrypted credentials**
-(`LoadCredentialEncrypted=` in `deploy/hydra.service`) — they are never
-process environment variables, never inherited by child processes,
-tmpfs-backed at runtime, and encrypted at rest.
+**`calypso-broker`** authenticates to Interactive Brokers with OAuth 1.0a.
+Under the shared-session architecture (see
+`docs/migration/BROKER_SESSION_SERVICE_DESIGN.md`) **only** `calypso-broker`
+owns the single IBKR session and holds these credentials; the HYDRA strategy
+units (A/B/C) proxy all brokerage calls through the broker over loopback
+(`CALYPSO_BROKER_URL`) and do not authenticate to IBKR themselves.
+
+The six credentials are delivered to the broker by **systemd encrypted
+credentials** (`LoadCredentialEncrypted=` in `deploy/calypso-broker.service`)
+— they are never process environment variables, never inherited by child
+processes, tmpfs-backed at runtime, and encrypted at rest.
+
+> Cutover note: `deploy/hydra.service` still carries the same
+> `LoadCredentialEncrypted=` entries today, but in broker-proxy mode
+> (`CALYPSO_BROKER_URL` set, which is the tracked default) they are redundant
+> fallback only — the broker is the live OAuth identity. They will be removed
+> from the hydra units in a follow-up cleanup once the cutover is confirmed on
+> the VM.
 
 ## The six credentials
 
@@ -37,7 +50,8 @@ Run as root on `calypso-bot`.
 sudo install -d -m 0700 /etc/calypso/ibkr
 
 # 2. Encrypt each credential. The --name MUST match the credential ID in
-#    hydra.service exactly (systemd binds the ciphertext to that name).
+#    calypso-broker.service exactly (systemd binds the ciphertext to that
+#    name; the same IDs also appear in the hydra* fallback units).
 
 #    String secrets — pipe the raw value (no trailing newline: `echo -n`):
 echo -n 'YOURCONSUMERKEY' | sudo systemd-creds encrypt --name=ibkr_consumer_key - /etc/calypso/ibkr/consumer_key.cred
@@ -52,7 +66,10 @@ sudo systemd-creds encrypt --name=ibkr_dhparam_pem    dhparam.pem            /et
 # 3. Shred the plaintext PEM files once encrypted.
 shred -u private_signature.pem private_encryption.pem dhparam.pem
 
-# 4. Install the service. DO NOT enable yet — verify first (next section).
+# 4. Install the services. DO NOT enable yet — verify first (next section).
+#    calypso-broker.service is the credential-bearing unit (it authenticates
+#    to IBKR); the hydra* strategy units proxy through it.
+sudo cp /opt/calypso/deploy/calypso-broker.service /etc/systemd/system/
 sudo cp /opt/calypso/deploy/hydra.service /etc/systemd/system/
 sudo systemctl daemon-reload
 ```
@@ -67,7 +84,10 @@ at start time, possibly during market hours.
 ```bash
 # 1. Validate the service unit syntactically. `systemd-analyze verify`
 #    catches typos in LoadCredentialEncrypted= names BEFORE the unit
-#    ever tries to start. Exit code 0 = clean.
+#    ever tries to start. Exit code 0 = clean. Verify the broker (the unit
+#    that actually loads these creds and authenticates to IBKR); also verify
+#    hydra.service since it still declares the same fallback creds.
+sudo systemd-analyze verify /etc/systemd/system/calypso-broker.service
 sudo systemd-analyze verify /etc/systemd/system/hydra.service
 
 # 2. Decrypt each .cred file back to plaintext and check byte length.
@@ -91,27 +111,34 @@ done
 sudo systemd-creds decrypt /etc/calypso/ibkr/consumer_key.cred -
 # Expected: prints exactly your consumer key, no trailing newline.
 
-# 4. Once steps 1-3 are clean, enable + start:
+# 4. Once steps 1-3 are clean, enable + start the broker FIRST (it owns the
+#    single IBKR session), confirm it authenticated, then start the strategies
+#    (they Want/After calypso-broker, so they wait for it).
+sudo systemctl enable --now calypso-broker
+sudo journalctl -u calypso-broker -f   # wait for /health → authenticated
+# Then bring up the strategy units (proxy through the broker):
 sudo systemctl enable --now hydra
 sudo journalctl -u hydra -f
 ```
 
 If any of steps 1-3 fail, **do not** enable the service. Re-run the
 failing encrypt step (verifying the source value first) or fix the
-typo in `hydra.service`.
+typo in `calypso-broker.service`.
 
 ## How the bot reads them
 
-`shared/ib_oauth.load_credentials("paper")` checks for
-`$CREDENTIALS_DIRECTORY` (set by systemd whenever `LoadCredential*=` is
-used). When present it reads all six credentials from files there, named
-by the IDs in `_SYSTEMD_CRED_NAMES`. With no `$CREDENTIALS_DIRECTORY`
-(dev laptop) it falls back to env vars + `$CALYPSO_IBKR_KEYS_DIR` —
-unchanged.
+`services/broker/main.py` calls `shared/ib_oauth.load_credentials("paper")`,
+which checks for `$CREDENTIALS_DIRECTORY` (set by systemd whenever
+`LoadCredential*=` is used). When present it reads all six credentials from
+files there, named by the IDs in `_SYSTEMD_CRED_NAMES`. With no
+`$CREDENTIALS_DIRECTORY` (dev laptop) it falls back to env vars +
+`$CALYPSO_IBKR_KEYS_DIR` — unchanged. (In broker-proxy mode the HYDRA
+strategy units never call this; they reach the broker over loopback.)
 
 ## Rotation
 
-Re-encrypt the changed credential (step 2) and `sudo systemctl restart hydra`.
+Re-encrypt the changed credential (step 2) and `sudo systemctl restart calypso-broker`
+(the strategies keep their loopback connection and reconnect automatically).
 
 ## Notes
 
@@ -120,5 +147,6 @@ Re-encrypt the changed credential (step 2) and `sudo systemctl restart hydra`.
   re-encrypt on each host.
 - The old Saxo `token_keeper` service is **not** needed: OAuth 1.0a is
   unattended (the live session token rotates cryptographically; the
-  morning re-auth gate handles the daily reset — see
+  morning re-auth gate inside `calypso-broker` handles the daily reset —
+  see `docs/migration/BROKER_SESSION_SERVICE_DESIGN.md` and
   `docs/migration/P7_GO_LIVE_PLAN.md`).

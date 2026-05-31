@@ -482,24 +482,30 @@ class BrandonHydraStrategy(HydraStrategy):
         #    2026-05-07: state file recorded actual_put_stop_debit=$56,250
         #    for SV=$37.50 closes (= $37.50 × 100 × 15) until this fix.
         #
-        # 2. Realized-P&L correction. _close_entry_early already added the
-        #    full credit to total_realized_pnl on the deferred-fill path
-        #    (line ~2030). In dry-run, deferred fills never resolve (no real
-        #    Saxo positions), so the credit-only number sticks and the
-        #    journal overstates profit by close_cost per side. We subtract
-        #    close_cost here to match what live mode would converge to once
-        #    the async deferred-fill correction landed.
+        # 2. Realized-P&L correction — DRY-RUN ONLY. In live mode
+        #    _close_entry_early already subtracts the real fill-based close
+        #    cost from total_realized_pnl (it adds credit then subtracts
+        #    side_close_cost once a fill price is available). Subtracting the
+        #    pre-close mark here as well would double-count the close cost and
+        #    understate realized P&L by ~one close cost per closed side. In
+        #    dry-run, deferred fills never resolve (no real broker positions),
+        #    so _close_entry_early leaves a credit-only number; we subtract
+        #    close_cost here to match what live mode converges to. The
+        #    actual_*_stop_debit journaling field is set in BOTH modes (for the
+        #    dashboard); only the total_realized_pnl subtraction is guarded.
         contracts = max(int(getattr(entry, "contracts", 1) or 1), 1)
         if call_alive:
             entry.call_side_stopped = True
             close_cost_call = float(entry.call_spread_value) if entry.call_spread_value else 0.0
             entry.actual_call_stop_debit = close_cost_call
-            self.daily_state.total_realized_pnl -= close_cost_call
+            if self.dry_run:
+                self.daily_state.total_realized_pnl -= close_cost_call
         if put_alive:
             entry.put_side_stopped = True
             close_cost_put = float(entry.put_spread_value) if entry.put_spread_value else 0.0
             entry.actual_put_stop_debit = close_cost_put
-            self.daily_state.total_realized_pnl -= close_cost_put
+            if self.dry_run:
+                self.daily_state.total_realized_pnl -= close_cost_put
         # Tag the close so the dashboard / journal can distinguish "TP at 80%
         # captured" from a stop or end-of-day expiry. Both sides share the
         # same reason because Brandon TP fires aggregate (both legs go out
@@ -528,18 +534,57 @@ class BrandonHydraStrategy(HydraStrategy):
             if not self._brandon_side_alive(entry, side):
                 continue
             walls = profile.positive_clusters(min_strength_pct=self.brandon_decel_min_pct)
-            # Filter relative to the SHORT STRIKE, not current spot — once
-            # spot has breached past a wall the wall would otherwise be
-            # excluded by the filter and the breach signal would die just
-            # when we need it most. Walls qualify if they sit between entry
-            # spot and the short (call: strike_low <= short_call; put:
-            # strike_high >= short_put).
+            # Filter to walls that actually protect the THREATENED wing. The
+            # band is bounded on BOTH sides and anchored to the IC's own
+            # strikes (fixed at entry), NOT to live spot.
+            #
+            # Why not gate on live spot: once spot has pushed past a wall the
+            # wall's edge falls on the far side of spot, so a live-spot gate
+            # would drop the wall exactly mid-breach and reset
+            # evaluate_breach's confirmation timer — losing the real signal
+            # when we need it most. The reference must be a fixed entry-time
+            # level. We use the IC midpoint between the two shorts as a
+            # spot-at-entry proxy (the condor is built symmetrically around
+            # the entry spot).
+            #
+            # The previous filter used only ONE bound (call: strike_low <=
+            # short_call; put: strike_high >= short_put). That admits walls in
+            # the OPPOSITE wing: under build_profile's SpotGamma convention the
+            # positive/decel clusters are put-dominated and sit BELOW spot, so
+            # on the call side a put-wing wall far below entry spot trivially
+            # satisfies strike_low <= short_call. evaluate_breach then takes it
+            # as the outermost wall (max strike_high) and, with its
+            # strike_high < spot, reports `spot > strike_high` every tick → a
+            # perpetual false "confirmed call breach" after the 90s window,
+            # closing the call leg though price never approached the short.
+            # The mirror defect exists on the put side for above-spot walls.
+            #
+            # Fix — keep only walls genuinely on the threatened wing:
+            #   call: above the entry midpoint AND not beyond the call short
+            #         (mid <= strike_high, strike_low <= short_call)
+            #   put:  below the entry midpoint AND not beyond the put short
+            #         (strike_low <= mid, strike_high >= short_put)
+            # A wall straddling between spot and the short (the genuine
+            # breach case) is retained; opposite-wing walls are excluded.
+            sc = float(entry.short_call_strike or 0.0)
+            sp = float(entry.short_put_strike or 0.0)
+            if sc > 0 and sp > 0:
+                mid = (sc + sp) / 2.0
+            else:
+                # One-sided entry (the other wing was skipped): no opposing
+                # short to form a midpoint — fall back to live spot as the
+                # entry-spot proxy for the wing boundary.
+                mid = spot
             if side == "call":
                 ref = entry.short_call_strike
-                relevant = tuple(c for c in walls if c.strike_low <= ref)
+                relevant = tuple(
+                    c for c in walls if c.strike_high >= mid and c.strike_low <= ref
+                )
             else:
                 ref = entry.short_put_strike
-                relevant = tuple(c for c in walls if c.strike_high >= ref)
+                relevant = tuple(
+                    c for c in walls if c.strike_low <= mid and c.strike_high >= ref
+                )
             key = (entry.entry_number, side)
             state = self._brandon_breach_states.get(key, gex_breach_exit.BreachState())
             decision, new_state = gex_breach_exit.evaluate_breach(
@@ -585,17 +630,23 @@ class BrandonHydraStrategy(HydraStrategy):
                 # P&L attribution: same pattern as TP. Use the captured
                 # pre-close aliveness flags + spread_values to record the
                 # real close cost on each side that was alive at the moment
-                # of breach.
+                # of breach. The total_realized_pnl subtraction is DRY-RUN
+                # ONLY — in live mode _close_entry_early already subtracts the
+                # real fill-based close cost, so subtracting the pre-close mark
+                # here too would double-count it. actual_*_stop_debit is set in
+                # both modes for journaling.
                 contracts = max(int(getattr(entry, "contracts", 1) or 1), 1)
                 if call_alive_pre:
                     entry.call_side_stopped = True
                     entry.actual_call_stop_debit = close_cost_call_real
-                    self.daily_state.total_realized_pnl -= close_cost_call_real
+                    if self.dry_run:
+                        self.daily_state.total_realized_pnl -= close_cost_call_real
                     setattr(entry, "call_side_pivot_closed", True)
                 if put_alive_pre:
                     entry.put_side_stopped = True
                     entry.actual_put_stop_debit = close_cost_put_real
-                    self.daily_state.total_realized_pnl -= close_cost_put_real
+                    if self.dry_run:
+                        self.daily_state.total_realized_pnl -= close_cost_put_real
                     setattr(entry, "put_side_pivot_closed", True)
                 # Tag close type for the dashboard. BREACH = Brandon GEX wall
                 # breach, distinct from TP and from a HYDRA credit+buffer stop.

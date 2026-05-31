@@ -40,6 +40,7 @@ def _make_hooks():
     h._stuck_open_since = {}
     h._stuck_open_last_reminder = {}
     h._stuck_open_reminders_today = {}
+    h._half_open_since = {}  # audit #49: stable-HALF_OPEN recovery tracking
     h._alerts = _CapturingAlerts()
     brk = _Breaker("closed")
     broker = type("Broker", (), {})()

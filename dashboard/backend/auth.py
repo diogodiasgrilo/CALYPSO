@@ -12,6 +12,7 @@ is configured. Set ``DASHBOARD_API_KEY`` on the VM to turn it on (and bind
 nginx to localhost / a VPN for defense in depth).
 """
 
+import hmac
 from typing import Optional
 
 from fastapi import Header, HTTPException, Query, status
@@ -30,7 +31,7 @@ async def require_api_key(
     if not settings.api_key:
         return
     provided = x_api_key or api_key
-    if provided != settings.api_key:
+    if not provided or not hmac.compare_digest(provided, settings.api_key):
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing API key",
