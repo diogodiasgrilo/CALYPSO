@@ -1,0 +1,17 @@
+[Unit]
+Description=HYDRA paper-account order-path smoke (through calypso-broker) — validates a real 1-contract paper fill before A goes live
+# Runs THROUGH the broker (BrokerClient → RPC) so it never opens a competing
+# IBKR session. Hard-gated to a DU (paper) account inside the script.
+After=calypso-broker.service network-online.target
+Wants=calypso-broker.service
+Requires=calypso-broker.service
+
+[Service]
+Type=oneshot
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+Environment="CALYPSO_BROKER_URL=http://127.0.0.1:8788"
+# --place = full 1-contract round trip (buy-to-open → confirm fill → close).
+# The script refuses to write unless the broker account is paper (DU…).
+ExecStart=/opt/calypso/.venv/bin/python /opt/calypso/scripts/broker_paper_smoke.py --place
