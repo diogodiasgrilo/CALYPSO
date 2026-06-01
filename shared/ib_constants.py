@@ -27,7 +27,9 @@ FIELD_THETA = "7310"
 FIELD_VEGA = "7311"
 FIELD_IV = "7633"
 FIELD_OI = "7638"
-FIELD_AVAILABILITY = "6509"  # 'R' real-time / 'D' delayed / 'Z' stale
+FIELD_AVAILABILITY = "6509"  # market-data availability; parse FIRST char only
+# (IBKR appends secondary/tertiary chars, e.g. 'RpB','Zp','DP'). First char:
+# R=RealTime, D=Delayed, Z=Frozen, Y=Frozen-Delayed, N=Not-Subscribed.
 
 
 # ─── Default field sets ──────────────────────────────────────────────────────

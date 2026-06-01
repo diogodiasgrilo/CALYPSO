@@ -705,18 +705,24 @@ class MarketData:
         if price > 0:
             avail = availability.upper() if isinstance(availability, str) else None
             self.last_spx_availability = avail
-            if avail == "Z":
-                # Stale upstream tick: keep the last price for display but do
-                # NOT refresh the freshness clock — fail closed.
+            # IBKR-audit #2/#4: parse only the FIRST char of 6509 (IBKR appends
+            # secondary/tertiary chars, e.g. 'RpB','Zp','DP'). First char:
+            # R=RealTime, D=Delayed, Z=Frozen, Y=Frozen-Delayed, N=Not-Subscribed.
+            first = avail[:1] if avail else None
+            if first in ("Z", "Y", "N"):
+                # NOT real-time (Frozen / Frozen-Delayed / Not-Subscribed): keep
+                # the last price for display but do NOT refresh the freshness
+                # clock — DATA-001 then trips so entries fail closed instead of
+                # trading on a frozen/unentitled feed.
                 logger.warning(
-                    "DATA-001: SPX quote flagged STALE by broker (availability="
-                    "'Z'); not refreshing freshness timestamp"
+                    "DATA-001: SPX quote is NOT real-time (6509=%r); not "
+                    "refreshing freshness timestamp", avail
                 )
                 return
-            if avail == "D":
+            if first == "D":
                 logger.warning(
-                    "DATA: SPX quote is DELAYED (availability='D') — proceeding "
-                    "but data may lag real-time"
+                    "DATA: SPX quote is DELAYED (6509=%r) — proceeding but data "
+                    "may lag real-time", avail
                 )
             self.spx_price = price
             self.last_spx_update = get_us_market_time()
@@ -754,16 +760,16 @@ class MarketData:
         if vix > 0:
             avail = availability.upper() if isinstance(availability, str) else None
             self.last_vix_availability = avail
-            if avail == "Z":
+            # IBKR-audit #2/#4: first char only (R/D/Z/Y/N + secondary chars).
+            first = avail[:1] if avail else None
+            if first in ("Z", "Y", "N"):
                 logger.warning(
-                    "DATA-001: VIX quote flagged STALE by broker (availability="
-                    "'Z'); not refreshing freshness timestamp"
+                    "DATA-001: VIX quote is NOT real-time (6509=%r); not "
+                    "refreshing freshness timestamp", avail
                 )
                 return
-            if avail == "D":
-                logger.warning(
-                    "DATA: VIX quote is DELAYED (availability='D')"
-                )
+            if first == "D":
+                logger.warning("DATA: VIX quote is DELAYED (6509=%r)", avail)
             self.vix = vix
             self.last_vix_update = get_us_market_time()
 

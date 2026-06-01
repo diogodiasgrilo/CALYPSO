@@ -1574,12 +1574,25 @@ class HydraStrategy(MEICStrategy):
             raw = self.broker.get_quote(int(instrument_id))
             if not raw:
                 return None
+            # IBKR-audit #11: surface the broker freshness flag (6509) on the
+            # legs we actually trade. First char R=RealTime / D=Delayed /
+            # Z=Frozen / Y=Frozen-Delayed / N=Not-Subscribed. Callers gate on it
+            # (see _option_quote_is_realtime); a non-'R' option quote during RTH
+            # means a delayed/frozen/unentitled OPRA feed — do not price a trade
+            # off it. Warn once-ish so a feed-entitlement problem is visible.
+            avail = raw.get("availability")
+            if avail and str(avail)[:1].upper() != "R":
+                logger.warning(
+                    "DATA_QUALITY: option %s quote NOT real-time (6509=%r) — "
+                    "delayed/frozen/unentitled OPRA feed?", instrument_id, avail
+                )
             return {
                 "bid": _f(raw.get("bid")),
                 "ask": _f(raw.get("ask")),
                 "last": _f(raw.get("last")),
                 "mid": _f(raw.get("mid")),
                 "mark": _f(raw.get("mark")),
+                "availability": avail,
             }
         except Exception as e:
             logger.warning(
@@ -1906,38 +1919,42 @@ class HydraStrategy(MEICStrategy):
             )
             return None
 
-    def _read_index_price(self, symbol: str) -> Optional[float]:
-        """Spot price of an index (``"SPX"`` / ``"VIX"``) from the
-        active broker (F7.1). None on failure.
+    def _read_index_price(self, symbol: str):
+        """Spot price + broker freshness flag of an index (``"SPX"`` / ``"VIX"``)
+        from the active broker (F7.1). Returns ``(price, availability)`` —
+        ``availability`` is IBKR's 6509 flag (first char R=RealTime / D=Delayed /
+        Z=Frozen / Y=Frozen-Delayed / N=Not-Subscribed, possibly with secondary
+        chars) — or ``(None, None)`` on failure.
 
-        VIX → ``IBClient.get_vix_price`` (it has the mark-fallback);
-        other indexes → resolve the index conid (``qualify_contract``
-        sec_type="IND") then ``get_quote`` and take mid → last → mark.
+        IBKR-audit #10: this used to return a bare float, so the ``availability``
+        plumbed into ``update_spx``/``update_vix`` (via ``_split_index_read``)
+        was always None and the freshness gate never fired. Now both SPX and VIX
+        resolve the index conid + ``get_quote`` and take mid → last → mark (the
+        same fallback ladder as ``get_vix_price`` — VIX's cash index delivers
+        only ``mark``), returning the broker's availability alongside.
 
-        Used by GAP-C ``_update_market_data`` (sets ``current_price`` /
-        VIX) and GAP-E ``_check_market_halt``.
+        Used by GAP-C ``_update_market_data`` and GAP-E ``_check_market_halt``.
         """
         try:
-            if symbol.upper() == "VIX":
-                return self.broker.get_vix_price()
             conid = self.broker.qualify_contract(symbol, sec_type="IND")
             q = self.broker.get_quote(conid)
             if not q:
-                return None
-            # P7-audit M10: explicit `is not None` ladder, not an
-            # `or`-chain — a legitimate 0.0 quote (rare for an index but
-            # possible during a halt) is a price, not a fallback trigger.
+                return (None, None)
+            avail = q.get("availability")
+            # P7-audit M10: explicit `is not None` ladder, not an `or`-chain —
+            # a legitimate 0.0 quote (rare for an index but possible during a
+            # halt) is a price, not a fallback trigger.
             for key in ("mid", "last", "mark"):
                 v = q.get(key)
                 if v is not None:
-                    return v
-            return None
+                    return (v, avail)
+            return (None, avail)
         except Exception as e:
             logger.warning(
                 f"_read_index_price({symbol}) failed "
                 f"({type(e).__name__}: {e})"
             )
-            return None
+            return (None, None)
 
     def _read_account_balance(self) -> Dict[str, Any]:
         """Account balance from the active broker (F7.1), keyed with the

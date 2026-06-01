@@ -217,13 +217,13 @@ class TestReadOptionQuote:
         fake_broker = MagicMock()
         fake_broker.get_quote.return_value = {
             "bid": 2.50, "ask": 2.55, "last": 2.52,
-            "mid": 2.525, "mark": 2.53,
+            "mid": 2.525, "mark": 2.53, "availability": "R",
         }
         s = self._make_bare_strategy(broker=fake_broker)
         quote = s._read_option_quote(883539497)
         assert quote == {
             "bid": 2.50, "ask": 2.55, "last": 2.52,
-            "mid": 2.525, "mark": 2.53,
+            "mid": 2.525, "mark": 2.53, "availability": "R",  # audit #11
         }
         # Confirms IB path: get_quote called with int conid, no asset_type
         fake_broker.get_quote.assert_called_once_with(883539497)
@@ -2597,34 +2597,38 @@ class TestReadIndexPrice:
         return s
 
     def test_ib_spx_via_qualify_and_quote(self):
+        # IBKR-audit #10: returns (price, availability) so update_spx can gate
+        # on the 6509 freshness flag.
         b = MagicMock()
         b.qualify_contract.return_value = 416904
-        b.get_quote.return_value = {"mid": 6800.5, "last": 6800.0}
+        b.get_quote.return_value = {"mid": 6800.5, "last": 6800.0, "availability": "R"}
         s = self._make(broker=b)
-        assert s._read_index_price("SPX") == 6800.5
+        assert s._read_index_price("SPX") == (6800.5, "R")
         b.qualify_contract.assert_called_once_with("SPX", sec_type="IND")
         b.get_quote.assert_called_once_with(416904)
 
     def test_ib_spx_falls_back_to_last(self):
         b = MagicMock()
         b.qualify_contract.return_value = 1
-        b.get_quote.return_value = {"mid": None, "last": 6799.0}
+        b.get_quote.return_value = {"mid": None, "last": 6799.0, "availability": "RpB"}
         s = self._make(broker=b)
-        assert s._read_index_price("SPX") == 6799.0
+        assert s._read_index_price("SPX") == (6799.0, "RpB")
 
-    def test_ib_vix_uses_get_vix_price(self):
+    def test_ib_vix_via_qualify_and_quote_with_availability(self):
+        # IBKR-audit #10: VIX now also resolves the conid + get_quote (same
+        # mid->last->mark ladder as get_vix_price) so its 6509 flag is surfaced.
         b = MagicMock()
-        b.get_vix_price.return_value = 18.4
+        b.qualify_contract.return_value = 13455763
+        b.get_quote.return_value = {"mid": None, "last": None, "mark": 18.4, "availability": "R"}
         s = self._make(broker=b)
-        assert s._read_index_price("VIX") == 18.4
-        b.get_vix_price.assert_called_once()
-        b.qualify_contract.assert_not_called()
+        assert s._read_index_price("VIX") == (18.4, "R")
+        b.qualify_contract.assert_called_once_with("VIX", sec_type="IND")
 
-    def test_exception_returns_none(self):
+    def test_exception_returns_none_tuple(self):
         b = MagicMock()
-        b.get_vix_price.side_effect = RuntimeError("blip")
+        b.qualify_contract.side_effect = RuntimeError("blip")
         s = self._make(broker=b)
-        assert s._read_index_price("VIX") is None
+        assert s._read_index_price("VIX") == (None, None)
 
 
 class TestReadAccountBalance:

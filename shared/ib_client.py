@@ -51,7 +51,8 @@ against ibind/client/ibkr_definitions.py):
    7638 = open interest
 
   Status fields:
-   6509 = market data availability (R=real-time, D=delayed, Z=stale)
+   6509 = market data availability; FIRST char: R=RealTime, D=Delayed,
+          Z=Frozen, Y=Frozen-Delayed, N=Not-Subscribed (+ secondary chars)
 """
 
 from __future__ import annotations
@@ -1788,7 +1789,8 @@ class IBClient:
         use the StreamingManager (Phase A.5).
 
         Returns dict with keys: bid, ask, last, mid, mark, bid_size, ask_size,
-        availability ('R'=real-time, 'D'=delayed, 'Z'=stale), conid, raw.
+        availability (6509 raw string; first char R=RealTime/D=Delayed/
+        Z=Frozen/Y=Frozen-Delayed/N=Not-Subscribed), conid, raw.
         Values are None when IBKR returns nothing for the field.
 
         SaxoClient.get_quote() equivalent. Caller doesn't need to know the
