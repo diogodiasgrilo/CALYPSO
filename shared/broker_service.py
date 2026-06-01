@@ -36,6 +36,8 @@ ALLOWED_METHODS = frozenset({
     "get_order_status", "get_closed_position_price",
     # orders (writes)
     "place_and_wait_for_fill", "cancel_order",
+    # operator override — clear the rate-limit penalty box (no restart needed)
+    "clear_rate_penalty",
 })
 
 

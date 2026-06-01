@@ -44,7 +44,9 @@ from dataclasses import dataclass
 from enum import Enum
 
 from bots.hydra.order_types import BuySell
-from shared.ib_client import IBClient, AmbiguousOrderError, _normalize_position_dict
+from shared.ib_client import (
+    IBClient, AmbiguousOrderError, RatePenaltyError, _normalize_position_dict,
+)
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_hours import get_us_market_time, is_early_close_day
 from shared.technical_indicators import get_current_ema, calculate_atr
@@ -3601,6 +3603,44 @@ class HydraStrategy(MEICStrategy):
                 )
                 return ("skip", True, estimated_call, estimated_put)
 
+    def _alert_rate_penalty(self, where: str, exc: Exception) -> None:
+        """Surface a rate-limit penalty box (429) that refused chain resolution.
+
+        With the family-aware box, stop-loss reads/closes are EXEMPT (they keep
+        running on the slow penalty gate), so held positions stay monitored —
+        what's lost is the ability to OPEN new entries until the box clears.
+        Without this, the refusal is swallowed as an empty chain (a silent
+        skipped entry window); a 429 should be operator-visible.
+        """
+        logger.critical(
+            f"_read_option_chain: IBKR rate penalty active during {where} — "
+            f"new entries blocked until it clears: {exc}"
+        )
+        # Dedup: _read_option_chain is re-attempted every ~1s scheduler tick for
+        # the whole entry-window grace, so without a cooldown one boxed window
+        # would emit dozens-to-hundreds of identical HIGH alerts (send_alert has
+        # no throttle). Fire at most once per ~2 min so the operator gets one
+        # clean signal, not a storm.
+        now = time.monotonic()
+        last = getattr(self, "_last_rate_penalty_alert_at", 0.0)
+        if now - last < 120:
+            return
+        self._last_rate_penalty_alert_at = now
+        try:
+            self.alert_service.send_alert(
+                alert_type=AlertType.API_ERROR,
+                title=f"{self.BOT_NAME} — IBKR rate penalty active",
+                message=(
+                    f"A 429 penalty box refused {where}. NEW ENTRIES are blocked "
+                    f"until it clears (~10 min); stop-loss monitoring of open "
+                    f"positions continues (risk reads are exempt). Investigate "
+                    f"the entry-window request burst if this recurs."
+                ),
+                priority=AlertPriority.HIGH,
+            )
+        except Exception as ae:
+            logger.warning(f"_alert_rate_penalty: alert send failed: {ae}")
+
     def _read_option_chain(
         self,
         expiry: str,
@@ -3643,6 +3683,9 @@ class HydraStrategy(MEICStrategy):
 
         try:
             strike_list = self.broker.get_option_chain("SPX", expiry_date)
+        except RatePenaltyError as e:
+            self._alert_rate_penalty("option-chain fetch", e)
+            return {}, {}
         except Exception as e:
             logger.warning(
                 f"_read_option_chain: IB strike-list fetch failed: {e}"
@@ -3672,6 +3715,9 @@ class HydraStrategy(MEICStrategy):
                 expiry=expiry_date,
                 strikes=sorted(snapped),
             )
+        except RatePenaltyError as e:
+            self._alert_rate_penalty("strike conid resolution", e)
+            return {}, {}
         except Exception as e:
             logger.warning(
                 f"_read_option_chain: qualify_option_strikes failed: {e}"

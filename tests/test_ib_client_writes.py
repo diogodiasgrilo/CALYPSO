@@ -10,6 +10,7 @@ All tests use mocked IbkrClient — no live IBKR calls.
 from __future__ import annotations
 
 import subprocess
+import time
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -25,6 +26,7 @@ from shared.ib_client import (
     IBClient,
     IBClientError,
     IBConfig,
+    RatePenaltyError,
 )
 from shared.ib_oauth import IBKRCredentials
 
@@ -1367,3 +1369,152 @@ class TestDefaultOrderAnswers:
         """We don't use native stop orders for 0DTE."""
         from ibind import QuestionType
         assert DEFAULT_ORDER_ANSWERS[QuestionType.STOP_ORDER_RISKS] is False
+
+
+# ─── 429 penalty box: family-aware exemption + concurrency cap (429-burst) ───
+
+
+class TestPenaltyBoxFamilyAware:
+    """The penalty box must REFUSE non-risk-critical calls (new entries / bulk
+    chain resolution) but EXEMPT risk-critical reads/closes (stop-loss monitoring
+    + the stop-close) so a 10-min box can't blind a held 0DTE position."""
+
+    def _box(self, client):
+        # Put the box ~5 min into the future.
+        client._rate_penalty_until = time.monotonic() + 300
+
+    def test_non_risk_critical_refused_with_typed_error(self, connected_client):
+        client, _ = connected_client
+        self._box(client)
+        with pytest.raises(RatePenaltyError):
+            client._ib_call("market", lambda: "should-not-run")
+
+    def test_risk_critical_is_exempt(self, connected_client):
+        client, _ = connected_client
+        self._box(client)
+        # Risk-critical call is NOT refused — it runs (routed via penalty gate).
+        out = client._ib_call("market", lambda: "ok", _risk_critical=True)
+        assert out == "ok"
+
+    def test_risk_critical_uses_slow_penalty_gate_when_boxed(self, connected_client):
+        client, _ = connected_client
+        self._box(client)
+        slept = []
+        with patch("shared.ib_client.time.sleep", side_effect=lambda s: slept.append(s)):
+            # Two back-to-back risk-critical calls while boxed → the 3 rps
+            # penalty gate must space the second by ~1/3s.
+            client._ib_call("market", lambda: 1, _risk_critical=True)
+            client._ib_call("market", lambda: 2, _risk_critical=True)
+        assert any(s > 0 for s in slept), "penalty gate should have paced the 2nd call"
+
+    def test_no_box_means_no_refusal(self, connected_client):
+        client, _ = connected_client
+        client._rate_penalty_until = 0.0
+        assert client._ib_call("market", lambda: "ok") == "ok"
+
+    def test_429_enters_box_and_reraises(self, connected_client):
+        client, _ = connected_client
+        client._rate_penalty_until = 0.0
+
+        class _E429(Exception):
+            status_code = 429
+
+        def _boom():
+            raise _E429("Too Many Requests")
+
+        with pytest.raises(Exception):
+            client._ib_call("market", _boom)
+        # The 429 handler armed the box.
+        assert client._rate_penalty_until > time.monotonic()
+
+    def test_clear_rate_penalty_unblocks(self, connected_client):
+        client, _ = connected_client
+        self._box(client)
+        remaining = client.clear_rate_penalty()
+        assert remaining > 0
+        assert client._rate_penalty_until == 0.0
+        # A normal (non-risk-critical) call now succeeds.
+        assert client._ib_call("market", lambda: "ok") == "ok"
+
+    def test_clear_when_not_boxed_returns_zero(self, connected_client):
+        client, _ = connected_client
+        client._rate_penalty_until = 0.0
+        assert client.clear_rate_penalty() == 0.0
+
+    def test_cancel_order_survives_the_box(self, connected_client):
+        """MUST-FIX: cancel_order is on the stop-close action path. During a box
+        it must NOT be refused (else an un-cancelled working close over-closes).
+        With _risk_critical it proceeds and returns True."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.cancel_order.return_value = _mk_result({"order_id": "O1"})
+        self._box(client)
+        assert client.cancel_order("O1") is True
+        mock_ibkr.cancel_order.assert_called_once()
+
+    def test_boxed_qualify_strikes_raises_not_empty(self, connected_client):
+        """MUST-FIX: a penalty box that activates during chain resolution must
+        ABORT qualify_option_strikes with RatePenaltyError (so the strategy
+        alerts), NOT be swallowed per-strike into a silent empty conid map."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
+        self._box(client)
+        with pytest.raises(RatePenaltyError):
+            client.qualify_option_strikes(
+                symbol="SPX", expiry=date(2026, 6, 1),
+                strikes=[5000, 5010, 5020], trading_class="SPXW",
+            )
+
+    def test_iserver_preflight_exempt_when_risk_critical(self, connected_client):
+        """SHOULD-FIX: the snapshot's mandatory /iserver/accounts preflight must
+        inherit risk-criticality so a reconnect-during-box can't blind stop
+        reads. Boxed + primed-reset + risk_critical → preflight is NOT refused."""
+        client, mock_ibkr = connected_client
+        client._iserver_primed = False
+        self._box(client)
+        # Non-risk-critical preflight IS refused during a box…
+        with pytest.raises(RatePenaltyError):
+            client._ensure_iserver_primed()
+        # …but the risk-critical variant (stop-loss snapshot path) is exempt.
+        client._iserver_primed = False
+        client._ensure_iserver_primed(_risk_critical=True)
+        assert client._iserver_primed is True
+
+
+class TestChainResolveConcurrencyCap:
+    """qualify_option_strikes' per-strike secdef fan-out must never have more
+    than CALYPSO_IBKR_CHAIN_CONCURRENCY calls in flight at once (the cross-bot
+    cap that prevents the entry-window 429 burst)."""
+
+    def test_concurrent_secdef_calls_capped(self, connected_client):
+        import threading
+        client, mock_ibkr = connected_client
+        # Shrink the global cap to make the bound easy to observe.
+        client._chain_resolve_sem = threading.BoundedSemaphore(2)
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
+
+        in_flight = {"now": 0, "max": 0}
+        lock = threading.Lock()
+
+        def _slow_secdef(*a, **k):
+            with lock:
+                in_flight["now"] += 1
+                in_flight["max"] = max(in_flight["max"], in_flight["now"])
+            time.sleep(0.02)
+            with lock:
+                in_flight["now"] -= 1
+            strike = int(k.get("strike", "5000"))
+            return _mk_result([
+                {"conid": strike * 10, "tradingClass": "SPXW",
+                 "maturityDate": "20260601", "right": "C"},
+            ])
+
+        mock_ibkr.search_secdef_info_by_conid.side_effect = _slow_secdef
+        client._allow_missing_expiry = False
+        client.qualify_option_strikes(
+            symbol="SPX", expiry=date(2026, 6, 1),
+            strikes=[5000, 5010, 5020, 5030, 5040, 5050, 5060, 5070],
+            trading_class="SPXW", max_workers=8,
+        )
+        assert in_flight["max"] <= 2, (
+            f"secdef concurrency exceeded the semaphore cap: {in_flight['max']} > 2"
+        )

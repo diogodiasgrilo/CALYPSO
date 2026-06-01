@@ -80,6 +80,8 @@ CASES = [
                                      "order_type": "LMT", "limit_price": 1.0, "coid": "x"},
      {"order_id": "O1", "status": "filled", "filled_quantity": 1, "avg_fill_price": 1.0, "raw": {}}),
     ("cancel_order", ("O1",), {}, True),
+    # operator override — returns seconds that were left on the penalty box
+    ("clear_rate_penalty", (), {}, 0.0),
 ]
 
 
@@ -160,6 +162,20 @@ class TestBrokerContract:
         client2 = BrokerClient(transport=lambda m, a, k: {"error": "boom", "type": "ValueError"})
         with pytest.raises(BrokerError):
             client2.get_vix_price()
+
+    def test_rate_penalty_error_survives_the_rpc_boundary(self):
+        """429-burst fix: a RatePenaltyError raised in the broker process must
+        re-raise as RatePenaltyError on the client side (not a generic
+        BrokerError) — else the strategy's `except RatePenaltyError` RISK-BLIND
+        alert can't distinguish a rate-degraded session from an empty tick."""
+        from shared.ib_client import RatePenaltyError
+
+        def pen_transport(method, args, kwargs):
+            return {"error": "penalty box active", "type": "RatePenaltyError"}
+
+        client = BrokerClient(transport=pen_transport)
+        with pytest.raises(RatePenaltyError):
+            client.get_option_chain("SPX", datetime.date(2026, 6, 1))
 
     def test_connect_ok_when_broker_holds_session(self):
         _, client = _make()

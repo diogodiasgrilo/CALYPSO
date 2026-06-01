@@ -581,6 +581,21 @@ class AmbiguousOrderError(IBClientError):
     """
 
 
+class RatePenaltyError(IBClientError):
+    """A NON-risk-critical IBKR call was refused because the rate-limit penalty
+    box is active (a 429 was recently seen; IBKR boxes the IP for ~10 min and
+    permanently blocks repeat offenders).
+
+    A distinct subclass (not a bare IBClientError) so it survives the broker
+    RPC boundary as ``type="RatePenaltyError"`` and the strategy can tell "the
+    session is rate-penalty-degraded" apart from "this strike just isn't
+    listed" / a transient empty tick — which matters when the bot holds live
+    positions and must alert that risk reads may be degraded. Risk-critical
+    calls (stop-loss reads, order status, stop-close placement) are NOT refused
+    with this — they re-route through the slow penalty gate instead.
+    """
+
+
 def _looks_like_410_gone(exc: Exception) -> bool:
     """True if `exc` represents an IBKR HTTP 410 Gone.
 
@@ -726,6 +741,20 @@ class IBClient:
         except ValueError:
             _rps = 0.0
         self._rate_gate = _RateGate(_rps) if _rps > 0 else None
+        # IBKR-audit (429-burst): cap the TOTAL concurrent option-chain secdef
+        # fan-out across ALL bots sharing this ONE session. qualify_option_strikes
+        # uses a per-call thread pool (max_workers up to 8); three bots resolving
+        # chains at the SAME entry window would otherwise put ~16-24 secdef calls
+        # in flight at once and saturate the rate gate's queue — which is what
+        # produced the 10:45 entry-window 429. This process-global bounded
+        # semaphore is the single cross-bot concurrency cap (default 4, env
+        # CALYPSO_IBKR_CHAIN_CONCURRENCY). It wraps ONLY the per-strike secdef
+        # call, so warm-cache strikes never hold a permit.
+        try:
+            _chain_cc = int(os.environ.get("CALYPSO_IBKR_CHAIN_CONCURRENCY", "4") or "4")
+        except ValueError:
+            _chain_cc = 4
+        self._chain_resolve_sem = threading.BoundedSemaphore(max(1, _chain_cc))
         # IBKR-audit #8: LST expiry (epoch ms) captured at connect; used by
         # ensure_connected to refresh proactively before the 24h TTL.
         self._lst_expires_ms: Optional[int] = None
@@ -733,6 +762,15 @@ class IBClient:
         # min (repeat offenders permanently blocked). We set this to a monotonic
         # deadline and fail-fast (no further IBKR calls) until it passes.
         self._rate_penalty_until: float = 0.0
+        # IBKR-audit #9 (live-safety): while the penalty box is active, RISK-
+        # CRITICAL calls (stop-loss quote reads, order status, open-orders/coid
+        # lookup, position reads, stop-CLOSE placement) are NOT refused — they
+        # re-route through this dedicated slow gate so stop-loss management of
+        # held 0DTE positions never goes dark for the full 10 min, yet stays far
+        # under IBKR's ~10/s so it cannot itself re-trigger a 429. ~3 rps (≈0.33s
+        # spacing) covers the 0.5s order-status poll loop without stretching it.
+        # Only NEW-entry / bulk-chain work is hard-refused during the box.
+        self._penalty_gate = _RateGate(3.0)
         # Polish Item 1: monotonically-increasing counter incremented in
         # _snapshot_with_preflight whenever the warmup-poll loop exits
         # without populated data (i.e., the snapshot stays metadata-only
@@ -1212,6 +1250,7 @@ class IBClient:
         self, family: str, fn, *args,
         _serialize: bool = True,
         _policy: Optional["RetryPolicy"] = None,
+        _risk_critical: bool = False,
         **kwargs,
     ):
         """Run an ibind call through retry + per-family circuit breaker + unwrap.
@@ -1265,7 +1304,18 @@ class IBClient:
             # concurrent qualify_option_strikes burst is paced too. The wait
             # happens before acquiring _call_lock so it never holds the
             # serialization lock while throttling.
-            if self._rate_gate is not None:
+            #
+            # While the penalty box is active, risk-critical calls (which the
+            # guard below let THROUGH instead of refusing) use the dedicated
+            # SLOW penalty gate (~3 rps) instead of the normal gate — keeping
+            # stop-loss reads/closes alive but far enough under IBKR's limit
+            # that they can't re-trigger a 429. Gate selection lives HERE (not
+            # in the guard) because this is where the gate actually runs.
+            boxed = bool(self._rate_penalty_until
+                         and time.monotonic() < self._rate_penalty_until)
+            if _risk_critical and boxed:
+                self._penalty_gate.acquire()
+            elif self._rate_gate is not None:
                 self._rate_gate.acquire()
             if _serialize:
                 with self._call_lock:
@@ -1282,13 +1332,24 @@ class IBClient:
         # IBKR-audit #9: a 429 puts the IP in a ~10-min penalty box (repeat
         # offenders permanently blocked). If we're in it, fail fast — issuing
         # MORE requests is futile (still boxed) and escalates toward a permanent
-        # ban. The 8 req/s rate gate should keep us out of the box entirely;
-        # this is the don't-make-a-slip-catastrophic backstop.
-        if self._rate_penalty_until and time.monotonic() < self._rate_penalty_until:
-            raise IBClientError(
+        # ban. The rate gate should keep us out of the box entirely; this is the
+        # don't-make-a-slip-catastrophic backstop.
+        #
+        # EXEMPTION (live-safety): risk-critical calls are NOT refused. Blinding
+        # stop-loss DETECTION (quote reads) and ACTION (order status + stop-close
+        # placement) for the full 10 min on held 0DTE positions is WORSE than the
+        # box itself — an undefended breached short can run to max loss in well
+        # under 10 min. Exempt calls fall through and _invoke routes them through
+        # the slow ~3 rps penalty gate so they stay alive without re-triggering a
+        # 429. Only NEW-entry / bulk-chain work (the burst source) is refused.
+        if (not _risk_critical
+                and self._rate_penalty_until
+                and time.monotonic() < self._rate_penalty_until):
+            raise RatePenaltyError(
                 f"IBKR rate-limit penalty box active "
                 f"(~{int(self._rate_penalty_until - time.monotonic())}s left) — "
-                f"refusing {family} call to avoid escalation toward a permanent block"
+                f"refusing non-risk-critical {family} call to avoid escalation "
+                f"toward a permanent block"
             )
         wrapped = retry_with_backoff(
             policy=_policy or self._retry_policy, breaker=breaker,
@@ -1307,6 +1368,27 @@ class IBClient:
                     family, int(_RATE_PENALTY_COOLDOWN_S),
                 )
             raise
+
+    def clear_rate_penalty(self) -> float:
+        """Operator override: clear the rate-limit penalty box immediately.
+
+        The box otherwise only clears by waiting out the full monotonic
+        ``_RATE_PENALTY_COOLDOWN_S`` (~10 min). Exposed via the broker RPC so
+        an operator who has confirmed IBKR lifted the IP penalty (or who knows
+        the 429 was a one-off, e.g. caused by manual probing) can resume NEW
+        entries without a broker restart. Returns the number of seconds that
+        remained on the box (0.0 if it was not active). Use with care — only
+        clear it when you're confident the rate pressure is gone, or you risk
+        re-tripping IBKR toward a permanent block.
+        """
+        remaining = max(0.0, self._rate_penalty_until - time.monotonic())
+        self._rate_penalty_until = 0.0
+        if remaining > 0:
+            logger.warning(
+                "clear_rate_penalty: penalty box cleared by operator with "
+                "~%ds remaining", int(remaining),
+            )
+        return remaining
 
     @property
     def retry_policy(self) -> RetryPolicy:
@@ -1702,12 +1784,16 @@ class IBClient:
 
                 # One secdef_info call resolves BOTH rights for the
                 # strike (probe 4). _serialize=False → concurrent path.
-                secdef_data = self._ib_call(
-                    "market", self._client.search_secdef_info_by_conid,
-                    _serialize=False,
-                    conid=str(underlying_conid), sec_type="OPT",
-                    month=month, exchange="CBOE", strike=str(strike),
-                ) or []
+                # Cross-bot concurrency cap (429-burst fix): only the actual
+                # secdef call holds a permit — cache hits already returned
+                # above, so warm strikes never serialize behind this.
+                with self._chain_resolve_sem:
+                    secdef_data = self._ib_call(
+                        "market", self._client.search_secdef_info_by_conid,
+                        _serialize=False,
+                        conid=str(underlying_conid), sec_type="OPT",
+                        month=month, exchange="CBOE", strike=str(strike),
+                    ) or []
                 rows = secdef_data if isinstance(secdef_data, list) else [secdef_data]
 
                 resolved: dict[tuple[float, str], int] = {}
@@ -1747,10 +1833,15 @@ class IBClient:
                     if raw_conid:
                         resolved[(strike, right)] = int(raw_conid)
                 return resolved
-            except CircuitBreakerOpen:
-                # Broker-down — must NOT be swallowed as "strike absent".
-                # Propagate so the whole batch aborts and the caller can
-                # tell a degraded broker from a genuinely empty chain.
+            except (CircuitBreakerOpen, RatePenaltyError):
+                # Broker-down (breaker) or rate-limit penalty box — must NOT be
+                # swallowed as "strike absent". Propagate so the WHOLE batch
+                # aborts and the caller (_read_option_chain) can tell a degraded
+                # broker / boxed session from a genuinely empty chain and alert.
+                # RatePenaltyError especially: without this re-raise the generic
+                # handler below returns {} per strike, qualify_option_strikes
+                # yields an empty map, and the strategy's `except RatePenaltyError`
+                # would be DEAD CODE (silent skipped entry, no alert).
                 raise
             except Exception as exc:
                 # A genuine per-strike failure (e.g. 400 "strike not
@@ -1782,7 +1873,7 @@ class IBClient:
 
     # ─── Quotes (read methods) ────────────────────────────────────────────
 
-    def _ensure_iserver_primed(self) -> None:
+    def _ensure_iserver_primed(self, _risk_critical: bool = False) -> None:
         """Prime the /iserver brokerage session, once per session.
 
         IBKR requires `/iserver/accounts` to be called before
@@ -1804,10 +1895,16 @@ class IBClient:
         with self._call_lock:
             if self._iserver_primed:
                 return
-            self._ib_call("session", self._client.receive_brokerage_accounts)
+            # Inherit risk-criticality from the caller: a risk-critical snapshot
+            # (stop-loss read) reaching here after a reconnect-during-box must
+            # NOT be blocked by this mandatory preflight, or the snapshot — and
+            # thus stop-loss price reads — go dark for the whole 10-min box.
+            self._ib_call("session", self._client.receive_brokerage_accounts,
+                          _risk_critical=_risk_critical)
             self._iserver_primed = True
 
-    def _snapshot_with_preflight(self, conids: str, fields: list[str]):
+    def _snapshot_with_preflight(self, conids: str, fields: list[str],
+                                 _risk_critical: bool = False):
         """Call live_marketdata_snapshot with the required pre-flights.
 
         Two pre-flights are required:
@@ -1840,14 +1937,17 @@ class IBClient:
         production because HYDRA reads quotes on demand and a silent
         all-None response would break credit estimation + stop monitoring.
         """
-        # Pre-flight 1: /iserver/accounts (required, once per session).
-        self._ensure_iserver_primed()
+        # Pre-flight 1: /iserver/accounts (required, once per session). Inherit
+        # risk-criticality so a stop-loss read's mandatory preflight survives a
+        # reconnect-during-box (else the snapshot fails and stop reads go dark).
+        self._ensure_iserver_primed(_risk_critical=_risk_critical)
 
         # Pre-flight 2: ibind's snapshot priming — first call arms the
         # conid's snapshot cache, it returns no data itself.
         self._ib_call(
             "market", self._client.live_marketdata_snapshot,
             conids=conids, fields=fields,
+            _risk_critical=_risk_critical,
         )
 
         # Requested conids — `conids` is the comma-separated string the
@@ -1866,6 +1966,7 @@ class IBClient:
             data = self._ib_call(
                 "market", self._client.live_marketdata_snapshot,
                 conids=conids, fields=fields,
+                _risk_critical=_risk_critical,
             )
             ready = _snapshot_ready_conids(data)
             if requested:
@@ -1962,7 +2063,11 @@ class IBClient:
         """
         self._require_connected()
         fields = list(fields) if fields else DEFAULT_QUOTE_FIELDS
-        data = self._snapshot_with_preflight(str(conid), fields)
+        # Risk-critical: this is the stop-loss monitor's price source. It must
+        # stay alive (via the slow penalty gate) if the rate-penalty box is
+        # active, so a held 0DTE position is never left unmonitored. New entries
+        # are still blocked during a box because CHAIN resolution is refused.
+        data = self._snapshot_with_preflight(str(conid), fields, _risk_critical=True)
         # IBKR returns a list with one entry per conid
         if isinstance(data, list) and data:
             row = data[0]
@@ -1998,8 +2103,10 @@ class IBClient:
             raise IBClientError(
                 f"get_quotes_batch: max 50 fields per call, got {len(fields)}"
             )
+        # Risk-critical: stop-loss monitoring reads spread leg values via this
+        # batch path — keep it alive on the slow penalty gate during a box.
         data = self._snapshot_with_preflight(
-            ",".join(str(c) for c in conids), fields,
+            ",".join(str(c) for c in conids), fields, _risk_critical=True,
         )
         rows = data if isinstance(data, list) else [data]
         # IBKR doesn't guarantee response order matches request order;
@@ -2234,6 +2341,7 @@ class IBClient:
             data = self._ib_call(
                 "portfolio", self._client.positions,
                 account_id=self.account_id, page=page,
+                _risk_critical=True,  # stop-mgmt: must read held positions during a box
             )
             if not data:
                 break
@@ -2498,13 +2606,17 @@ class IBClient:
         self._require_connected()
         # Cache-clear preflight + real read, each independently
         # retry+breaker wrapped (see _snapshot_with_preflight rationale).
+        # Risk-critical: the double-execution guard (_find_order_by_coid) and
+        # stop-close reconciliation depend on reading live orders during a box.
         self._ib_call(
             "orders", self._client.live_orders,
             account_id=self.account_id, force=True,
+            _risk_critical=True,
         )
         data = self._ib_call(
             "orders", self._client.live_orders,
             account_id=self.account_id,
+            _risk_critical=True,
         ) or {}
         # ibind returns {"orders": [...]} wrapping
         if isinstance(data, dict):
@@ -2517,9 +2629,13 @@ class IBClient:
         SaxoClient.get_order_status() equivalent.
         """
         self._require_connected()
+        # Risk-critical: place_and_wait_for_fill polls this to confirm a
+        # stop-close fill; it must keep polling during a box (on the slow
+        # penalty gate) or a 0DTE stop-close could hang unconfirmed.
         return self._ib_call(
             "orders", self._client.order_status,
             order_id=str(order_id),
+            _risk_critical=True,
         ) or {}
 
     # ─── Historical bars ─────────────────────────────────────────────────
@@ -3106,6 +3222,12 @@ class IBClient:
                 "orders", self._client.cancel_order,
                 order_id=str(order_id),
                 account_id=self.account_id,
+                # Risk-critical: a cancel on the stop-CLOSE path flattens a
+                # still-working close before the residual is re-placed. If the
+                # penalty box refused it, the un-cancelled remainder could fill
+                # late → over-close / new naked exposure. Low-volume write, never
+                # a 429 burst source — must stay alive on the penalty gate.
+                _risk_critical=True,
             )
             logger.info("Order cancel: order_id=%s", order_id)
             return True
@@ -3367,6 +3489,8 @@ class IBClient:
             return self._ib_call(
                 "orders", self._client.place_order,
                 _policy=no_retry,
+                _risk_critical=True,  # a stop-CLOSE must place during a box;
+                # new ENTRIES can't reach here in a box anyway (chain refused)
                 order_request=order,
                 answers=a,
                 account_id=self.account_id,

@@ -108,6 +108,14 @@ class BrokerClient:
             if etype == "AmbiguousOrderError":
                 from shared.ib_client import AmbiguousOrderError
                 raise AmbiguousOrderError(msg)
+            # RatePenaltyError signals "the rate-limit penalty box refused a
+            # NON-risk-critical call". The strategy branches on its CLASS to tell
+            # a rate-degraded session apart from a transient empty tick and emit a
+            # RISK-BLIND alert; if it collapsed to a generic BrokerError the alert
+            # could not distinguish it. Re-raise the same class the bot imports.
+            if etype == "RatePenaltyError":
+                from shared.ib_client import RatePenaltyError
+                raise RatePenaltyError(msg)
             raise BrokerError(msg)
         # Reverse any JSON-safe transforms the broker applied to non-JSON-native
         # return shapes (e.g. qualify_option_strikes' tuple-keyed dict) so the

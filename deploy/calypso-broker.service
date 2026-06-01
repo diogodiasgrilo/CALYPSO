@@ -21,10 +21,16 @@ Environment="GCP_PROJECT=calypso-trading-bot"
 Environment="CALYPSO_BROKER_HOST=127.0.0.1"
 Environment="CALYPSO_BROKER_PORT=8788"
 # Global IBKR request-rate cap (req/s) across this one shared session. IBKR's
-# Web API limit is ~10 req/s per authenticated session; 8 leaves 20% headroom
-# so the combined A/B/C + health + smoke traffic can't 429-storm and trip the
-# breaker during overlapping entry windows. Read by shared.ib_client._RateGate.
-Environment="CALYPSO_IBKR_MAX_RPS=8"
+# Web API limit is ~10 req/s per authenticated session. 8 (20% headroom) was
+# EMPIRICALLY TOO THIN — it 429'd at the 2026-06-01 10:45 ET entry window when
+# B+C resolved chains concurrently: the gate spaces STARTS on broker time, but
+# ThreadPool+TLS+WAN jitter re-clusters them so 9-10 ARRIVE at IBKR inside one
+# rolling second. 5 (50% headroom) absorbs that re-clustering; the entry burst
+# is short so the extra drain costs only ~1-2s/window. Paired with the global
+# chain-concurrency semaphore (CALYPSO_IBKR_CHAIN_CONCURRENCY) that caps the
+# cross-bot secdef fan-out. Read by shared.ib_client._RateGate.
+Environment="CALYPSO_IBKR_MAX_RPS=5"
+Environment="CALYPSO_IBKR_CHAIN_CONCURRENCY=4"
 
 # ─── IBKR OAuth 1.0a credentials ────────────────────────────────────────────
 # This broker is the single OAuth identity / session owner: all three hydra*

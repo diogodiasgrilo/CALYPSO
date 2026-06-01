@@ -40,6 +40,14 @@ _MIN_CALL_INTERVAL_S = float(os.environ.get("CALYPSO_CLAUDE_MIN_INTERVAL_S", "35
 _pace_lock = threading.Lock()
 _last_call_at = 0.0
 
+# Per-request HTTP timeout for the Anthropic client. Default 120s suits the
+# short analyst/journal calls. CLIO asks for a single LARGE generation
+# (max_tokens=12288 against ~62k input chars) that legitimately needs several
+# minutes — at 120s the SDK times out, retries, then raises APITimeoutError and
+# the run fails. CLIO's unit sets CALYPSO_CLAUDE_TIMEOUT_S=600 to give that one
+# big call room; every other consumer keeps the 120s default.
+_REQUEST_TIMEOUT_S = float(os.environ.get("CALYPSO_CLAUDE_TIMEOUT_S", "120.0"))
+
 
 def get_anthropic_client(config: Optional[Dict[str, Any]] = None):
     """
@@ -93,7 +101,7 @@ def get_anthropic_client(config: Optional[Dict[str, Any]] = None):
     # max_retries above the SDK default (2) so a transient 429/overload is
     # ridden out with exponential backoff rather than surfacing as a failed
     # agent report.
-    return anthropic.Anthropic(api_key=api_key, timeout=120.0, max_retries=5)
+    return anthropic.Anthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_S, max_retries=5)
 
 
 def ask_claude(
