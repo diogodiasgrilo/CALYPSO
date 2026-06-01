@@ -15,3 +15,9 @@ Environment="CALYPSO_BROKER_URL=http://127.0.0.1:8788"
 # --place = full 1-contract round trip (buy-to-open → confirm fill → close).
 # The script refuses to write unless the broker account is paper (DU…).
 ExecStart=/opt/calypso/.venv/bin/python /opt/calypso/scripts/broker_paper_smoke.py --place
+# CONDITIONAL AUTO-FLIP. systemd runs ExecStartPost ONLY if ExecStart exited 0
+# (a full paper round-trip PASS). The `+` runs it as root (this unit is
+# User=calypso, which cannot restart hydra). It flips ONLY variant A to
+# dry_run:false and restarts it; B/C stay dry-run. If the smoke FAILS, this
+# never runs and A stays in dry-run.
+ExecStartPost=+/opt/calypso/scripts/flip_a_live.sh

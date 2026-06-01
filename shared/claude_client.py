@@ -17,6 +17,8 @@ Usage:
 
 import logging
 import os
+import threading
+import time
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,16 @@ logger = logging.getLogger(__name__)
 # Default model — best cost/quality balance for analysis tasks
 DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_MAX_TOKENS = 4096
+
+# Intra-process call pacing (2026-05-31). Agents like HOMER fire several
+# ~13k-input-token calls back-to-back in a single run; that burst tripped the
+# account's per-minute token rate limit → HTTP 429 (the SDK auto-retried and
+# succeeded, but it generated a rate-limit email). Space consecutive ask_claude
+# calls within a process so the burst stays under the per-minute limit. Tunable
+# via env; the agents are batch/non-latency-sensitive so a few seconds is free.
+_MIN_CALL_INTERVAL_S = float(os.environ.get("CALYPSO_CLAUDE_MIN_INTERVAL_S", "6.0"))
+_pace_lock = threading.Lock()
+_last_call_at = 0.0
 
 
 def get_anthropic_client(config: Optional[Dict[str, Any]] = None):
@@ -75,7 +87,10 @@ def get_anthropic_client(config: Optional[Dict[str, Any]] = None):
         )
         return None
 
-    return anthropic.Anthropic(api_key=api_key, timeout=120.0)
+    # max_retries above the SDK default (2) so a transient 429/overload is
+    # ridden out with exponential backoff rather than surfacing as a failed
+    # agent report.
+    return anthropic.Anthropic(api_key=api_key, timeout=120.0, max_retries=5)
 
 
 def ask_claude(
@@ -106,6 +121,18 @@ def ask_claude(
         model = DEFAULT_MODEL
     if max_tokens is None:
         max_tokens = DEFAULT_MAX_TOKENS
+
+    # Pace consecutive calls within this process so a multi-call agent run
+    # (e.g. HOMER's ~5 back-to-back narrative calls) does not burst past the
+    # account's per-minute token limit and trigger a 429 + rate-limit email.
+    global _last_call_at
+    if _MIN_CALL_INTERVAL_S > 0:
+        with _pace_lock:
+            wait = _last_call_at + _MIN_CALL_INTERVAL_S - time.monotonic()
+            if wait > 0:
+                logger.debug("ask_claude: pacing %.1fs to stay under rate limit", wait)
+                time.sleep(wait)
+            _last_call_at = time.monotonic()
 
     try:
         response = client.messages.create(
