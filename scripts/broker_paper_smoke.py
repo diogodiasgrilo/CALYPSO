@@ -119,10 +119,27 @@ def main() -> int:
         log("CHECK-ONLY complete — reads + safety gate + chain/quote OK; NO order placed.")
         _alert(True, out); return 0
 
-    # ── full 1-contract round trip (RTH only) ───────────────────────────────
-    avail = str(q.get("availability") or "")
-    if "Z" in avail or q.get("ask") in (None, 0):
-        log(f"ABORT place: quote not real-time (availability={avail!r}, ask={q.get('ask')}) — run during RTH")
+    # ── GO-LIVE ENTITLEMENT GATE (IBKR audit #2/#3/#4) ──────────────────────
+    # Require REAL-TIME data — 6509 availability FIRST char == 'R' — on SPX, VIX,
+    # AND the SPXW leg before placing (and therefore before the ExecStartPost
+    # auto-flip). A paper account missing the SPX-index / OPRA real-time
+    # entitlement returns Frozen ('Z'/'Y'), Delayed ('D'), or Not-subscribed
+    # ('N'); flipping A live onto non-real-time data would trade on stale prices.
+    # Parse only the first char (IBKR appends snapshot/book chars, e.g. 'RpB').
+    def _is_rt(quote, label):
+        a = str((quote or {}).get("availability") or "")
+        ok = a[:1].upper() == "R"
+        log(f"  realtime[{label}]: 6509={a!r} -> {'R (OK)' if ok else 'NOT real-time'}")
+        return ok
+    try:
+        vix_q = bc.get_quote(bc.qualify_contract("VIX", sec_type="IND"))
+    except Exception as e:
+        log(f"FAIL: VIX quote for realtime gate: {type(e).__name__}: {e}"); _alert(False, out); return 5
+    rt_spx, rt_vix, rt_leg = _is_rt(spx, "SPX"), _is_rt(vix_q, "VIX"), _is_rt(q, "SPXW-leg")
+    if not (rt_spx and rt_vix and rt_leg) or q.get("ask") in (None, 0):
+        log("ABORT place: market data is NOT real-time (6509 first-char != 'R') on SPX/VIX/leg, "
+            "or no ask — refusing to place a paper order and refusing the auto-flip onto frozen/"
+            "delayed/unentitled data. Check the account's SPX-index + OPRA real-time subscriptions.")
         _alert(False, out); return 5
 
     nonce = datetime.now().strftime("%H%M%S")

@@ -2486,9 +2486,13 @@ class IBClient:
             "price you receive in credit" when SELLing a combo.
             (See https://www.ibkrguides.com/traderworkstation/notes-on-combination-orders.htm)
 
-        Atomic-fill enforcement: CP API has NO direct NonGuaranteed flag
-        equivalent to TWS API's. Caller monitors `sor` WebSocket for
-        partial-fill detection — that's Phase A.5 / A.7 territory.
+        Atomic-fill enforcement: a combo on the CP API fills atomically on the
+        complex (BAG) book, and the order ticket DOES expose `allOrNone`
+        (boolean) per the IBKR REST OpenAPI spec — so if this combo path is ever
+        promoted to the live entry, pass allOrNone=True via OrderRequest rather
+        than building a WebSocket partial-fill watcher. (NOTE: the live entry
+        currently legs in via 4 single-leg place_and_wait_for_fill calls — this
+        combo path is not yet RPC-exposed; see the broker ALLOWLIST.)
 
         Args:
             expiry: option expiry date (today for 0DTE)
