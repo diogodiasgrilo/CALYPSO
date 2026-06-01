@@ -10488,6 +10488,78 @@ class HydraStrategy(MEICStrategy):
             and _leg_gone(getattr(entry, f"long_{side}_uic", None))
         )
 
+    def _settlement_spx_level(self) -> Optional[float]:
+        """Best-effort SPX level at settlement, used to detect ITM-settled
+        shorts (IBKR-audit #5). Returns None if no usable read.
+
+        SPXW is PM-CASH-settled against the SPX close, so the index level at
+        settlement time is the right reference. Freshness is intentionally
+        IGNORED here: at/after the close the 6509 flag is 'Z' (Frozen) — that
+        frozen value IS the settlement reference we want, so a non-'R' flag
+        must NOT suppress it (unlike intraday reads, where cluster A rejects
+        stale data). Any exception or missing price → None (caller falls back
+        to the legacy worthless assumption rather than crashing settlement).
+        """
+        try:
+            price, _avail = self._read_index_price("SPX")
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(f"  Settlement SPX read failed ({exc}); "
+                           f"cannot verify ITM settlement, assuming worthless")
+            return None
+        if price is None or price <= 0:
+            logger.warning("  Settlement SPX read returned no price; "
+                           "cannot verify ITM settlement, assuming worthless")
+            return None
+        return float(price)
+
+    def _settlement_booked_pnl(
+        self, entry, side: str, settlement_level: Optional[float],
+    ) -> tuple[float, bool]:
+        """Dollar P&L to book for a side whose positions are gone at settlement.
+
+        IBKR-audit #5: the bot assumed every 'gone' short expired WORTHLESS
+        (full credit kept = profit). But an ITM short at PM settlement is
+        cash-settled and disappears from the book in exactly the same way — the
+        ONLY signal it was a LOSS is settlement-vs-strike. On Saxo, Fix #87
+        cross-checked actual settlement P&L; on IBKR that cross-check is a
+        no-op (no real-time closed-positions report), so without this an
+        ITM-settled short is mis-booked as a full-credit profit.
+
+        Returns ``(booked_pnl, worthless)``. ``worthless`` is True when the side
+        finished OTM or the settlement level is unavailable — then ``booked_pnl``
+        is the full credit kept. Otherwise (ITM) ``booked_pnl`` is
+        ``credit - cash_settled_intrinsic``, which can be NEGATIVE, and the ITM
+        detail is logged here. Credits and the returned value are total dollars
+        (points × 100 × contracts), matching how credits are stored.
+        """
+        if side == "call":
+            credit = entry.call_spread_credit
+            short_k = entry.short_call_strike
+            long_k = entry.long_call_strike
+            itm_points = (settlement_level - short_k) if settlement_level else 0.0
+        else:
+            credit = entry.put_spread_credit
+            short_k = entry.short_put_strike
+            long_k = entry.long_put_strike
+            itm_points = (short_k - settlement_level) if settlement_level else 0.0
+
+        # Can't verify, no short leg, or finished OTM → legacy worthless credit.
+        if settlement_level is None or short_k <= 0 or itm_points <= 0:
+            return credit, True
+
+        width = abs(long_k - short_k)
+        intrinsic_pts = min(itm_points, width) if width > 0 else itm_points
+        settle_value = intrinsic_pts * 100 * max(int(getattr(entry, "contracts", 1)), 1)
+        booked = credit - settle_value
+        logger.warning(
+            f"  Entry #{entry.entry_number} {side} side settled ITM "
+            f"(SPX={settlement_level:.2f} vs short {short_k:.0f}, "
+            f"{intrinsic_pts:.2f}pt intrinsic): booking ${booked:.2f} "
+            f"(credit ${credit:.2f} - settlement ${settle_value:.2f}) — NOT a "
+            f"worthless expiry"
+        )
+        return booked, False
+
     def _process_expired_credits(self) -> float:
         """
         FIX #77: Process entries with un-finalized sides as expired.
@@ -10518,6 +10590,16 @@ class HydraStrategy(MEICStrategy):
             else None
         )
 
+        # IBKR-audit #5: SPX settlement level, to detect ITM-settled shorts that
+        # would otherwise be mis-booked as worthless profit. Only read on the
+        # real IBKR path — None in dry-run / Saxo, where the booked-PnL helper
+        # falls back to the legacy full-credit assumption.
+        settlement_level = (
+            self._settlement_spx_level()
+            if (self.broker is not None and not self.dry_run)
+            else None
+        )
+
         for entry in self.daily_state.entries:
             # Check call side
             call_had_positions = entry.short_call_strike > 0 or entry.long_call_strike > 0
@@ -10528,12 +10610,17 @@ class HydraStrategy(MEICStrategy):
             if call_had_positions and call_positions_gone:
                 if not entry.call_side_stopped and not entry.call_side_expired and not entry.call_side_skipped:
                     entry.call_side_expired = True
-                    credit = entry.call_spread_credit
-                    if credit > 0:
-                        expired_call_credit += credit
+                    # IBKR-audit #5: book actual settlement P&L (full credit if
+                    # OTM/unverifiable; credit - intrinsic if ITM-settled).
+                    booked, worthless = self._settlement_booked_pnl(
+                        entry, "call", settlement_level,
+                    )
+                    if booked != 0:
+                        expired_call_credit += booked
+                    if worthless and booked > 0:
                         logger.info(
                             f"  Entry #{entry.entry_number} call side EXPIRED worthless: "
-                            f"+${credit:.2f} profit (credit kept)"
+                            f"+${booked:.2f} profit (credit kept)"
                         )
                     # Capital-deployed sweep needs a close_time on every closed
                     # entry to free margin in its interval calculation. Without
@@ -10555,12 +10642,17 @@ class HydraStrategy(MEICStrategy):
             if put_had_positions and put_positions_gone:
                 if not entry.put_side_stopped and not entry.put_side_expired and not entry.put_side_skipped:
                     entry.put_side_expired = True
-                    credit = entry.put_spread_credit
-                    if credit > 0:
-                        expired_put_credit += credit
+                    # IBKR-audit #5: book actual settlement P&L (full credit if
+                    # OTM/unverifiable; credit - intrinsic if ITM-settled).
+                    booked, worthless = self._settlement_booked_pnl(
+                        entry, "put", settlement_level,
+                    )
+                    if booked != 0:
+                        expired_put_credit += booked
+                    if worthless and booked > 0:
                         logger.info(
                             f"  Entry #{entry.entry_number} put side EXPIRED worthless: "
-                            f"+${credit:.2f} profit (credit kept)"
+                            f"+${booked:.2f} profit (credit kept)"
                         )
                     # Same rationale as the call-side block above.
                     if not getattr(entry, "close_time", ""):
@@ -10582,10 +10674,14 @@ class HydraStrategy(MEICStrategy):
                     entry.is_complete = True
 
         total_expired_credit = expired_call_credit + expired_put_credit
-        if total_expired_credit > 0:
+        # IBKR-audit #5: book ANY nonzero net, not just positive — an ITM-settled
+        # side contributes a LOSS, and the net (or an individually-negative side)
+        # must still be applied. The old `> 0` guard silently dropped a
+        # net-negative settlement, overstating realized P&L.
+        if total_expired_credit != 0:
             self.daily_state.total_realized_pnl += total_expired_credit
             logger.info(
-                f"POS-004: Added ${total_expired_credit:.2f} from expired positions to realized P&L "
+                f"POS-004: Booked ${total_expired_credit:.2f} from settled positions to realized P&L "
                 f"(Calls: ${expired_call_credit:.2f}, Puts: ${expired_put_credit:.2f})"
             )
             logger.info(

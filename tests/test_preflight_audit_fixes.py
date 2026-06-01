@@ -46,7 +46,6 @@ class TestIsRetryableTokenMatch:
             Exception("HTTP 500"), Exception("HTTP 502"),
             Exception("HTTP 503"), Exception("HTTP 504"),
             Exception("503 Service Unavailable"),
-            Exception("429 Too Many Requests"),
         ):
             assert self.pol.is_retryable(exc), f"{exc!r} should be retryable"
         # A CONTEXT-FREE bare number is intentionally NOT retryable (audit #50):
@@ -54,6 +53,9 @@ class TestIsRetryableTokenMatch:
         # carry a structured status_code (ExternalBrokerError) or HTTP context
         # ("HTTP 503" / "503 Service Unavailable"), both still retried above.
         assert not self.pol.is_retryable(Exception("503"))
+        # 429 is NOT retryable (IBKR-audit #9): retrying triggers IBKR's ~10-min
+        # penalty box / permanent-block escalation; _ib_call fail-fasts instead.
+        assert not self.pol.is_retryable(Exception("429 Too Many Requests"))
 
     def test_embedded_digit_runs_not_retryable(self):
         """The bug: '503'/'504'/'500' embedded inside a larger number was

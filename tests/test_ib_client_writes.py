@@ -172,6 +172,22 @@ class TestRoundToIncrement:
         assert IBClient._round_to_increment(0.123, 0.01) == pytest.approx(0.12)
 
 
+class TestSpxOptionTick:
+    """IBKR-audit #16: SPX/SPXW single-leg tiered tick ($0.05 <$3, $0.10 ≥$3)."""
+
+    def test_below_three_is_nickel(self):
+        assert IBClient._spx_option_tick(0.05) == pytest.approx(0.05)
+        assert IBClient._spx_option_tick(2.95) == pytest.approx(0.05)
+
+    def test_at_or_above_three_is_dime(self):
+        assert IBClient._spx_option_tick(3.0) == pytest.approx(0.10)
+        assert IBClient._spx_option_tick(7.40) == pytest.approx(0.10)
+
+    def test_sign_safe(self):
+        # Net-debit/credit signs shouldn't flip the tier.
+        assert IBClient._spx_option_tick(-4.2) == pytest.approx(0.10)
+
+
 # ─── place_iron_condor ─────────────────────────────────────────────────────
 
 
@@ -469,6 +485,33 @@ class TestPlaceOrder:
             price=5.37, price_increment=0,
         )
         assert mock_ibkr.place_order.call_args.kwargs["order_request"].price == pytest.approx(5.37)
+
+    def test_default_uses_spx_tiered_tick_below_three(self, connected_client):
+        """IBKR-audit #16: default rounding for a sub-$3 single leg is the
+        $0.05 grid ($1.32 stays $1.30, not $1.35)."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        client.place_order(conid=1, side="BUY", quantity=1, order_type="LMT", price=1.32)
+        assert mock_ibkr.place_order.call_args.kwargs["order_request"].price == pytest.approx(1.30)
+
+    def test_default_uses_spx_tiered_tick_at_or_above_three(self, connected_client):
+        """IBKR-audit #16: a $3+ single leg rounds to the legal $0.10 grid by
+        default — $3.07 → $3.10, NOT $3.05 (which the exchange would reject)."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        client.place_order(conid=1, side="SELL", quantity=1, order_type="LMT", price=3.07)
+        assert mock_ibkr.place_order.call_args.kwargs["order_request"].price == pytest.approx(3.10)
+
+    def test_explicit_numeric_increment_overrides_tiered_default(self, connected_client):
+        """An explicit numeric increment (e.g. equities at $0.01) bypasses the
+        SPX tiered default entirely."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        client.place_order(
+            conid=1, side="BUY", quantity=1, order_type="LMT",
+            price=3.07, price_increment=0.01,
+        )
+        assert mock_ibkr.place_order.call_args.kwargs["order_request"].price == pytest.approx(3.07)
 
     def test_quantity_serialized_as_float(self, connected_client):
         """OrderRequest.quantity is typed float in ibind; we cast at the

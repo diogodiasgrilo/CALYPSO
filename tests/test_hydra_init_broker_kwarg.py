@@ -3004,3 +3004,73 @@ class TestExecuteStopLossClosesOnIBKR:
         s = self._strategy(short_only=True)
         s._execute_stop_loss(self._entry(), "call")
         assert s.daily_state.total_realized_pnl == pytest.approx(-150.0)
+
+
+class TestSettlementBookedPnl:
+    """IBKR-audit #5: ITM-settled shorts must be booked as the actual loss, not
+    as a full-credit worthless expiry."""
+
+    def _strategy(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.broker = None
+        return s
+
+    def _entry(self, *, sc=5050, lc=5060, sp=4950, lp=4940,
+               call_credit=200.0, put_credit=180.0, contracts=1):
+        from types import SimpleNamespace
+        return SimpleNamespace(
+            entry_number=1,
+            short_call_strike=sc, long_call_strike=lc,
+            short_put_strike=sp, long_put_strike=lp,
+            call_spread_credit=call_credit, put_spread_credit=put_credit,
+            contracts=contracts,
+        )
+
+    def test_call_otm_keeps_full_credit(self):
+        s = self._strategy()
+        booked, worthless = s._settlement_booked_pnl(self._entry(), "call", 5000.0)
+        assert worthless is True
+        assert booked == pytest.approx(200.0)
+
+    def test_put_otm_keeps_full_credit(self):
+        s = self._strategy()
+        booked, worthless = s._settlement_booked_pnl(self._entry(), "put", 5000.0)
+        assert worthless is True
+        assert booked == pytest.approx(180.0)
+
+    def test_no_settlement_level_keeps_full_credit(self):
+        s = self._strategy()
+        booked, worthless = s._settlement_booked_pnl(self._entry(), "call", None)
+        assert worthless is True
+        assert booked == pytest.approx(200.0)
+
+    def test_call_itm_within_wing_books_loss(self):
+        # SPX 5055, short call 5050 → 5pt intrinsic × 100 = $500 settlement.
+        # credit $200 - $500 = -$300 booked, flagged NOT worthless.
+        s = self._strategy()
+        booked, worthless = s._settlement_booked_pnl(self._entry(), "call", 5055.0)
+        assert worthless is False
+        assert booked == pytest.approx(-300.0)
+
+    def test_call_itm_beyond_long_wing_capped_at_width(self):
+        # SPX 5200 → raw 150pt, but capped at the 10pt wing (5050→5060) =
+        # $1000 settlement → 200 - 1000 = -$800 (max loss), not -$14800.
+        s = self._strategy()
+        booked, worthless = s._settlement_booked_pnl(self._entry(), "call", 5200.0)
+        assert worthless is False
+        assert booked == pytest.approx(-800.0)
+
+    def test_put_itm_within_wing_books_loss(self):
+        # SPX 4947, short put 4950 → 3pt × 100 = $300; 180 - 300 = -$120.
+        s = self._strategy()
+        booked, worthless = s._settlement_booked_pnl(self._entry(), "put", 4947.0)
+        assert worthless is False
+        assert booked == pytest.approx(-120.0)
+
+    def test_multi_contract_scales_settlement(self):
+        # 2 contracts: 5pt × 100 × 2 = $1000 settlement; credit $400 - 1000 = -$600.
+        s = self._strategy()
+        e = self._entry(call_credit=400.0, contracts=2)
+        booked, worthless = s._settlement_booked_pnl(e, "call", 5055.0)
+        assert worthless is False
+        assert booked == pytest.approx(-600.0)

@@ -149,6 +149,32 @@ class TestIBClientConnect:
             with pytest.raises(IBConnectionError, match="LST stage"):
                 client.connect()
 
+    def test_lst_handshake_410_gone_is_retryable_not_auth(self, paper_config):
+        """IBKR-audit #18: a 410 Gone at the LST stage is a revoked session
+        (self-healing on reconnect), so it must surface as the RETRYABLE
+        IBConnectionError — never the fatal IBAuthError that implies a
+        wrong/pre-activation consumer key."""
+        class _Gone(Exception):
+            status_code = 410
+        with patch("shared.ib_client.IbkrClient", side_effect=_Gone("410 Gone")):
+            client = IBClient(paper_config)
+            with pytest.raises(IBConnectionError, match="Session gone"):
+                client.connect()
+            assert not client.is_connected()
+
+    def test_auth_status_410_gone_is_retryable_not_auth(
+        self, paper_config, mock_ibkr_client,
+    ):
+        """IBKR-audit #18: a 410 during the stage-3 auth/status read is also a
+        revoked session — the catch-all must NOT wrap it as IBAuthError."""
+        class _Gone(Exception):
+            status_code = 410
+        mock_ibkr_client.authentication_status.side_effect = _Gone("410 Gone")
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
+            client = IBClient(paper_config)
+            with pytest.raises(IBConnectionError, match="Session gone"):
+                client.connect()
+
     def test_auth_status_not_authenticated_raises_auth_error(self, paper_config, mock_ibkr_client):
         """Stage 2/3: even if LST succeeded, ssodh/init may have failed silently."""
         mock_ibkr_client.authentication_status.return_value.data = {

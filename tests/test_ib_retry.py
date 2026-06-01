@@ -144,9 +144,16 @@ class TestCircuitBreakerReset:
 
 
 class TestRetryPolicy:
-    def test_429_is_retryable(self):
+    def test_429_is_NOT_retryable(self):
+        # IBKR-audit #9: a 429 puts the IP in a ~10-min penalty box (repeat
+        # offenders permanently blocked), so it must NOT be retried — it surfaces
+        # immediately and _ib_call enters a fail-fast cooldown.
         pol = RetryPolicy()
-        assert pol.is_retryable(Exception("429 Too Many Requests"))
+        assert not pol.is_retryable(Exception("429 Too Many Requests"))
+
+        class _E429(Exception):
+            status_code = 429
+        assert not pol.is_retryable(_E429("Too Many Requests"))
 
     def test_5xx_is_retryable(self):
         pol = RetryPolicy()

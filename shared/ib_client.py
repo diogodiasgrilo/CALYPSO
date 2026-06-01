@@ -498,6 +498,49 @@ DEFAULT_ORDER_ANSWERS = {
     QuestionType.CLOSE_POSITION: False,              # don't auto-close-all in response to anything
 }
 
+# IBKR-audit #6/#7: precautionary ORDER warnings to PRE-SUPPRESS at connect via
+# /iserver/questions/suppress (ibind suppress_messages). These are benign
+# "are-you-sure" prompts that, if they appear in the reply loop and are NOT in
+# DEFAULT_ORDER_ANSWERS, raise an unmapped-prompt error and can leave a stop-out
+# market order un-submitted. We suppress ONLY "proceed" warnings (market data /
+# market-order risk / order-routing / price-cap) — the size-limit and
+# close-position SAFETY prompts are deliberately NOT suppressed (we answer those
+# False so they still block). IDs are TWS error codes with an 'o' prefix.
+_SUPPRESSED_ORDER_MESSAGE_IDS = (
+    "o354",    # market-data warning (we always intend to proceed on OPRA)
+    "o451",    # order will be routed / price-cap acknowledgement
+    "o10151",  # market-order risk ("no live market data") — the stop-out path
+    "o10153",  # market-order / price-cap variant
+)
+
+# IBKR-audit #8: refresh the LST this many seconds BEFORE its 24h expiry, so the
+# expiry boundary never lands mid-entry/stop as a surprise 401.
+_LST_REFRESH_MARGIN_S = 15 * 60
+
+# IBKR-audit #9: a 429 puts the IP in a ~10-minute penalty box (repeat offenders
+# permanently blocked). Fail-fast for this long after a 429 rather than retrying.
+_RATE_PENALTY_COOLDOWN_S = 10 * 60
+
+# IBKR-audit #14: pin the underlying INDEX conids we actually trade. The
+# free-text `search_contract_by_symbol` lookup returns several "SPX-flavored"
+# rows and we pick the first survivor of the strict/loose filter; on a thin or
+# reordered response that could silently land on the wrong instrument. These two
+# index conids are stable IBKR identifiers, confirmed live against the paper
+# session (2026-06-01): SPX=416904, VIX=13455763. Pinning them removes the
+# ambiguity AND saves one API call per qualify. Keyed by (symbol, sec_type);
+# only the INDEX underlyings are pinned — option strikes still walk the secdef
+# chain (their conids rotate per expiry and cannot be hard-coded).
+_PINNED_UNDERLYING_CONIDS = {
+    ("SPX", "IND"): 416904,
+    ("VIX", "IND"): 13455763,
+}
+
+# IBKR-audit #16: sentinel for place_order(price_increment=...) meaning "use the
+# SPX/SPXW tiered single-leg tick derived from the price" ($0.05 <$3, $0.10 ≥$3),
+# rather than a fixed grid. Default for the single-leg order path; equity callers
+# still pass an explicit numeric increment (e.g. 0.01).
+_SPX_TIERED_TICK = "spx_tiered"
+
 
 # ─── Public exceptions ──────────────────────────────────────────────────────
 
@@ -536,6 +579,25 @@ class AmbiguousOrderError(IBClientError):
     the placement and let reconciliation/alerting handle the unknown order.
     Audit: place_order retry double-execution.
     """
+
+
+def _looks_like_410_gone(exc: Exception) -> bool:
+    """True if `exc` represents an IBKR HTTP 410 Gone.
+
+    IBKR-audit #18: a 410 means the brokerage session has been REVOKED (its
+    LST/ssodh state is gone — e.g. competed away, expired, or torn down by the
+    ~01:00 ET reset). Unlike a 401 (which can mean a wrong/pre-activation
+    consumer key — a human-fix-it condition), a 410 is purely a session-state
+    loss that a fresh reconnect re-establishes. It must therefore be classified
+    RETRYABLE (IBConnectionError), never as the fatal IBAuthError.
+
+    Detected by the structured `status_code` attribute first (ibind sets it on
+    its HTTP errors), falling back to a word-boundary match on the message so a
+    "4101" / order-id "...410" substring can't false-positive.
+    """
+    if getattr(exc, "status_code", None) == 410:
+        return True
+    return bool(re.search(r"\b410\b", str(exc)))
 
 
 # ─── Config dataclass ───────────────────────────────────────────────────────
@@ -664,6 +726,13 @@ class IBClient:
         except ValueError:
             _rps = 0.0
         self._rate_gate = _RateGate(_rps) if _rps > 0 else None
+        # IBKR-audit #8: LST expiry (epoch ms) captured at connect; used by
+        # ensure_connected to refresh proactively before the 24h TTL.
+        self._lst_expires_ms: Optional[int] = None
+        # IBKR-audit #9: when a 429 is seen, IBKR penalty-boxes the IP for ~10
+        # min (repeat offenders permanently blocked). We set this to a monotonic
+        # deadline and fail-fast (no further IBKR calls) until it passes.
+        self._rate_penalty_until: float = 0.0
         # Polish Item 1: monotonically-increasing counter incremented in
         # _snapshot_with_preflight whenever the warmup-poll loop exits
         # without populated data (i.e., the snapshot stays metadata-only
@@ -736,6 +805,13 @@ class IBClient:
             # "error 4017" or a URL containing the substring. Use a word-
             # boundary regex for the HTTP code; keep the longer keyword
             # phrases as substring matches since collision is implausible.
+            # IBKR-audit #18: a 410 Gone is a revoked-session condition, NOT a
+            # credential problem — keep it retryable (IBConnectionError) and
+            # never let it fall into the auth branch below.
+            if _looks_like_410_gone(exc):
+                raise IBConnectionError(
+                    f"Session gone (410) at LST stage — reconnect will re-init: {exc}"
+                ) from exc
             looks_like_auth = (
                 bool(re.search(r"\b401\b", err_str))
                 or any(k in err_str for k in (
@@ -795,6 +871,14 @@ class IBClient:
         except IBAuthError:
             raise
         except Exception as exc:
+            # IBKR-audit #18: a 410 Gone during the status read is a revoked
+            # session (self-healing on reconnect), not a credential failure —
+            # keep it retryable instead of wrapping it as the fatal IBAuthError.
+            if _looks_like_410_gone(exc):
+                raise IBConnectionError(
+                    f"Session gone (410) during auth/status — reconnect will "
+                    f"re-init: {exc}"
+                ) from exc
             raise IBAuthError(
                 f"auth/status check errored after LST success: {exc}"
             ) from exc
@@ -808,6 +892,26 @@ class IBClient:
         # connected) state, never the True flag ahead of a usable client.
         with self._call_lock:
             self._connected = True
+        # IBKR-audit #8: capture the LST expiry so ensure_connected can refresh
+        # PROACTIVELY (before the 24h TTL / nightly reset lands inside an entry
+        # or stop window), instead of only reacting to a 401 up to 15 min late.
+        try:
+            self._lst_expires_ms = getattr(
+                self._client, "live_session_token_expires_ms", None
+            )
+        except Exception:
+            self._lst_expires_ms = None
+        # IBKR-audit #6/#7: pre-suppress the benign precautionary order warnings
+        # so the stop/entry reply loop can't hit an UNMAPPED prompt and fail to
+        # submit (a breached short must always be able to close). Best-effort —
+        # a suppression failure must NOT block connect.
+        try:
+            self._client.suppress_messages(list(_SUPPRESSED_ORDER_MESSAGE_IDS))
+            logger.info("suppressed benign order warnings: %s",
+                        list(_SUPPRESSED_ORDER_MESSAGE_IDS))
+        except Exception as e:  # noqa: BLE001
+            logger.warning("suppress_messages failed (non-fatal): %s: %s",
+                           type(e).__name__, e)
         logger.info(
             "IBClient connected successfully — account=%s",
             self._account_id,
@@ -886,11 +990,26 @@ class IBClient:
                 if (status.get("authenticated")
                         and status.get("connected")
                         and not status.get("competing")):
-                    return True
-                logger.info(
-                    "ensure_connected: session stale (status=%r) — reconnecting",
-                    status,
-                )
+                    # IBKR-audit #8: even when the session reads healthy, refresh
+                    # PROACTIVELY if the LST is within the margin of its 24h
+                    # expiry — so the boundary never lands mid-entry/stop as a
+                    # surprise 401 caught up to 15 min late.
+                    exp_ms = self._lst_expires_ms
+                    if (isinstance(exp_ms, (int, float))
+                            and (exp_ms / 1000.0) - time.time() < _LST_REFRESH_MARGIN_S):
+                        logger.info(
+                            "ensure_connected: LST within %ds of expiry "
+                            "(expires_ms=%s) — proactively reconnecting",
+                            int(_LST_REFRESH_MARGIN_S), exp_ms,
+                        )
+                        # fall through to disconnect()+connect() below
+                    else:
+                        return True
+                else:
+                    logger.info(
+                        "ensure_connected: session stale (status=%r) — reconnecting",
+                        status,
+                    )
             except Exception as exc:
                 logger.warning(
                     "ensure_connected: auth status read failed (%s) — reconnecting",
@@ -1160,10 +1279,34 @@ class IBClient:
         # with max_attempts=1 so a transient failure does NOT blindly
         # re-POST the order — see _submit_order (audit: place_order retry
         # double-execution). Defaults to the shared self._retry_policy.
+        # IBKR-audit #9: a 429 puts the IP in a ~10-min penalty box (repeat
+        # offenders permanently blocked). If we're in it, fail fast — issuing
+        # MORE requests is futile (still boxed) and escalates toward a permanent
+        # ban. The 8 req/s rate gate should keep us out of the box entirely;
+        # this is the don't-make-a-slip-catastrophic backstop.
+        if self._rate_penalty_until and time.monotonic() < self._rate_penalty_until:
+            raise IBClientError(
+                f"IBKR rate-limit penalty box active "
+                f"(~{int(self._rate_penalty_until - time.monotonic())}s left) — "
+                f"refusing {family} call to avoid escalation toward a permanent block"
+            )
         wrapped = retry_with_backoff(
             policy=_policy or self._retry_policy, breaker=breaker,
         )(_invoke)
-        return self._unwrap(wrapped())
+        try:
+            return self._unwrap(wrapped())
+        except Exception as exc:
+            # 429 is NON-retryable (see ib_retry.is_retryable) so it surfaces
+            # here on the first hit. Enter the penalty box + alert loudly.
+            if getattr(exc, "status_code", None) == 429:
+                self._rate_penalty_until = time.monotonic() + _RATE_PENALTY_COOLDOWN_S
+                logger.critical(
+                    "IBKR 429 Too Many Requests on %s — entering %ds rate-limit "
+                    "penalty box; all IBKR calls fail fast until it clears (a 429 "
+                    "means the global rate gate was exceeded — investigate).",
+                    family, int(_RATE_PENALTY_COOLDOWN_S),
+                )
+            raise
 
     @property
     def retry_policy(self) -> RetryPolicy:
@@ -1274,11 +1417,32 @@ class IBClient:
             # qualify_contract for the same key — desired) but only the
             # _call_lock, which serializes ibind anyway.
             underlying_sec_type = "IND" if sec_type == "OPT" else sec_type
-            candidates = self._ib_call(
-                "market", self._client.search_contract_by_symbol,
-                symbol=symbol,
-                sec_type=underlying_sec_type,
-            ) or []
+
+            # IBKR-audit #14: short-circuit to the pinned conid for the index
+            # underlyings we trade — deterministic, and skips the fuzzy search
+            # (and its API call) entirely. Falls through to the search below for
+            # any non-pinned symbol/sec_type.
+            pinned = _PINNED_UNDERLYING_CONIDS.get((symbol, underlying_sec_type))
+            if pinned is not None:
+                if sec_type != "OPT":
+                    # Underlying quote: the pinned conid IS the answer.
+                    conid = int(pinned)
+                    self._conid_cache[cache_key] = conid
+                    return conid
+                # Option: feed the pinned underlying through as the sole search
+                # candidate so the filter/extract logic below resolves
+                # underlying_conid = pinned with no fuzzy lookup, then Step 2
+                # still walks the secdef chain to the exact strike.
+                candidates = [{
+                    "conid": pinned,
+                    "sections": [{"secType": underlying_sec_type, "exchange": "CBOE"}],
+                }]
+            else:
+                candidates = self._ib_call(
+                    "market", self._client.search_contract_by_symbol,
+                    symbol=symbol,
+                    sec_type=underlying_sec_type,
+                ) or []
             if not isinstance(candidates, list):
                 candidates = [candidates]
             if not candidates:
@@ -2413,6 +2577,20 @@ class IBClient:
         return round(price / increment) * increment
 
     @staticmethod
+    def _spx_option_tick(price: float) -> float:
+        """SPX/SPXW single-leg minimum price increment for a given premium.
+
+        IBKR-audit #16: SPX index options (incl. SPXW 0DTE) are NOT a flat
+        $0.05 grid — CBOE's tick regime is $0.05 for series quoted UNDER
+        $3.00 and $0.10 AT/ABOVE $3.00. Rounding a $3+ single leg to the
+        $0.05 grid can land off the legal $0.10 grid (e.g. $3.05) and the
+        exchange rejects the order. Combo *net-credit* prices stay $0.05 on
+        the Complex Order Book — this tiered rule is the SINGLE-LEG path
+        only (legging in/out, stop-out closes). abs() so it's sign-safe.
+        """
+        return 0.05 if abs(price) < 3.0 else 0.10
+
+    @staticmethod
     def _ensure_coid(coid: Optional[str]) -> str:
         """Return the caller's client_order_id, or a fresh one if None.
 
@@ -2492,9 +2670,22 @@ class IBClient:
         complex (BAG) book, and the order ticket DOES expose `allOrNone`
         (boolean) per the IBKR REST OpenAPI spec — so if this combo path is ever
         promoted to the live entry, pass allOrNone=True via OrderRequest rather
-        than building a WebSocket partial-fill watcher. (NOTE: the live entry
-        currently legs in via 4 single-leg place_and_wait_for_fill calls — this
-        combo path is not yet RPC-exposed; see the broker ALLOWLIST.)
+        than building a WebSocket partial-fill watcher.
+
+        Entry path (IBKR-audit #1): the live/paper entry does NOT use this combo
+        method — it LEGS IN via 4 single-leg place_and_wait_for_fill calls (this
+        combo path is not yet RPC-exposed; see the broker ALLOWLIST). Legging is
+        the accepted approach for both paper and live because the strategy buys
+        the PROTECTION (long wings) BEFORE selling the shorts (see
+        _execute_entry / _execute_put_spread_only — "buy protection first"), so
+        there is never a naked-short window even if a later leg fails; a failed
+        short after a filled long leaves a fully-hedged long, not naked risk.
+
+        Conid preflight (IBKR-audit #21): every leg conid here is resolved by
+        qualify_contract, which walks the secdef chain (search_secdef_info_by_
+        conid) and fail-closes on an expiry mismatch — i.e. qualify_contract IS
+        the secdef preflight, so a stale/expired/wrong-dated strike is rejected
+        BEFORE any order POST rather than 500'ing at whatif/submit time.
 
         Args:
             expiry: option expiry date (today for 0DTE)
@@ -2619,7 +2810,7 @@ class IBClient:
         tif: str = "DAY",
         coid: Optional[str] = None,
         answers: Optional[dict] = None,
-        price_increment: float = 0.05,
+        price_increment: "float | str" = _SPX_TIERED_TICK,
     ) -> dict:
         """Place a single-leg order.
 
@@ -2627,11 +2818,13 @@ class IBClient:
         place_iron_condor / place_vertical_spread.
 
         Args:
-            price_increment: tick size for price rounding. Defaults to 0.05
-                (correct for SPX/SPXW single-leg option orders, which is
-                HYDRA's universe today). For equities or sub-$1 stocks,
-                pass 0.01. Pass 0 to skip rounding entirely (caller has
-                already chosen a tick-conforming price).
+            price_increment: tick size for price rounding. Defaults to the
+                SPX/SPXW tiered single-leg tick (``_SPX_TIERED_TICK``):
+                $0.05 under $3.00, $0.10 at/above $3.00 (IBKR-audit #16) —
+                correct for HYDRA's universe today. For equities or sub-$1
+                stocks, pass an explicit numeric increment (e.g. 0.01). Pass
+                0 to skip rounding entirely (caller has already chosen a
+                tick-conforming price).
 
         SaxoClient.place_order() equivalent.
         """
@@ -2641,10 +2834,16 @@ class IBClient:
         if side not in ("BUY", "SELL"):
             raise IBClientError(f"side must be 'BUY' or 'SELL', got {side!r}")
 
-        if price is None or price_increment <= 0:
+        if price is None:
             rounded_price = price
         else:
-            rounded_price = self._round_to_increment(price, price_increment)
+            inc = price_increment
+            if inc == _SPX_TIERED_TICK:
+                inc = self._spx_option_tick(price)  # tiered SPX/SPXW tick
+            if inc and inc > 0:
+                rounded_price = self._round_to_increment(price, inc)
+            else:
+                rounded_price = price  # inc == 0 → caller-chosen, skip
         coid = self._ensure_coid(coid)
 
         order = OrderRequest(
@@ -2697,7 +2896,7 @@ class IBClient:
         tif: str = "DAY",
         coid: Optional[str] = None,
         answers: Optional[dict] = None,
-        price_increment: float = 0.05,
+        price_increment: "float | str" = _SPX_TIERED_TICK,
     ) -> dict:
         """Place an order and poll until it reaches a terminal state or timeout.
 
@@ -2729,7 +2928,8 @@ class IBClient:
                 (see _ensure_coid)
             answers: override DEFAULT_ORDER_ANSWERS reply-prompt map
             price_increment: tick size for limit price rounding (default
-                0.05 — SPX/SPXW single-leg tick; pass 0.01 for equities)
+                SPX/SPXW tiered tick — $0.05 <$3, $0.10 ≥$3, IBKR-audit #16;
+                pass an explicit numeric increment, e.g. 0.01, for equities)
 
         Returns:
             dict with keys:

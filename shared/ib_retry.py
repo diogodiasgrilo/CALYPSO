@@ -57,10 +57,13 @@ from typing import Callable, Optional
 #   • an http/status[_code] keyword immediately preceding the code, or
 #   • a leading status line ``^<code> <reason-phrase>``.
 _HTTP_RETRYABLE_CODE_RE = re.compile(
+    # 5xx only — 429 is intentionally excluded (IBKR-audit #9): a 429 must NOT
+    # be retried (it triggers a ~10-min IP penalty box; retrying escalates
+    # toward a permanent block). _ib_call handles 429 via a fail-fast cooldown.
     r"(?:"
-    r"::\s*(?:429|500|502|503|504)\s*::"
-    r"|(?:http|status(?:[_ ]?code)?)[\s:=\"']*\(?(?:429|500|502|503|504)\b"
-    r"|^\s*(?:429|500|502|503|504)\s+[a-z]"
+    r"::\s*(?:500|502|503|504)\s*::"
+    r"|(?:http|status(?:[_ ]?code)?)[\s:=\"']*\(?(?:500|502|503|504)\b"
+    r"|^\s*(?:500|502|503|504)\s+[a-z]"
     r")"
 )
 
@@ -316,16 +319,21 @@ class RetryPolicy:
         # also tags some non-HTTP failures (e.g. invalid-JSON) with
         # status_code=None, which simply falls through to the text/type
         # checks below.
+        # IBKR-audit #9: 429 is deliberately NON-retryable. IBKR penalty-boxes
+        # the IP for ~10 min on a 429 (repeat offenders permanently blocked), so
+        # retrying is futile (still boxed) and escalates toward a permanent ban.
+        # We let a 429 surface immediately; _ib_call catches it, enters a
+        # fail-fast penalty-box cooldown, and alerts. Only true 5xx retry.
         status_code = getattr(exc, "status_code", None)
         if isinstance(status_code, int):
-            return status_code in (429, 500, 502, 503, 504)
+            return status_code in (500, 502, 503, 504)
 
-        # HTTP 429/5xx text fallback — matched only as a real status token
-        # (see _HTTP_RETRYABLE_CODE_RE) so digit runs embedded in conids,
-        # strikes, order-ids or notionals can't masquerade as a 5xx and
-        # cause retry storms + false orders-breaker trips on the safety-
-        # critical order path.
-        if _HTTP_RETRYABLE_CODE_RE.search(msg) or "rate limit" in msg:
+        # HTTP 5xx text fallback — matched only as a real status token (see
+        # _HTTP_RETRYABLE_CODE_RE) so digit runs embedded in conids, strikes,
+        # order-ids or notionals can't masquerade as a 5xx and cause retry
+        # storms + false orders-breaker trips on the safety-critical order path.
+        # NOTE: 429 / "rate limit" intentionally NOT matched here (see above).
+        if _HTTP_RETRYABLE_CODE_RE.search(msg):
             return True
         if any(t in msg for t in (
             "timeout", "timed out",

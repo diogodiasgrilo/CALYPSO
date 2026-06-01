@@ -115,12 +115,40 @@ class TestQualifyContract:
 
     def test_caches_repeated_calls(self, connected_client):
         client, mock_ibkr = connected_client
+        # Use a NON-pinned symbol so the fuzzy search path (and its cache) is
+        # actually exercised — SPX/VIX index conids are pinned (IBKR-audit #14)
+        # and never hit search_contract_by_symbol at all.
         mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 12345}])
-        client.qualify_contract("VIX", sec_type="IND")
-        client.qualify_contract("VIX", sec_type="IND")
-        client.qualify_contract("VIX", sec_type="IND")
+        client.qualify_contract("AAPL", sec_type="STK")
+        client.qualify_contract("AAPL", sec_type="STK")
+        client.qualify_contract("AAPL", sec_type="STK")
         # First call hits ibind; cache supplies the rest
         assert mock_ibkr.search_contract_by_symbol.call_count == 1
+
+    def test_pinned_index_conids_skip_search(self, connected_client):
+        """IBKR-audit #14: SPX/VIX index underlyings resolve to their pinned
+        conids deterministically, with NO fuzzy search_contract_by_symbol call
+        (saves an API call and removes the 'pick first survivor' ambiguity)."""
+        client, mock_ibkr = connected_client
+        assert client.qualify_contract("SPX", sec_type="IND") == 416904
+        assert client.qualify_contract("VIX", sec_type="IND") == 13455763
+        assert mock_ibkr.search_contract_by_symbol.call_count == 0
+
+    def test_pinned_underlying_used_for_option_chain_walk(self, connected_client):
+        """For an SPX option, the pinned underlying conid feeds Step 2 directly:
+        no fuzzy search, but the secdef chain is still walked to the strike."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.search_secdef_info_by_conid.return_value = _mk_result(
+            [{"conid": 999111, "tradingClass": "SPXW", "maturityDate": "20260601"}]
+        )
+        conid = client.qualify_contract(
+            "SPX", expiry=date(2026, 6, 1), strike=5500, right="C",
+            trading_class="SPXW",
+        )
+        assert conid == 999111
+        assert mock_ibkr.search_contract_by_symbol.call_count == 0
+        # The pinned SPX conid (416904) is what Step 2 queried against.
+        assert mock_ibkr.search_secdef_info_by_conid.call_args.kwargs["conid"] == "416904"
 
     def test_option_walks_secdef_chain(self, connected_client):
         client, mock_ibkr = connected_client
