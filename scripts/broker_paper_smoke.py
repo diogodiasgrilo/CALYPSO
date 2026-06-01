@@ -180,6 +180,17 @@ def main() -> int:
         log(f"WARN: get_positions after close failed: {e}")
 
     log("✅ FULL ROUND TRIP OK — real paper order placed, FILLED at a live price, and closed flat.")
+    # Defense-in-depth for the conditional auto-flip: write a DATED PASS marker.
+    # flip_a_live.sh requires a fresh (today) marker in addition to systemd only
+    # running it on a clean ExecStart — two independent gates before A goes live.
+    try:
+        import os as _os
+        _os.makedirs("/opt/calypso/data/smoke", exist_ok=True)
+        with open("/opt/calypso/data/smoke/last_pass.txt", "w") as fh:
+            fh.write(date.today().isoformat() + " PASS\n")
+        log("wrote PASS sentinel /opt/calypso/data/smoke/last_pass.txt")
+    except Exception as e:
+        log(f"WARN: could not write PASS sentinel: {e}")
     _alert(True, out); return 0
 
 

@@ -20,6 +20,11 @@ Environment="GCP_PROJECT=calypso-trading-bot"
 # Loopback-only bind (single-tenant VM). Override here if ever needed.
 Environment="CALYPSO_BROKER_HOST=127.0.0.1"
 Environment="CALYPSO_BROKER_PORT=8788"
+# Global IBKR request-rate cap (req/s) across this one shared session. IBKR's
+# Web API limit is ~10 req/s per authenticated session; 8 leaves 20% headroom
+# so the combined A/B/C + health + smoke traffic can't 429-storm and trip the
+# breaker during overlapping entry windows. Read by shared.ib_client._RateGate.
+Environment="CALYPSO_IBKR_MAX_RPS=8"
 
 # ─── IBKR OAuth 1.0a credentials ────────────────────────────────────────────
 # This broker is the single OAuth identity / session owner: all three hydra*

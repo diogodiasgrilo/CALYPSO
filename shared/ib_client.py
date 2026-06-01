@@ -51,6 +51,7 @@ against ibind/client/ibkr_definitions.py):
 from __future__ import annotations
 
 import logging
+import os
 import re
 import threading
 import time
@@ -432,6 +433,35 @@ def _coerce_expiry(expiry):
         return date.fromisoformat(s) if "-" in s else datetime.strptime(s, "%Y%m%d").date()
     return expiry
 
+
+class _RateGate:
+    """Process-global request-rate gate — caps the START rate of IBKR calls to
+    ``max_rps`` across ALL threads (the broker's single session serving A/B/C +
+    health + smoke), keeping the combined rate under IBKR's ~10 req/s/session
+    limit.
+
+    Design: each caller atomically RESERVES the next time-slot under a short
+    lock, then sleeps until that slot OUTSIDE the lock. Successive reservations
+    are spaced ``1/max_rps`` apart, so starts are rate-capped while the lock is
+    only ever held for a few microseconds — it cannot deadlock and the wait is
+    bounded. At low rates (slot already in the past) the wait is zero, so it
+    only throttles genuine bursts.
+    """
+
+    def __init__(self, max_rps: float) -> None:
+        self._min_interval = 1.0 / max_rps
+        self._lock = threading.Lock()
+        self._next_allowed = 0.0
+
+    def acquire(self) -> None:
+        with self._lock:
+            now = time.monotonic()
+            slot = self._next_allowed if self._next_allowed > now else now
+            self._next_allowed = slot + self._min_interval
+            wait = slot - now
+        if wait > 0:
+            time.sleep(wait)
+
 # Default answers for IBKR's order-reply prompts. Caller can override per-call.
 #
 # Reply prompts fire on each place_order/modify_order call where IBKR wants
@@ -613,6 +643,20 @@ class IBClient:
             family: CircuitBreaker(name=f"ib.{family}")
             for family in ("oauth", "session", "portfolio", "market", "orders")
         }
+        # Global request-rate gate (opt-in via CALYPSO_IBKR_MAX_RPS). IBKR's
+        # Client Portal Web API caps each authenticated SESSION at ~10 req/s
+        # (verified: IBKR Campus docs; 429 on exceed). The calypso-broker holds
+        # the ONE session for A/B/C+health+smoke, so their COMBINED rate must
+        # stay under 10/s — otherwise a sustained overlapping-entry-window burst
+        # could 429 repeatedly and (after 5 consecutive failures) trip the
+        # orders/market breaker. This caps the combined start-rate at the single
+        # chokepoint. Default OFF (0.0) so tests/dev/direct-IBClient are
+        # unaffected; the broker unit sets CALYPSO_IBKR_MAX_RPS=8 (20% headroom).
+        try:
+            _rps = float(os.environ.get("CALYPSO_IBKR_MAX_RPS", "0") or "0")
+        except ValueError:
+            _rps = 0.0
+        self._rate_gate = _RateGate(_rps) if _rps > 0 else None
         # Polish Item 1: monotonically-increasing counter incremented in
         # _snapshot_with_preflight whenever the warmup-poll loop exits
         # without populated data (i.e., the snapshot stays metadata-only
@@ -1088,6 +1132,13 @@ class IBClient:
             ) from exc
 
         def _invoke():
+            # Global rate gate (opt-in): cap the combined IBKR start-rate under
+            # the per-session 10 req/s limit. Applied on BOTH paths so the
+            # concurrent qualify_option_strikes burst is paced too. The wait
+            # happens before acquiring _call_lock so it never holds the
+            # serialization lock while throttling.
+            if self._rate_gate is not None:
+                self._rate_gate.acquire()
             if _serialize:
                 with self._call_lock:
                     return fn(*args, **kwargs)

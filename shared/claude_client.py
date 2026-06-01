@@ -27,13 +27,17 @@ logger = logging.getLogger(__name__)
 DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_MAX_TOKENS = 4096
 
-# Intra-process call pacing (2026-05-31). Agents like HOMER fire several
-# ~13k-input-token calls back-to-back in a single run; that burst tripped the
-# account's per-minute token rate limit → HTTP 429 (the SDK auto-retried and
-# succeeded, but it generated a rate-limit email). Space consecutive ask_claude
-# calls within a process so the burst stays under the per-minute limit. Tunable
-# via env; the agents are batch/non-latency-sensitive so a few seconds is free.
-_MIN_CALL_INTERVAL_S = float(os.environ.get("CALYPSO_CLAUDE_MIN_INTERVAL_S", "6.0"))
+# Intra-process call pacing (2026-05-31). Agents like HOMER fire ~5 calls of
+# ~13k input tokens back-to-back; that burst exceeds the account's per-minute
+# input-token limit (ITPM — e.g. ~30k on Anthropic Tier 1 for Sonnet) → HTTP
+# 429. The Anthropic SDK already rides this out (max_retries below + retry-after
+# header), so the agent still SUCCEEDS — pacing just reduces how often a 429
+# (and its email) fires. NOTE: spacing alone cannot guarantee staying under a
+# low ITPM tier (2×13k already ≈ a Tier-1 minute); the real fixes are raising
+# the Anthropic usage tier or trimming each call's input. Default 15s is a
+# pragmatic middle ground (HOMER's batch run is not latency-sensitive); set
+# CALYPSO_CLAUDE_MIN_INTERVAL_S higher (~35) to fully avoid 429s on Tier 1.
+_MIN_CALL_INTERVAL_S = float(os.environ.get("CALYPSO_CLAUDE_MIN_INTERVAL_S", "15.0"))
 _pace_lock = threading.Lock()
 _last_call_at = 0.0
 

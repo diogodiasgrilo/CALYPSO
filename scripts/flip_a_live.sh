@@ -24,6 +24,17 @@ if ! echo "$h" | grep -qE '"connected": ?true'; then
     exit 0
 fi
 
+# Guard 1.5 — require a FRESH (today) paper-smoke PASS sentinel. Defense in
+# depth: the flip now depends on TWO independent signals — systemd only runs
+# this ExecStartPost on a clean ExecStart (exit 0) AND the probe wrote a dated
+# PASS marker today. If the marker is missing/stale, do not flip.
+SENT=/opt/calypso/data/smoke/last_pass.txt
+today=$(date +%F)
+if ! grep -q "^${today} PASS" "$SENT" 2>/dev/null; then
+    log "ABORT: no fresh ($today) paper-smoke PASS sentinel at $SENT — not flipping"
+    exit 0
+fi
+
 # Guard 2 — idempotent: only flip if A is currently dry_run:true.
 cur=$(runuser -u calypso -- "$VENV" -c "import json;print(json.load(open('$CFG')).get('dry_run'))" 2>/dev/null || echo ERR)
 if [ "$cur" != "True" ]; then
