@@ -715,6 +715,14 @@ class IBClient:
         # requires it before /iserver/marketdata/snapshot and
         # /iserver/account/trades. Reset on disconnect.
         self._iserver_primed = False
+        # Symbols whose /iserver/secdef/search has been issued this session.
+        # IBKR requires that search before /secdef/strikes + /secdef/info will
+        # resolve a symbol's OPTION contracts (else they 500 "No Contracts
+        # retrieved"). The conid PIN (#14) skips the fuzzy search, so we re-issue
+        # it ONCE per (symbol, sec_type) purely to prime IBKR's session cache.
+        # Cleared on disconnect IN LOCKSTEP with _conid_cache so a cached conid
+        # never outlives its priming.
+        self._secdef_search_primed: set[tuple] = set()
         # Phase A.8 — retry + per-family circuit breakers. RetryPolicy
         # defaults: 6 attempts (initial + 5 retries), 1s base, 30s cap,
         # 0.5 jitter, retryable on HTTP 429/5xx + transient network errors.
@@ -1153,6 +1161,7 @@ class IBClient:
 
             self._connected = False
             self._conid_cache.clear()
+            self._secdef_search_primed.clear()  # lockstep with _conid_cache
             self._iserver_primed = False
         if unclean:
             logger.error(
@@ -1506,6 +1515,17 @@ class IBClient:
             # any non-pinned symbol/sec_type.
             pinned = _PINNED_UNDERLYING_CONIDS.get((symbol, underlying_sec_type))
             if pinned is not None:
+                # #14-regression fix (2026-06-01): the pin skips the fuzzy
+                # search, but /iserver/secdef/search ALSO primes IBKR's session
+                # contract cache — without it /secdef/strikes + /secdef/info 500
+                # with "No Contracts retrieved" and option-chain resolution
+                # breaks. Re-issue the search ONCE per session for its priming
+                # side-effect; we still return the deterministic pinned conid.
+                # Runs on BOTH the IND-quote and OPT paths because both option
+                # readers (get_option_chain / qualify_option_strikes) obtain the
+                # underlying via qualify_contract(symbol, sec_type="IND"), and
+                # this is the first call of the session before any secdef query.
+                self._ensure_secdef_search_primed(symbol, underlying_sec_type)
                 if sec_type != "OPT":
                     # Underlying quote: the pinned conid IS the answer.
                     conid = int(pinned)
@@ -1902,6 +1922,41 @@ class IBClient:
             self._ib_call("session", self._client.receive_brokerage_accounts,
                           _risk_critical=_risk_critical)
             self._iserver_primed = True
+
+    def _ensure_secdef_search_primed(self, symbol: str, sec_type: str) -> None:
+        """Issue /iserver/secdef/search for `symbol` once per session.
+
+        IBKR requires a secdef/search for a symbol before /secdef/strikes and
+        /secdef/info will resolve that symbol's OPTION contracts in the session;
+        without it they 500 with "No Contracts retrieved". qualify_contract's
+        conid PIN (#14) bypasses the fuzzy search, which inadvertently removed
+        this priming on 2026-06-01 and broke all option-chain resolution. We
+        re-issue the search here purely for its server-side priming effect (the
+        result is discarded — the pinned conid is authoritative).
+
+        Idempotent per (symbol, sec_type); the set is cleared in lockstep with
+        _conid_cache on disconnect so a cached conid never outlives its priming.
+        Best-effort: a priming failure is logged, not raised — the subsequent
+        strikes/info call will surface any genuine error.
+        """
+        key = (symbol, sec_type)
+        # _call_lock is an RLock; qualify_contract already holds it, and the
+        # nested _ib_call re-acquisition on this thread is free.
+        with self._call_lock:
+            if key in self._secdef_search_primed:
+                return
+            try:
+                self._ib_call(
+                    "market", self._client.search_contract_by_symbol,
+                    symbol=symbol, sec_type=sec_type,
+                )
+                self._secdef_search_primed.add(key)
+            except Exception as exc:
+                logger.warning(
+                    "secdef search-prime for %s/%s failed (%s) — option-chain "
+                    "secdef calls may 500 'No Contracts retrieved' until it "
+                    "succeeds", symbol, sec_type, exc,
+                )
 
     def _snapshot_with_preflight(self, conids: str, fields: list[str],
                                  _risk_critical: bool = False):

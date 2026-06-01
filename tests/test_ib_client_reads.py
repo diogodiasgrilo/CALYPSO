@@ -125,19 +125,29 @@ class TestQualifyContract:
         # First call hits ibind; cache supplies the rest
         assert mock_ibkr.search_contract_by_symbol.call_count == 1
 
-    def test_pinned_index_conids_skip_search(self, connected_client):
-        """IBKR-audit #14: SPX/VIX index underlyings resolve to their pinned
-        conids deterministically, with NO fuzzy search_contract_by_symbol call
-        (saves an API call and removes the 'pick first survivor' ambiguity)."""
+    def test_pinned_index_conids_are_deterministic_and_prime_once(self, connected_client):
+        """IBKR-audit #14 (+ 2026-06-01 regression fix): SPX/VIX index
+        underlyings resolve to their PINNED conids deterministically (no
+        'pick first survivor' ambiguity). The fuzzy search is still issued
+        ONCE per symbol — purely to PRIME IBKR's secdef cache, without which
+        /secdef/strikes + /secdef/info 500 'No Contracts retrieved' — and a
+        repeat qualify of the same symbol does NOT re-search (conid cached)."""
         client, mock_ibkr = connected_client
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
         assert client.qualify_contract("SPX", sec_type="IND") == 416904
         assert client.qualify_contract("VIX", sec_type="IND") == 13455763
-        assert mock_ibkr.search_contract_by_symbol.call_count == 0
+        # One priming search per distinct symbol (SPX, VIX).
+        assert mock_ibkr.search_contract_by_symbol.call_count == 2
+        # Repeat → cache hit, no extra search.
+        assert client.qualify_contract("SPX", sec_type="IND") == 416904
+        assert mock_ibkr.search_contract_by_symbol.call_count == 2
 
     def test_pinned_underlying_used_for_option_chain_walk(self, connected_client):
-        """For an SPX option, the pinned underlying conid feeds Step 2 directly:
-        no fuzzy search, but the secdef chain is still walked to the strike."""
+        """For an SPX option, the pinned underlying conid feeds Step 2 directly
+        (deterministic), the secdef cache is primed once, and the secdef chain
+        is still walked to the strike."""
         client, mock_ibkr = connected_client
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
         mock_ibkr.search_secdef_info_by_conid.return_value = _mk_result(
             [{"conid": 999111, "tradingClass": "SPXW", "maturityDate": "20260601"}]
         )
@@ -146,7 +156,8 @@ class TestQualifyContract:
             trading_class="SPXW",
         )
         assert conid == 999111
-        assert mock_ibkr.search_contract_by_symbol.call_count == 0
+        # Priming search issued once for the SPX underlying.
+        assert mock_ibkr.search_contract_by_symbol.call_count == 1
         # The pinned SPX conid (416904) is what Step 2 queried against.
         assert mock_ibkr.search_secdef_info_by_conid.call_args.kwargs["conid"] == "416904"
 
