@@ -79,6 +79,24 @@ is_market_hours() {
     return 1
 }
 
+# ─── Helper: core trading session (tight) ────────────────────────────────
+# Returns 0 (true) weekdays 9:30 AM–4:00 PM ET — the window during which HYDRA
+# writes `last_heartbeat_at` every ~10s. The heartbeat-freshness FAIL (Check 2)
+# gates on THIS, not is_market_hours(): after the 4 PM close HYDRA sleeps in
+# 15-min cycles and stops updating the heartbeat BY DESIGN, so the broad 9–5
+# is_market_hours window produced a daily FALSE FAIL in the 4–5 PM ET hour
+# (state-file froze at 16:00, ARGUS still demanded a <5m heartbeat until 17:00).
+is_trading_session() {
+    local dow hhmm
+    dow=$(date +"%u")
+    # %H%M as a base-10 int (10# avoids octal parse of the leading zero).
+    hhmm=$((10#$(TZ="America/New_York" date +"%H%M")))
+    if [[ "$dow" -le 5 ]] && [[ "$hhmm" -ge 930 ]] && [[ "$hhmm" -lt 1600 ]]; then
+        return 0
+    fi
+    return 1
+}
+
 # ─── Helper: US market holiday (suppress log-staleness on holidays) ─────
 # Calls into shared.event_calendar for an authoritative answer. If the
 # Python module is missing or the call fails, defaults to "not a
@@ -124,7 +142,10 @@ fi
 # =========================================================================
 heartbeat_status="ok"
 heartbeat_age_min="N/A"
-if is_market_hours && ! is_market_holiday; then
+# Gate on the TIGHT 9:30–16:00 session: HYDRA only writes the ~10s heartbeat
+# during the open session; post-close it sleeps 15m and stops (by design), so
+# enforcing the <5m heartbeat in the 16:00–17:00 hour is a guaranteed false FAIL.
+if is_trading_session && ! is_market_holiday; then
     if [[ -f "${STATE_FILE}" ]]; then
         # Pull last_heartbeat_at via Python (atomic state-file reader)
         last_hb=$("${VENV_PYTHON}" -c "

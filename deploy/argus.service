@@ -6,6 +6,12 @@ Documentation=https://github.com/calypso-trading/calypso
 Type=oneshot
 User=calypso
 Group=calypso
+# Check 6 (log-staleness liveness) runs `journalctl -u hydra`; as plain calypso
+# that returns "No journal files were opened due to insufficient permissions",
+# so the check was silently DEAD (always WARN, never able to detect a real
+# stalled-log hang). systemd-journal group membership grants journald read
+# access so Check 6 actually works.
+SupplementaryGroups=systemd-journal
 WorkingDirectory=/opt/calypso
 
 Environment="GCP_PROJECT=calypso-trading-bot"

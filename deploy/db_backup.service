@@ -9,35 +9,12 @@ User=calypso
 Group=calypso
 WorkingDirectory=/opt/calypso
 
-# Backup backtesting.db to Google Cloud Storage
-ExecStart=/bin/bash -c '\
-    DATE=$(date +%%Y%%m%%d); \
-    /usr/bin/gsutil cp /opt/calypso/data/backtesting.db \
-    gs://calypso-backups/backtesting_${DATE}.db && \
-    echo "Backup complete: backtesting_${DATE}.db" || \
-    echo "Backup FAILED"'
-
-# Also backup metrics and state files, including every per-variant state file
-# (data/variant_*/hydra_state.json written by hydra_variant_b/c.service) so the
-# A-vs-B-vs-C comparison history survives VM disk loss. Best-effort: a single
-# failed copy is logged but does not fail the unit (canonical backup above is
-# the gating step).
-ExecStartPost=/bin/bash -c '\
-    DATE=$(date +%%Y%%m%%d); \
-    /usr/bin/gsutil cp /opt/calypso/data/hydra_metrics.json \
-    gs://calypso-backups/hydra_metrics_${DATE}.json \
-    || echo "Backup FAILED: hydra_metrics.json"; \
-    /usr/bin/gsutil cp /opt/calypso/data/hydra_state.json \
-    gs://calypso-backups/hydra_state_${DATE}.json \
-    || echo "Backup FAILED: hydra_state.json"; \
-    for f in /opt/calypso/data/variant_*/hydra_state.json; do \
-        [ -e "$f" ] || continue; \
-        v=$(basename "$(dirname "$f")"); \
-        /usr/bin/gsutil cp "$f" \
-        gs://calypso-backups/${v}_hydra_state_${DATE}.json \
-        || echo "Backup FAILED: ${v}/hydra_state.json"; \
-    done; \
-    true'
+# Backup backtesting.db (gating) + metrics/state/per-variant state (best-effort)
+# to GCS. Logic lives in scripts/db_backup.sh because the prior inline
+# `$(date +%%Y%%m%%d)` expanded EMPTY in the systemd exec context, so backups
+# landed on dateless objects (no history). systemd does not %-expand a script
+# file's contents, so the date is computed correctly there.
+ExecStart=/bin/bash /opt/calypso/scripts/db_backup.sh
 
 StandardOutput=journal
 StandardError=journal
