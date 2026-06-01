@@ -440,7 +440,7 @@ Full deployment guide: [`docs/ALERTING_SETUP.md`](docs/ALERTING_SETUP.md).
 
 ## Agent Suite (5 Agents)
 
-5 autonomous agents on systemd timers. All use `shared/claude_client.py` for Claude API + `shared/sheets_reader.py` for Google Sheets.
+5 autonomous agents on systemd timers. The 4 narrative agents (APOLLO, HERMES, HOMER, CLIO) use `shared/claude_client.py` for the Claude API + `shared/sheets_reader.py` for Google Sheets. ARGUS is a bash health-check script (`services/argus/health_check.sh`, launched via `/bin/bash` in `argus.service`) that reads the state file and emits alerts (`notify.py`) — it uses neither the Claude API nor Sheets.
 
 | Agent | Service | Schedule | Purpose |
 |-------|---------|----------|---------|

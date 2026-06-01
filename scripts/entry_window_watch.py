@@ -10,8 +10,9 @@ on A/B/C or the shared broker. Checks:
 
 LOG SOURCE (important): the bots/broker do NOT log to journald — journalctl is
 empty for these units. They write to FILES under /opt/calypso/logs, and the
-exact path is messy (A → hydra/bot.log; B and C share bot_log.txt; logrotate
-can rename a file out from under an open fd). So instead of guessing paths we
+exact path is messy (A → logs/hydra/bot.log; B → logs/hydra_variant_b/bot.log;
+C → logs/hydra_variant_c/bot.log; logrotate can rename a file out from under an
+open fd). So instead of guessing paths we
 resolve each unit's *actually-open* log file(s) via /proc/<MainPID>/fd — that
 auto-follows wherever each process truly writes, immune to the rotation mess.
 Bot log lines are ET-stamped ("YYYY-MM-DD HH:MM:SS | LEVEL | ..."); we window
@@ -215,8 +216,10 @@ def main() -> int:
             )
 
     # 3. entry-path errors in the window, scanning the union of all open log
-    #    files (A/B/C + broker). B/C share a file and all carry bot_name=HYDRA,
-    #    so errors are reported across the set rather than per-unit — for a
+    #    files (A/B/C + broker). B and C now write separate per-variant files
+    #    (logs/hydra_variant_b/bot.log, logs/hydra_variant_c/bot.log) and all
+    #    carry bot_name=HYDRA, so errors are reported across the set rather than
+    #    per-unit — for a
     #    watchdog "something in the entry path errored" is the signal that matters.
     if not log_files:
         problems.append("no open log files resolved for A/B/C/broker (all PIDs dead?)")

@@ -85,17 +85,19 @@ The 16 methods (the API surface):
 - **Session ownership:** ONLY the broker authenticates to IBKR. The morning
   re-auth gate (currently in `main.py`) moves into the broker — one place owns
   session lifecycle, so there is never an eviction war.
-- **Credentials:** ONLY `calypso-broker.service` gets
-  `LoadCredentialEncrypted=ibkr_*` (`/etc/calypso/ibkr`). `hydra.service` +
-  variants **drop** the IBKR creds entirely (they no longer auth to IBKR).
+- **Credentials:** ONLY `calypso-broker.service` USES the
+  `LoadCredentialEncrypted=ibkr_*` creds (`/etc/calypso/ibkr`). The `hydra*`
+  units still carry their `LoadCredentialEncrypted=ibkr_*` entries as a
+  now-unused fallback (they no longer auth to IBKR while `CALYPSO_BROKER_URL` is
+  set); removing them is a deferred cleanup.
 - **Failure isolation:** broker is a single point of failure → `Restart=always`
   + strategies degrade gracefully when it's unavailable (BrokerClient surfaces a
   clean error; strategies already handle "no data" ticks — they must NOT
   crash-loop if the broker is down). `hydra*` units gain `After=calypso-broker`
   (+ `Wants=`, not hard `Requires`, so a broker blip doesn't kill strategies).
 - **Concurrency:** broker serializes IBKR access behind its existing
-  retry+breaker; per-strategy request tagging (`X-Strategy: A|B|C`) for logging
-  + the future risk gate.
+  retry+breaker; (planned, not yet implemented) per-strategy request tagging
+  (`X-Strategy: A|B|C`) for logging + the future risk gate.
 
 ## 5. Implementation plan (phased; each phase verifiable, live-A protected)
 

@@ -361,10 +361,11 @@ class HydraStrategy(MEICStrategy):
 
         # API pacing multiplier — multiplies the monitoring loop's recommended
         # check interval AND main.py's status_interval so non-canonical
-        # variants pace their Saxo calls more loosely. Defaults to 1.0
-        # (no change). When 3+ variants run simultaneously, this is the lever
-        # that keeps the combined Saxo API rate under the ~60 req/min sustained
-        # limit. Variant A: 1.0 (live, safety-critical), B: 1.5, C: 2.0.
+        # variants pace their IBKR calls more loosely. Defaults to 1.0
+        # (no change). When 3+ variants run simultaneously, this helps keep
+        # combined IBKR traffic under the broker's global rate gate
+        # (CALYPSO_IBKR_MAX_RPS=8, below IBKR's 10 req/s/session).
+        # Variant A: 1.0 (live, safety-critical), B: 2.0, C: 2.0.
         # Vigilant mode is intentionally NOT scaled — when a stop is near, we
         # need fast detection on every variant (still cheap because vigilant
         # only kicks in for one entry at a time).
@@ -6007,8 +6008,9 @@ class HydraStrategy(MEICStrategy):
     # worthless at end-of-day settlement (0DTE). This matches Tammy Chambless
     # and Sandvand's approach: "set stops on the short only, not on the spread."
     #
-    # Benefits: reduces slippage (1 market order instead of 2), saves $2.50
-    # commission per stop (1 leg instead of 2), avoids selling illiquid long
+    # Benefits: reduces slippage (1 market order instead of 2), saves ~$1.15
+    # commission per stop (1 leg instead of 2, at the configured IBKR
+    # commission_per_leg), avoids selling illiquid long
     # wings at terrible fill prices.
     #
     # Tradeoff: we lose the long leg's residual value (it expires worthless
@@ -6252,7 +6254,8 @@ class HydraStrategy(MEICStrategy):
 
         self.daily_state.total_realized_pnl -= net_loss
 
-        # MKT-025: Commission for 1 close leg only ($2.50 instead of $5.00).
+        # MKT-025: Commission for 1 close leg only (~$1.15 instead of ~$2.30 at
+        # the IBKR commission_per_leg rate).
         # v8: scale by entry.contracts (the count this entry was opened at), NOT
         # self.contracts_per_entry (which may have changed if config flipped).
         close_commission = 1 * self.commission_per_leg * entry.contracts
@@ -9172,7 +9175,8 @@ class HydraStrategy(MEICStrategy):
     # =========================================================================
     # OVERRIDE: API pacing — multiply normal-mode check interval by the
     # variant's `api_pacing_multiplier` so parallel variants don't blow past
-    # the Saxo ~60 req/min sustained limit. Vigilant mode is left at the
+    # the broker's IBKR rate gate (CALYPSO_IBKR_MAX_RPS=8, under IBKR's
+    # 10 req/s/session limit). Vigilant mode is left at the
     # parent's value (2s) because stop detection latency is safety-critical.
     # Multiplier 1.0 (default) is a no-op — parent behavior unchanged.
     # =========================================================================

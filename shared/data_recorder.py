@@ -15,8 +15,8 @@ Safety guarantees:
 Schema v5 adds: individual leg prices, Greeks, bid-ask width, slippage,
 margin, execution quality, MAE/MFE, skipped entries, economic events.
 
-Schema v6 adds: per-leg Saxo bid/ask in spread_snapshots (~10s resolution)
-for ThetaData-vs-Saxo backtest calibration.
+Schema v6 adds: per-leg broker (IBKR; originally Saxo) bid/ask in spread_snapshots
+(~10s resolution) for ThetaData-vs-broker backtest calibration.
 """
 
 import json
@@ -79,8 +79,9 @@ MIGRATION_V5_SQL = [
 ]
 
 # v6 migrations: bid/ask capture for backtest calibration
-# Enables comparing ThetaData's aggregated OPRA quotes to Saxo's single-broker
-# quotes. Each leg's (bid, ask) captured during monitoring (~10s resolution).
+# Enables comparing ThetaData's aggregated OPRA quotes to the broker's
+# single-session quotes (IBKR via calypso-broker; originally Saxo).
+# Each leg's (bid, ask) captured during monitoring (~10s resolution).
 MIGRATION_V6_SQL = [
     "ALTER TABLE spread_snapshots ADD COLUMN short_call_bid REAL",
     "ALTER TABLE spread_snapshots ADD COLUMN short_call_ask REAL",

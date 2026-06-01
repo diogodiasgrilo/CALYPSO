@@ -1,6 +1,6 @@
 """Extract today's live data from hydra_state.json in DB-compatible formats.
 
-During trading hours (and until HOMER runs at 5:30 PM ET), SQLite has no data
+During trading hours (and until HOMER runs at 7:30 PM ET), SQLite has no data
 for today. This module bridges the gap by converting state file data into the
 same schema the DB readers return, so REST endpoints can fall back to live data.
 """

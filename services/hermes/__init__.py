@@ -8,8 +8,9 @@ Claude for narrative analysis, saves a report, and sends a summary alert.
 v1.1.0 Changes:
     - Pre-computed cheat sheet prevents Claude arithmetic errors
     - Narrative-focused analysis (story of the day, not just numbers)
-    - Updated strategy params for HYDRA v1.23.0 (2 effective base entries E#2+E#3 — E#1 at 10:15
-      dropped at ALL VIX levels since 2026-04-17; VIX-scaled spreads 25-110pt; Downday-035 E6
+    - Updated strategy params (2 effective base entries: Entry #1 at 10:45 + Entry #2 at 11:15 —
+      the canonical 10:15 slot is dropped at ALL VIX levels by the regime cap since 2026-04-17;
+      Entry #3 at 14:00 conditional; VIX-scaled spreads 25-110pt; Downday-035 Entry #3
       conditional call-only on down days; FOMC T+1 blackout supersedes MKT-038 call-only)
     - Cumulative context (win/lose streak, averages, day number)
     - Apollo accuracy assessment

@@ -14,6 +14,18 @@
 
 ## RB-1 — Bot says "authenticated but not connected"
 
+> **DEPLOYED (broker mode).** The IBKR session is owned by `calypso-broker`,
+> NOT the `hydra*` units. A session-lost / authenticated-but-not-connected /
+> competing-session fault is resolved by `sudo systemctl restart calypso-broker`
+> and inspected via `journalctl -u calypso-broker`. In broker mode HYDRA's
+> `ensure_connected()` (`shared/broker_client.py`) is only a `GET /health`
+> probe — it reports the broker's session health and **cannot reconnect**; the
+> real `disconnect()` + `connect()` re-auth loop runs inside `calypso-broker`
+> (`services/broker/main.py:_maintain()`, the only process that owns the IBKR
+> session). Restarting a `hydra*` unit just re-probes the broker's `/health` and
+> will NOT re-establish the session. The legacy direct-`IBClient` steps below
+> apply ONLY when `CALYPSO_BROKER_URL` is unset (standalone, non-broker mode).
+
 ### Symptom
 - Telegram alert: `API_ERROR` — "IBKR session lost mid-day — bot exiting for systemd restart — likely competing session or LST expiry" (this is the alert from Polish Item 1's `ensure_connected()` site)
 - OR `journalctl -u hydra` shows: `Auth status: authenticated=true connected=false` repeatedly
@@ -240,6 +252,16 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 ---
 
 ## RB-4 — Session stolen by another client
+
+> **DEPLOYED (broker mode).** The IBKR session is owned by `calypso-broker`, not
+> the `hydra*` units. A stolen / competing session is cleared by signing out the
+> other client and then `sudo systemctl restart calypso-broker` (inspect via
+> `journalctl -u calypso-broker`) — restarting a `hydra*` unit only re-probes the
+> broker's `/health` and cannot re-establish the IBKR session, because in broker
+> mode HYDRA's `ensure_connected()` is a probe only (the re-auth loop lives in
+> `calypso-broker`, the single process that holds the session). The
+> stop/start-`hydra` steps below apply ONLY when `CALYPSO_BROKER_URL` is unset
+> (standalone, non-broker mode).
 
 ### Symptom
 - Telegram alert: `API_ERROR` — "IBKR session lost mid-day — likely competing session" (Polish Item 1)

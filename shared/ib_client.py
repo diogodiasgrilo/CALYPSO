@@ -6,7 +6,7 @@ documented in docs/migration/SAXO_TO_IB_MIGRATION_PLAN.md).
 
 Status — F1-F7 + P1-P7 complete (see docs/migration/PROJECT_STATUS.md):
   ✓ Connection lifecycle: connect / disconnect / is_connected, Tickler,
-    once-per-day morning re-auth gate
+    re-auth gate (morning + ~15-min intraday re-check, idempotent when healthy)
   ✓ 3-stage auth: LST → ssodh/init → auth/status
   ✓ Account discovery + pyCrypto fast-fail safety assertion
   ✓ Contract qualification with conid cache (qualify_contract)
@@ -17,8 +17,14 @@ Status — F1-F7 + P1-P7 complete (see docs/migration/PROJECT_STATUS.md):
   ✓ Order-state / position reconcile (shared/ib_reconcile.py)
   ✓ Retry + per-family circuit breakers (shared/ib_retry.py)
 
-This is the LIVE broker: HYDRA's strategy layer calls it via `self.broker`
-(see bots/hydra/base_strategy.py). The Saxo adapter is retired on this
+This is the IBKR adapter that owns the live session. In the deployed
+multi-strategy setup (Option 1 — shared broker) it runs INSIDE the
+calypso-broker process as ONE shared IBKR session for all of A/B/C;
+HYDRA strategies reach it via shared.broker_client.BrokerClient over
+loopback HTTP (self.broker is a BrokerClient whenever CALYPSO_BROKER_URL
+is set — committed inline as http://127.0.0.1:8788 in all three hydra
+units). IBClient is only `self.broker` directly in the legacy single-bot
+mode (CALYPSO_BROKER_URL unset). The Saxo adapter is retired on this
 branch — the broker-abstraction reparent landed in P1–P4.
 
 Mapping from SaxoClient methods (kept in module-level docstring so Phase B
@@ -844,8 +850,10 @@ class IBClient:
         a server-side reset — so a process that has been up overnight
         will usually find its session dead the next morning.
 
-        Call this as a once-per-trading-day gate before the first entry
-        (and after any 401/410). It round-trips to auth/status:
+        Call this as a session gate before the first entry of the day and
+        as a periodic intraday re-check (HYDRA and calypso-broker both call
+        it every ~15 min), plus after any 401/410. It is cheap/idempotent
+        when the session is healthy and round-trips to auth/status:
 
         - healthy (``authenticated`` + ``connected``, not ``competing``)
           → returns True, touches nothing;

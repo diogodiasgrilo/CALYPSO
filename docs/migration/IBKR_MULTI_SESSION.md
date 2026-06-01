@@ -36,7 +36,7 @@ account `DUR049068`), all three crash-loop: `/iserver/auth/ssodh/init` →
 This is why the Saxo era had a `token_keeper`/coordinator (shared one token
 across bots); deleting it on the IBKR branch exposed the constraint.
 
-## Option 2 — one paper username per strategy (CHOSEN for paper)
+## Option 2 — one paper username per strategy (REJECTED alternative)
 
 Each variant gets its OWN IBKR paper username + OAuth registration → its own
 brokerage session → no contention (verify `competing:false` on all three).
@@ -46,15 +46,21 @@ brokerage session → no contention (verify `competing:false` on all three).
   — is moot. They still see the same SPX/VIX market, so the A-vs-B-vs-C
   comparison holds. Near-zero code: each systemd process keeps its own
   `IBClient`, just different creds.
-- **Wiring (already in the repo):** `hydra_variant_b.service` loads creds from
-  `/etc/calypso/ibkr-b/`, `hydra_variant_c.service` from `/etc/calypso/ibkr-c/`
-  (A stays on `/etc/calypso/ibkr/`). The credential *IDs* (`ibkr_consumer_key`
-  …) are unchanged — `shared/ib_oauth.load_credentials` reads them by ID from
-  `$CREDENTIALS_DIRECTORY`, so only the source `.cred` paths differ per account.
+- **Wiring (PLANNED, never implemented — Option 1 was deployed instead):** this
+  approach would have had `hydra_variant_b.service` load creds from
+  `/etc/calypso/ibkr-b/` and `hydra_variant_c.service` from `/etc/calypso/ibkr-c/`
+  (A staying on `/etc/calypso/ibkr/`). The credential *IDs* (`ibkr_consumer_key`
+  …) would be unchanged — `shared/ib_oauth.load_credentials` reads them by ID from
+  `$CREDENTIALS_DIRECTORY`, so only the source `.cred` paths would differ per
+  account. As deployed, NO such per-username sets exist: there are no
+  `ibkr-b`/`ibkr-c` paths anywhere in the repo, and all three units
+  (`hydra.service`, `hydra_variant_b.service`, `hydra_variant_c.service`)
+  `LoadCredentialEncrypted` from the SHARED `/etc/calypso/ibkr/` and reach IBKR
+  only through `calypso-broker` via `CALYPSO_BROKER_URL=http://127.0.0.1:8788`.
 - **Cost:** maintain 3 OAuth credential sets; per-username market-data
   subscriptions (negligible on paper; would be per-account fees on live).
 
-### Operator provisioning (one-time, per variant B and C)
+### Operator provisioning (NOT performed — rejected Option-2 plan, kept for reference)
 1. Create a new IBKR **paper username** (Client Portal → Settings → Users &
    Access Rights → add user; or a separate paper account). One per variant.
 2. For each, complete OAuth 1.0a **self-service registration** (same as
@@ -72,7 +78,7 @@ brokerage session → no contention (verify `competing:false` on all three).
 > ⚠️ New OAuth consumer keys may have an **activation delay** (A's key took
 > ~days to activate). Provision early.
 
-## Option 1 — single shared broker-session service (TARGET for live)
+## Option 1 — single shared broker-session service (CHOSEN + DEPLOYED, paper and live)
 
 One `calypso-broker` process owns the single `IbkrClient` (one LST, one
 `ssodh/init`, one tickler). A/B/C stop owning sessions and request

@@ -22,9 +22,11 @@ Feature matrix (v1.27.1, both B and C):
                                  strike + GEX confirms an accel zone. Hedge
                                  legs placed via _place_option_order in live
                                  mode; synthetic DRY_* fills in dry-run
-    gex_cache           15-min   refresh every 15 min (Polygon Starter is
-                                 unlimited; matches feed delay). Failure
-                                 cooldown: 60s before retry.
+    gex_cache           3-min    background refresh every 3 min (cut from
+                                 15 min on 2026-05-13; Polygon Starter is
+                                 unlimited). force_refresh at entry time
+                                 pulls a fresh chain regardless of TTL.
+                                 Failure cooldown: 60s before retry.
     HYDRA_stop_shadow   SHADOW   credit+buffer stop computed but never acts;
                                  Telegram alert when each side would fire
                                  with expected loss
@@ -241,7 +243,7 @@ class BrandonHydraStrategy(HydraStrategy):
 
         target = self.brandon_delta_target_pct
         # Recompute delta from cached IV at LIVE spot. The cached snapshot
-        # is up to 15 minutes old (cache TTL) plus Polygon's own ~15-min
+        # is up to 3 minutes old (cache TTL) plus Polygon's own ~15-min
         # delayed feed — on 0DTE that's enough drift to turn an 8δ pick
         # into a 14δ one (verified on B's 2026-05-12 E#4: chain showed
         # 8δ at 7320 from spot=7358 fetch, but live spot at placement was
@@ -756,8 +758,10 @@ class BrandonHydraStrategy(HydraStrategy):
         end-of-day settlement and the daily P&L picture is complete.
 
         In live mode the same legs are also tracked, but each is placed via
-        `_place_option_order` against Saxo. Position ids returned by Saxo
-        replace the DRY_OVERLAY_* placeholders. Hedges are held to expiry —
+        `_place_option_order` against IBKR (through the shared broker). IBKR
+        has no per-leg position id, so the conid (uic) identifies the leg;
+        the DRY_OVERLAY_* placeholders are not replaced by a broker-issued
+        position id. Hedges are held to expiry —
         intraday management of the hedge itself is not yet wired.
         """
         legs_summary = ", ".join(

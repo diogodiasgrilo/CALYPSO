@@ -674,9 +674,8 @@ class MarketData:
         """True when current ET time is at-or-after 9:30 AM (regular-session open).
 
         Used to gate intraday-OHLC capture (spx_open / spx_high / spx_low /
-        vix_open / vix_high / vix_low) so pre-market Saxo extended-hours
-        quotes (available from 7:00 AM ET via Saxo extended hours) can't
-        contaminate the "% from open" reference. All downstream strategy
+        vix_open / vix_high / vix_low) so pre-9:30 ET ticks (from the broker's
+        IBKR feed) can't contaminate the "% from open" reference. All downstream strategy
         decisions that compute SPX/VIX move from open — Upday-035,
         Downday-035, whipsaw filter, ROC gate, directional-pivot — depend on
         this anchor being the actual regular-session open (9:30 AM ET).
@@ -1028,7 +1027,10 @@ class MEICStrategy:
         self.min_pnl_per_ic = self.strategy_config.get("min_pnl_per_ic", MIN_PNL_PER_IC)
 
         # Commission tracking (display only - does not affect strategy logic)
-        # Saxo Bank charges $2.50 per leg per contract, round-trip = $5.00 per leg
+        # Commission per leg (display only). IBKR all-in SPX cost ~$1.15/leg/contract
+        # since the 2026-05-29 cutover; variant configs set commission_per_leg=1.15.
+        # The old $2.50/$5.00 Saxo-era figures are stale (see the dataclass note above).
+        # Default fallback below is the legacy 2.50 and should be overridden by config.
         self.commission_per_leg = self.strategy_config.get("commission_per_leg", 2.50)
 
         # State and metrics file paths - can be overridden by subclasses BEFORE calling super().__init__()

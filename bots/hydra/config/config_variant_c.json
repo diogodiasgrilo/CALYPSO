@@ -172,7 +172,7 @@
     "fomc_blackout": true
   },
   "external_price_feed": {
-    "_comment": "Yahoo Finance fallback for VIX/SPX when Saxo returns NoAccess. shared/config_loader.py defaults enabled=false in cloud — explicit override here because Saxo's VIX feed flaps NoAccess every 10-15 sec on FullTradingAndChat session contention.",
+    "_comment": "Yahoo Finance fallback for VIX/SPX (shared/external_price_feed.py). shared/config_loader.py defaults enabled=false in cloud/LIVE — kept enabled=true here as a defensive override. NOTE: post-IBKR cutover the old Saxo 'NoAccess' / 'FullTradingAndChat session contention' rationale is obsolete (no Saxo on this branch). HYDRA's own VIX read now goes through self.broker.get_vix_price() → IBClient.get_vix_price (strategy.py:1913/1922) and does NOT consume this key — the external_price_feed feed is only wired into the shared/apollo path (services/apollo/market_data.py), so this flag has no effect on HYDRA's spread-width / vix_regime math today.",
     "enabled": true
   },
   "google_sheets": {

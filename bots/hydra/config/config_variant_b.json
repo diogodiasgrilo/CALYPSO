@@ -171,7 +171,7 @@
     "fomc_blackout": true
   },
   "external_price_feed": {
-    "_comment": "Yahoo Finance fallback for VIX/SPX when Saxo returns NoAccess. shared/config_loader.py defaults enabled=false in cloud — explicit override here because Saxo's VIX feed flaps NoAccess every 10-15 sec on FullTradingAndChat session contention. Yahoo fallback silences the noise and prevents downstream None-VIX bugs in spread-width / vix_regime calculations. Read-only data so it doesn't compromise the LIVE-trading boundary.",
+    "_comment": "Yahoo Finance fallback for VIX/SPX when the IBKR feed is unavailable. shared/config_loader.py defaults enabled=false in cloud — explicit override here so a transient IBKR market-data gap doesn't produce downstream None-VIX bugs in spread-width / vix_regime calculations. Read-only data so it doesn't compromise the LIVE-trading boundary. (The prior Saxo 'NoAccess' / FullTradingAndChat-contention rationale is obsolete post-IBKR cutover.)",
     "enabled": true
   },
   "google_sheets": {

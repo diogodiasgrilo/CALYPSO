@@ -1,7 +1,8 @@
 """calypso-broker entrypoint — the single shared IBKR session service.
 
 Owns the ONLY IBClient (one Live Session Token, one ssodh/init, one Tickler,
-one daily re-auth loop) and serves the 16-method broker surface on loopback so
+one session re-check / re-auth loop running every CALYPSO_BROKER_SESSION_CHECK_S
+seconds, default 15 min) and serves the 16-method broker surface on loopback so
 HYDRA strategies A/B/C run concurrently without the one-brokerage-session-per-
 username eviction war. See docs/migration/BROKER_SESSION_SERVICE_DESIGN.md.
 

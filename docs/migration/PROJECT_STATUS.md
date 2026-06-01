@@ -3,9 +3,9 @@
 **This file is the single-source-of-truth for the current state of the `hydra-ibkr-standalone` branch.** Any Claude session arriving at this repo should read this file first, before CLAUDE.md. CLAUDE.md is the operator reference (what the bot does, how to deploy, troubleshoot); this file is the *project state* (what's been done, what's in flight, what's blocked).
 
 **Last updated:** 2026-05-31
-**Last commit on branch:** `3f67bc7` (use `git rev-parse HEAD` to verify)
-**Commits ahead of `main`:** 134 (use `git log --oneline main..HEAD | wc -l` to verify)
-**Test suite:** 953 unit tests pass, 16 integration/optional tests skipped pending live paper account. The suite is now deterministic at any wall-clock hour (the intraday-OHLC tests were time-gated; fixed 2026-05-28).
+**Last commit on branch:** `3d90d15` (use `git rev-parse HEAD` to verify)
+**Commits ahead of `main`:** 141 (use `git log --oneline main..HEAD | wc -l` to verify)
+**Test suite:** unit suite passes; integration/optional tests skipped pending live paper account. Re-run `pytest` for the exact current count (it grew past the old 953 snapshot after the 2026-05-31 30-agent audit, `38ac9d6`); see CI / run `python -m pytest tests/ -q`. The suite is deterministic at any wall-clock hour (the intraday-OHLC tests were time-gated; fixed 2026-05-28).
 **Branch is pushed to `origin`** (github.com/diogodiasgrilo/CALYPSO) as of 2026-05-29 — no longer laptop-only.
 
 > ## ⚡ CUTOVER EXECUTED 2026-05-29 (~12:40 ET) — read this first
@@ -14,13 +14,13 @@
 > - **Strategy A is LIVE on IBKR paper** (account `DUR049068`), **dry-run**, fresh daily state, real-time SPX/VIX, `NRestarts=0`. Telegram + Google Sheets working. Dashboard locked to `127.0.0.1:8080` (SSH-tunnel only). Backups: `gs://calypso-backups` created + VM SA granted write (fixes the long-broken `db_backup`); pre-cutover state archived locally + off-site.
 > - **✅ B and C RESOLVED via `calypso-broker` (deployed 2026-05-29 ~14:11 ET).** The one-brokerage-session-per-username limit (OAuth 1.0a; `compete:true` made 3 processes evict each other) is solved by a single shared broker-session service: `calypso-broker` owns the ONE IBClient (LST + ssodh/init + Tickler + 15-min re-auth loop); A/B/C run via a drop-in `BrokerClient` over loopback (`CALYPSO_BROKER_URL=http://127.0.0.1:8788`) and open NO sessions of their own. **All four (broker + A + B + C) are active, NRestarts=0, zero contention, ~0.9 IBKR req/s** (well under ~10/s). Design + follow-ups: [`BROKER_SESSION_SERVICE_DESIGN.md`](./BROKER_SESSION_SERVICE_DESIGN.md); constraint research: [`IBKR_MULTI_SESSION.md`](./IBKR_MULTI_SESSION.md).
 > - **✅ P5a DONE — breaker/warmup alerting runs in the broker.** `IBKRAlertHooks` is instantiated inside `calypso-broker` (where the breakers live) and polled every 10s (breaker-transition / stuck-open / warmup-exhaustion), publishing to the same `calypso-alerts` Pub/Sub path. Strategy-side `BrokerClient.circuit_breakers` stays empty (no duplicate alerts); strategies still emit their own `ensure_connected`/broker-reachability alerts. Verified clean on deploy (no alert-poll errors; strategies degraded gracefully through the broker restart).
-> - **Notes:** A/B/C run **dry-run** — flip `dry_run:false` to place real paper orders when ready. The morning re-auth gate now lives in the broker. `hydra*` units still carry (now-unused) `LoadCredentialEncrypted` — only the broker needs creds; harmless, clean up later. `ProtectDevices=yes` silently unsupported on this systemd 252 build (minor). Rollback: remove each unit's `…/broker.conf` drop-in + restart on own `IBClient`, or `main` @ `a77027f` + `~/cutover_backup_*` + `gs://calypso-backups/`.
+> - **Notes:** A/B/C run **dry-run**. **B/C stay dry-run.** Variant A will **auto-flip** to `dry_run:false` (live paper) IF the one-shot Monday 2026-06-01 09:35 ET broker paper-smoke passes (`broker-paper-smoke.timer` → `broker-paper-smoke.service`, whose `ExecStartPost=+/opt/calypso/scripts/flip_a_live.sh` flips ONLY A and restarts `hydra` on a clean PASS — guarded on broker `/health` connected + a fresh dated PASS sentinel); otherwise A stays dry-run. To flip manually, set `dry_run:false` in `config.json` + restart `hydra`. The morning re-auth gate now lives in the broker. `hydra*` units still carry (now-unused) `LoadCredentialEncrypted` — only the broker needs creds; harmless, clean up later. `PrivateDevices=yes` is used on this systemd 252 build (`ProtectDevices=yes` is silently ignored there; minor). Rollback: remove the inline `Environment="CALYPSO_BROKER_URL=…"` line from each `hydra*` unit file (+ restart on its own `IBClient`), or `main` @ `a77027f` + `~/cutover_backup_*` + `gs://calypso-backups/`.
 > - **✅ Dashboard audited + wired to IBKR (2026-05-29).** Swept all 26 endpoints against the live deployment — `health / hydra.state / summary / entries (DB, with spx_at_entry) / market.ohlc / metrics.{cumulative,daily,performance,entries} / agents / widget` all return real IBKR + full Feb→today history. Two fixes: (1) **enabled comparison mode** (`DASHBOARD_COMPARISON_MODE_ENABLED=true`) so the A-vs-B-vs-C `/api/variants/*` view works (was 503 — off on Saxo too); (2) `live_state` today-SPX/VIX now sourced from `state.market_data_ohlc` (exact) instead of absent per-entry fields (closes audit FP6). Dashboard stays localhost-bound (M12).
 > - **Telegram alert formatting fixed (2026-05-29).** The `process-trading-alert` Cloud Function (`cloud_functions/alert_processor/`) 400'd on every alert's Markdown (unbalanced `_`/`*` from snake_case fields) and fell back to plain text. `_md_escape()` now escapes dynamic content → valid Markdown. Redeployed (revision 00012); no 400s since. **Confirm formatted delivery in the Telegram chat** (a "Broker fix test ✅" was sent).
 > - **Entry-window watchdog deployed.** `entry-window-watch.timer` runs the watchdog Mon–Fri at 10:20/10:50/11:20/11:35 ET (just after the 10:15/10:45/11:15 windows): verifies broker `/health` connected + A/B/C active + no entry-path errors; Telegram-alerts on any problem. Self-contained on the VM. Verified OK on a manual run.
 > - **Commission model corrected to IBKR (2026-05-29, `078049f`).** `strategy.commission_per_leg` previously fell back to the Saxo $2.50/leg default on every broker (display/reported-P&L only; not strategy logic), overstating IBKR fees by ~$1.35/leg. Set to **$1.15/leg** (~$0.65 IBKR Pro base + ~$0.45 CBOE index + ~$0.05 ORF/OCC/CAT) across all three live VM configs (A/B/C) — decisive for judging B/C's dry-run P&L (the Saxo-vs-IBKR gap was ~$170–450/day at their leg counts). Applied + restarted; NRestarts=0.
 > - **✅ Overnight session-lost incident handled + hardened (2026-05-31, `3f67bc7`).** A 01:02 ET HIGH alert fired on a routine IBKR ~01:00 ET auth-server reset; the broker's 15-min `ensure_connected()` caught the one-cycle drop, alerted, and re-authed next cycle (**self-healed, NRestarts=0**). The investigation surfaced + fixed 3 defects: (1) **nightly false HIGH** — the broker now alerts only after ≥2 consecutive `ensure_connected` failures (a routine reset clears in one) with broker-accurate wording (`will_restart=False` → "broker stays UP and keeps retrying"); the bot path (`will_restart=True`) is unchanged; (2) **watchdog was blind** — it grepped journald, but these units log to FILES; it now resolves each bot's open log via `/proc/<MainPID>/fd` + scans the broker's known path, with level-based `| ERROR |` matching so normal `ssodh/init` INFO no longer false-triggers; (3) **broker had no persistent log** — added a `RotatingFileHandler` at `/opt/calypso/logs/broker/broker.log`. Deployed + verified on the VM. +2 tests.
-> - **Now = Gate 2 paper-smoke watch:** observe A/B/C + the broker through the session + overnight + **Monday's** morning re-auth gate + entry windows (tomorrow is Saturday) before flipping to live-paper or merging. Still-open items to confirm by observation: Telegram command handler responsiveness (`/status`), and the full dry-run entry evaluation through the broker at Monday's windows (the watchdog flags failures).
+> - **Now = Gate 2 paper-smoke watch:** observe A/B/C + the broker through the session + overnight + **Monday's** morning re-auth gate + entry windows (today is Sunday 2026-05-31; the broker paper-smoke + windows are tomorrow, Monday 2026-06-01) before flipping to live-paper or merging. Still-open items to confirm by observation: Telegram command handler responsiveness (`/status`), and the full dry-run entry evaluation through the broker at Monday's windows (the watchdog flags failures).
 
 ---
 
@@ -79,8 +79,9 @@ Full migration history: `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 | **Polish pass** | 12 items + 17 amendments + 3-agent re-audit + senior overseer | 0 new | PASS, confidence raised to 90% | 918 |
 | **AUD2** | 6 parallel domain agents + Round 2 verify + senior overseer | 4 H + 7 M + 17 L | All H+M fixed with regression tests; 7 L fixed; 10 L accepted as observations | **920** |
 | **AUD3 — preflight (2026-05-28)** | 20 parallel domain agents + per-finding adversarial verify + Claude adjudication (web-search enabled) | 81 raw → 74 confirmed (1 C + 7 H + 14 M + 46 L + 6 I), 7 false-positive | 20 cutover-relevant findings fixed w/ regression tests (3 commits: `6882e82`, `09e1641`, `2e276af`); rest triaged (see below) | **953** |
+| **AUD4 — 30-agent migration audit (2026-05-31, post-cutover)** | 30 parallel domain agents over the live Saxo→IBKR migration | 79 verified findings | 79 fixed (`38ac9d6`, 39 files, +2959/−610) + follow-up hardening on 2 fixes that rested on unverified runtime assumptions (`9b83067`) | re-run `pytest` (grew past 953; see CI) |
 
-Cumulative findings closed: **87**. Zero regressions across any cycle.
+Cumulative findings closed: **166**. Zero regressions across any cycle.
 
 **AUD3 detail** — full register + per-finding adjudication in [`PREFLIGHT_AUDIT_FINDINGS.md`](./PREFLIGHT_AUDIT_FINDINGS.md). The 20 fixed: cOID uniqueness (#1 critical + M2), partial-fill flatten (M3), warmup metadata (#2/M4), retry token-match (#4), durable state write (M11), breaker outage alerting (M7/M10), streaming lock (#3), dashboard path-traversal (#6) + API-key auth (M12) + Telegram token redaction (#5), streaming staleness (M5), retry-policy preservation (M6), `/config` buffer (M8), variant-unit hardening (AUD2-L4 regression), a latent settlement `NameError`, plus stale-deploy-file deletion (#7/#8) and operator-doc accuracy. **None were real-money risks** (IBKR paper account; variants B/C dry-run).
 
@@ -117,14 +118,14 @@ The branch is **production-ready code-wise** — the merge is gated on external 
 
 ### Gate 1 — regular-session market-data probe (external — user runs)
 
-**Status:** ⏳ still pending a valid regular-session run. History: the Sunday 2026-05-24 probe showed `6509='Z'` (frozen — expected weekend/holiday); a 2026-05-28 ~21:09 ET run was **inconclusive** (market closed → all instruments NO DATA, incl. the SPY control) — auth + contract qualification worked, only live data-entitlement is unconfirmed. Next opportunity: **any regular session, ~09:35 ET or later** (Friday 2026-05-29).
+**Status:** ✅ **PASSED (2026-05-29 12:08 ET).** The regular-session probe returned `6509='R'` on both SPX and VIX (real-time, entitled), clearing the cutover. History: the Sunday 2026-05-24 probe showed `6509='Z'` (frozen — expected weekend/holiday); a 2026-05-28 ~21:09 ET run was **inconclusive** (market closed → all instruments NO DATA, incl. the SPY control) — auth + contract qualification worked, only live data-entitlement was unconfirmed until the 2026-05-29 regular-session run resolved it to `R`.
 
-Re-running during a regular session will show:
-- ✅ `6509='R'` on SPX/VIX → cleared for the cutover (Gate 2)
-- ⚠️ `6509='D'` → IBKR account has delayed-only entitlement; do NOT trade live; fix subscription before proceeding
-- ❌ Bid/ask still missing during market hours → broader subscription issue; investigate
+The passing probe showed:
+- ✅ `6509='R'` on SPX/VIX → cleared for the cutover (Gate 2 — executed 2026-05-29)
 
-Command (user has the OAuth env vars from 1Password in their shell):
+(For reference, the other outcomes the probe could have returned: `6509='D'` → delayed-only entitlement, do NOT trade live, fix subscription first; bid/ask missing during market hours → broader subscription issue.)
+
+Command, if a re-probe is ever needed (user has the OAuth env vars from 1Password in their shell):
 ```bash
 cd "/Users/ddias/Desktop/CALYPSO/Git Repo"
 source .venv/bin/activate
@@ -135,7 +136,7 @@ Expected: paste the output to the Claude session for interpretation.
 
 ### Gate 2 — Saxo→IBKR cutover on `calypso-bot` (operator + Claude pair)
 
-**Status:** ⏳ blocked on Gate 1 passing. **Full runbook: [`GATE2_DEPLOY_RUNBOOK.md`](./GATE2_DEPLOY_RUNBOOK.md).**
+**Status:** ✅ **EXECUTED 2026-05-29 (~12:40 ET)** — see the "CUTOVER EXECUTED" blockquote at the top of this file for the as-run result. The procedure below is kept for the historical record + rollback reference. **Full runbook: [`GATE2_DEPLOY_RUNBOOK.md`](./GATE2_DEPLOY_RUNBOOK.md).**
 
 **Operator decision (2026-05-28):** completely replace the live deployment on `calypso-bot` — remove all Saxo bots + the Saxo token-keeper (code preserved on `main`), and run the IBKR HYDRA strategies A/B/C, with dashboard + Telegram + DB + Google Sheets rewired to the IBKR bot. Verified safe: no real money on either side (the current Saxo bot runs `[DRY RUN]`; the IBKR account is paper-only via hardcoded `load_credentials("paper")`; B/C are dry-run). This supersedes the parallel `_ibkr`-suffixed Phase D/E/F plan — the `hydra-ibkr-standalone` branch *is* the Saxo-removed end-state, so we deploy it wholesale.
 
@@ -238,10 +239,10 @@ git rev-parse --abbrev-ref HEAD          # → hydra-ibkr-standalone
 
 # Confirm tests still pass (now deterministic at any wall-clock hour)
 python -m pytest tests/ -q --ignore=tests/test_dashboard 2>&1 | tail -3
-#  → 953 passed, 16 skipped
+#  → all passed, integration/optional skipped (exact count grows per audit; see CI / run pytest)
 
 # Confirm commit count is at/ahead of where this doc was written
-git log --oneline main..HEAD | wc -l     # → ≥ 115
+git log --oneline main..HEAD | wc -l     # → ≥ 141
 
 # Confirm zero open audit findings
 grep -c "| OPEN |" docs/migration/P7_AUDIT_FINDINGS.md       # → 0

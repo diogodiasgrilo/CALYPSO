@@ -73,8 +73,10 @@ try:
         alert_type=AlertType.API_ERROR,
         title="HYDRA A → LIVE paper trading ✅",
         message=("Paper smoke PASSED — variant A auto-flipped to dry_run:false "
-                 "and restarted. A will place REAL paper orders at today's entry "
-                 "windows (10:15/10:45/11:15 ET). B and C remain dry-run. To "
+                 "and restarted. A will place REAL paper orders at today's "
+                 "effective entry windows (10:45/11:15 ET, plus the 14:00 "
+                 "conditional; the configured 10:15 slot is dropped at all VIX "
+                 "levels by the regime cap). B and C remain dry-run. To "
                  "revert: set dry_run:true in config.json + restart hydra."),
         priority=AlertPriority.HIGH,
     )

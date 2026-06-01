@@ -12,19 +12,24 @@
 
 ## What this is
 
-A single autonomous SPX 0DTE iron-condor trading bot (**HYDRA**) running on a Google Cloud VM, talking to Interactive Brokers via the Web API. Trades the IBKR paper account; the broker stack and credentials infrastructure are wired for a future live cutover but the live path is intentionally not enabled here.
+An autonomous SPX 0DTE iron-condor trading system (**HYDRA**) running on a Google Cloud VM, talking to Interactive Brokers via the Web API. HYDRA runs as **three parallel strategy processes** — A (`hydra.service`, the live-path paper variant), B (`hydra_variant_b.service`) and C (`hydra_variant_c.service`, the Brandon Trojan Horse dry-run variants). All three trade the IBKR **paper** account. Rather than each opening its own IBKR session, all three proxy their IBKR calls over loopback (`CALYPSO_BROKER_URL=http://127.0.0.1:8788`, committed inline in all three units) to **`calypso-broker`** (`services/broker/main.py`), which owns the **one shared IBKR session** (ibind OAuth 1.0a), the OAuth credentials, and the re-auth loop. Session/auth faults are fixed by restarting **`calypso-broker`**, not the hydra units. The legacy direct-`IBClient` single-bot path is a fallback used only when `CALYPSO_BROKER_URL` is unset.
 
 ```
-HYDRA process (systemd, paper)
+hydra / hydra_variant_b / hydra_variant_c (systemd, paper)
    ↓
-IBClient (shared/ib_client.py — ibind OAuth 1.0a)
-   ↓
+BrokerClient (shared/broker_client.py)
+   ↓  HTTP over loopback :8788
+calypso-broker (services/broker/main.py — owns the 1 IBClient:
+   shared/ib_client.py LST + ssodh/init + Tickler + re-auth loop + OAuth creds)
+   ↓  ibind OAuth 1.0a
 IBKR Client Portal Web API
 ```
 
+(A bare `IBClient` talking straight to IBKR is used only in the legacy fallback when `CALYPSO_BROKER_URL` is unset.)
+
 Adjacent services (read-only or async):
 
-- **Agent suite** — APOLLO (pre-market scout), HERMES (daily execution analyst), HOMER (trading journal writer), CLIO (weekly strategy analyst), ARGUS (health monitor). All on systemd timers, all use the Claude API + Google Sheets.
+- **Agent suite** — APOLLO (pre-market scout), HERMES (daily execution analyst), HOMER (trading journal writer), CLIO (weekly strategy analyst) use the Claude API + Google Sheets; ARGUS (health monitor) is a bash health-check script that reads the state file and emits alerts on failure (no Claude, no Sheets). All on systemd timers.
 - **Dashboard** — FastAPI backend + React 19 frontend, 100% read-only. Live entries, P&L, agent reports, variant comparison, history calendar, analytics.
 - **Alerts** — Telegram + Email via Google Cloud Pub/Sub + Cloud Functions.
 - **Backups** — Daily SQLite + state-file snapshots to Google Cloud Storage.
