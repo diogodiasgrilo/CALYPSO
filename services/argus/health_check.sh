@@ -91,7 +91,14 @@ is_trading_session() {
     dow=$(date +"%u")
     # %H%M as a base-10 int (10# avoids octal parse of the leading zero).
     hhmm=$((10#$(TZ="America/New_York" date +"%H%M")))
-    if [[ "$dow" -le 5 ]] && [[ "$hhmm" -ge 930 ]] && [[ "$hhmm" -lt 1600 ]]; then
+    # Start at 9:40, not 9:30: HYDRA detects the open via a 60s pre-market
+    # recheck loop and doesn't write its first market-hours heartbeat until
+    # ~9:31; an ARGUS tick landing in that 9:30–9:31 ramp-up read the stale
+    # OVERNIGHT heartbeat and false-FAILed (observed 2026-06-02 09:31). A 10-min
+    # post-open grace clears the ramp-up; Check 1 (process) + Check 6 (log
+    # staleness) still cover liveness in that window. End at 16:00 (the close,
+    # after which HYDRA stops the tight heartbeat by design).
+    if [[ "$dow" -le 5 ]] && [[ "$hhmm" -ge 940 ]] && [[ "$hhmm" -lt 1600 ]]; then
         return 0
     fi
     return 1

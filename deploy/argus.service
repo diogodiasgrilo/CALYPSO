@@ -17,6 +17,14 @@ WorkingDirectory=/opt/calypso
 Environment="GCP_PROJECT=calypso-trading-bot"
 Environment="PYTHONUNBUFFERED=1"
 Environment="PYTHONPATH=/opt/calypso"
+# Check 8's gsutil needs a WRITABLE config/state home; ProtectHome=true blocks
+# /home/calypso, so without these gsutil hit "Read-only file system" and Check 8
+# always false-reported the backup missing. Point HOME + the gcloud/boto config
+# at the writable ARGUS dir (already in ReadWritePaths). Verified: gsutil stat
+# succeeds in the hardened context with these set.
+Environment="HOME=/opt/calypso/intel/argus"
+Environment="CLOUDSDK_CONFIG=/opt/calypso/intel/argus/.gcloud"
+Environment="BOTO_CONFIG=/opt/calypso/intel/argus/.boto"
 
 ExecStart=/bin/bash /opt/calypso/services/argus/health_check.sh
 
@@ -29,6 +37,12 @@ SyslogIdentifier=calypso-argus
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true
+# Check 8 shells out to gsutil, which needs a writable temp dir; under
+# ProtectSystem=strict the whole fs is read-only, so gsutil crashed with "No
+# usable temporary directory found" and Check 8 ALWAYS false-reported "GCS
+# backup missing" (even when the dated backup existed). A private writable
+# /tmp (and /var/tmp) lets gsutil run without exposing the host tmp.
+PrivateTmp=true
 ReadWritePaths=/opt/calypso/intel/argus
 ReadOnlyPaths=/opt/calypso/data /opt/calypso/services/argus /opt/calypso/.venv /opt/calypso/shared /opt/calypso/bots/hydra/config
 
