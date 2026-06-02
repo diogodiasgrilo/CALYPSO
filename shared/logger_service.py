@@ -228,6 +228,16 @@ class GoogleSheetsLogger:
             self.config.get("position_snapshot_min_interval_s", 60)
         )
         self._last_pos_snapshot_at = 0.0
+        # Same throttle for the per-heartbeat dashboard writes (performance
+        # metrics + account-summary tabs). They were unthrottled and, with three
+        # bots sharing one project's write quota, contributed to the 429/timeout
+        # noise ("... update skipped due to timeout"). Separate timestamps because
+        # the two are called as a pair each heartbeat.
+        self._dashboard_write_min_interval = float(
+            self.config.get("dashboard_write_min_interval_s", 60)
+        )
+        self._last_metrics_write_at = 0.0
+        self._last_summary_write_at = 0.0
 
         if self.enabled:
             self._initialize()
@@ -2596,6 +2606,18 @@ class GoogleSheetsLogger:
         if not self.enabled or "Performance Metrics" not in self.worksheets:
             return False
 
+        # Throttle the high-frequency intraday metrics writes (Sheets write
+        # quota — 3 bots share it). EOD / All-Time / Weekly / Monthly / Final
+        # periods are the important low-frequency settlement writes and are
+        # NEVER throttled. A throttled intraday call returns True (benign —
+        # the next one rewrites current state).
+        import time as _time
+        if not any(k in str(period) for k in ("End", "All", "Weekly", "Monthly", "Final")):
+            _now = _time.monotonic()
+            if _now - self._last_metrics_write_at < self._dashboard_write_min_interval:
+                return True
+            self._last_metrics_write_at = _now
+
         try:
             # Calculate EUR values if exchange rate provided
             total_pnl = metrics.get("total_pnl", 0)
@@ -2848,6 +2870,16 @@ class GoogleSheetsLogger:
         """
         if not self.enabled or "Account Summary" not in self.worksheets:
             return False
+
+        # Throttle the high-frequency account-summary snapshot (Sheets write
+        # quota). It's a current-state snapshot, so ~60s freshness is plenty and
+        # the last write before EOD still reflects final state. Returns True when
+        # throttled (benign — next snapshot rewrites current state).
+        import time as _time
+        _now = _time.monotonic()
+        if _now - self._last_summary_write_at < self._dashboard_write_min_interval:
+            return True
+        self._last_summary_write_at = _now
 
         try:
             worksheet = self.worksheets["Account Summary"]

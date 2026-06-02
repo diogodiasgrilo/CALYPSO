@@ -814,21 +814,33 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 if active > 0:
                     spy_price = status.get('underlying_price', 0)
                     vix = status.get('vix', 0)
-                    logger.critical(
-                        f"CRITICAL: Bot shutting down with {active} ACTIVE positions! "
-                        f"P&L: ${realized + unrealized:.2f}"
-                    )
-                    trade_logger.log_event(
-                        f"WARNING: Bot shutting down with {active} ACTIVE positions! "
-                        "Manual intervention may be required."
-                    )
-                    trade_logger.log_safety_event({
-                        "event_type": "HYDRA_SHUTDOWN_WITH_POSITION",
-                        "spy_price": spy_price,
-                        "vix": vix,
-                        "description": f"Bot shutdown with {active} active positions",
-                        "result": "Positions left open - MANUAL INTERVENTION REQUIRED"
-                    })
+                    if getattr(strategy, 'dry_run', False):
+                        # Dry-run: the "active" positions are SIMULATED — a
+                        # restart leaves no real risk. INFO, no CRITICAL/alert,
+                        # so planned dry-run restarts don't cry wolf.
+                        logger.info(
+                            f"Shutdown with {active} active SIMULATED positions "
+                            f"(dry-run, no real risk). P&L: "
+                            f"${realized + unrealized:.2f}"
+                        )
+                    else:
+                        # LIVE: real positions left open on shutdown is a genuine
+                        # safety event — keep it CRITICAL + safety-event/alert.
+                        logger.critical(
+                            f"CRITICAL: Bot shutting down with {active} ACTIVE positions! "
+                            f"P&L: ${realized + unrealized:.2f}"
+                        )
+                        trade_logger.log_event(
+                            f"WARNING: Bot shutting down with {active} ACTIVE positions! "
+                            "Manual intervention may be required."
+                        )
+                        trade_logger.log_safety_event({
+                            "event_type": "HYDRA_SHUTDOWN_WITH_POSITION",
+                            "spy_price": spy_price,
+                            "vix": vix,
+                            "description": f"Bot shutdown with {active} active positions",
+                            "result": "Positions left open - MANUAL INTERVENTION REQUIRED"
+                        })
 
                 # Send BOT_STOPPED alert
                 try:

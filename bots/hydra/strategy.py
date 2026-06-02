@@ -275,6 +275,14 @@ class HydraStrategy(MEICStrategy):
     # This ensures HYDRA positions are isolated in the registry
     BOT_NAME = "HYDRA"
 
+    # Class-level defaults so these always exist even if a stop-level recompute
+    # is triggered during the state-reload path BEFORE __init__ assigns them
+    # (line ~777). Without this, the first state-save after a restart logged a
+    # caught "no attribute 'buffer_decay_start_mult'" error every startup
+    # (pre-existing, non-fatal). __init__ overrides both from config.
+    buffer_decay_start_mult = None
+    buffer_decay_hours = None
+
     def __init__(
         self,
         broker: IBClient,

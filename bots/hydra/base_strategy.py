@@ -1224,7 +1224,17 @@ class MEICStrategy:
         # STATE-002: Validate state/position consistency
         consistency_error = self._check_state_consistency()
         if consistency_error:
-            logger.error(f"STATE-002: {consistency_error}")
+            # "MONITORING but no active entries" is a benign, self-recovering
+            # transient (state-file reload at startup before entries repopulate,
+            # or all entries closed/expired just before the DAILY_COMPLETE
+            # transition) — recovery below fixes it on the same tick. Log it as a
+            # WARNING (auto-recovering) so a planned restart doesn't emit a false
+            # ERROR; genuinely concerning mismatches (e.g. IDLE with live
+            # entries, registry count drift) stay ERROR and remain visible.
+            if "no active entries" in consistency_error:
+                logger.warning(f"STATE-002 (auto-recovering): {consistency_error}")
+            else:
+                logger.error(f"STATE-002: {consistency_error}")
             # Attempt to recover instead of halting
             self._attempt_state_recovery()
 
