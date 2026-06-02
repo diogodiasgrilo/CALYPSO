@@ -2764,6 +2764,20 @@ class HydraStrategy(MEICStrategy):
                         f"credit=${credit:.2f} (fill prices deferred)"
                     )
 
+                # Record this early-close (Brandon TP / GEX-breach exit / MKT-018)
+                # to trade_stops with the REAL net close cost. Critical for B/C:
+                # the Brandon variants bypass _execute_stop_loss (the usual recorder
+                # site), so without this every live TP/breach close would write ZERO
+                # rows. Passing side_close_cost (real synchronous IBKR fills, not the
+                # theoretical spread_value mark) makes actual_debit + slippage_on_close
+                # real; _record_stop_to_db books net_pnl = -(cost - credit), so a TP
+                # is recorded as a profit and a breach close as a loss, correctly.
+                self._record_stop_to_db(
+                    entry, side_name,
+                    getattr(entry, f"{side_name}_side_stop", None) or 0.0,
+                    side_close_cost,
+                )
+
             # Mark entry complete if all sides now done
             call_done = entry.call_side_stopped or entry.call_side_expired or getattr(entry, 'call_side_skipped', False)
             put_done = entry.put_side_stopped or entry.put_side_expired or getattr(entry, 'put_side_skipped', False)
@@ -4687,11 +4701,17 @@ class HydraStrategy(MEICStrategy):
             except Exception:
                 pass
 
-            # Slippage: fill price vs current mid (approximate)
-            if entry.short_call_fill_price and entry.short_call_price:
-                call_slippage = round(entry.short_call_fill_price - entry.short_call_price, 4)
-            if entry.short_put_fill_price and entry.short_put_price:
-                put_slippage = round(entry.short_put_fill_price - entry.short_put_price, 4)
+            # Real per-leg entry slippage = fill - mid_at_fill (the (bid+ask)/2 of
+            # the FILLING attempt, captured in _execute_entry BEFORE the monitoring
+            # *_price was overwritten with the fill). The prior code diffed fill
+            # against short_*_price, which _execute_entry sets equal to the fill —
+            # so it was structurally 0. Signed: the short legs collect credit, so a
+            # fill BELOW the mid (negative) gave up edge (adverse); above = price
+            # improvement. mid_at_fill==0 ⇒ not captured (dry-run / no quote) ⇒ None.
+            if entry.short_call_fill_price and entry.short_call_mid_at_fill:
+                call_slippage = round(entry.short_call_fill_price - entry.short_call_mid_at_fill, 4)
+            if entry.short_put_fill_price and entry.short_put_mid_at_fill:
+                put_slippage = round(entry.short_put_fill_price - entry.short_put_mid_at_fill, 4)
 
             entry_data = {
                 "date": date_str,
@@ -4721,6 +4741,17 @@ class HydraStrategy(MEICStrategy):
                 "slippage_call": call_slippage,
                 "slippage_put": put_slippage,
                 "attempts": getattr(entry, '_fill_attempts', 1),
+                # Ground-truth execution prices (v9): the real per-leg fills + the
+                # mid each filled against, so credits/slippage are reconstructable
+                # and reconcilable against the broker. None/0 in dry-run.
+                "short_call_fill_price": entry.short_call_fill_price or None,
+                "long_call_fill_price": entry.long_call_fill_price or None,
+                "short_put_fill_price": entry.short_put_fill_price or None,
+                "long_put_fill_price": entry.long_put_fill_price or None,
+                "short_call_mid_at_fill": entry.short_call_mid_at_fill or None,
+                "long_call_mid_at_fill": entry.long_call_mid_at_fill or None,
+                "short_put_mid_at_fill": entry.short_put_mid_at_fill or None,
+                "long_put_mid_at_fill": entry.long_put_mid_at_fill or None,
                 # Margin snapshot
                 "margin_available": self._last_margin_snapshot.get("available"),
                 "margin_utilization_pct": self._last_margin_snapshot.get("utilization_pct"),
@@ -5821,6 +5852,7 @@ class HydraStrategy(MEICStrategy):
             entry.long_put_uic = long_put_result.get("uic")
             long_put_debit = long_put_result.get("debit", 0)
             entry.long_put_fill_price = long_put_result.get("fill_price", 0)
+            entry.long_put_mid_at_fill = long_put_result.get("mid_at_fill", 0)
             filled_legs.append(("long_put", entry.long_put_position_id, entry.long_put_uic))
             self._register_position(entry, "long_put")
 
@@ -5838,6 +5870,7 @@ class HydraStrategy(MEICStrategy):
             entry.short_put_position_id = short_put_result.get("position_id")
             entry.short_put_uic = short_put_result.get("uic")
             entry.short_put_fill_price = short_put_result.get("fill_price", 0)
+            entry.short_put_mid_at_fill = short_put_result.get("mid_at_fill", 0)
             short_put_credit = short_put_result.get("credit", 0)
             entry.put_spread_credit = short_put_credit - long_put_debit
             logger.debug(
@@ -5966,6 +5999,7 @@ class HydraStrategy(MEICStrategy):
             entry.long_call_uic = long_call_result.get("uic")
             long_call_debit = long_call_result.get("debit", 0)
             entry.long_call_fill_price = long_call_result.get("fill_price", 0)
+            entry.long_call_mid_at_fill = long_call_result.get("mid_at_fill", 0)
             filled_legs.append(("long_call", entry.long_call_position_id, entry.long_call_uic))
             self._register_position(entry, "long_call")
 
@@ -5983,6 +6017,7 @@ class HydraStrategy(MEICStrategy):
             entry.short_call_position_id = short_call_result.get("position_id")
             entry.short_call_uic = short_call_result.get("uic")
             entry.short_call_fill_price = short_call_result.get("fill_price", 0)
+            entry.short_call_mid_at_fill = short_call_result.get("mid_at_fill", 0)
             short_call_credit = short_call_result.get("credit", 0)
             entry.call_spread_credit = short_call_credit - long_call_debit
             logger.debug(

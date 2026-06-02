@@ -28,7 +28,7 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 9
 
 # ============================================================================
 # Schema Migration SQL
@@ -102,6 +102,21 @@ MIGRATION_V8_SQL = [
     "ALTER TABLE spread_snapshots ADD COLUMN contracts INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE shadow_entries ADD COLUMN contracts INTEGER NOT NULL DEFAULT 1",
     "ALTER TABLE daily_summaries ADD COLUMN contracts_per_entry INTEGER NOT NULL DEFAULT 1",
+]
+
+# v9 (2026-06-02): ground-truth execution prices for the LIVE go-live. Per-leg
+# fill prices + the mid each filled against, so real entry slippage
+# (= fill − mid) and exact credit/broker reconciliation are reconstructable.
+# All nullable + additive; historical (dry-run) rows stay NULL, which is correct.
+MIGRATION_V9_SQL = [
+    "ALTER TABLE trade_entries ADD COLUMN short_call_fill_price REAL",
+    "ALTER TABLE trade_entries ADD COLUMN long_call_fill_price REAL",
+    "ALTER TABLE trade_entries ADD COLUMN short_put_fill_price REAL",
+    "ALTER TABLE trade_entries ADD COLUMN long_put_fill_price REAL",
+    "ALTER TABLE trade_entries ADD COLUMN short_call_mid_at_fill REAL",
+    "ALTER TABLE trade_entries ADD COLUMN long_call_mid_at_fill REAL",
+    "ALTER TABLE trade_entries ADD COLUMN short_put_mid_at_fill REAL",
+    "ALTER TABLE trade_entries ADD COLUMN long_put_mid_at_fill REAL",
 ]
 
 # v7: shadow entries table — records what OTM-based selection WOULD have chosen
@@ -317,6 +332,9 @@ class DataRecorder:
                 if current_version < 8:
                     # v8: per-row contracts column for 2-contract scaling
                     migration_sql += MIGRATION_V8_SQL
+                if current_version < 9:
+                    # v9: per-leg fill prices + mid-at-fill (real execution capture)
+                    migration_sql += MIGRATION_V9_SQL
 
                 for sql in migration_sql:
                     try:
@@ -446,6 +464,11 @@ class DataRecorder:
                 "config_version", "attempts",
                 # v8 contract count
                 "contracts",
+                # v9 ground-truth execution prices
+                "short_call_fill_price", "long_call_fill_price",
+                "short_put_fill_price", "long_put_fill_price",
+                "short_call_mid_at_fill", "long_call_mid_at_fill",
+                "short_put_mid_at_fill", "long_put_mid_at_fill",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)

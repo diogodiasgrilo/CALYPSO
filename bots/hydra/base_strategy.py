@@ -362,6 +362,16 @@ class IronCondorEntry:
     short_put_fill_price: float = 0.0
     long_put_fill_price: float = 0.0
 
+    # Per-leg MID at fill time ((bid+ask)/2 of the filling attempt), captured in
+    # _execute_entry BEFORE the monitoring *_price is overwritten with the fill.
+    # The reference for REAL entry slippage = fill - mid (the dry-run-era
+    # slippage was structurally 0 because it diffed fill against fill). 0.0 means
+    # not captured (e.g. dry-run / a leg with no quote).
+    short_call_mid_at_fill: float = 0.0
+    long_call_mid_at_fill: float = 0.0
+    short_put_mid_at_fill: float = 0.0
+    long_put_mid_at_fill: float = 0.0
+
     # Status tracking
     is_complete: bool = False  # All 4 legs filled
     call_side_stopped: bool = False  # Call spread was stopped out (LOSS)
@@ -2154,6 +2164,7 @@ class MEICStrategy:
             entry.long_call_uic = long_call_result.get("uic")
             long_call_debit = long_call_result.get("debit", 0)  # Track debit for net credit calc
             entry.long_call_fill_price = long_call_result.get("fill_price", 0)
+            entry.long_call_mid_at_fill = long_call_result.get("mid_at_fill", 0)
             filled_legs.append(("long_call", entry.long_call_position_id, entry.long_call_uic))
             self._register_position(entry, "long_call")
 
@@ -2172,6 +2183,7 @@ class MEICStrategy:
             entry.long_put_uic = long_put_result.get("uic")
             long_put_debit = long_put_result.get("debit", 0)  # Track debit for net credit calc
             entry.long_put_fill_price = long_put_result.get("fill_price", 0)
+            entry.long_put_mid_at_fill = long_put_result.get("mid_at_fill", 0)
             filled_legs.append(("long_put", entry.long_put_position_id, entry.long_put_uic))
             self._register_position(entry, "long_put")
 
@@ -2189,6 +2201,7 @@ class MEICStrategy:
             entry.short_call_position_id = short_call_result.get("position_id")
             entry.short_call_uic = short_call_result.get("uic")
             entry.short_call_fill_price = short_call_result.get("fill_price", 0)
+            entry.short_call_mid_at_fill = short_call_result.get("mid_at_fill", 0)
             # FIX (2026-02-04): Net credit = short credit - long debit (was only tracking short credit!)
             short_call_credit = short_call_result.get("credit", 0)
             entry.call_spread_credit = short_call_credit - long_call_debit
@@ -2210,6 +2223,7 @@ class MEICStrategy:
             entry.short_put_position_id = short_put_result.get("position_id")
             entry.short_put_uic = short_put_result.get("uic")
             entry.short_put_fill_price = short_put_result.get("fill_price", 0)
+            entry.short_put_mid_at_fill = short_put_result.get("mid_at_fill", 0)
             # FIX (2026-02-04): Net credit = short credit - long debit (was only tracking short credit!)
             short_put_credit = short_put_result.get("credit", 0)
             entry.put_spread_credit = short_put_credit - long_put_debit
@@ -2509,6 +2523,10 @@ class MEICStrategy:
                     "credit": fill_price * qty_mult if buy_sell == BuySell.SELL else 0,
                     "debit": fill_price * qty_mult if buy_sell == BuySell.BUY else 0,
                     "fill_price": fill_price,
+                    # MID of the FILLING attempt (the slippage reference). Real
+                    # entry slippage = fill - mid; persisted per leg so the DB can
+                    # show live execution quality (vs the dry-run's structural 0).
+                    "mid_at_fill": mid_price,
                 }
 
             # ORDER-010: partial fill. The leg filled SOME but not all
@@ -5453,18 +5471,19 @@ class MEICStrategy:
                 return True, "Balance check skipped (no margin field)"
 
             # Log margin snapshot for diagnostics + store for DataRecorder.
-            # On the IBKR path these three fields are absent (IBKR doesn't
-            # surface used-margin / utilization / total value), so they default
-            # to 0 — the snapshot will read "Used: $0.00, Utilization: 0.0%,
-            # Account: $0.00". Diagnostic only; the gate uses `available`.
+            # On the IBKR path these fields are absent (IBKR doesn't surface
+            # used-margin / utilization / total value). utilization_pct is stored
+            # as None (not 0) so the DB column is honestly NULL rather than a
+            # misleading "0% used" — the gate itself uses `available`.
             margin_used = balance.get("MarginUsedByCurrentPositions", 0)
-            margin_pct = balance.get("MarginUtilizationPct", 0)
+            margin_pct = balance.get("MarginUtilizationPct")  # None if not surfaced (IBKR)
             total_value = balance.get("TotalValue", 0)
+            _util_str = f"{margin_pct:.1f}%" if margin_pct is not None else "n/a"
             logger.info(
                 f"ORDER-004: Margin snapshot — "
                 f"Available: ${available:,.2f} (via {field_used}), "
                 f"Used: ${abs(margin_used):,.2f}, "
-                f"Utilization: {margin_pct:.1f}%, "
+                f"Utilization: {_util_str}, "
                 f"Account: ${total_value:,.2f}"
             )
 
