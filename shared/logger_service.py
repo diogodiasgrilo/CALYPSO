@@ -219,6 +219,16 @@ class GoogleSheetsLogger:
         self._log_buffer_lock = threading.Lock()
         self._last_log_flush = datetime.now()
 
+        # Position-snapshot write throttle (audit 2026-06-02): the Positions tab
+        # was rewritten on every ~10-15s heartbeat across 3 bots sharing ONE GCP
+        # project's Sheets write quota → continuous HTTP 429 "write requests per
+        # minute" rejections. A snapshot is a "current view"; ~60s freshness is
+        # plenty. Configurable via google_sheets.position_snapshot_min_interval_s.
+        self._pos_snapshot_min_interval = float(
+            self.config.get("position_snapshot_min_interval_s", 60)
+        )
+        self._last_pos_snapshot_at = 0.0
+
         if self.enabled:
             self._initialize()
 
@@ -1426,11 +1436,26 @@ class GoogleSheetsLogger:
         if not self.enabled or "Positions" not in self.worksheets:
             return False
 
+        # Throttle (audit 2026-06-02): cap Positions-tab rewrites to ≥ the
+        # configured interval to stay under the Sheets per-minute write quota.
+        # A skipped snapshot is benign (the next one rewrites the full current
+        # state), so return True — not an error.
+        import time as _time
+        _now = _time.monotonic()
+        if _now - self._last_pos_snapshot_at < self._pos_snapshot_min_interval:
+            return True
+        self._last_pos_snapshot_at = _now
+
         try:
             # Clear existing data (keep headers)
             worksheet = self.worksheets["Positions"]
-            # Only delete if there are rows beyond the header
-            if worksheet.row_count > 1:
+            # Only delete for APPEND-based layouts (iron_fly/delta_neutral/etc.).
+            # The meic/hydra path below uses resize+update which overwrites AND
+            # shrinks the sheet itself, so a delete-to-1-row here is redundant —
+            # and was harmful: when the later resize was throttled/failed under
+            # 429 pressure, the sheet was left at 1 row and the update/format hit
+            # "Range exceeds grid limits. Max rows: 1" (audit 2026-06-02). Skip it.
+            if self.strategy_type not in ("meic", "hydra") and worksheet.row_count > 1:
                 # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
                 self._sheets_call_with_timeout(worksheet.delete_rows, 2, worksheet.row_count)
                 # Ignore failures - we'll overwrite anyway
@@ -1525,22 +1550,19 @@ class GoogleSheetsLogger:
                     ]
                     all_rows.append(row)
 
-                # Batch write all rows at once (single API call)
+                # Batch write all rows at once. Minimize API calls (429-quota
+                # fix 2026-06-02): just resize-to-exact + one update. resize
+                # both grows AND shrinks to end_row (removing stale rows), so no
+                # separate delete is needed; the per-snapshot bold-clear format
+                # call was dropped (data rows written via update are not bold) —
+                # 2 write calls/snapshot instead of 4.
                 if all_rows:
                     end_row = 1 + len(all_rows)
-                    # Always resize to exact needed size — cached row_count can be
-                    # stale after a timed-out delete_rows (Fix #80: sheet may have
-                    # shrunk server-side but gspread cache still shows old count)
                     self._sheets_call_with_timeout(
                         worksheet.resize, end_row, 17
                     )
                     self._sheets_call_with_timeout(
                         worksheet.update, f"A2:Q{end_row}", all_rows
-                    )
-
-                    # Clear any bold formatting from data rows
-                    self._sheets_call_with_timeout(
-                        worksheet.format, f"A2:Q{end_row}", {"textFormat": {"bold": False}}
                     )
 
             else:

@@ -6762,7 +6762,10 @@ class HydraStrategy(MEICStrategy):
             # Only call spread placed
             credit = entry.call_spread_credit
             if credit < min_stop_level:
-                logger.critical(f"CRITICAL: Low credit ${credit:.2f}, using minimum stop")
+                # Routine for narrow-spread variants (Brandon 10c): the credit is
+                # below the MIN_STOP_LEVEL floor, so the floor sets the stop. NOT
+                # an error — logged INFO to avoid CRITICAL alert-fatigue.
+                logger.info(f"Credit ${credit:.2f} below ${min_stop_level:.2f} min-stop floor — using floor for stop ({n}c)")
                 credit = min_stop_level
 
             # All call-only entries use theoretical put for stop calculation:
@@ -6787,7 +6790,9 @@ class HydraStrategy(MEICStrategy):
             # Only put spread placed
             credit = entry.put_spread_credit
             if credit < min_stop_level:
-                logger.critical(f"CRITICAL: Low credit ${credit:.2f}, using minimum stop")
+                # Routine for narrow-spread variants (Brandon 10c): credit below
+                # the MIN_STOP_LEVEL floor → floor sets the stop. NOT an error.
+                logger.info(f"Credit ${credit:.2f} below ${min_stop_level:.2f} min-stop floor — using floor for stop ({n}c)")
                 credit = min_stop_level
 
             # MKT-039: Put-only stop = credit + $1.75 buffer (same pattern as full IC puts).
@@ -6808,7 +6813,9 @@ class HydraStrategy(MEICStrategy):
             total_credit = entry.total_credit
 
             if total_credit < min_stop_level:
-                logger.critical(f"CRITICAL: Total credit ${total_credit:.2f} very low, using minimum stop")
+                # Routine for narrow-spread variants: total credit below the
+                # MIN_STOP_LEVEL floor → floor sets the stop. NOT an error.
+                logger.info(f"Total credit ${total_credit:.2f} below ${min_stop_level:.2f} min-stop floor — using floor for stop ({n}c)")
                 total_credit = min_stop_level
 
             base_stop = total_credit

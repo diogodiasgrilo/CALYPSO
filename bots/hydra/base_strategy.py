@@ -4756,23 +4756,30 @@ class MEICStrategy:
             call_active = not entry.call_side_stopped and not call_skipped and not call_expired
             put_active = not entry.put_side_stopped and not put_skipped and not put_expired
 
+            # A side that ALSO expired/early-closed (e.g. a Brandon TP that sets
+            # both *_side_expired and *_side_stopped) realized its actual P&L
+            # already and carries NO catastrophic stop-residual — guard the
+            # residual additions with `and not *_expired` so a profitable TP
+            # isn't counted as a phantom theoretical-stop loss (audit 2026-06-02:
+            # variant B's display double-counted ~$2,025 on a +$200 TP).
             if call_active and put_active:
                 # Full IC: only one side can go to full loss at expiry
                 entry_loss = sw - entry.total_credit
             elif call_active:
                 entry_loss = sw - entry.call_spread_credit
-                if entry.put_side_stopped:
+                if entry.put_side_stopped and not put_expired:
                     entry_loss += max(0.0, entry.put_side_stop - entry.put_spread_credit)
             elif put_active:
                 entry_loss = sw - entry.put_spread_credit
-                if entry.call_side_stopped:
+                if entry.call_side_stopped and not call_expired:
                     entry_loss += max(0.0, entry.call_side_stop - entry.call_spread_credit)
             else:
-                # Both sides done - only realized losses
+                # Both sides done - only realized stop losses (a side that
+                # expired/TP'd contributes nothing here).
                 entry_loss = 0.0
-                if entry.call_side_stopped:
+                if entry.call_side_stopped and not call_expired:
                     entry_loss += max(0.0, entry.call_side_stop - entry.call_spread_credit)
-                if entry.put_side_stopped:
+                if entry.put_side_stopped and not put_expired:
                     entry_loss += max(0.0, entry.put_side_stop - entry.put_spread_credit)
 
             total += max(0.0, entry_loss)

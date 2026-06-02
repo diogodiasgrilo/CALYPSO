@@ -636,7 +636,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                     commission = status.get('total_commission', 0)
                     net_pnl = total_pnl - commission
                     net_sign = "+" if net_pnl >= 0 else ""
-                    pnl_text = f"  {net_sign}${net_pnl:.2f} net (${commission:.0f} comm)  "
+                    pnl_text = f"  {net_sign}${net_pnl:.2f} net (${commission:.2f} comm)  "
                     pnl_len = len(pnl_text)
                     left_len = (bar_width - pnl_len) // 2
                     right_len = bar_width - pnl_len - left_len
