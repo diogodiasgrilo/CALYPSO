@@ -428,15 +428,17 @@ class TestReadOptionQuotesBatch:
         fake_broker = MagicMock()
         fake_broker.get_quotes_batch.return_value = [
             {"conid": 111, "bid": 2.50, "ask": 2.55, "last": 2.52,
-             "mid": 2.525, "mark": 2.53},
+             "mid": 2.525, "mark": 2.53, "availability": "R"},
             {"conid": 222, "bid": 1.10, "ask": 1.15, "last": 1.12,
              "mid": 1.125, "mark": 1.13},
         ]
         s = self._make_bare_strategy(broker=fake_broker)
         out = s._read_option_quotes_batch([111, 222])
         assert out[111] == {"bid": 2.50, "ask": 2.55, "last": 2.52,
-                            "mid": 2.525, "mark": 2.53}
+                            "mid": 2.525, "mark": 2.53, "availability": "R"}
         assert out[222]["bid"] == 1.10
+        # AUD5 C-1c: availability surfaced on batch legs too (None when absent)
+        assert out[222]["availability"] is None
         fake_broker.get_quotes_batch.assert_called_once_with([111, 222])
 
     def test_ib_path_chunks_at_100_conids(self):

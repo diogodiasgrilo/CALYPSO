@@ -4105,17 +4105,20 @@ class MEICStrategy:
         if price:
             self.market_data.update_spx(price, availability=spx_avail)
             # #17/#18: only treat the SPX spot as current when the broker did
-            # NOT flag it stale — otherwise keep the previous current_price so
-            # strike calc / price-based stops don't act on a frozen quote.
+            # NOT flag it NON-real-time — otherwise keep the previous
+            # current_price so strike calc / price-based stops don't act on a
+            # frozen/unentitled quote. Mirror update_spx(): the first char of
+            # 6509 in (Z=Frozen, Y=Frozen-Delayed, N=Not-Subscribed) is blocked;
+            # R/D/None pass (D is delayed-but-usable, logged by update_spx).
             avail = spx_avail.upper() if isinstance(spx_avail, str) else None
-            if avail != "Z":
+            if (avail[:1] if avail else None) not in ("Z", "Y", "N"):
                 self.current_price = price
 
         vix, vix_avail = self._split_index_read(self._read_index_price("VIX"))
         if vix:
             self.market_data.update_vix(vix, availability=vix_avail)
             avail = vix_avail.upper() if isinstance(vix_avail, str) else None
-            if avail != "Z":
+            if (avail[:1] if avail else None) not in ("Z", "Y", "N"):
                 self.current_vix = vix
 
     # P7-audit L4: removed dead Saxo-shaped `_extract_price` and
@@ -4599,6 +4602,10 @@ class MEICStrategy:
     def _get_total_saxo_pnl(self) -> float:
         """
         Get total broker unrealized P&L for all active entries.
+
+        NOTE: the ``saxo`` in the name is legacy — this is **broker-agnostic**
+        and reads IBKR P&L on this branch (kept for back-compat / to avoid
+        churn in the disabled MKT-018 callers; see GAP-A below).
 
         FIX (2026-02-03): Use the broker's authoritative P&L instead of a
         mid-price calc.
@@ -5533,14 +5540,14 @@ class MEICStrategy:
                     f"ORDER-004: Insufficient buying power. "
                     f"Available: ${available:,.2f}, Required: ${required:,.2f} "
                     f"({self.contracts_per_entry}c × ${self.min_buying_power_per_ic:,.0f}), "
-                    f"Utilization: {margin_pct:.1f}%"
+                    f"Utilization: {_util_str}"
                 )
                 return False, (
                     f"Insufficient BP: ${available:,.2f} < ${required:,.2f} "
-                    f"({self.contracts_per_entry}c, margin {margin_pct:.1f}% used)"
+                    f"({self.contracts_per_entry}c, margin {_util_str} used)"
                 )
 
-            return True, f"BP OK: ${available:,.2f} (margin {margin_pct:.1f}% used, req ${required:,.0f} at {self.contracts_per_entry}c)"
+            return True, f"BP OK: ${available:,.2f} (margin {_util_str} used, req ${required:,.0f} at {self.contracts_per_entry}c)"
 
         except Exception as e:
             logger.error(f"ORDER-004: Error checking buying power: {e}")
@@ -5572,21 +5579,24 @@ class MEICStrategy:
             # returns a usable price (mid→last→mark) or None; a None
             # while the schedule says open is the halt heuristic — no
             # broker exposes a trading-halt flag directly.
-            # #17/#18: a broker 'Z' (stale) availability flag is treated as
-            # no usable data here too — a frozen-but-nonzero quote during the
-            # session is exactly the degraded-feed/halt case this guards.
+            # #17/#18: a broker NON-real-time availability flag is treated as
+            # no usable data here too — a frozen/unentitled-but-nonzero quote
+            # during the session is exactly the degraded-feed/halt case this
+            # guards. First char of 6509 in (Z=Frozen, Y=Frozen-Delayed,
+            # N=Not-Subscribed) all mean "not real-time" → treat as halt.
             price, avail = self._split_index_read(self._read_index_price("SPX"))
             if not price:
                 logger.warning(
                     "MKT-005: No SPX price available — possible market halt"
                 )
                 return True, "No SPX price available"
-            if isinstance(avail, str) and avail.upper() == "Z":
+            avail_first = avail[:1].upper() if isinstance(avail, str) and avail else None
+            if avail_first in ("Z", "Y", "N"):
                 logger.warning(
-                    "MKT-005: SPX quote flagged STALE (availability='Z') — "
-                    "treating as no data / possible halt"
+                    "MKT-005: SPX quote flagged NOT real-time (availability=%r) "
+                    "— treating as no data / possible halt", avail
                 )
-                return True, "SPX price stale (availability='Z')"
+                return True, f"SPX price not real-time (availability={avail!r})"
 
             return False, "Market trading normally"
 

@@ -1566,11 +1566,17 @@ class GoogleSheetsLogger:
                 # separate delete is needed; the per-snapshot bold-clear format
                 # call was dropped (data rows written via update are not bold) —
                 # 2 write calls/snapshot instead of 4.
+                #
+                # AUD5 C-2: the resize runs UNCONDITIONALLY (outside the
+                # all_rows guard) so an empty snapshot — every position expired —
+                # shrinks the sheet back to header-only (end_row=1) instead of
+                # leaving the prior snapshot's stale rows on display. The update
+                # is skipped when there are no data rows to write.
+                end_row = 1 + len(all_rows)
+                self._sheets_call_with_timeout(
+                    worksheet.resize, end_row, 17
+                )
                 if all_rows:
-                    end_row = 1 + len(all_rows)
-                    self._sheets_call_with_timeout(
-                        worksheet.resize, end_row, 17
-                    )
                     self._sheets_call_with_timeout(
                         worksheet.update, f"A2:Q{end_row}", all_rows
                     )

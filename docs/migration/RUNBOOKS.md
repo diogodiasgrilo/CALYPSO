@@ -545,6 +545,68 @@ Not a failure mode by itself — but referenced by `LIVE_READINESS_CHECKLIST.md`
 
 ---
 
+## RB-8 — Flip a variant from dry-run to LIVE paper trading
+
+**When:** an operator decides to take a variant from `dry_run:true` (simulation) to
+`dry_run:false` (real paper orders) — e.g. the 2026-06-02 A+C go-live. **This is a
+deliberate, manual operator action. There is intentionally NO auto-flip timer for
+A+C** (a date-pinned auto-flip is a go-live footgun — a clock change or a leftover
+unit could re-fire it).
+
+> Paper-only reminder: this branch trades the IBKR **paper** account regardless of
+> `dry_run`. "LIVE" here means "places real paper orders", not real money.
+
+### Preconditions (the flip scripts hard-gate on these)
+1. **Broker session healthy now:** `curl -s http://127.0.0.1:8788/health` shows
+   `"connected": true`. The flip aborts (exit 0, no change) if not.
+2. **A fresh same-ET-day paper-smoke PASS sentinel** exists at
+   `/opt/calypso/data/smoke/last_pass.txt` with a line `^<today-ET> PASS`. The smoke
+   places a real 1-contract paper round-trip THROUGH the broker and writes the
+   sentinel (ET-dated) only on a clean fill+close. Guard 2 aborts without it.
+
+### Procedure
+```bash
+# 1. (Same ET day as the flip) run a fresh paper-smoke so the sentinel is today's.
+#    The smoke is hard-gated to a paper (DU…) account; it also flips A via its
+#    ExecStartPost on a clean PASS (flip_a_live.sh).
+sudo systemctl start broker-paper-smoke
+sudo journalctl -u broker-paper-smoke -n 40 --no-pager   # expect "FULL ROUND TRIP OK" + "wrote PASS sentinel … ET"
+cat /opt/calypso/data/smoke/last_pass.txt                # expect "<today-ET> PASS"
+
+# 2. AFTER the 16:00 ET close + after-hours settlement, flip A + C (B stays dry-run).
+#    Idempotent + guarded; safe to re-run. Run as root (it restarts the units).
+sudo /opt/calypso/scripts/flip_ac_live.sh
+sudo journalctl -u hydra -u hydra_variant_c -n 40 --no-pager   # confirm restart, no "DRY RUN" lines
+
+# 3. Verify the flip stuck.
+for c in config.json config_variant_c.json; do
+  sudo -u calypso /opt/calypso/.venv/bin/python -c \
+    "import json;print('$c', json.load(open('/opt/calypso/bots/hydra/config/$c'))['dry_run'])"
+done
+# Expect: config.json False ; config_variant_c.json False
+```
+
+### Abort/skip behavior (by design)
+- Broker not connected → "ABORT: broker /health not connected" → leaves dry-run.
+- No fresh ET-day sentinel → "ABORT: no fresh (… ET) paper-smoke PASS sentinel" →
+  run step 1 first.
+- A variant already `dry_run:false` → "dry_run is 'False' (not True) — no change".
+
+### Rollback (revert to dry-run)
+```bash
+sudo -u calypso /opt/calypso/.venv/bin/python - <<'PY'
+import json
+for fn in ("/opt/calypso/bots/hydra/config/config.json",
+           "/opt/calypso/bots/hydra/config/config_variant_c.json"):
+    d = json.load(open(fn)); d["dry_run"] = True
+    open(fn, "w").write(json.dumps(d, indent=2) + "\n")
+    print("reverted", fn)
+PY
+sudo systemctl restart hydra hydra_variant_c
+```
+
+---
+
 ## Appendix — Alert → Runbook map
 
 Use this table when a Telegram alert arrives and you need the matching runbook.

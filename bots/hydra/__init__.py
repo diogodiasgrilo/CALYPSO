@@ -36,6 +36,37 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2.0.0-rc.1 go-live hardening + AUD5 (2026-06-02): post-cutover fixes atop
+  rc.1. Context: the Saxo→IBKR cutover executed 2026-05-29 (A on IBKR paper;
+  B/C dry-run via the shared `calypso-broker` session service); commission
+  modelled at IBKR ~$1.15/leg (was Saxo $2.50, `078049f`); the 30-agent AUD4
+  migration audit fixed 79 findings (`38ac9d6`). The **AUD5** go-live audit
+  (20 domain agents + 3 meta-auditors + 16 backfill agents over `38ac9d6..
+  d83d50b`; see docs/migration/AUD5_FINDINGS.md) then fixed:
+  • GL-2: ORDER-004 buying-power gate no longer fails open on the IBKR path —
+    `margin_pct` is None there, and three f-strings formatted it with `.1f%`
+    (TypeError, swallowed by the broad except → gate silently skipped on every
+    live entry). Now rendered "n/a" via the existing `_util_str`.
+  • C-1: completed the real-time market-data gate that 651a5cc only half-built.
+    Index `current_price`/`current_vix` now refuse a quote whose 6509 flag is
+    Z/Y/N (frozen / frozen-delayed / not-subscribed), consistent with
+    MarketData.update_spx; `_check_market_halt` treats Y/N like Z; a new
+    `_option_quote_is_realtime()` gate (None/absent flag passes; explicit
+    non-'R' blocks) is wired into MKT-020/022 strike tightening and the MKT-033
+    salvage path, and `_read_option_quotes_batch` now surfaces `availability`.
+  • C-2: an empty position snapshot shrinks the Sheets Positions tab to
+    header-only instead of leaving the prior snapshot's stale rows.
+  • C-3: the post-settlement `log_performance_metrics` call uses a
+    throttle-exempt period ("End of Day") so the settled-P&L write isn't
+    dropped by the intraday Sheets-write throttle.
+  • GL-1: flip_a_live.sh / flip_ac_live.sh / broker_paper_smoke.py pin the
+    smoke PASS sentinel + the flip's freshness check to the Eastern (market)
+    day; flip_ac_live.sh's false "scheduled via systemd timer" comment
+    corrected — it is operator-run (manual); see RUNBOOKS RB-8.
+  Regression tests: tests/test_aud5_fixes.py. Doc sweep: PROJECT_STATUS,
+  strategy spec commission note, CALYPSO_IBKR_MAX_RPS comments (8→5),
+  data_recorder docstring, this history.
+
 - 2.0.0-rc.1 (2026-05-22, branch: hydra-ibkr-standalone): IBKR-standalone
   migration. Saxo Bank → Interactive Brokers Web API (ibind OAuth 1.0a,
   no gateway, no local container). All seven phases F1–F7 are

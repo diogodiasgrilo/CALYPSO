@@ -743,7 +743,9 @@ class IBClient:
         # could 429 repeatedly and (after 5 consecutive failures) trip the
         # orders/market breaker. This caps the combined start-rate at the single
         # chokepoint. Default OFF (0.0) so tests/dev/direct-IBClient are
-        # unaffected; the broker unit sets CALYPSO_IBKR_MAX_RPS=8 (20% headroom).
+        # unaffected; the broker unit sets CALYPSO_IBKR_MAX_RPS=5 (~50% headroom
+        # under the ~10/s ceiling, lowered from 8 in the 2026-06-01 API-limit
+        # safety-hardening — see deploy/calypso-broker.service).
         try:
             _rps = float(os.environ.get("CALYPSO_IBKR_MAX_RPS", "0") or "0")
         except ValueError:

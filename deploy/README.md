@@ -13,6 +13,8 @@ _Last updated: 2026-05-29 (broker-session pivot — `calypso-broker` is now the 
 | `hydra_variant_b.service` | Variant B (Brandon Trojan Horse, dry-run paper, 4-slot grid). Uses the shared broker via `CALYPSO_BROKER_URL`. | ACTIVE (dry-run) |
 | `hydra_variant_c.service` | Variant C (Brandon Trojan Horse, dry-run paper, 3-slot grid). Uses the shared broker via `CALYPSO_BROKER_URL`. | ACTIVE (dry-run) |
 | `entry-window-watch.{service,timer}` | Entry-window watchdog — checks A/B/C + broker just after each entry window (10:20 / 10:50 / 11:20 + 11:35 settle, ET weekdays). | ACTIVE |
+| `broker-paper-smoke.{service,timer}` | **Go-live tooling (one-shot).** Places a real 1-contract paper round-trip through the broker, writes an ET-dated PASS sentinel, and (via `ExecStartPost=+flip_a_live.sh`) conditionally flips variant **A** to `dry_run:false` on a clean PASS. The committed `.timer` `OnCalendar` is a specific past date (one-shot, `Persistent=false`) — **re-date it before re-running**, or `systemctl start broker-paper-smoke` manually. | One-shot (go-live) |
+| `scripts/flip_ac_live.sh` (no unit) | **Operator-run** go-live flip of A **and** C to `dry_run:false` (B stays dry-run). Not auto-scheduled by design. Guarded on broker `/health` + a fresh same-ET-day PASS sentinel. Runbook: [`RUNBOOKS.md` RB-8](../docs/migration/RUNBOOKS.md). | Manual |
 | `apollo.{service,timer}` | Pre-market scout agent (8:30 AM ET weekdays) | ACTIVE |
 | `hermes.{service,timer}` | Daily execution analyst (7:00 PM ET weekdays) | ACTIVE |
 | `homer.{service,timer}` | Trading journal writer (7:30 PM ET weekdays) | ACTIVE |

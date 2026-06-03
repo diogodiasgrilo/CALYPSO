@@ -4,9 +4,12 @@
 # 2026-06-02 close so both are live for the 2026-06-03 session from the open.
 # B (hydra_variant_b) intentionally stays dry-run.
 #
-# Scheduled via a one-shot systemd timer at 21:30 UTC (17:30 ET — well past the
-# 16:00 ET close + after-hours settlement). Runs as root (restarts services);
-# config edits run as the calypso user. Idempotent + guarded.
+# OPERATOR-RUN (manual), as root, AFTER the close + after-hours settlement.
+# There is intentionally NO auto-flip systemd timer for A+C: a date-pinned
+# auto-flip is a go-live footgun (a clock change or a stale unit could re-fire
+# it). Run a fresh paper-smoke the SAME ET day first — it writes today's PASS
+# sentinel that Guard 2 below requires. Runbook: docs/migration/RUNBOOKS.md RB-8.
+# Restarts services as root; config edits run as the calypso user. Idempotent.
 set -uo pipefail
 
 VENV=/opt/calypso/.venv/bin/python
@@ -22,9 +25,12 @@ fi
 # Guard 2 — require a FRESH (today) paper-smoke PASS sentinel: defense in depth so
 # we only go live if the real order path was validated today.
 SENT=/opt/calypso/data/smoke/last_pass.txt
-today=$(date +%F)
+# AUD5 GL-1: pin to the Eastern (market) day so the "fresh today" check matches
+# the ET-dated sentinel the smoke writes, regardless of the VM's system TZ.
+today=$(TZ=America/New_York date +%F)
 if ! grep -q "^${today} PASS" "$SENT" 2>/dev/null; then
-    log "ABORT: no fresh ($today) paper-smoke PASS sentinel at $SENT — not flipping"
+    log "ABORT: no fresh ($today ET) paper-smoke PASS sentinel at $SENT — not flipping."
+    log "       Run a paper-smoke TODAY first: sudo systemctl start broker-paper-smoke"
     exit 0
 fi
 

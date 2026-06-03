@@ -202,10 +202,15 @@ def main() -> int:
     # running it on a clean ExecStart — two independent gates before A goes live.
     try:
         import os as _os
+        # AUD5 GL-1: stamp the sentinel with the EASTERN (market) day, matching
+        # the ET day the flip scripts check — so "fresh today" is unambiguous
+        # regardless of the VM's system timezone.
+        from shared.market_hours import get_us_market_time
+        _et_day = get_us_market_time().strftime("%Y-%m-%d")
         _os.makedirs("/opt/calypso/data/smoke", exist_ok=True)
         with open("/opt/calypso/data/smoke/last_pass.txt", "w") as fh:
-            fh.write(date.today().isoformat() + " PASS\n")
-        log("wrote PASS sentinel /opt/calypso/data/smoke/last_pass.txt")
+            fh.write(_et_day + " PASS\n")
+        log(f"wrote PASS sentinel /opt/calypso/data/smoke/last_pass.txt ({_et_day} ET)")
     except Exception as e:
         log(f"WARN: could not write PASS sentinel: {e}")
     _alert(True, out); return 0

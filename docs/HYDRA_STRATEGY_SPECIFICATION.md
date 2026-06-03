@@ -992,7 +992,9 @@ HEARTBEAT | Monitoring | SPX: 6012.45 | VIX: 19.5 | Entries: 6/6 | Active: 3 | T
 |-----------|---------|-----------------|--------------|
 | Full IC | $10 | $15 | $20 |
 
-Commission = $2.50 per leg per transaction. Expired options incur no close commission.
+Commission = **$1.15 per leg per transaction** on IBKR (`strategy.commission_per_leg`, set 2026-05-29 in commit `078049f`: ~$0.65 IBKR Pro base + ~$0.45 CBOE index + ~$0.05 ORF/OCC/CAT). Expired options incur no close commission.
+
+> **Note on the worked examples in this doc:** the close-cost / round-trip examples elsewhere (the `$2.50/leg`, `$5 round-trip`, `$10/$15/$20` tables above and in the stop-math sections) predate the IBKR commission change and reflect the **Saxo-era $2.50/leg**. They illustrate the *formula shape*, not current dollar values — the live commission is $1.15/leg. (Commission affects display / reported P&L only, never strategy logic.)
 
 ---
 

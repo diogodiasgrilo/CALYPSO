@@ -1,0 +1,239 @@
+"""Regression tests for the AUD5 post-cutover go-live audit fixes.
+
+Covers the confirmed code findings in docs/migration/AUD5_FINDINGS.md:
+
+- GL-2 : ORDER-004 buying-power gate must NOT raise (and must not silently
+         fail open) when IBKR leaves margin utilization unset (margin_pct=None).
+- C-1a : index current_price/current_vix only adopt a quote whose 6509 flag is
+         real-time/usable (block Z/Y/N), consistent with MarketData.update_spx.
+- C-1b : market-halt detection treats Y/N (frozen-delayed / not-subscribed)
+         like Z (frozen) — all "not real-time" → halt.
+- C-1c : _option_quote_is_realtime exists + batch surfaces the availability flag.
+- C-2  : an empty position snapshot shrinks the Positions sheet to header-only
+         instead of leaving the prior snapshot's stale rows.
+- C-3  : HydraStrategy.log_performance_metrics passes `period` through so the
+         post-settlement write can use a throttle-exempt label.
+"""
+
+from __future__ import annotations
+
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+import sys
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from bots.hydra.strategy import HydraStrategy
+import bots.hydra.base_strategy as base_mod
+from shared.logger_service import GoogleSheetsLogger
+
+
+def _bare() -> HydraStrategy:
+    """A HydraStrategy with no __init__ — set only the attrs a method needs."""
+    return HydraStrategy.__new__(HydraStrategy)
+
+
+class _ZeroDict(dict):
+    """dict that yields 0 for any missing key (keeps metric math finite)."""
+
+    def __missing__(self, key):  # noqa: D401
+        return 0
+
+
+# ─── GL-2: ORDER-004 margin_pct=None must not crash the BP gate ───────────
+class TestOrder004MarginNone:
+    """base_strategy._check_buying_power on the IBKR path (margin_pct=None)."""
+
+    def _strategy(self, available, dry_run=False):
+        s = _bare()
+        # IBKR balance: only MarginAvailableForTrading; NO MarginUtilizationPct.
+        s._read_account_balance = MagicMock(
+            return_value={"MarginAvailableForTrading": available}
+        )
+        s.min_buying_power_per_ic = 5000
+        s.contracts_per_entry = 1
+        s.dry_run = dry_run
+        s._last_margin_snapshot = {}
+        return s
+
+    def test_bp_ok_path_no_crash_when_margin_pct_none(self):
+        # available >> required → success return (the line that crashed pre-fix).
+        ok, msg = self._strategy(available=100000)._check_buying_power()
+        assert ok is True
+        assert "BP OK" in msg          # the real success msg, NOT "skipped (error"
+        assert "n/a" in msg            # margin rendered as n/a, not a TypeError
+
+    def test_insufficient_bp_path_no_crash_when_margin_pct_none(self):
+        ok, msg = self._strategy(available=10, dry_run=False)._check_buying_power()
+        assert ok is False
+        assert "Insufficient BP" in msg
+        assert "n/a" in msg
+
+    def test_explicit_margin_pct_still_formatted(self):
+        s = _bare()
+        s._read_account_balance = MagicMock(return_value={
+            "MarginAvailableForTrading": 100000,
+            "MarginUtilizationPct": 12.5,
+        })
+        s.min_buying_power_per_ic = 5000
+        s.contracts_per_entry = 1
+        s.dry_run = False
+        s._last_margin_snapshot = {}
+        ok, msg = s._check_buying_power()
+        assert ok is True
+        assert "12.5%" in msg
+
+
+# ─── C-1a: index current_price/current_vix availability gate ──────────────
+class TestIndexAvailabilityGate:
+    def _strategy(self, avail):
+        s = _bare()
+        s.market_data = MagicMock()
+        s._read_index_price = MagicMock(
+            side_effect=lambda sym: (6000.0 if sym == "SPX" else 15.0, avail)
+        )
+        s.current_price = -1.0
+        s.current_vix = -1.0
+        return s
+
+    def test_realtime_updates_current(self):
+        s = self._strategy("R")
+        s._update_market_data()
+        assert s.current_price == 6000.0
+        assert s.current_vix == 15.0
+
+    def test_delayed_still_updates_current(self):
+        # 'D' is delayed-but-usable (update_spx logs and proceeds) — adopted.
+        s = self._strategy("D")
+        s._update_market_data()
+        assert s.current_price == 6000.0
+        assert s.current_vix == 15.0
+
+    @pytest.mark.parametrize("avail", ["Z", "Y", "N", "ZP", "Yp", "Np"])
+    def test_non_realtime_does_not_update_current(self, avail):
+        s = self._strategy(avail)
+        s._update_market_data()
+        assert s.current_price == -1.0   # stale/unentitled quote NOT adopted
+        assert s.current_vix == -1.0
+
+
+# ─── C-1b: market-halt detection on Y/N ───────────────────────────────────
+class TestMarketHaltAvailability:
+    def _strategy(self, price, avail):
+        s = _bare()
+        s._read_index_price = MagicMock(return_value=(price, avail))
+        return s
+
+    def test_realtime_not_halted(self):
+        s = self._strategy(6000.0, "R")
+        with patch.object(base_mod, "is_market_open", return_value=True):
+            halted, reason = s._check_market_halt()
+        assert halted is False
+
+    @pytest.mark.parametrize("avail", ["Z", "Y", "N", "Yp", "Np"])
+    def test_non_realtime_treated_as_halt(self, avail):
+        s = self._strategy(6000.0, avail)
+        with patch.object(base_mod, "is_market_open", return_value=True):
+            halted, reason = s._check_market_halt()
+        assert halted is True
+        assert "not real-time" in reason
+
+
+# ─── C-1c: _option_quote_is_realtime + batch availability ─────────────────
+class TestOptionQuoteIsRealtime:
+    def test_semantics(self):
+        s = _bare()
+        assert s._option_quote_is_realtime(None) is False        # no quote
+        assert s._option_quote_is_realtime({}) is False          # empty quote
+        # quote present but no availability flag → pass (IBKR batch may omit it)
+        assert s._option_quote_is_realtime({"bid": 1.0}) is True
+        assert s._option_quote_is_realtime({"availability": None}) is True
+        assert s._option_quote_is_realtime({"availability": "R"}) is True
+        assert s._option_quote_is_realtime({"availability": "RpB"}) is True
+        for bad in ("D", "Z", "Y", "N", "DP", "Zp", "Yp", "Np"):
+            assert s._option_quote_is_realtime({"availability": bad}) is False, bad
+
+    def test_batch_surfaces_availability(self):
+        s = _bare()
+        broker = MagicMock()
+        broker.get_quotes_batch.return_value = [
+            {"conid": 1, "bid": 1.0, "availability": "R"},
+            {"conid": 2, "bid": 2.0, "availability": "Z"},
+            {"conid": 3, "bid": 3.0},   # no flag → None
+        ]
+        s.broker = broker
+        out = s._read_option_quotes_batch([1, 2, 3])
+        assert out[1]["availability"] == "R"
+        assert out[2]["availability"] == "Z"
+        assert out[3]["availability"] is None
+        # and the gate agrees:
+        assert s._option_quote_is_realtime(out[1]) is True
+        assert s._option_quote_is_realtime(out[2]) is False
+        assert s._option_quote_is_realtime(out[3]) is True
+
+
+# ─── C-2: empty Positions snapshot shrinks to header-only ─────────────────
+class TestEmptyPositionsShrink:
+    def _logger(self):
+        lg = GoogleSheetsLogger.__new__(GoogleSheetsLogger)
+        lg.enabled = True
+        lg.strategy_type = "hydra"
+        lg._last_pos_snapshot_at = 0.0
+        lg._pos_snapshot_min_interval = 0.0
+        lg._sheets_call_with_timeout = MagicMock()
+        ws = MagicMock()
+        ws.row_count = 50
+        lg.worksheets = {"Positions": ws}
+        return lg, ws
+
+    def test_empty_positions_resizes_to_header_only_and_skips_update(self):
+        lg, ws = self._logger()
+        lg.log_position_snapshot([])
+        calls = lg._sheets_call_with_timeout.call_args_list
+        # resize(worksheet.resize, 1, 17) — shrink to header
+        assert any(c.args[0] is ws.resize and c.args[1] == 1 for c in calls), calls
+        # update is NOT called when there are no data rows
+        assert not any(c.args[0] is ws.update for c in calls), calls
+
+    def test_nonempty_positions_resizes_and_updates(self):
+        lg, ws = self._logger()
+        pos = [{"entry_number": 1, "leg_type": "call", "strike": 6000,
+                "expiry": "2026-06-03", "side": "short", "status": "ACTIVE"}]
+        lg.log_position_snapshot(pos)
+        calls = lg._sheets_call_with_timeout.call_args_list
+        assert any(c.args[0] is ws.resize and c.args[1] == 2 for c in calls), calls
+        assert any(c.args[0] is ws.update for c in calls), calls
+
+
+# ─── C-3: settlement metrics period passthrough ───────────────────────────
+class TestPerformanceMetricsPeriodPassthrough:
+    def _strategy(self):
+        s = _bare()
+        s.trade_logger = MagicMock()
+        s.get_dashboard_metrics = MagicMock(return_value=_ZeroDict())
+        s.cumulative_metrics = {}
+        ds = MagicMock()
+        ds.total_commission = 0
+        ds.entries = []
+        s.daily_state = ds
+        s._calculate_capital_deployed = MagicMock(return_value=0)
+        s._calculate_max_loss_with_stops = MagicMock(return_value=0)
+        s._calculate_max_loss_catastrophic = MagicMock(return_value=0)
+        s._early_close_triggered = False
+        s._early_close_time = None
+        s.broker = MagicMock()
+        return s
+
+    def test_default_period_is_intraday(self):
+        s = self._strategy()
+        s.log_performance_metrics()
+        _, kwargs = s.trade_logger.log_performance_metrics.call_args
+        assert kwargs["period"] == "Intraday"
+
+    def test_settlement_period_passed_through(self):
+        s = self._strategy()
+        s.log_performance_metrics(period="End of Day")
+        _, kwargs = s.trade_logger.log_performance_metrics.call_args
+        assert kwargs["period"] == "End of Day"

@@ -17,6 +17,19 @@ margin, execution quality, MAE/MFE, skipped entries, economic events.
 
 Schema v6 adds: per-leg broker (IBKR; originally Saxo) bid/ask in spread_snapshots
 (~10s resolution) for ThetaData-vs-broker backtest calibration.
+
+Schema v7 adds: the `shadow_entries` table — records what OTM-based strike
+selection WOULD have chosen (observation only; never traded).
+
+Schema v8 adds: a per-row `contracts` column on trade_entries / trade_stops /
+spread_snapshots / shadow_entries, plus `contracts_per_entry` on daily_summaries
+(NOT NULL DEFAULT 1; null-safe `or 1` on write) for 2-contract scaling.
+
+Schema v9 (2026-06-02) adds: ground-truth per-leg execution capture on
+trade_entries for the live go-live — short/long call/put `*_fill_price` and
+`*_mid_at_fill` (real fill vs mid, for live slippage analysis).
+
+Current SCHEMA_VERSION = 9 (see the module constant).
 """
 
 import json

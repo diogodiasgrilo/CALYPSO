@@ -374,7 +374,7 @@ class HydraStrategy(MEICStrategy):
         # variants pace their IBKR calls more loosely. Defaults to 1.0
         # (no change). When 3+ variants run simultaneously, this helps keep
         # combined IBKR traffic under the broker's global rate gate
-        # (CALYPSO_IBKR_MAX_RPS=8, below IBKR's 10 req/s/session).
+        # (CALYPSO_IBKR_MAX_RPS=5, below IBKR's 10 req/s/session).
         # Variant A: 1.0 (live, safety-critical), B: 2.0, C: 2.0.
         # Vigilant mode is intentionally NOT scaled — when a stop is near, we
         # need fast detection on every variant (still cheap because vigilant
@@ -1611,17 +1611,42 @@ class HydraStrategy(MEICStrategy):
             )
             return None
 
+    def _option_quote_is_realtime(self, quote: Optional[Dict[str, Any]]) -> bool:
+        """True if an option quote is real-time enough to price a trade off.
+
+        IBKR-audit #11: gates on field 6509 (``availability``). The first char
+        ``R`` (RealTime) passes; ``D``/``Z``/``Y``/``N``
+        (Delayed/Frozen/Frozen-Delayed/Not-Subscribed) are blocked so a
+        delayed/frozen/unentitled OPRA feed never drives strike selection or a
+        salvage decision.
+
+        Semantics chosen to FAIL CLOSED without destabilizing the common case:
+        - ``None``/falsy quote (no quote at all) → ``False`` (unusable).
+        - quote present but ``availability`` missing/None → ``True``. IBKR's
+          batch endpoint does not always populate 6509; mirroring
+          ``MarketData.update_spx``, we reject only an EXPLICIT non-'R' flag so
+          a normal RTH session (where 6509 is 'R' or absent) is unaffected.
+        - ``availability`` present → ``True`` iff its first char is 'R'.
+        """
+        if not quote:
+            return False
+        avail = quote.get("availability")
+        if avail is None:
+            return True
+        return str(avail)[:1].upper() == "R"
+
     def _read_option_quotes_batch(
         self,
         instrument_ids: List,
     ) -> Dict[Any, Dict[str, Any]]:
         """Fetch many option quotes from the active broker in one batch.
 
-        Returns ``{instrument_id: {"bid","ask","last","mid","mark"}}`` —
-        the same per-quote shape as :meth:`_read_option_quote`, keyed by
-        instrument id. Instruments the broker returns nothing for are
-        simply absent from the result. Returns ``{}`` on a batch-level
-        failure (the MKT-020/022 call sites already handle empty maps).
+        Returns ``{instrument_id: {"bid","ask","last","mid","mark",
+        "availability"}}`` — the same per-quote shape as
+        :meth:`_read_option_quote`, keyed by instrument id. Instruments the
+        broker returns nothing for are simply absent from the result. Returns
+        ``{}`` on a batch-level failure (the MKT-020/022 call sites already
+        handle empty maps).
 
         ``IBClient.get_quotes_batch`` returns a list of flat normalized
         dicts. The CP API caps a batch at 100 conids, so this chunks at
@@ -1668,6 +1693,11 @@ class HydraStrategy(MEICStrategy):
                         "last": _f(row.get("last")),
                         "mid": _f(row.get("mid")),
                         "mark": _f(row.get("mark")),
+                        # IBKR-audit #11: surface the freshness flag (6509) on
+                        # batch legs too, so candidate-strike pricing can gate on
+                        # it via _option_quote_is_realtime (parity with the
+                        # single-quote _read_option_quote path).
+                        "availability": row.get("availability"),
                     }
                 # P7-audit L3: surface row drops. Two distinct shapes:
                 # (a) rows we got but couldn't key (no `conid` field) —
@@ -4065,6 +4095,21 @@ class HydraStrategy(MEICStrategy):
             short_quote = quotes.get(short_uic) or {}
             long_quote = (quotes.get(long_uic) or {}) if long_uic else {}
 
+            # IBKR-audit #11: never price a strike off a NON-real-time option
+            # quote (explicit 6509 D/Z/Y/N). Missing/empty quotes fall through
+            # to the illiquid handling below; only a PRESENT quote with an
+            # explicit non-'R' flag fails closed here, so normal RTH (6509='R'
+            # or unpopulated) is unaffected.
+            if (short_quote and not self._option_quote_is_realtime(short_quote)) or \
+                    (long_quote and not self._option_quote_is_realtime(long_quote)):
+                logger.warning(
+                    "MKT-020: %spt OTM → option quote NOT real-time "
+                    "(short 6509=%r, long 6509=%r) — skipping candidate",
+                    otm_val, short_quote.get("availability"),
+                    long_quote.get("availability"),
+                )
+                continue
+
             short_bid = short_quote.get("bid") or 0
             short_ask = short_quote.get("ask") or 0
             long_bid = long_quote.get("bid") or 0
@@ -4297,6 +4342,21 @@ class HydraStrategy(MEICStrategy):
 
             short_quote = quotes.get(short_uic) or {}
             long_quote = (quotes.get(long_uic) or {}) if long_uic else {}
+
+            # IBKR-audit #11: never price a strike off a NON-real-time option
+            # quote (explicit 6509 D/Z/Y/N). Missing/empty quotes fall through
+            # to the illiquid handling below; only a PRESENT quote with an
+            # explicit non-'R' flag fails closed here, so normal RTH (6509='R'
+            # or unpopulated) is unaffected.
+            if (short_quote and not self._option_quote_is_realtime(short_quote)) or \
+                    (long_quote and not self._option_quote_is_realtime(long_quote)):
+                logger.warning(
+                    "MKT-022: %spt OTM → option quote NOT real-time "
+                    "(short 6509=%r, long 6509=%r) — skipping candidate",
+                    otm_val, short_quote.get("availability"),
+                    long_quote.get("availability"),
+                )
+                continue
 
             short_bid = short_quote.get("bid") or 0
             short_ask = short_quote.get("ask") or 0
@@ -6538,6 +6598,18 @@ class HydraStrategy(MEICStrategy):
             quote = self._read_option_quote(long_uic)
             if not quote:
                 logger.debug(f"MKT-033: No quote for Entry #{entry.entry_number} long {side} UIC {long_uic}")
+                return False
+
+            # IBKR-audit #11: don't price a salvage off a NON-real-time quote
+            # (explicit 6509 D/Z/Y/N) — fail closed; the long simply isn't
+            # salvaged this tick. Missing availability passes (see
+            # _option_quote_is_realtime).
+            if not self._option_quote_is_realtime(quote):
+                logger.warning(
+                    "MKT-033: Entry #%s long %s quote NOT real-time (6509=%r) — "
+                    "skipping salvage", entry.entry_number, side,
+                    quote.get("availability"),
+                )
                 return False
 
             bid = quote.get("bid") or 0
@@ -9288,7 +9360,7 @@ class HydraStrategy(MEICStrategy):
     # =========================================================================
     # OVERRIDE: API pacing — multiply normal-mode check interval by the
     # variant's `api_pacing_multiplier` so parallel variants don't blow past
-    # the broker's IBKR rate gate (CALYPSO_IBKR_MAX_RPS=8, under IBKR's
+    # the broker's IBKR rate gate (CALYPSO_IBKR_MAX_RPS=5, under IBKR's
     # 10 req/s/session limit). Vigilant mode is left at the
     # parent's value (2s) because stop detection latency is safety-critical.
     # Multiplier 1.0 (default) is a no-op — parent behavior unchanged.
@@ -9359,7 +9431,7 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             logger.error(f"Failed to log HYDRA account summary: {e}")
 
-    def log_performance_metrics(self):
+    def log_performance_metrics(self, period: str = "Intraday"):
         """
         Log HYDRA performance metrics to Google Sheets.
 
@@ -9370,6 +9442,13 @@ class HydraStrategy(MEICStrategy):
         Fix #69: Parent's log_performance_metrics() builds a NEW dict that
         doesn't include HYDRA-specific keys from get_dashboard_metrics().
         The logger reads metrics.get("full_ics", 0) which defaults to 0.
+
+        AUD5 C-3: ``period`` defaults to "Intraday" (the heartbeat caller),
+        which the logger throttles to protect the shared Sheets write quota.
+        The post-settlement caller (main.py) passes an EXEMPT label
+        ("End of Day") so the authoritative settled-P&L write is never
+        throttled/dropped — the throttle exempts periods containing
+        End/All/Weekly/Monthly/Final (see logger_service.log_performance_metrics).
         """
         try:
             metrics = self.get_dashboard_metrics()
@@ -9389,7 +9468,7 @@ class HydraStrategy(MEICStrategy):
             net_pnl = metrics["total_pnl"] - self.daily_state.total_commission
 
             self.trade_logger.log_performance_metrics(
-                period="Intraday",
+                period=period,
                 metrics={
                     # P&L
                     "total_pnl": metrics["total_pnl"],

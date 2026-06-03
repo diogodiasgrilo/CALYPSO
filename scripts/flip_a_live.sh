@@ -29,7 +29,9 @@ fi
 # this ExecStartPost on a clean ExecStart (exit 0) AND the probe wrote a dated
 # PASS marker today. If the marker is missing/stale, do not flip.
 SENT=/opt/calypso/data/smoke/last_pass.txt
-today=$(date +%F)
+# AUD5 GL-1: pin to the Eastern (market) day so the "fresh today" check matches
+# the ET-dated sentinel the smoke writes, regardless of the VM's system TZ.
+today=$(TZ=America/New_York date +%F)
 if ! grep -q "^${today} PASS" "$SENT" 2>/dev/null; then
     log "ABORT: no fresh ($today) paper-smoke PASS sentinel at $SENT — not flipping"
     exit 0

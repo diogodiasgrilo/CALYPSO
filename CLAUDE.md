@@ -904,6 +904,8 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="cat /etc/systemd/sys
 
 > Reminder: even with `dry_run: false`, this branch trades the IBKR **paper account** only. There is no live-money path.
 
+**Going live (flipping a variant dry-run → real paper orders):** this is a deliberate **manual operator action**, guarded on broker `/health` + a fresh same-ET-day paper-smoke PASS. There is intentionally **no auto-flip timer for A+C**. Use `scripts/flip_ac_live.sh` (flips A+C; B stays dry-run) after the close, having run `systemctl start broker-paper-smoke` the same ET day. Full procedure + rollback: [`docs/migration/RUNBOOKS.md`](docs/migration/RUNBOOKS.md) **RB-8**. (`flip_a_live.sh` flips only A and is wired as the smoke's `ExecStartPost`.)
+
 ```bash
 # Flip dry_run via heredoc
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python << \"SCRIPT\"

@@ -461,7 +461,11 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                                     # These were previously only logged during market hours heartbeat (pre-settlement),
                                     # meaning the final values with settled P&L were never recorded
                                     strategy.log_account_summary()
-                                    strategy.log_performance_metrics()
+                                    # AUD5 C-3: pass an EXEMPT period so the
+                                    # settled-P&L write bypasses the intraday
+                                    # Sheets-write throttle (heartbeat callers
+                                    # keep the default "Intraday").
+                                    strategy.log_performance_metrics(period="End of Day")
                                     strategy.log_position_snapshot()
                                 except Exception as e:
                                     trade_logger.log_error(f"Failed to log daily summary: {e}")
