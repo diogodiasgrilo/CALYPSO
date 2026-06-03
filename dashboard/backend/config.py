@@ -27,6 +27,22 @@ class Settings(BaseSettings):
     # Log file (primary = C)
     hydra_log_file: Path = Path("/opt/calypso/logs/hydra_variant_c/bot.log")
 
+    # ── MARKET-DATA (SPX/VIX price chart) source ─────────────────────────
+    # The SPX/VIX price chart is ACCOUNT-AGNOSTIC — every variant (A/B/C)
+    # watches the SAME S&P 500 index, so the candle chart should come from the
+    # DENSEST recorder, independent of which variant is "primary" for trades.
+    # Variant A samples ~4-8 ticks/min (real candle bodies + wicks); variant C
+    # samples ~1 tick/min (every 1-min bar collapses to a flat doji → the
+    # "spare crosses" look). Pointing the price chart at A's dense DB/log gives
+    # full, accurate candlesticks while the trade overlay (strikes, entries,
+    # stops, P&L) stays on the primary's data above. Override with
+    # DASHBOARD_MARKET_DATA_DB / DASHBOARD_MARKET_LOG_FILE if A is ever retired
+    # (point at whichever variant samples densest). If this source has no data,
+    # the chart falls back to the primary's sparse data and the frontend renders
+    # a clean line instead of crosses (never broken-looking).
+    market_data_db: Path = Path("/opt/calypso/data/backtesting.db")
+    market_log_file: Path = Path("/opt/calypso/logs/hydra/bot.log")
+
     # Comparison mode (head-to-head dry-run experiment).
     # When comparison_mode_enabled = True, the dashboard exposes:
     #   - /api/variants/* endpoints reading each variant's parallel state/metrics/db

@@ -26,6 +26,10 @@ class Broadcaster:
         self.state_reader = StateFileReader(settings.hydra_state_file)
         self.metrics_reader = MetricsFileReader(settings.hydra_metrics_file)
         self.db_reader = BacktestingDBReader(settings.backtesting_db)
+        # SPX/VIX price chart is account-agnostic — source it from the densest
+        # recorder (config.market_data_db, e.g. A at ~4-8 ticks/min) so candles
+        # have real bodies, not the flat dojis C's ~1 tick/min produces.
+        self.market_db_reader = BacktestingDBReader(settings.market_data_db)
         self.log_tailer = LogTailer(settings.hydra_log_file)
         self.live_ohlc = LiveOHLCBuilder()
         self.live_state = LiveStateProvider(self.state_reader, db_reader=self.db_reader)
@@ -75,34 +79,30 @@ class Broadcaster:
         logger.info("Broadcaster stopped")
 
     async def _get_merged_ohlc(self) -> list[dict]:
-        """Get OHLC bars: SQLite historical + live heartbeat bars.
+        """Get dense SPX OHLC bars for the price chart.
 
-        During market hours, live bars from heartbeat parsing fill the gap
-        until HOMER writes to SQLite post-market. Live bars for timestamps
-        already in SQLite are skipped (SQLite is authoritative).
+        Sourced from the market-data DB (densest recorder, e.g. A), which gives
+        real candle bodies. Priority:
+          1. HOMER's authoritative market_ohlc_1min (post-close).
+          2. Live: compute dense bars from that DB's market_ticks (~4-8/min)
+             — covers today before HOMER runs, and survives dashboard restarts
+             (DB-backed, unlike the log-parsed builder which loses its place on
+             a bot log-rotation).
+          3. Last resort (market-data DB has nothing): the log-parsed live
+             builder. Sparse (~1/min), but better than an empty chart; the
+             frontend renders it as a line rather than crosses.
         """
         today = get_today_et()
-        db_bars: list[dict] = []
 
-        if await self.db_reader.is_available():
-            db_bars = await self.db_reader.get_today_ohlc(today)
+        if await self.market_db_reader.is_available():
+            db_bars = await self.market_db_reader.get_today_ohlc(today)
+            if db_bars:
+                return db_bars
+            tick_bars = await self.market_db_reader.compute_ohlc_from_ticks(today)
+            if tick_bars:
+                return tick_bars
 
-        live_bars = self.live_ohlc.get_ohlc_bars()
-
-        if not live_bars:
-            return db_bars
-        if not db_bars:
-            return live_bars
-
-        # Merge: SQLite is authoritative. Only add live bars not in SQLite.
-        db_timestamps = {b["timestamp"] for b in db_bars}
-        merged = list(db_bars)
-        for bar in live_bars:
-            if bar["timestamp"] not in db_timestamps:
-                merged.append(bar)
-
-        merged.sort(key=lambda b: b["timestamp"])
-        return merged
+        return self.live_ohlc.get_ohlc_bars()
 
     async def get_snapshot(self) -> dict:
         """Build a full snapshot for newly connected clients."""

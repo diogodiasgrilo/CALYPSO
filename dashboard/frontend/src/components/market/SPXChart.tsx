@@ -1,16 +1,54 @@
-import { useEffect, useRef, useMemo } from "react";
+import { useEffect, useRef, useMemo, useState } from "react";
 import {
   createChart,
   createSeriesMarkers,
   CandlestickSeries,
+  LineSeries,
   type IChartApi,
   type ISeriesApi,
   type Time,
   ColorType,
   CrosshairMode,
 } from "lightweight-charts";
-import { useHydraStore, type HydraEntry } from "../../store/hydraStore";
+import { useHydraStore, type HydraEntry, type OHLCBar } from "../../store/hydraStore";
 import { colors } from "../../lib/tradingColors";
+
+type SeriesType = "candle" | "line";
+// Generic series handle — markers + price lines work on both candle and line.
+type AnySeries = ISeriesApi<"Candlestick"> | ISeriesApi<"Line">;
+
+/** Decide how to draw the price track from the data's density.
+ *  Candlesticks need several samples/minute to show a body+wick; a feed that
+ *  samples ~1×/min produces all-doji bars (open=high=low=close) that render as
+ *  ugly flat crosses. When most bars are degenerate we draw a clean line of
+ *  closes instead — honest and continuous at any sampling rate. Dense feeds
+ *  (e.g. variant A at ~4-8×/min) keep real candlesticks. */
+function chooseSeriesType(bars: OHLCBar[]): SeriesType {
+  if (bars.length < 5) return "candle";
+  const dojis = bars.filter(
+    (b) => b.high === b.low && b.open === b.close && b.high === b.open
+  ).length;
+  return dojis / bars.length > 0.5 ? "line" : "candle";
+}
+
+function makeSeries(chart: IChartApi, type: SeriesType): AnySeries {
+  if (type === "line") {
+    return chart.addSeries(LineSeries, {
+      color: colors.info,
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+    });
+  }
+  return chart.addSeries(CandlestickSeries, {
+    upColor: colors.profit,
+    downColor: colors.loss,
+    borderUpColor: colors.profit,
+    borderDownColor: colors.loss,
+    wickUpColor: colors.profitMuted,
+    wickDownColor: colors.lossMuted,
+  });
+}
 
 /** Format a chart Time (epoch that ENCODES the ET wall-clock as-UTC, produced by
  *  parseET) as HH:MM in Eastern, regardless of the viewer's browser timezone.
@@ -56,13 +94,18 @@ function entriesHash(entries: HydraEntry[]): string {
 export function SPXChart() {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const seriesRef = useRef<AnySeries | null>(null);
+  const seriesTypeRef = useRef<SeriesType | null>(null);
   const priceLinesRef = useRef<ReturnType<ISeriesApi<"Candlestick">["createPriceLine"]>[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const markersRef = useRef<any>(null);
   const prevEntriesHashRef = useRef("");
   const prevStopCountRef = useRef(0);
   const prevShowStrikesRef = useRef(false);
+  const prevSeriesVersionRef = useRef(0);
+  // Bumped whenever the price series is recreated (candle↔line) so the markers/
+  // price-lines effect re-attaches them to the new series.
+  const [seriesVersion, setSeriesVersion] = useState(0);
 
   const todayOHLC = useHydraStore((s) => s.todayOHLC);
   const hydraEntries = useHydraStore((s) => s.hydraState?.entries);
@@ -111,17 +154,9 @@ export function SPXChart() {
       handleScroll: { vertTouchDrag: false },
     });
 
-    const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: colors.profit,
-      downColor: colors.loss,
-      borderUpColor: colors.profit,
-      borderDownColor: colors.loss,
-      wickUpColor: colors.profitMuted,
-      wickDownColor: colors.lossMuted,
-    });
-
     chartRef.current = chart;
-    candleSeriesRef.current = candleSeries;
+    // The price series is created lazily in the data effect below, where its
+    // type (candle vs line) is chosen from the data's density.
 
     // Handle resize
     const observer = new ResizeObserver((resizeEntries) => {
@@ -138,41 +173,71 @@ export function SPXChart() {
       observer.disconnect();
       chart.remove();
       chartRef.current = null;
-      candleSeriesRef.current = null;
+      seriesRef.current = null;
+      seriesTypeRef.current = null;
     };
   }, []);
 
-  // Update candlestick data when OHLC changes
+  // Update price data when OHLC changes; pick candle vs line from data density.
   useEffect(() => {
-    if (!candleSeriesRef.current || todayOHLC.length === 0) return;
+    if (!chartRef.current || todayOHLC.length === 0) return;
 
-    const data = todayOHLC.map((bar) => ({
-      time: parseET(bar.timestamp) as Time,
-      open: bar.open,
-      high: bar.high,
-      low: bar.low,
-      close: bar.close,
-    }));
+    const desired = chooseSeriesType(todayOHLC);
 
-    candleSeriesRef.current.setData(data);
-    chartRef.current?.timeScale().scrollToRealTime();
+    // (Re)create the series if it doesn't exist or the chosen type changed.
+    if (!seriesRef.current || seriesTypeRef.current !== desired) {
+      if (seriesRef.current) {
+        markersRef.current?.detach();
+        markersRef.current = null;
+        for (const line of priceLinesRef.current) {
+          try { seriesRef.current.removePriceLine(line); } catch { /* gone */ }
+        }
+        priceLinesRef.current = [];
+        chartRef.current.removeSeries(seriesRef.current);
+      }
+      seriesRef.current = makeSeries(chartRef.current, desired);
+      seriesTypeRef.current = desired;
+      setSeriesVersion((v) => v + 1); // force markers/lines to re-attach
+    }
+
+    if (desired === "line") {
+      const data = todayOHLC.map((bar) => ({
+        time: parseET(bar.timestamp) as Time,
+        value: bar.close,
+      }));
+      (seriesRef.current as ISeriesApi<"Line">).setData(data);
+    } else {
+      const data = todayOHLC.map((bar) => ({
+        time: parseET(bar.timestamp) as Time,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+      }));
+      (seriesRef.current as ISeriesApi<"Candlestick">).setData(data);
+    }
+    chartRef.current.timeScale().scrollToRealTime();
   }, [todayOHLC]);
 
   // Update markers and price lines only when entries/stops actually change
   useEffect(() => {
-    if (!candleSeriesRef.current) return;
+    if (!seriesRef.current) return;
 
     const currentHash = entriesHash(entries);
     const currentStopCount = stopEvents.length;
 
-    // Skip if nothing changed (OHLC updates won't trigger marker rebuild)
+    // Skip if nothing changed (OHLC updates won't trigger marker rebuild) —
+    // but always rebuild when the series was recreated (candle↔line), since the
+    // new series starts with no markers/price lines attached.
     const strikesChanged = showStrikes !== prevShowStrikesRef.current;
-    if (currentHash === prevEntriesHashRef.current && currentStopCount === prevStopCountRef.current && !strikesChanged) {
+    const seriesChanged = seriesVersion !== prevSeriesVersionRef.current;
+    if (!seriesChanged && currentHash === prevEntriesHashRef.current && currentStopCount === prevStopCountRef.current && !strikesChanged) {
       return;
     }
     prevEntriesHashRef.current = currentHash;
     prevStopCountRef.current = currentStopCount;
     prevShowStrikesRef.current = showStrikes;
+    prevSeriesVersionRef.current = seriesVersion;
 
     // Build entry markers (exclude fully-skipped entries where both sides were never placed)
     const markers = entries
@@ -209,11 +274,11 @@ export function SPXChart() {
     // Detach previous markers before creating new ones (LWC v5 stacking fix)
     markersRef.current?.detach();
     markersRef.current = allMarkers.length > 0
-      ? createSeriesMarkers(candleSeriesRef.current, allMarkers)
+      ? createSeriesMarkers(seriesRef.current, allMarkers)
       : null;
 
     // Update price lines
-    const series = candleSeriesRef.current;
+    const series = seriesRef.current;
     for (const line of priceLinesRef.current) {
       series.removePriceLine(line);
     }
@@ -253,7 +318,7 @@ export function SPXChart() {
         }
       });
     }
-  }, [entries, stopEvents, showStrikes]);
+  }, [entries, stopEvents, showStrikes, stateDate, seriesVersion]);
 
   return (
     <div>
