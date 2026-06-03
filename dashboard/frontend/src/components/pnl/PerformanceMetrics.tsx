@@ -114,12 +114,12 @@ export function PerformanceMetrics() {
       <h3 className="label-upper mb-2">Performance</h3>
       <div className="grid grid-cols-4 max-lg:grid-cols-2 max-sm:grid-cols-1 gap-2">
         <MetricCard
-          label="Sharpe"
+          label="Sharpe (ann.)"
           value={fmtRatio(sharpe)}
           color={sharpe >= 1 ? colors.profit : sharpe >= 0 ? colors.warning : colors.loss}
         />
         <MetricCard
-          label="Sortino"
+          label="Sortino (ann.)"
           value={fmtRatio(sortino)}
           color={sortino >= 1.5 ? colors.profit : sortino >= 0 ? colors.warning : colors.loss}
         />
@@ -129,7 +129,7 @@ export function PerformanceMetrics() {
           color={colors.loss}
         />
         <MetricCard
-          label="Calmar"
+          label="Calmar (ann.)"
           value={fmtRatio(calmar)}
           color={calmar >= 2 ? colors.profit : calmar >= 0 ? colors.warning : colors.loss}
         />

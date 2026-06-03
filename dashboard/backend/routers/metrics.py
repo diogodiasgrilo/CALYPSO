@@ -6,7 +6,7 @@ from fastapi import APIRouter, Query
 
 from dashboard.backend.config import settings
 from dashboard.backend.services.metrics_reader import MetricsFileReader
-from dashboard.backend.services.db_reader import BacktestingDBReader
+from dashboard.backend.services.db_reader import BacktestingDBReader, apply_db_cumulative
 from dashboard.backend.services.live_state import LiveStateProvider
 from dashboard.backend.services.market_status import get_today_et, is_after_market_close
 
@@ -47,8 +47,10 @@ def _append_today_summary(summaries: list[dict]) -> list[dict]:
 
 @router.get("/cumulative")
 async def get_cumulative():
-    """Lifetime cumulative metrics."""
+    """Lifetime cumulative metrics (DB-canonical — see apply_db_cumulative)."""
     data = metrics_reader.read_latest()
+    overrides = await db_reader.get_cumulative_overrides()
+    data = apply_db_cumulative(data, overrides)
     if data is None:
         return {"error": "Metrics file not available"}
     return data

@@ -118,13 +118,23 @@ const chartCursor = { fill: "rgba(126, 232, 199, 0.06)", stroke: colors.borderDi
 
 function parseEntryTimeToSlot(timeStr: string): number | null {
   if (!timeStr) return null;
-  const m = timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-  if (!m) return null;
-  let h = parseInt(m[1], 10);
-  const min = parseInt(m[2], 10);
-  const ampm = m[3].toUpperCase();
-  if (ampm === "PM" && h !== 12) h += 12;
-  if (ampm === "AM" && h === 12) h = 0;
+  let h: number;
+  let min: number;
+  const ampm = timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (ampm) {
+    h = parseInt(ampm[1], 10);
+    min = parseInt(ampm[2], 10);
+    const p = ampm[3].toUpperCase();
+    if (p === "PM" && h !== 12) h += 12;
+    if (p === "AM" && h === 12) h = 0;
+  } else {
+    // 24-hour DB format: "YYYY-MM-DD HH:MM:SS" / "HH:MM:SS" / "HH:MM".
+    // The first colon-pair is always the time (the date has no colons).
+    const t = timeStr.match(/(\d{1,2}):(\d{2})/);
+    if (!t) return null;
+    h = parseInt(t[1], 10);
+    min = parseInt(t[2], 10);
+  }
   const totalMin = h * 60 + min;
   let best = SCHEDULED_SLOTS[0];
   let bestDist = Math.abs(totalMin - best);
@@ -555,7 +565,8 @@ function EntriesTab({
     entries.forEach((e) => {
       const type = (e.entry_type || "").toLowerCase();
       const label =
-        type.includes("iron") || type === "full" ? "Iron Condor"
+        // "full_ic" / "iron_condor" / "full" all mean a full iron condor.
+        type.includes("iron") || type.includes("condor") || type.includes("ic") || type.startsWith("full") ? "Iron Condor"
         : type.includes("put") ? "Put Spread"
         : type.includes("call") ? "Call Spread"
         : e.entry_type || "Other";
@@ -1028,7 +1039,7 @@ function StopsTab({
                 cursor={chartCursor}
                 formatter={(value: unknown) => [`${value} days`, "Count"]}
               />
-              <Bar dataKey="days" radius={[3, 3, 0, 0]}>
+              <Bar dataKey="days" radius={[3, 3, 0, 0]} maxBarSize={64}>
                 {stopsPerDayData.map((d, i) => (
                   <Cell
                     key={i}
@@ -1105,8 +1116,10 @@ function MarketTab({
   const trendData = useMemo(() => {
     const map = new Map<string, { totalPnl: number; count: number }>();
     entries.forEach((e) => {
-      const signal = e.trend_signal || "Unknown";
-      if (signal === "Unknown") return;
+      // DB stores the signal lowercase ("neutral"); the order/labels below are
+      // uppercase, so normalize or the panel renders empty despite having data.
+      const signal = (e.trend_signal || "Unknown").toUpperCase();
+      if (signal === "UNKNOWN") return;
       const entryStops = stopLookup.get(`${e.date}_${e.entry_number}`) ?? [];
       let pnl = e.total_credit || 0;
       entryStops.forEach((s) => {
@@ -1140,8 +1153,11 @@ function MarketTab({
               <XAxis
                 dataKey="vix"
                 name="VIX"
+                type="number"
+                domain={["dataMin - 0.5", "dataMax + 0.5"]}
                 tick={{ fontSize: 10, fill: colors.textDim }}
                 axisLine={{ stroke: colors.borderDim }}
+                tickFormatter={(v) => Number(v).toFixed(1)}
               />
               <YAxis
                 dataKey="pnl"
@@ -1178,8 +1194,11 @@ function MarketTab({
               <XAxis
                 dataKey="range"
                 name="Range"
+                type="number"
+                domain={["dataMin - 2", "dataMax + 2"]}
                 tick={{ fontSize: 10, fill: colors.textDim }}
                 axisLine={{ stroke: colors.borderDim }}
+                tickFormatter={(v) => Number(v).toFixed(0)}
                 label={{ value: "SPX Range (pts)", position: "insideBottom", offset: -2, fontSize: 9, fill: colors.textDim }}
               />
               <YAxis

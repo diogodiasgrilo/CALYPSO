@@ -10,6 +10,25 @@ from typing import Optional
 logger = logging.getLogger("dashboard.db_reader")
 
 
+def apply_db_cumulative(metrics: Optional[dict], overrides: dict) -> Optional[dict]:
+    """Merge DB-canonical aggregates over the metrics-file rollup.
+
+    The metrics file supplies fields the DB doesn't track (e.g. double_stops);
+    the DB supplies the authoritative cumulative_pnl / winning_days /
+    losing_days / total_entries / total_credit_collected / total_stops so every
+    dashboard page agrees. Returns the metrics dict (or the overrides alone if
+    the file is missing) with non-null overrides applied. last_updated is taken
+    from the DB so the broadcaster's after-close augmentation isn't double-applied.
+    """
+    if not overrides:
+        return metrics
+    base = dict(metrics) if metrics else {}
+    for key, value in overrides.items():
+        if value is not None:
+            base[key] = value
+    return base
+
+
 class BacktestingDBReader:
     """Read-only SQLite reader for HOMER's backtesting database.
 
@@ -133,11 +152,21 @@ class BacktestingDBReader:
             (date_str,),
         )
 
+    # actual_stops = authoritative stop-loss EVENT count from trade_stops (the
+    # same table the Analytics Stops tab + day-detail "Stop Losses" list read).
+    # daily_summaries.entries_stopped conflates Brandon take-profit exits with
+    # stop-losses for the B/C variants, which made History disagree with both;
+    # exposing actual_stops lets the "Stops" columns mean stop-losses everywhere.
+    _ACTUAL_STOPS = (
+        "(SELECT COUNT(*) FROM trade_stops ts WHERE ts.date = daily_summaries.date) "
+        "AS actual_stops"
+    )
+
     async def get_daily_summaries(self, limit: int = 30) -> list[dict]:
         """Get recent daily summaries for calendar heat map."""
         return await to_thread(
             self._query,
-            "SELECT * FROM daily_summaries ORDER BY date DESC LIMIT ?",
+            f"SELECT *, {self._ACTUAL_STOPS} FROM daily_summaries ORDER BY date DESC LIMIT ?",
             (limit,),
         )
 
@@ -145,7 +174,7 @@ class BacktestingDBReader:
         """Get all daily summaries for a specific year."""
         return await to_thread(
             self._query,
-            "SELECT * FROM daily_summaries WHERE date LIKE ? ORDER BY date",
+            f"SELECT *, {self._ACTUAL_STOPS} FROM daily_summaries WHERE date LIKE ? ORDER BY date",
             (f"{year}-%",),
         )
 
@@ -196,6 +225,31 @@ class BacktestingDBReader:
             FROM daily_summaries""",
         )
         return rows[0] if rows else None
+
+    async def get_cumulative_overrides(self) -> dict:
+        """DB-canonical lifetime aggregates that OVERRIDE the metrics-file rollup.
+
+        The metrics file (hydra_metrics.json) is a bot-maintained running total
+        that can drift from the authoritative per-day DB records (it misses an
+        increment whenever the bot is down at a market close). To keep every
+        dashboard page consistent, the cumulative card is derived from the same
+        daily_summaries / trade_entries / trade_stops the History + Analytics
+        pages read. Near-zero P&L (floating-point noise) is rounded so a flat
+        day isn't miscounted as a win/loss.
+        """
+        rows = await to_thread(
+            self._query,
+            """SELECT
+                (SELECT ROUND(SUM(net_pnl), 2) FROM daily_summaries) AS cumulative_pnl,
+                (SELECT COUNT(*) FROM daily_summaries WHERE ROUND(net_pnl, 2) > 0) AS winning_days,
+                (SELECT COUNT(*) FROM daily_summaries WHERE ROUND(net_pnl, 2) < 0) AS losing_days,
+                (SELECT COUNT(*) FROM trade_entries) AS total_entries,
+                (SELECT ROUND(SUM(total_credit), 2) FROM trade_entries) AS total_credit_collected,
+                (SELECT COUNT(*) FROM trade_stops) AS total_stops,
+                (SELECT MAX(date) FROM daily_summaries) AS last_updated
+            """,
+        )
+        return rows[0] if rows else {}
 
     async def get_daily_pnls(self) -> list[float]:
         """Get all daily net P&L values for performance metric calculations."""

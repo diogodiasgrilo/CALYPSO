@@ -7,7 +7,7 @@ import time
 from dashboard.backend.config import settings
 from dashboard.backend.services.state_reader import StateFileReader
 from dashboard.backend.services.metrics_reader import MetricsFileReader
-from dashboard.backend.services.db_reader import BacktestingDBReader
+from dashboard.backend.services.db_reader import BacktestingDBReader, apply_db_cumulative
 from dashboard.backend.services.log_tailer import LogTailer
 from dashboard.backend.services.live_ohlc import LiveOHLCBuilder
 from dashboard.backend.services.live_state import LiveStateProvider
@@ -107,7 +107,10 @@ class Broadcaster:
     async def get_snapshot(self) -> dict:
         """Build a full snapshot for newly connected clients."""
         state = self.state_reader.read_latest()
-        metrics = self.metrics_reader.read_latest()
+        metrics = apply_db_cumulative(
+            self.metrics_reader.read_latest(),
+            await self.db_reader.get_cumulative_overrides(),
+        )
 
         today = get_today_et()
         entries = []
@@ -253,6 +256,9 @@ class Broadcaster:
                 if data is not None:
                     # When metrics file updates (bot wrote it), reset flag for next day
                     _sent_today_augmented = False
+                    data = apply_db_cumulative(
+                        data, await self.db_reader.get_cumulative_overrides()
+                    )
                     await self.manager.broadcast({
                         "type": "metrics_update",
                         "data": data,
@@ -265,8 +271,14 @@ class Broadcaster:
                     if today_pnl is not None:
                         _sent_today_augmented = True
 
-                        # Augment cumulative metrics with today's P&L
-                        base_metrics = self.metrics_reader.read_latest() or {}
+                        # Augment cumulative metrics with today's P&L. DB-canonical
+                        # first so last_updated reflects the DB — if today's row is
+                        # already in the DB the != today guard below skips the add
+                        # (no double-count); during hours the DB lacks today so it adds.
+                        base_metrics = apply_db_cumulative(
+                            self.metrics_reader.read_latest() or {},
+                            await self.db_reader.get_cumulative_overrides(),
+                        ) or {}
                         if base_metrics:
                             today = get_today_et()
                             # Only augment if metrics file hasn't been updated for today yet

@@ -48,7 +48,7 @@ function SummaryCard({
   const stats = useMemo(() => {
     const totalPnl = days.reduce((a, d) => a + (d.net_pnl ?? 0), 0);
     const totalEntries = days.reduce((a, d) => a + (d.entries_placed ?? 0), 0);
-    const totalStops = days.reduce((a, d) => a + (d.entries_stopped ?? 0), 0);
+    const totalStops = days.reduce((a, d) => a + (d.actual_stops ?? d.entries_stopped ?? 0), 0);
     const wins = days.filter((d) => (d.net_pnl ?? 0) > 0).length;
     const losses = days.filter((d) => (d.net_pnl ?? 0) < 0).length;
     const best = days.length > 0 ? Math.max(...days.map((d) => d.net_pnl ?? 0)) : 0;

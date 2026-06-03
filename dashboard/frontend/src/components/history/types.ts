@@ -6,6 +6,9 @@ export interface DaySummary {
   gross_pnl: number;
   entries_placed: number;
   entries_stopped: number;
+  /** Authoritative stop-loss event count (trade_stops). entries_stopped
+   *  conflates Brandon take-profit exits for B/C; prefer this for "Stops". */
+  actual_stops?: number;
   entries_expired: number;
   commission: number;
   spx_open: number;

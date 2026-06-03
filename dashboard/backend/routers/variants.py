@@ -816,11 +816,15 @@ async def get_aggregate():
 
     for vid in available_ids_lower:
         vid_upper = vid.upper()
-        metrics = _metrics_readers[vid].read_latest()
-        lifetimes[vid_upper] = _per_variant_lifetime_stats(metrics)
         summaries = await _db_readers[vid].get_all_summaries()
         summaries_by_variant[vid_upper] = summaries
         cumulative_curves[vid_upper] = _cumulative_series(summaries)
+        # DB-canonical lifetime stats (cumulative_pnl / win-loss / credit / stops)
+        # so the cross-day table matches the main dashboard + Analytics + History,
+        # rather than the bot-maintained metrics file which can drift.
+        overrides = await _db_readers[vid].get_cumulative_overrides()
+        lifetimes[vid_upper] = _per_variant_lifetime_stats(overrides)
+        lifetimes[vid_upper]["daily_returns_count"] = len(summaries)
 
     # ---- Date-keyed lookups for alignment ----
     by_date_per_variant: dict[str, dict[str, dict]] = {

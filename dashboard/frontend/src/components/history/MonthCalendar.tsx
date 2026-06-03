@@ -149,7 +149,7 @@ export function MonthCalendar({
                   key={di}
                   className="flex-1 h-8 rounded-sm flex items-center justify-center text-[10px] font-mono cursor-pointer hover:ring-1 hover:ring-text-dim/50 hover:brightness-125 transition-all"
                   style={{ backgroundColor: bgColor }}
-                  title={`${date}: ${formatPnL(pnl)} | ${summary.entries_placed} entries, ${summary.entries_stopped} stops`}
+                  title={`${date}: ${formatPnL(pnl)} | ${summary.entries_placed} entries, ${summary.actual_stops ?? summary.entries_stopped ?? 0} stops`}
                   onClick={() => onDayClick(date)}
                 >
                   {dayNum}

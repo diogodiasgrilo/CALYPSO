@@ -728,7 +728,9 @@ function BufferBar({
       <div className={`${height} bg-bg-elevated rounded-full overflow-hidden`}>
         <div
           className={`${height} rounded-full transition-all duration-500`}
-          style={{ width: `${v}%`, backgroundColor: color }}
+          // Bar fill caps at 100% (a full/breached buffer); the numeric label
+          // above keeps the true value (e.g. 120% = breached by 20% of buffer).
+          style={{ width: `${Math.min(v, 100)}%`, backgroundColor: color }}
         />
       </div>
     </div>
