@@ -495,7 +495,6 @@ class BrandonHydraStrategy(HydraStrategy):
         #    close_cost here to match what live mode converges to. The
         #    actual_*_stop_debit journaling field is set in BOTH modes (for the
         #    dashboard); only the total_realized_pnl subtraction is guarded.
-        contracts = max(int(getattr(entry, "contracts", 1) or 1), 1)
         if call_alive:
             entry.call_side_stopped = True
             close_cost_call = float(entry.call_spread_value) if entry.call_spread_value else 0.0
@@ -637,7 +636,6 @@ class BrandonHydraStrategy(HydraStrategy):
                 # real fill-based close cost, so subtracting the pre-close mark
                 # here too would double-count it. actual_*_stop_debit is set in
                 # both modes for journaling.
-                contracts = max(int(getattr(entry, "contracts", 1) or 1), 1)
                 if call_alive_pre:
                     entry.call_side_stopped = True
                     entry.actual_call_stop_debit = close_cost_call_real

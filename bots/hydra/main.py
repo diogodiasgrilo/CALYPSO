@@ -285,6 +285,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
         trade_logger.log_event("Logging dashboard metrics on startup...")
         strategy.update_market_data()
         strategy.log_account_summary()
+        # Startup/intraday snapshot → default period "Intraday" (Sheets-throttled).
+        # The settlement caller passes period="End of Day" (throttle-exempt); see
+        # the after-hours settlement block below.
         strategy.log_performance_metrics()
         strategy.log_position_snapshot()
 

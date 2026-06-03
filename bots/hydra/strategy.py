@@ -1587,9 +1587,11 @@ class HydraStrategy(MEICStrategy):
             # IBKR-audit #11: surface the broker freshness flag (6509) on the
             # legs we actually trade. First char R=RealTime / D=Delayed /
             # Z=Frozen / Y=Frozen-Delayed / N=Not-Subscribed. Callers gate on it
-            # (see _option_quote_is_realtime); a non-'R' option quote during RTH
+            # via _option_quote_is_realtime(); a non-'R' option quote during RTH
             # means a delayed/frozen/unentitled OPRA feed — do not price a trade
-            # off it. Warn once-ish so a feed-entitlement problem is visible.
+            # off it. Warns on every non-'R' read (no rate-limit) so a feed-
+            # entitlement problem stays visible; expected to be silent in
+            # steady state, so the volume itself signals a problem.
             avail = raw.get("availability")
             if avail and str(avail)[:1].upper() != "R":
                 logger.warning(
@@ -11006,6 +11008,43 @@ class HydraStrategy(MEICStrategy):
         # Save state with any new salvage data
         self._save_state_to_disk()
 
+    @staticmethod
+    def _classify_settlement_conids(expected, actual):
+        """POS-004 (AUD5 fix): classify tracked conids at settlement time.
+
+        IBKR exposes only the NET quantity per conid, so a conid is normally
+        "settled" when we expected a non-zero net there and the broker now
+        reports net 0 (the 0DTE legs expired). The blind spot the original
+        code had: it keyed solely off the broker's ACTUAL net == 0, so a conid
+        whose EXPECTED net is *itself* 0 — one entry's short and another
+        entry's long merged onto the SAME conid (e.g. short_call -1 on E#2 +
+        long_call +1 on E#3) — also reads actual net 0 while BOTH legs are
+        still open, and got marked "settled", clearing both live legs and
+        dropping monitoring of a genuinely-open 0DTE short (a safety risk).
+
+        Returns ``(settled, still_open, merged_net_zero)``:
+        - ``settled``: EXPECTED net != 0 AND broker net == 0 → unambiguously
+          expired; safe to clear these legs.
+        - ``still_open``: broker net != 0 → not settled; keep monitoring.
+        - ``merged_net_zero``: EXPECTED net == 0 AND broker net == 0 →
+          AMBIGUOUS (could be both-open-and-netting OR both-expired). These
+          are NEVER bulk-cleared off the net signal; their legs stay tracked
+          and are booked by the expiry-gated, idempotent
+          ``_process_expired_credits()`` instead. MKT-013/015 deconfliction
+          normally prevents the same-conid opposing-leg merge in the first
+          place; this is defense-in-depth for a deconfliction miss.
+        """
+        settled = {
+            c for c in expected
+            if expected.get(c, 0) != 0 and actual.get(c, 0) == 0
+        }
+        still_open = {c for c in expected if actual.get(c, 0) != 0}
+        merged_net_zero = {
+            c for c in expected
+            if expected.get(c, 0) == 0 and actual.get(c, 0) == 0
+        }
+        return settled, still_open, merged_net_zero
+
     def check_after_hours_settlement(self) -> bool:
         """
         POS-004: Check if 0DTE positions have been settled after market close.
@@ -11081,12 +11120,21 @@ class HydraStrategy(MEICStrategy):
             actual = self._actual_position_quantities(open_positions)
             expected = self._expected_position_quantities()
 
-            settled_conids = {
-                conid for conid in expected if actual.get(conid, 0) == 0
-            }
-            still_open_conids = {
-                conid for conid in expected if actual.get(conid, 0) != 0
-            }
+            # POS-004 (AUD5): classify by EXPECTED vs ACTUAL net. A conid whose
+            # expected net is itself 0 (opposing legs merged on one conid) is
+            # ambiguous on a net-0 reading and must NOT be bulk-cleared.
+            settled_conids, still_open_conids, merged_net_zero_conids = \
+                self._classify_settlement_conids(expected, actual)
+
+            if merged_net_zero_conids:
+                logger.warning(
+                    "POS-004: %d conid(s) have EXPECTED net 0 (opposing legs "
+                    "merged on one conid) and broker net 0 — NOT auto-clearing "
+                    "(ambiguous: both-open-and-netting vs both-expired). Legs "
+                    "stay tracked; expiry booking handles them. Check "
+                    "MKT-013/015 deconfliction. conids=%s",
+                    len(merged_net_zero_conids), sorted(merged_net_zero_conids),
+                )
 
             if settled_conids:
                 logger.info(

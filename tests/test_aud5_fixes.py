@@ -237,3 +237,42 @@ class TestPerformanceMetricsPeriodPassthrough:
         s.log_performance_metrics(period="End of Day")
         _, kwargs = s.trade_logger.log_performance_metrics.call_args
         assert kwargs["period"] == "End of Day"
+
+
+# ─── POS-004: settlement net-zero-merge classification ────────────────────
+class TestPOS004SettlementMergeClassification:
+    """AUD5/POS-004: a conid whose EXPECTED net is 0 (opposing legs merged)
+    must NOT be classified 'settled' off a net-0 broker reading — doing so
+    cleared a genuinely-open 0DTE short."""
+
+    _classify = staticmethod(HydraStrategy._classify_settlement_conids)
+
+    def test_normal_single_leg_settles(self):
+        settled, still_open, merged = self._classify({100: -1}, {100: 0})
+        assert settled == {100} and still_open == set() and merged == set()
+
+    def test_open_leg_not_settled(self):
+        settled, still_open, merged = self._classify({100: -1}, {100: -1})
+        assert settled == set() and still_open == {100} and merged == set()
+
+    def test_same_sign_merge_settles_cleanly(self):
+        # two shorts merged on one conid (-2) → still a non-zero expectation
+        settled, still_open, merged = self._classify({100: -2}, {100: 0})
+        assert settled == {100} and merged == set()
+
+    def test_opposing_merge_net_zero_is_ambiguous_not_settled(self):
+        # THE BUG: short -1 (E#2) + long +1 (E#3) on the SAME conid → expected 0;
+        # both still open → broker also 0. Must land in merged_net_zero, never
+        # in settled (which would clear the live short), nor block forever.
+        settled, still_open, merged = self._classify({100: 0}, {100: 0})
+        assert 100 not in settled
+        assert 100 not in still_open
+        assert merged == {100}
+
+    def test_mixed_set(self):
+        expected = {10: -1, 20: 0, 30: -1}   # 10 expired, 20 net-zero merge, 30 open
+        actual = {10: 0, 20: 0, 30: -1}
+        settled, still_open, merged = self._classify(expected, actual)
+        assert settled == {10}
+        assert still_open == {30}
+        assert merged == {20}
