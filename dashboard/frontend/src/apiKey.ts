@@ -25,9 +25,39 @@ export function getApiKey(): string {
   }
 }
 
+export function setApiKey(key: string): void {
+  try {
+    localStorage.setItem(STORAGE_KEY, key);
+  } catch {
+    /* ignore — private mode / storage disabled */
+  }
+}
+
+export function clearApiKey(): void {
+  try {
+    localStorage.removeItem(STORAGE_KEY);
+  } catch {
+    /* ignore */
+  }
+}
+
+/** Validate a key against a guarded endpoint. 200 = valid, 401 = wrong/missing. */
+export async function validateApiKey(key: string): Promise<boolean> {
+  if (!key) return false;
+  try {
+    const r = await fetch("/api/hydra/bot-config", {
+      headers: { "X-API-Key": key },
+    });
+    return r.ok;
+  } catch {
+    return false;
+  }
+}
+
 export function installApiKeyFetch(): void {
-  const key = getApiKey();
-  if (!key) return; // auth not in use — leave fetch untouched
+  // Always install; read the key PER REQUEST from localStorage so a key
+  // provisioned later (via the login gate) is picked up without a reload.
+  // No-op while no key is stored, so it's safe even when auth is off.
   const orig = window.fetch.bind(window);
   window.fetch = (input: RequestInfo | URL, init: RequestInit = {}) => {
     try {
@@ -38,9 +68,12 @@ export function installApiKeyFetch(): void {
             ? input.pathname
             : (input as Request).url;
       if (url && (url.includes("/api/") || url.includes("/ws/"))) {
-        const headers = new Headers(init.headers);
-        if (!headers.has("X-API-Key")) headers.set("X-API-Key", key);
-        init = { ...init, headers };
+        const key = getApiKey();
+        if (key) {
+          const headers = new Headers(init.headers);
+          if (!headers.has("X-API-Key")) headers.set("X-API-Key", key);
+          init = { ...init, headers };
+        }
       }
     } catch {
       /* fall through to the unmodified request */

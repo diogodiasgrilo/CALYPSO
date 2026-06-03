@@ -1,4 +1,5 @@
-import { Volume2, VolumeX } from "lucide-react";
+import { Volume2, VolumeX, LogOut } from "lucide-react";
+import { getApiKey, clearApiKey } from "../../apiKey";
 import { useHydraStore } from "../../store/hydraStore";
 import { formatPrice } from "../../lib/formatters";
 import { vixColor, colors } from "../../lib/tradingColors";
@@ -168,6 +169,18 @@ export function Header() {
         >
           {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
         </button>
+        {getApiKey() && (
+          <button
+            onClick={() => {
+              clearApiKey();
+              window.location.reload();
+            }}
+            className="text-text-secondary hover:text-loss transition-colors"
+            title="Sign out (clear access key from this browser)"
+          >
+            <LogOut size={16} />
+          </button>
+        )}
       </div>
     </header>
     </>
