@@ -492,8 +492,17 @@ DEFAULT_ORDER_ANSWERS = {
     QuestionType.DISRUPTIVE_ORDERS: True,            # IBKR may reject; informational
     QuestionType.MISSING_MARKET_DATA: False,         # we always have OPRA — refuse = abort
     QuestionType.STOP_ORDER_RISKS: False,            # we don't use native stop orders
-    QuestionType.ORDER_SIZE_LIMIT: False,            # safety: don't auto-confirm oversize
-    QuestionType.SIZE_MODIFICATION_LIMIT: False,     # safety: don't auto-confirm large mods
+    # 2026-06-03 incident fix: CONFIRM IBKR's "size exceeds the Size Limit of N"
+    # precaution. The strategy intentionally trades contracts_per_entry (10c on
+    # B/C), which exceeds IBKR's default account Size Limit (5), so this prompt
+    # fires on EVERY intended order — answered False it refused the bot's OWN
+    # orders ("A question was not given a positive reply"), blocking all live
+    # entries (the 1c smoke never tripped it, so it surfaced only at go-live).
+    # Order size is already bounded by config (contracts_per_entry) + the
+    # ORDER-004 buying-power gate, so we confirm the precaution rather than
+    # refuse our own correctly-sized orders.
+    QuestionType.ORDER_SIZE_LIMIT: True,             # confirm intended size (bounded by config + BP gate)
+    QuestionType.SIZE_MODIFICATION_LIMIT: True,      # same, for stop/modify resizes at the intended size
     QuestionType.MULTIPLE_ACCOUNTS: False,           # we trade one account at a time
     QuestionType.CLOSE_POSITION: False,              # don't auto-close-all in response to anything
 }

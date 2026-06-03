@@ -28,6 +28,8 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 from bots.hydra.strategy import HydraStrategy
 import bots.hydra.base_strategy as base_mod
 from shared.logger_service import GoogleSheetsLogger
+from shared.ib_client import DEFAULT_ORDER_ANSWERS
+from ibind import QuestionType
 
 
 def _bare() -> HydraStrategy:
@@ -314,3 +316,22 @@ class TestZombiePositionFilter:
         # safety net intact: a genuine non-zero overnight position is still returned
         out = self._strategy([self._REAL])._read_open_positions()
         assert len(out) == 1 and out[0]["instrument_id"] == 111
+
+
+# ─── 2026-06-03: confirm IBKR Size-Limit precaution (live order path) ──────
+class TestOrderSizeLimitConfirmed:
+    """The order-reply defaults must CONFIRM IBKR's 'size exceeds the Size Limit
+    of N' precaution. The bot trades contracts_per_entry (10c) which exceeds
+    IBKR's default account Size Limit (5); answering this prompt False refused
+    the bot's own orders ('A question was not given a positive reply') and
+    blocked ALL live entries. Order size is bounded by config + the ORDER-004
+    BP gate, so confirming the precaution is correct."""
+
+    def test_size_limit_prompts_confirmed(self):
+        assert DEFAULT_ORDER_ANSWERS.get(QuestionType.ORDER_SIZE_LIMIT) is True
+        assert DEFAULT_ORDER_ANSWERS.get(QuestionType.SIZE_MODIFICATION_LIMIT) is True
+
+    def test_safety_prompts_still_refused(self):
+        # we did NOT loosen the genuinely-protective refusals
+        assert DEFAULT_ORDER_ANSWERS.get(QuestionType.MISSING_MARKET_DATA) is False
+        assert DEFAULT_ORDER_ANSWERS.get(QuestionType.CLOSE_POSITION) is False
