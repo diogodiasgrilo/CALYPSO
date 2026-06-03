@@ -8,14 +8,24 @@ class Settings(BaseSettings):
     # Base path for CALYPSO installation (dashboard reads HYDRA's data from here)
     calypso_root: Path = Path("/opt/calypso")
 
-    # Data files (HYDRA writes these, dashboard reads)
-    hydra_state_file: Path = Path("/opt/calypso/data/hydra_state.json")
-    hydra_metrics_file: Path = Path("/opt/calypso/data/hydra_metrics.json")
-    backtesting_db: Path = Path("/opt/calypso/data/backtesting.db")
+    # ── PRIMARY (main page) data source ──────────────────────────────────
+    # The main dashboard page + WebSocket + widget read these "canonical"
+    # paths. 2026-06-02: the operator made variant C the LIVE canonical
+    # strategy, so these point at C's data (data/variant_c/*). A is demoted to
+    # a dry-run shadow and is surfaced as an explicit variant "a" on
+    # /comparison (its real paths are the variant_a_* fields below).
+    # `primary_label` is shown in the header so it's unambiguous which strategy
+    # the main page is displaying. (To switch the primary back to A, point
+    # these four at data/hydra_* + logs/hydra/ and set primary_label/bot_config_file.)
+    primary_label: str = "C · LIVE (Brandon narrow 5/10pt)"
+    bot_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_c.json")
+    hydra_state_file: Path = Path("/opt/calypso/data/variant_c/hydra_state.json")
+    hydra_metrics_file: Path = Path("/opt/calypso/data/variant_c/hydra_metrics.json")
+    backtesting_db: Path = Path("/opt/calypso/data/variant_c/backtesting.db")
     position_registry_file: Path = Path("/opt/calypso/data/position_registry.json")
 
-    # Log file
-    hydra_log_file: Path = Path("/opt/calypso/logs/hydra/bot.log")
+    # Log file (primary = C)
+    hydra_log_file: Path = Path("/opt/calypso/logs/hydra_variant_c/bot.log")
 
     # Comparison mode (head-to-head dry-run experiment).
     # When comparison_mode_enabled = True, the dashboard exposes:
@@ -27,8 +37,16 @@ class Settings(BaseSettings):
     # below — to add a variant D, add 5 fields here and the router picks it up.
     comparison_mode_enabled: bool = False
 
-    # Variant A — canonical baseline HYDRA (75pt MKT-027, no Brandon stack, no pivot).
-    variant_a_label: str = "A (baseline 75pt)"
+    # Variant A — baseline HYDRA (75pt MKT-027). 2026-06-02: demoted to a
+    # DRY-RUN SHADOW (records to its own DB only; Sheets + alerts off). Now an
+    # EXPLICIT variant pointing at the canonical data/hydra_* + logs/hydra/
+    # paths (it was special-cased to the main paths before C became primary).
+    variant_a_label: str = "A (baseline 75pt · dry-run shadow)"
+    variant_a_state_file: Path = Path("/opt/calypso/data/hydra_state.json")
+    variant_a_metrics_file: Path = Path("/opt/calypso/data/hydra_metrics.json")
+    variant_a_backtesting_db: Path = Path("/opt/calypso/data/backtesting.db")
+    variant_a_log_file: Path = Path("/opt/calypso/logs/hydra/bot.log")
+    variant_a_config_file: Path = Path("/opt/calypso/bots/hydra/config/config.json")
 
     # Variant B — Brandon Trojan Horse stack with NARROW 5/10pt widths (same
     # as C) and a 4-slot entry grid (09:45 / 10:45 / 11:15 / 11:45) at 10c.
@@ -52,7 +70,7 @@ class Settings(BaseSettings):
     variant_c_backtesting_db: Path = Path("/opt/calypso/data/variant_c/backtesting.db")
     variant_c_log_file: Path = Path("/opt/calypso/logs/hydra_variant_c/bot.log")
     variant_c_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_c.json")
-    variant_c_label: str = "C (Brandon, narrow 5/10pt)"
+    variant_c_label: str = "C (LIVE · Brandon narrow 5/10pt)"
 
     # Agent intel directories
     agent_intel_dir: Path = Path("/opt/calypso/intel")

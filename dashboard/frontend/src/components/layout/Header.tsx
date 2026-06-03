@@ -46,7 +46,7 @@ export function Header() {
             color: "#1a1a1a",
             letterSpacing: "0.15em",
           }}
-          title="Path-B dry-run mode: real Saxo prices, no real orders placed. Position IDs prefixed DRY_*."
+          title="Dry-run mode: real IBKR-paper prices, no real orders placed. Position IDs prefixed DRY_*."
         >
           ⚠ DRY-RUN MODE — REAL PRICES, NO REAL ORDERS — POSITION IDs PREFIXED DRY_* ⚠
         </div>
@@ -65,6 +65,18 @@ export function Header() {
         <span className="text-text-primary font-bold text-base max-sm:text-sm tracking-wide">
           HYDRA
         </span>
+        {cfg.primary_label && (
+          <span
+            className="text-[10px] sm:text-xs font-bold px-2 py-0.5 rounded uppercase tracking-wide whitespace-nowrap"
+            style={{
+              backgroundColor: dryRun ? "rgba(210,153,34,0.18)" : "rgba(126,232,199,0.18)",
+              color: dryRun ? colors.warning : colors.profit,
+            }}
+            title="The strategy this main page is showing. Other variants are on the Comparison page."
+          >
+            {cfg.primary_label}
+          </span>
+        )}
         <div className="flex items-center gap-1.5 ml-2 max-sm:ml-1">
           <div className={`w-2 h-2 rounded-full ${connDot}`} />
           <span className="text-text-secondary text-xs capitalize hidden sm:inline">

@@ -1,9 +1,10 @@
 """N-way head-to-head variant comparison endpoints.
 
-Variant A is the live HYDRA bot (current spread width, current config).
-Variants B, C, ... are parallel HYDRA processes running in dry mode with
-different configs (typically a different spread width), each writing to
-data/variant_<id>/* and logs/hydra_variant_<id>/.
+Each variant is a parallel HYDRA process with its own config + data tree
+(data/variant_<id>/* and logs/hydra_variant_<id>/). As of 2026-06-02, variant
+**C** is the LIVE canonical strategy and **A** is a dry-run shadow; both are
+listed here from their own variant_<id>_* settings. The main dashboard page
+reads the canonical hydra_* paths (pointed at the live variant, currently C).
 
 The variant set is built at import time from ``settings`` — to add a new
 variant you only need to (1) add 5 ``variant_<id>_*`` fields to
@@ -43,9 +44,12 @@ router = APIRouter(prefix="/api/variants", tags=["variants"])
 # variant means adding a new ``variant_<id>_*`` group to settings + appending
 # its id to ``_VARIANT_IDS`` below.
 #
-# Variant A is special-cased: it points at the canonical hydra_* paths
-# (so the live bot's data IS variant A's data without any duplication).
-# All other variants point at their parallel ``data/variant_<id>/*`` tree.
+# Every variant (including A) resolves from its own explicit ``variant_<id>_*``
+# settings fields, so /comparison shows A, B, C from their separate data trees.
+# The dashboard's MAIN page reads the canonical ``hydra_*`` paths separately
+# (currently variant C — the live one); A's real data lives under the
+# variant_a_* fields. (Pre-2026-06-02, A was special-cased to the main paths
+# because the live bot WAS variant A; C is now primary.)
 
 _VARIANT_IDS: list[str] = ["a", "b", "c"]
 
@@ -57,15 +61,6 @@ def _variant_paths(vid: str) -> dict:
     isn't defined — that lets us list a variant id even if its settings
     haven't been added yet (defensive against typos in _VARIANT_IDS).
     """
-    if vid == "a":
-        return {
-            "label": settings.variant_a_label,
-            "state_file": settings.hydra_state_file,
-            "metrics_file": settings.hydra_metrics_file,
-            "backtesting_db": settings.backtesting_db,
-            "log_file": settings.hydra_log_file,
-            "config_file": settings.calypso_root / "bots/hydra/config/config.json",
-        }
     return {
         "label": getattr(settings, f"variant_{vid}_label", f"Variant {vid.upper()}"),
         "state_file": getattr(settings, f"variant_{vid}_state_file", None),

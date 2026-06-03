@@ -32,7 +32,11 @@ async def get_bot_config():
     regime cap drops entries at runtime. As of 2026-04-17, E#1 (10:15) is
     dropped at ALL VIX levels per config max_entries: [2, 2, 2, 1].
     """
-    config_path = settings.calypso_root / "bots/hydra/config/config.json"
+    # Read the PRIMARY variant's config (settings.bot_config_file → currently
+    # variant C, the live canonical strategy). The dry_run flag + schedule here
+    # drive the main dashboard's banner/labels, so they must match whichever
+    # variant the main page is showing.
+    config_path = settings.bot_config_file
     try:
         with open(config_path) as f:
             config = json.load(f)
@@ -42,8 +46,8 @@ async def get_bot_config():
         # fallback mirrors the Phase 1 pattern — None/0/missing → 1.
         contracts = strategy.get("contracts_per_entry") or 1
         # 2026-04-27: expose dry_run flag so the frontend can render a prominent
-        # DRY-RUN banner — eliminates ambiguity when the bot is in dry mode
-        # (Path-B realistic dry-run uses real Saxo prices, so positions look
+        # DRY-RUN banner — eliminates ambiguity when the primary bot is in dry
+        # mode (realistic dry-run uses real IBKR-paper prices, so positions look
         # identical to live except for the DRY_* prefix on position IDs).
         dry_run = bool(config.get("dry_run", False))
         return {
@@ -63,6 +67,7 @@ async def get_bot_config():
             "conditional_entry_times": strategy.get("conditional_entry_times", []),
             "contracts_per_entry": contracts,
             "dry_run": dry_run,
+            "primary_label": settings.primary_label,
         }
     except Exception as e:
         logger.warning(f"Could not read bot config ({config_path}): {e}")
@@ -80,6 +85,7 @@ async def get_bot_config():
             "conditional_entry_times": [],
             "contracts_per_entry": 1,
             "dry_run": False,
+            "primary_label": settings.primary_label,
         }
 
 

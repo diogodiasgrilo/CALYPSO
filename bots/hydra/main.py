@@ -301,7 +301,12 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
             flush=True
         )
 
-        trade_logger.log_event("Dashboard metrics logged to Google Sheets")
+        # AUD5: only claim "logged to Google Sheets" when Sheets is actually
+        # enabled (dry-run shadows have it off — the write is a no-op).
+        if trade_logger.google_logger.enabled:
+            trade_logger.log_event("Dashboard metrics logged to Google Sheets")
+        else:
+            trade_logger.log_event("Dashboard metrics updated (Sheets disabled — local/DB only)")
     except Exception as e:
         trade_logger.log_error(f"Failed to log startup dashboard metrics: {e}")
 
@@ -473,7 +478,12 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                                 except Exception as e:
                                     trade_logger.log_error(f"Failed to log daily summary: {e}")
                                 daily_summary_sent_date = today_date
-                                trade_logger.log_event("Daily summary sent to Google Sheets and alerts")
+                                # AUD5: accurate event text — dry-run shadows
+                                # have Sheets + alerts off (the sends are no-ops).
+                                if trade_logger.google_logger.enabled:
+                                    trade_logger.log_event("Daily summary sent to Google Sheets and alerts")
+                                else:
+                                    trade_logger.log_event("Daily summary recorded (Sheets/alerts disabled — local/DB only)")
                             else:
                                 # FIX #82: Do NOT lock the settlement gate pre-market when there's no activity.
                                 # At midnight ET, _reset_for_new_day() clears the registry, then settlement
