@@ -10,11 +10,16 @@ import {
 } from "recharts";
 import { useHydraStore } from "../../store/hydraStore";
 import { colors } from "../../lib/tradingColors";
-import { formatPnL } from "../../lib/formatters";
+import { formatPnL, isRegularSessionTime } from "../../lib/formatters";
 
 export function PnLCurve() {
-  const pnlHistory = useHydraStore((s) => s.pnlHistory);
+  const pnlHistoryRaw = useHydraStore((s) => s.pnlHistory);
   const comparisons = useHydraStore((s) => s.comparisons);
+
+  // Intraday chart: regular session only (09:30–16:00 ET). The bot also records
+  // after-hours points (settlement snapshot + any restarts) which would stretch
+  // the x-axis into the evening and make the (already-ET) curve look wrong.
+  const pnlHistory = pnlHistoryRaw.filter((p) => isRegularSessionTime(p.time));
 
   // Determine current P&L from last data point
   const lastPoint = pnlHistory[pnlHistory.length - 1];

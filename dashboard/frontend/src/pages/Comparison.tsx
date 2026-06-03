@@ -36,7 +36,7 @@ import {
   Cell,
 } from "recharts";
 import { colors, pnlColor } from "../lib/tradingColors";
-import { formatPnL } from "../lib/formatters";
+import { formatPnL, isRegularSessionTime } from "../lib/formatters";
 
 const POLL_MS = 2000;
 
@@ -756,7 +756,8 @@ function PnLChart({
   const histories = variantIds.map((vid) => ({
     id: vid,
     label: variants[vid]?.label ?? vid,
-    series: variants[vid]?.pnl_history ?? [],
+    // Intraday overlay: regular session only — drop after-hours/restart points.
+    series: (variants[vid]?.pnl_history ?? []).filter((p) => isRegularSessionTime(p.time)),
   }));
   const totalPoints = histories.reduce((acc, h) => acc + h.series.length, 0);
 

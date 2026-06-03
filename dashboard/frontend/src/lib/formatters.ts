@@ -37,6 +37,14 @@ export function formatTime(iso: string): string {
   }
 }
 
+/** True if an ET "HH:MM" time is within the regular market session (09:30–16:00).
+ *  Intraday charts use this to drop after-hours points (settlement snapshots + bot
+ *  restarts) that would otherwise stretch the x-axis into the evening and make the
+ *  curve look mis-timezoned. HH:MM strings sort lexicographically = chronologically. */
+export function isRegularSessionTime(hhmm: string | undefined | null): boolean {
+  return !!hhmm && hhmm >= "09:30" && hhmm <= "16:00";
+}
+
 /** Format date as short (Mar 6). */
 export function formatDateShort(dateStr: string): string {
   if (!dateStr) return "";

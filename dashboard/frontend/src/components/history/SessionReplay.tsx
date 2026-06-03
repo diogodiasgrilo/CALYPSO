@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { isRegularSessionTime } from "../../lib/formatters";
 import { Play, Pause, RotateCcw } from "lucide-react";
 import {
   AreaChart,
@@ -100,7 +101,13 @@ export function SessionReplay({ date }: { date: string }) {
           };
         }));
 
-        setPnlCurve((pnlData.pnl_curve ?? []) as PnLPoint[]);
+        // Regular session only — drop after-hours/restart points so the replay
+        // curve doesn't stretch past the close.
+        setPnlCurve(
+          ((pnlData.pnl_curve ?? []) as PnLPoint[]).filter((p) =>
+            isRegularSessionTime(p.time)
+          )
+        );
         setCurrentIndex(0);
         setState(t.length > 0 ? "ready" : "idle");
       })
