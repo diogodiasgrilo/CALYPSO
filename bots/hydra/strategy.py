@@ -1844,6 +1844,22 @@ class HydraStrategy(MEICStrategy):
                     continue
                 if norm.get("asset_type") != "OPT":
                     continue  # HYDRA only reconciles option legs
+                # 2026-06-03 fix: IBKR PAPER leaves an expired 0DTE in the
+                # position list as a quantity-0 "zombie" row (settled, but not
+                # purged for up to ~a day). A zero-qty row is NOT an open
+                # position — including it false-triggered the STATE-004
+                # overnight-0DTE halt at the new-day reset (which froze the bot
+                # all day and would recur, since 0DTE expires daily). A genuine
+                # open leg always carries a non-zero SIGNED quantity, so real
+                # overnight positions still trip the halt as intended.
+                _q = norm.get("quantity")
+                if _q is None or _q == 0:
+                    logger.debug(
+                        "_read_open_positions: skipping settled/zombie row "
+                        "conid=%s qty=%s (expired 0DTE not yet purged by IBKR)",
+                        norm.get("instrument_id"), _q,
+                    )
+                    continue
                 out.append({
                     "instrument_id": norm["instrument_id"],
                     "quantity": norm["quantity"],

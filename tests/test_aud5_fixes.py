@@ -276,3 +276,41 @@ class TestPOS004SettlementMergeClassification:
         assert settled == {10}
         assert still_open == {30}
         assert merged == {20}
+
+
+# ─── 2026-06-03: qty=0 zombie-position filter (STATE-004 false-halt) ───────
+class TestZombiePositionFilter:
+    """_read_open_positions must drop qty=0 'zombie' rows — IBKR paper leaves an
+    expired 0DTE in the position list with quantity 0 for ~a day, which
+    false-triggered the STATE-004 overnight-0DTE halt and froze the bot for the
+    whole day. Real (non-zero) positions are still returned so genuine overnight
+    positions still halt."""
+
+    _ZOMBIE = {"conid": 886490515, "position": 0, "assetClass": "OPT",
+               "ticker": "SPXW", "putOrCall": "C", "strike": 7615,
+               "lastTradingDay": "20260602"}
+    _REAL = {"conid": 111, "position": -10, "assetClass": "OPT",
+             "ticker": "SPXW", "putOrCall": "P", "strike": 7570,
+             "lastTradingDay": "20260603"}
+    _STK = {"conid": 222, "position": 100, "assetClass": "STK", "ticker": "SPY"}
+
+    def _strategy(self, rows):
+        s = _bare()
+        broker = MagicMock()
+        broker.get_positions.return_value = rows
+        s.broker = broker
+        return s
+
+    def test_zombie_filtered_real_kept(self):
+        out = self._strategy([self._ZOMBIE, self._REAL, self._STK])._read_open_positions()
+        assert [p["instrument_id"] for p in out] == [111]
+        assert out[0]["quantity"] == -10
+
+    def test_only_zombie_returns_empty(self):
+        # the actual 06-03 incident: a single qty-0 expired 0DTE row → no halt
+        assert self._strategy([self._ZOMBIE])._read_open_positions() == []
+
+    def test_real_overnight_position_still_detected(self):
+        # safety net intact: a genuine non-zero overnight position is still returned
+        out = self._strategy([self._REAL])._read_open_positions()
+        assert len(out) == 1 and out[0]["instrument_id"] == 111
