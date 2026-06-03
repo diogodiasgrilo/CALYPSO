@@ -12,7 +12,21 @@ import {
 import { useHydraStore, type HydraEntry } from "../../store/hydraStore";
 import { colors } from "../../lib/tradingColors";
 
-/** Parse ET timestamp → epoch seconds (Lightweight Charts renders as-if-UTC → shows ET labels).
+/** Format a chart Time (epoch that ENCODES the ET wall-clock as-UTC, produced by
+ *  parseET) as HH:MM in Eastern, regardless of the viewer's browser timezone.
+ *  Lightweight Charts otherwise renders tick/crosshair labels in the browser's
+ *  LOCAL zone; reading the UTC components of the as-UTC epoch returns the
+ *  original ET wall-clock, so the market clock shows correctly everywhere. */
+function fmtChartTimeET(time: Time): string {
+  const d = new Date((time as number) * 1000);
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+/** Parse an ET timestamp → epoch seconds that ENCODES the ET wall-clock as-UTC
+ *  (display is forced to ET by fmtChartTimeET via the chart's tickMark/time
+ *  formatters — do NOT rely on Lightweight Charts' default local rendering).
  *  Handles full ISO ("2026-04-07T12:03:01-04:00"), datetime ("2026-04-07 12:03:01"),
  *  and time-only ("12:03:08") formats. Time-only uses today's date. */
 function parseET(ts: string, fallbackDate?: string): number {
@@ -70,6 +84,10 @@ export function SPXChart() {
         fontFamily: "Inter, 'SF Mono', 'Fira Code', monospace",
         fontSize: 11,
       },
+      // Force the crosshair time label to Eastern (market clock).
+      localization: {
+        timeFormatter: (t: Time) => fmtChartTimeET(t),
+      },
       grid: {
         vertLines: { color: colors.borderDim },
         horzLines: { color: colors.borderDim },
@@ -87,6 +105,8 @@ export function SPXChart() {
         borderColor: colors.borderDim,
         timeVisible: true,
         secondsVisible: false,
+        // Force axis tick labels to Eastern (market clock), not browser-local.
+        tickMarkFormatter: (time: Time) => fmtChartTimeET(time),
       },
       handleScroll: { vertTouchDrag: false },
     });

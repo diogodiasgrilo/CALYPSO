@@ -24,6 +24,17 @@ function parseET(ts: string): number {
   return isNaN(utcDate.getTime()) ? 0 : utcDate.getTime() / 1000;
 }
 
+/** Format a chart Time (epoch encoding the ET wall-clock as-UTC, from parseET)
+ *  as HH:MM in Eastern, regardless of the viewer's browser timezone. Lightweight
+ *  Charts otherwise labels in browser-local; reading the UTC components returns
+ *  the original ET wall-clock. */
+function fmtChartTimeET(time: Time): string {
+  const d = new Date((time as number) * 1000);
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
 /**
  * Parse a time-only string like "10:15 AM ET" into epoch seconds for a given date.
  * Falls back to parseET for full timestamps.
@@ -89,6 +100,9 @@ export function DayDetailChart({
         fontFamily: "'SF Mono', 'Fira Code', monospace",
         fontSize: 11,
       },
+      localization: {
+        timeFormatter: (t: Time) => fmtChartTimeET(t),
+      },
       grid: {
         vertLines: { color: colors.borderDim },
         horzLines: { color: colors.borderDim },
@@ -107,6 +121,7 @@ export function DayDetailChart({
         timeVisible: true,
         secondsVisible: false,
         barSpacing: 4,
+        tickMarkFormatter: (time: Time) => fmtChartTimeET(time),
       },
       handleScroll: { vertTouchDrag: false },
     });
