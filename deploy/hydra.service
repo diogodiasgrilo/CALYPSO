@@ -12,11 +12,14 @@ Wants=network-online.target
 Wants=calypso-broker.service
 After=calypso-broker.service
 # Restart rate-limiter. StartLimitIntervalSec/StartLimitBurst are [Unit]
-# directives — in [Service] systemd silently ignores them. If the bot
-# crash-loops (e.g. expired IBKR credentials), systemd gives up after
-# 5 starts in 600s instead of hammering api.ibkr.com forever.
+# directives — in [Service] systemd silently ignores them. 2026-06-03: widened
+# 5→20 so a multi-minute calypso-broker session blip (which the broker
+# self-heals) lets the bot keep retrying and auto-recover instead of going
+# permanently 'failed' (5 was tripped by a ~6-min blip). The bot also now WAITS
+# for the broker instead of exiting (main.py), so this is a backstop; it still
+# catches a genuine crash-loop (e.g. bad credentials) — 20 starts in 600s.
 StartLimitIntervalSec=600
-StartLimitBurst=5
+StartLimitBurst=20
 
 [Service]
 Type=simple

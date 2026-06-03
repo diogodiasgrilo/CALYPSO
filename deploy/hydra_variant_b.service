@@ -15,8 +15,11 @@ Wants=calypso-broker.service
 After=calypso-broker.service
 # Restart rate-limiter. StartLimitIntervalSec/StartLimitBurst MUST be in
 # [Unit]; in [Service] systemd silently ignores them (P7-audit H5).
+# 2026-06-03: 5→20 so a multi-min broker blip (broker self-heals) auto-recovers
+# instead of going permanently 'failed'; the bot also now WAITS for the broker
+# (main.py). Backstop only; still catches a genuine crash-loop.
 StartLimitIntervalSec=600
-StartLimitBurst=5
+StartLimitBurst=20
 
 [Service]
 Type=simple

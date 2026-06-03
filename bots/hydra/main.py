@@ -256,11 +256,43 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     trade_logger.log_event("Connecting to Interactive Brokers (paper)...")
     try:
         broker = _build_broker()
-        broker.connect()
-    except (IBAuthError, IBConnectionError, IBClientError, BrokerError) as e:
-        trade_logger.log_error(f"Failed to connect to IBKR: {e}")
+    except Exception as e:
+        trade_logger.log_error(f"Failed to build broker client: {e}")
         trade_logger.shutdown()
         return
+
+    # 2026-06-03 incident fix: in BROKER mode the bot WAITS for the shared
+    # calypso-broker instead of crashing. The broker self-heals in its own
+    # maintenance loop after an IBKR session-bridge blip; restarting THIS bot
+    # can't fix a broker-side fault and just crash-loops into systemd's
+    # StartLimit (which took all bots down today). A BrokerError at startup
+    # means the broker isn't holding a session yet — wait + retry rather than
+    # exit. LEGACY direct-IBClient mode keeps fail-fast (its connect failure is
+    # a genuine auth problem and a fresh-connect restart re-auths).
+    _is_broker_mode = isinstance(broker, BrokerClient)
+    _connect_attempts = 0
+    _CONNECT_MAX_ATTEMPTS = 48  # ~12 min at 15s, then give up (systemd backstop)
+    while True:
+        try:
+            broker.connect()
+            break
+        except BrokerError as e:
+            if not _is_broker_mode or _connect_attempts >= _CONNECT_MAX_ATTEMPTS:
+                trade_logger.log_error(f"Failed to connect to IBKR broker: {e}")
+                trade_logger.shutdown()
+                return
+            _connect_attempts += 1
+            trade_logger.log_event(
+                f"calypso-broker not holding a session yet ({e}) — waiting 15s "
+                f"+ retrying (attempt {_connect_attempts}/{_CONNECT_MAX_ATTEMPTS}); not exiting."
+            )
+            if not interruptible_sleep(15):
+                trade_logger.shutdown()
+                return
+        except (IBAuthError, IBConnectionError, IBClientError) as e:
+            trade_logger.log_error(f"Failed to connect to IBKR: {e}")
+            trade_logger.shutdown()
+            return
 
     trade_logger.log_event("IBKR connection successful!")
 
@@ -386,6 +418,11 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     last_session_check_date = None  # P7: once-per-day IBKR re-auth gate
     last_intraday_session_check = datetime.min  # P7-audit H6: periodic re-check
     INTRADAY_SESSION_CHECK_INTERVAL_S = 15 * 60  # 15 min
+    # 2026-06-03: in broker mode, ride out a transiently-down broker (it
+    # self-heals) by pausing trading + re-checking, instead of exiting into a
+    # StartLimit crash-loop. Track the outage so we alert/log ONCE per blip.
+    broker_outage_active = False
+    BROKER_OUTAGE_RECHECK_S = 20  # re-check cadence while waiting for the broker
 
     # Polish Item 1: IBKR-specific Telegram alert bridge. Polls the broker's
     # circuit-breaker state + snapshot warmup exhaustion counter once per
@@ -524,10 +561,24 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 if last_session_check_date != today:
                     trade_logger.log_event("Verifying IBKR session for the trading day...")
                     if not broker.ensure_connected():
-                        # Polish Item 1 (A1.3 — highest-value alert):
-                        # the bot is about to break for systemd restart;
-                        # Telegram the operator so the disappearance is
-                        # explained.
+                        if _is_broker_mode:
+                            # 2026-06-03: broker self-heals in its own loop;
+                            # restarting THIS bot can't fix it. Pause trading +
+                            # wait (re-check each loop) instead of exiting into a
+                            # StartLimit crash-loop. Alert/log ONCE per outage.
+                            if not broker_outage_active:
+                                broker_outage_active = True
+                                alert_hooks.on_ensure_connected_failed(
+                                    reason="morning daily re-auth gate"
+                                )
+                                trade_logger.log_error(
+                                    "Broker session unavailable (morning re-auth "
+                                    "gate) — pausing trading and waiting for the "
+                                    "broker to self-heal (NOT exiting)."
+                                )
+                            interruptible_sleep(BROKER_OUTAGE_RECHECK_S)
+                            continue
+                        # Legacy direct-IBClient: a fresh-connect restart re-auths.
                         alert_hooks.on_ensure_connected_failed(
                             reason="morning daily re-auth gate"
                         )
@@ -536,6 +587,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                             "exiting for systemd restart (fresh connect)."
                         )
                         break
+                    if broker_outage_active:
+                        broker_outage_active = False
+                        trade_logger.log_event("Broker session recovered — resuming trading.")
                     last_session_check_date = today
                     last_intraday_session_check = datetime.now()
                     trade_logger.log_event("IBKR session verified.")
@@ -561,8 +615,23 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 now_ = datetime.now()
                 if (now_ - last_intraday_session_check).total_seconds() >= INTRADAY_SESSION_CHECK_INTERVAL_S:
                     if not broker.ensure_connected():
-                        # Polish Item 1 (A1.3): see comment at the
-                        # morning-gate site above.
+                        if _is_broker_mode:
+                            # 2026-06-03: broker self-heals; restarting THIS bot
+                            # can't fix it and crash-loops StartLimit. Pause +
+                            # wait (re-check each loop), don't exit. Alert ONCE.
+                            if not broker_outage_active:
+                                broker_outage_active = True
+                                alert_hooks.on_ensure_connected_failed(
+                                    reason="intraday session re-check (every 15 min)"
+                                )
+                                trade_logger.log_error(
+                                    "Broker session unavailable (intraday re-check) "
+                                    "— pausing trading and waiting for the broker to "
+                                    "self-heal (NOT exiting)."
+                                )
+                            interruptible_sleep(BROKER_OUTAGE_RECHECK_S)
+                            continue
+                        # Legacy direct-IBClient: a fresh-connect restart re-auths.
                         alert_hooks.on_ensure_connected_failed(
                             reason="intraday session re-check (every 15 min)"
                         )
@@ -571,6 +640,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                             "exiting for systemd restart."
                         )
                         break
+                    if broker_outage_active:
+                        broker_outage_active = False
+                        trade_logger.log_event("Broker session recovered — resuming trading.")
                     last_intraday_session_check = now_
 
                 # Directional-pivot continuous monitor (introduced 2026-05-01 in v1.26.0).
