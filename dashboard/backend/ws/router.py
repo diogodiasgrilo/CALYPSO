@@ -1,5 +1,6 @@
 """WebSocket endpoint for dashboard real-time updates."""
 
+import hmac
 import logging
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
@@ -30,8 +31,9 @@ async def websocket_dashboard(
 
     Sends full snapshot on connect, then streams deltas.
     """
-    # API key validation (skip if no key configured)
-    if settings.api_key and api_key != settings.api_key:
+    # API key validation (skip if no key configured). Constant-time compare to
+    # match the REST guard (auth.require_api_key) — no timing oracle on the key.
+    if settings.api_key and not hmac.compare_digest(api_key, settings.api_key):
         await websocket.close(code=4001, reason="Invalid API key")
         return
 
