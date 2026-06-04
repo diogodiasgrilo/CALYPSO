@@ -716,6 +716,9 @@ def _per_variant_lifetime_stats(metrics: Optional[dict]) -> dict:
             "total_stops": 0,
             "total_entries": 0,
             "daily_returns_count": 0,
+            "capital_deployed": 0.0,
+            "avg_capital_per_day": 0.0,
+            "roi_pct": 0.0,
         }
     return {
         "cumulative_pnl": metrics.get("cumulative_pnl", 0.0),
@@ -725,6 +728,10 @@ def _per_variant_lifetime_stats(metrics: Optional[dict]) -> dict:
         "total_stops": metrics.get("total_stops", 0),
         "total_entries": metrics.get("total_entries", 0),
         "daily_returns_count": len(metrics.get("daily_returns", []) or []),
+        # Capital deployed (max-risk notional) + ROI on it, for the comparison.
+        "capital_deployed": metrics.get("capital_deployed", 0.0),
+        "avg_capital_per_day": metrics.get("avg_capital_per_day", 0.0),
+        "roi_pct": metrics.get("roi_pct", 0.0),
     }
 
 

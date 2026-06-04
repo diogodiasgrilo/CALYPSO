@@ -47,7 +47,10 @@ def _seed_db(path: Path) -> None:
     conn.executescript(
         """
         CREATE TABLE daily_summaries (date TEXT PRIMARY KEY, net_pnl REAL);
-        CREATE TABLE trade_entries (date TEXT, entry_number INTEGER, total_credit REAL);
+        CREATE TABLE trade_entries (
+            date TEXT, entry_number INTEGER, total_credit REAL,
+            call_spread_width REAL, put_spread_width REAL, contracts INTEGER
+        );
         CREATE TABLE trade_stops (date TEXT, entry_number INTEGER, side TEXT);
         """
     )
@@ -63,13 +66,16 @@ def _seed_db(path: Path) -> None:
         ],
     )
     conn.executemany(
-        "INSERT INTO trade_entries (date, entry_number, total_credit) VALUES (?, ?, ?)",
+        "INSERT INTO trade_entries "
+        "(date, entry_number, total_credit, call_spread_width, put_spread_width, contracts) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
         [
-            ("2026-06-02", 1, 10.0),
-            ("2026-06-03", 1, 20.0),
-            ("2026-06-05", 1, 30.0),
-            ("2026-06-06", 1, 40.0),
-            ("2026-06-06", 2, 50.0),
+            # capital = max(call_w, put_w) * 100 * contracts
+            ("2026-06-02", 1, 10.0, 10.0, 10.0, 1),    # 1000   (pre)
+            ("2026-06-03", 1, 20.0, 20.0, 20.0, 1),    # 2000   (pre)
+            ("2026-06-05", 1, 30.0, 0.0, 5.0, 10),     # 5000   (>= baseline; put-only)
+            ("2026-06-06", 1, 40.0, 5.0, 5.0, 10),     # 5000   (>= baseline)
+            ("2026-06-06", 2, 50.0, 5.0, 0.0, 10),     # 5000   (>= baseline; call-only)
         ],
     )
     conn.executemany(
@@ -100,6 +106,10 @@ def test_full_history_when_no_baseline(tmp_path):
     assert o["total_credit_collected"] == 150.0
     assert o["total_stops"] == 3
     assert o["last_updated"] == "2026-06-06"
+    # Capital deployed + ROI over full history.
+    assert o["capital_deployed"] == 18000.0     # 1000+2000+5000+5000+5000
+    assert o["avg_capital_per_day"] == 4500.0    # 18000 / 4 entry-days
+    assert o["roi_pct"] == round(950.0 / 18000.0 * 100, 2)   # 5.28%
     # No-arg call is identical to empty-string (default param).
     assert asyncio.run(r.get_cumulative_overrides()) == o
 
@@ -114,6 +124,10 @@ def test_overrides_rebased_to_baseline(tmp_path):
     assert o["total_credit_collected"] == 120.0    # 30+40+50
     assert o["total_stops"] == 1                   # only 06-05's stop
     assert o["last_updated"] == "2026-06-06"
+    # Capital + ROI rebase too: only the 3 post-baseline entries (3×5000).
+    assert o["capital_deployed"] == 15000.0
+    assert o["avg_capital_per_day"] == 7500.0      # 15000 / 2 entry-days
+    assert o["roi_pct"] == round(700.0 / 15000.0 * 100, 2)   # 4.67%
 
 
 def test_summaries_and_pnls_rebased(tmp_path):

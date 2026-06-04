@@ -72,6 +72,8 @@ export function DailyPnLCard() {
   const totalDays = winningDays + losingDays;
   const avgPerDay = totalDays > 0 ? cumulativePnl / totalDays : 0;
   const baselineDate = metrics?.cumulative_baseline_date || "";
+  const roiPct = metrics?.roi_pct ?? 0;
+  const avgCapitalPerDay = metrics?.avg_capital_per_day ?? 0;
 
   // Comparisons
   const avgPnl = comparisons?.avg_pnl ?? 0;
@@ -173,6 +175,18 @@ export function DailyPnLCard() {
             <span style={{ color: pnlColor(avgPerDay) }}>
               {formatPnL(avgPerDay)}
             </span>
+          </StatCell>
+        </div>
+
+        {/* Capital efficiency row — ROI on capital deployed + avg capital/day */}
+        <div className="grid grid-cols-2 gap-1 pt-3 mt-3 border-t border-border-dim">
+          <StatCell label="ROI (on capital)">
+            <span style={{ color: pnlColor(roiPct) }}>
+              {roiPct >= 0 ? "+" : ""}{roiPct.toFixed(2)}%
+            </span>
+          </StatCell>
+          <StatCell label="Capital / Day">
+            ${Math.round(avgCapitalPerDay).toLocaleString()}
           </StatCell>
         </div>
       </div>

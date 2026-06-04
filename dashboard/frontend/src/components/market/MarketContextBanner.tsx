@@ -136,6 +136,8 @@ export function MarketContextBanner() {
   const losingDays = metrics?.losing_days ?? 0;
   const totalDays = winningDays + losingDays;
   const avgPerDay = totalDays > 0 ? cumulativePnl / totalDays : 0;
+  const roiPct = metrics?.roi_pct ?? 0;
+  const avgCapitalPerDay = metrics?.avg_capital_per_day ?? 0;
   const bestDay = comparisons?.best_day;
   const worstDay = comparisons?.worst_day;
 
@@ -208,6 +210,18 @@ export function MarketContextBanner() {
             <div className="label-upper mb-1">Avg / Day</div>
             <div className="metric-body" style={{ color: pnlColor(avgPerDay) }}>
               {formatPnL(avgPerDay)}
+            </div>
+          </div>
+          <div>
+            <div className="label-upper mb-1">ROI (on capital)</div>
+            <div className="metric-body" style={{ color: pnlColor(roiPct) }}>
+              {roiPct >= 0 ? "+" : ""}{roiPct.toFixed(2)}%
+            </div>
+          </div>
+          <div>
+            <div className="label-upper mb-1">Capital / Day</div>
+            <div className="metric-body text-text-primary">
+              ${Math.round(avgCapitalPerDay).toLocaleString()}
             </div>
           </div>
           <div>

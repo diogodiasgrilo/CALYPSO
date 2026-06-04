@@ -270,6 +270,10 @@ class BacktestingDBReader:
         ds_and, p_dsand = self._baseline_clause(baseline_date, leading="AND")
         te, p_te = self._baseline_clause(baseline_date)
         ts, p_ts = self._baseline_clause(baseline_date)
+        # capital_deployed = the max-risk notional of each entry = the wider of
+        # the two spreads × $100/pt × contracts (matches the bot's
+        # `capital_deployed`: e.g. C's 10c × 5pt = $5,000). entry_days = distinct
+        # days that actually placed a trade, for the avg-capital-per-day figure.
         rows = await to_thread(
             self._query,
             f"""SELECT
@@ -279,11 +283,25 @@ class BacktestingDBReader:
                 (SELECT COUNT(*) FROM trade_entries {te}) AS total_entries,
                 (SELECT ROUND(SUM(total_credit), 2) FROM trade_entries {te}) AS total_credit_collected,
                 (SELECT COUNT(*) FROM trade_stops {ts}) AS total_stops,
-                (SELECT MAX(date) FROM daily_summaries {ds}) AS last_updated
+                (SELECT MAX(date) FROM daily_summaries {ds}) AS last_updated,
+                (SELECT ROUND(SUM(
+                    MAX(COALESCE(call_spread_width, 0), COALESCE(put_spread_width, 0))
+                    * 100 * COALESCE(contracts, 1)), 2) FROM trade_entries {te}) AS capital_deployed,
+                (SELECT COUNT(DISTINCT date) FROM trade_entries {te}) AS entry_days
             """,
-            p_ds + p_dsand + p_dsand + p_te + p_te + p_ts + p_ds,
+            p_ds + p_dsand + p_dsand + p_te + p_te + p_ts + p_ds + p_te + p_te,
         )
-        return rows[0] if rows else {}
+        row = rows[0] if rows else {}
+        if row:
+            # ROI (on capital deployed) = total P&L per dollar of max-risk
+            # capital deployed across all trades — normalizes for contract size
+            # AND entry count, so A (1c/75pt), B and C (10c/5-10pt) compare fairly.
+            cap = row.get("capital_deployed") or 0.0
+            pnl = row.get("cumulative_pnl") or 0.0
+            days = row.get("entry_days") or 0
+            row["roi_pct"] = round((pnl / cap) * 100, 2) if cap else 0.0
+            row["avg_capital_per_day"] = round(cap / days, 2) if days else 0.0
+        return row
 
     async def get_daily_pnls(self, baseline_date: str = "") -> list[float]:
         """Get all daily net P&L values for performance metric calculations.

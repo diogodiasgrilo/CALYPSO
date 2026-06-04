@@ -185,6 +185,10 @@ interface AggregateLifetime {
   best_day: number;
   worst_day: number;
   daily_returns_count?: number;
+  // Capital efficiency (max-risk notional deployed + return on it).
+  capital_deployed?: number;
+  avg_capital_per_day?: number;
+  roi_pct?: number;
 }
 
 interface CumulativePoint {
@@ -992,9 +996,12 @@ function LifetimeStatsTable({ agg, ids }: { agg: AggregatePayload; ids: string[]
   // so its lifetime stats include data from before the experiment started.
   // Column headers carry the day count so the user knows the comparison isn't
   // on identical N — the H2H window section below is the apples-to-apples view.
-  const rows: Array<[string, (lt: AggregateLifetime) => string, "pnl" | "best" | "worst" | undefined]> =
+  const rows: Array<[string, (lt: AggregateLifetime) => string, "pnl" | "best" | "worst" | "roi" | undefined]> =
     [
       ["Cumulative P&L", (lt) => formatPnL(lt.cumulative_pnl), "pnl"],
+      ["ROI (on capital)", (lt) => `${(lt.roi_pct ?? 0) >= 0 ? "+" : ""}${(lt.roi_pct ?? 0).toFixed(2)}%`, "roi"],
+      ["Avg capital / day", (lt) => `$${Math.round(lt.avg_capital_per_day ?? 0).toLocaleString()}`, undefined],
+      ["Capital deployed", (lt) => `$${Math.round(lt.capital_deployed ?? 0).toLocaleString()}`, undefined],
       ["Win rate", (lt) => `${(lt.win_rate * 100).toFixed(1)}%`, undefined],
       ["Win / Loss days", (lt) => `${lt.winning_days} / ${lt.losing_days}`, undefined],
       ["Best day", (lt) => formatPnL(lt.best_day), "best"],
@@ -1039,6 +1046,7 @@ function LifetimeStatsTable({ agg, ids }: { agg: AggregatePayload; ids: string[]
                 if (!lt) return <td key={vid} className="py-0.5 text-right text-text-dim">—</td>;
                 let color: string | undefined;
                 if (kind === "pnl") color = pnlColor(lt.cumulative_pnl);
+                else if (kind === "roi") color = pnlColor(lt.roi_pct ?? 0);
                 else if (kind === "best") color = pnlColor(lt.best_day);
                 else if (kind === "worst") color = pnlColor(lt.worst_day);
                 return (

@@ -105,6 +105,12 @@ export interface CumulativeMetrics {
   // When set (YYYY-MM-DD), the cumulative figures are rebased to start from
   // this date (sums only days >= baseline). Empty/absent = full history.
   cumulative_baseline_date?: string;
+  // Capital efficiency: capital_deployed = max-risk notional summed over trades
+  // (width × $100 × contracts); roi_pct = cumulative_pnl / capital_deployed;
+  // avg_capital_per_day = capital_deployed / distinct trading days.
+  capital_deployed?: number;
+  avg_capital_per_day?: number;
+  roi_pct?: number;
 }
 
 export interface MarketStatus {
