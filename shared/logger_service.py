@@ -2244,11 +2244,23 @@ class GoogleSheetsLogger:
                 ]
                 logger.debug(f"Daily summary logged to Google Sheets (Net Theta: ${net_theta:.2f})")
 
-            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
-            result = self._sheets_call_with_timeout(
-                self.worksheets["Daily Summary"].append_row,
-                row
-            )
+            # 06-04: IDEMPOTENT BY DATE. The daily summary can legitimately be
+            # (re)written more than once for the same day — a mid-day restart, a
+            # multi-pass settlement, or a manual correction. A blind append_row
+            # left a SECOND row for the day (the duplicate Jun-2 row). Remove any
+            # existing row(s) for this date first, then append the fresh one, so
+            # there is exactly one row per day (also self-heals pre-existing dups).
+            # Mirrors the DB path, where `date` is the PRIMARY KEY.
+            # Fix #64: timeout wrapper to prevent freeze on a Google Sheets API hang.
+            ws = self.worksheets["Daily Summary"]
+            date_str = str(row[0])
+            col_a = self._sheets_call_with_timeout(ws.col_values, 1)
+            if col_a:
+                # 1-based row indices of existing rows for this date (skip header)
+                dup_rows = [i + 1 for i, d in enumerate(col_a) if i > 0 and d == date_str]
+                for ridx in reversed(dup_rows):  # delete bottom-up so indices stay valid
+                    self._sheets_call_with_timeout(ws.delete_rows, ridx)
+            result = self._sheets_call_with_timeout(ws.append_row, row)
             if result is None:
                 logger.warning(f"Daily summary log skipped due to timeout")
                 return False

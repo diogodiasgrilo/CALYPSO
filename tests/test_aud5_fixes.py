@@ -600,3 +600,60 @@ class TestSettlementRebook:
         booked = s._process_expired_credits()
         assert booked == 0.0            # not double-booked
         assert e.put_side_expired is False
+
+
+class TestDailySummarySheetIdempotent:
+    """The Daily Summary worksheet write must be IDEMPOTENT BY DATE. The bot can
+    legitimately (re)write a day's summary more than once — a mid-day restart, a
+    multi-pass settlement, or a manual correction — and the old blind append_row
+    left a SECOND row for the day (the duplicate Jun-2 row that motivated this).
+    log_daily_summary now removes any existing row(s) for the date, then appends,
+    so there is exactly one row per day (and it self-heals pre-existing dups).
+    Mirrors the DB path where daily_summaries.date is the PRIMARY KEY."""
+
+    def _logger(self, existing_col_a):
+        lg = GoogleSheetsLogger.__new__(GoogleSheetsLogger)
+        lg.enabled = True
+        lg.strategy_type = "hydra"
+        lg.SHEETS_API_TIMEOUT = 10
+        ws = MagicMock()
+        ws.col_values.return_value = list(existing_col_a)  # column A incl. header
+        lg.worksheets = {"Daily Summary": ws}
+        return lg, ws
+
+    def test_existing_date_is_replaced_not_duplicated(self):
+        # Sheet already has a 2026-06-04 row (the exact re-write scenario).
+        lg, ws = self._logger(["Date", "2026-06-03", "2026-06-04"])
+        ok = lg.log_daily_summary({"date": "2026-06-04", "daily_pnl": 377.0})
+        assert ok is True
+        ws.delete_rows.assert_called_once_with(3)   # the stale 2026-06-04 row
+        assert ws.append_row.call_count == 1        # then the fresh one
+        assert ws.append_row.call_args[0][0][0] == "2026-06-04"
+
+    def test_new_date_simply_appends(self):
+        lg, ws = self._logger(["Date", "2026-06-03"])
+        ok = lg.log_daily_summary({"date": "2026-06-04", "daily_pnl": 377.0})
+        assert ok is True
+        ws.delete_rows.assert_not_called()          # nothing to remove
+        assert ws.append_row.call_count == 1
+
+    def test_self_heals_preexisting_duplicates(self):
+        # Two stale 2026-06-04 rows already present → both removed, one appended.
+        lg, ws = self._logger(["Date", "2026-06-04", "2026-06-03", "2026-06-04"])
+        ok = lg.log_daily_summary({"date": "2026-06-04", "daily_pnl": 377.0})
+        assert ok is True
+        # deleted bottom-up so indices stay valid: row 4 then row 2
+        assert [c.args[0] for c in ws.delete_rows.call_args_list] == [4, 2]
+        assert ws.append_row.call_count == 1
+
+    def test_read_timeout_falls_back_to_plain_append(self):
+        # col_values times out → wrapper returns None → skip dedup, still append.
+        lg, ws = self._logger(["Date", "2026-06-04"])
+        ws.col_values.side_effect = None
+        with patch.object(lg, "_sheets_call_with_timeout") as wrapped:
+            # col_values → None (timeout); append_row → truthy result
+            wrapped.side_effect = [None, {"updates": {}}]
+            ok = lg.log_daily_summary({"date": "2026-06-04", "daily_pnl": 377.0})
+        assert ok is True
+        # exactly two wrapper calls: the read, then the append (no delete attempted)
+        assert wrapped.call_count == 2

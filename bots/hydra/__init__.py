@@ -36,6 +36,39 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2.0.0-rc.1 post-AUD5 go-live hardening (2026-06-03 → 06-04): the first real
+  live-paper fills exposed a cluster of IBKR-path bugs the dry-run masked.
+  • Phantom daily-summary (`4dd0a41`): the bot booted after the open into stale
+    prior-day state and wrote a daily summary from it (the duplicate Jun-3 row,
+    SPX=0). `_daily_summary_is_stale` now vetoes both the DB recorder and the
+    main.py after-hours write when the state's date ≠ today or close is 0.
+  • One-sided live entry (`57be626`): the Brandon GEX adjuster routes ~86% of
+    entries put-only, but the live `_execute_entry` placed all four legs
+    unconditionally → a $0.0-strike Long Call leg → "Entry failed at leg 1".
+    It now places ONLY the active side(s), mirroring the dry-run path.
+  • C1-sweep misses (`46b93c2`): the Saxo→IBKR migration's C1 fix (gate action
+    paths on the conid `*_uic`, since IBKR has no per-leg position id so
+    `*_position_id` is ALWAYS None live) fixed `_execute_stop_loss` but MISSED
+    its siblings. A 10-finder audit found `_close_entry_early` — the close
+    method behind BOTH Brandon take-profit AND GEX breach exit — still gated on
+    `*_position_id`, so the Jun-4 13:12 TP "closed 0 legs", orphaned the live
+    position, and booked $0 (the "+$285 → −$23" cliff). Fixed `_close_entry_early`,
+    `_execute_pivot_side_close`, `_count_active_position_legs`, and
+    `active_entries.has_any_position` to gate on `*_uic`. Brandon TP/breach exit
+    made fail-closed (mark a side stopped ONLY if a leg actually closed; else
+    CRITICAL log + orphan-close Telegram). Settlement `_process_expired_credits`
+    re-books a side a 0-leg TP/BREACH spuriously marked stopped (forward-safe;
+    genuine HYDRA stops are not double-booked). Recovery restores `is_complete`
+    and detects active entries conid-aware.
+  • Daily-summary Sheet idempotency (this commit): `log_daily_summary` removed
+    a day's existing row(s) before appending, so a legitimate same-day re-write
+    (restart / multi-pass settlement / manual correction) REPLACES rather than
+    appends a second row (the duplicate Jun-2 Sheet row). Mirrors the DB path
+    where `daily_summaries.date` is the PRIMARY KEY; self-heals pre-existing dups.
+  Tests: tests/test_aud5_fixes.py (+TestLiveCloseGating, TestRecoveryActiveEntries,
+  TestSettlementRebook, TestDailySummarySheetIdempotent),
+  tests/test_brandon_strategy_integration.py fail-closed updates — 1075 passing.
+
 - 2.0.0-rc.1 go-live hardening + AUD5 (2026-06-02): post-cutover fixes atop
   rc.1. Context: the Saxo→IBKR cutover executed 2026-05-29 (A on IBKR paper;
   B/C dry-run via the shared `calypso-broker` session service); commission
