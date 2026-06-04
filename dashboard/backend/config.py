@@ -88,6 +88,26 @@ class Settings(BaseSettings):
     variant_c_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_c.json")
     variant_c_label: str = "C (LIVE · Brandon narrow 5/10pt)"
 
+    # ── Cumulative track-record BASELINE (rebase the cumulative to a date) ────
+    # 2026-06-04: every cumulative figure (the single P&L card + the Comparison
+    # lifetime totals + the running-cumulative curves) is summed from each
+    # variant's `daily_summaries` table over ALL history. But that history is
+    # mostly DRY-RUN simulation (A & B have NEVER traded live; C only since
+    # 2026-06-04) and is contaminated by phantom/duplicate rows — and the
+    # variants started on different dates, so their lifetime totals aren't
+    # comparable. These fields rebase the cumulative SUMS + running curves to a
+    # chosen start date (WHERE date >= baseline), zeroing prior history. Empty
+    # string = full history (unchanged / backwards-compatible). NO DB mutation —
+    # the History/calendar pages stay UNFILTERED so prior days remain visible.
+    # `baseline_date` rebases the PRIMARY (C) card/WS; the per-variant fields
+    # rebase each variant's Comparison curve + lifetime total independently.
+    # Set via DASHBOARD_BASELINE_DATE / DASHBOARD_VARIANT_{A,B,C}_BASELINE_DATE
+    # (ISO YYYY-MM-DD).
+    baseline_date: str = ""
+    variant_a_baseline_date: str = ""
+    variant_b_baseline_date: str = ""
+    variant_c_baseline_date: str = ""
+
     # Agent intel directories
     agent_intel_dir: Path = Path("/opt/calypso/intel")
 

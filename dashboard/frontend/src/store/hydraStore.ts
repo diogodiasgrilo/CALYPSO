@@ -102,6 +102,9 @@ export interface CumulativeMetrics {
   total_stops: number;
   double_stops: number;
   last_updated: string;
+  // When set (YYYY-MM-DD), the cumulative figures are rebased to start from
+  // this date (sums only days >= baseline). Empty/absent = full history.
+  cumulative_baseline_date?: string;
 }
 
 export interface MarketStatus {

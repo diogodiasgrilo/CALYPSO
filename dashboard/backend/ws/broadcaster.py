@@ -18,6 +18,15 @@ from dashboard.backend.ws.manager import ConnectionManager
 logger = logging.getLogger("dashboard.broadcaster")
 
 
+def _on_or_after_baseline(date_str: str) -> bool:
+    """True if date_str (ISO YYYY-MM-DD) is on/after the cumulative rebase
+    baseline, or if no baseline is set. Gates today's-P&L augmentation so a
+    pre-baseline 'today' (e.g. baseline=tomorrow) isn't folded into the rebased
+    'since <baseline>' cumulative card/curve."""
+    baseline = (settings.baseline_date or "").strip()
+    return (not baseline) or (str(date_str) >= baseline)
+
+
 class Broadcaster:
     """Polls data sources and broadcasts changes to WebSocket clients."""
 
@@ -109,7 +118,7 @@ class Broadcaster:
         state = self.state_reader.read_latest()
         metrics = apply_db_cumulative(
             self.metrics_reader.read_latest(),
-            await self.db_reader.get_cumulative_overrides(),
+            await self.db_reader.get_cumulative_overrides(settings.baseline_date),
         )
 
         today = get_today_et()
@@ -171,7 +180,11 @@ class Broadcaster:
             today_pnl = self.live_state.get_today_net_pnl()
             if today_pnl is not None:
                 today = get_today_et()
-                if metrics.get("last_updated") != today:
+                # Don't fold today into the rebased cumulative if today is BEFORE
+                # the baseline (e.g. baseline=tomorrow while today already traded):
+                # the "since <baseline>" total must stay 0 until the baseline day.
+                today_in_baseline = _on_or_after_baseline(today)
+                if today_in_baseline and metrics.get("last_updated") != today:
                     metrics = dict(metrics)
                     metrics["cumulative_pnl"] = metrics.get("cumulative_pnl", 0) + today_pnl
                     if today_pnl >= 0:
@@ -180,9 +193,9 @@ class Broadcaster:
                         metrics["losing_days"] = metrics.get("losing_days", 0) + 1
 
                 # Build performance P&L array with today included
-                pnls = await self.db_reader.get_daily_pnls()
+                pnls = await self.db_reader.get_daily_pnls(settings.baseline_date)
                 summaries = await self.db_reader.get_daily_summaries(limit=1)
-                if not summaries or summaries[0].get("date") != today:
+                if today_in_baseline and (not summaries or summaries[0].get("date") != today):
                     pnls = list(pnls) + [today_pnl]
                 performance_pnls = pnls
 
@@ -257,7 +270,7 @@ class Broadcaster:
                     # When metrics file updates (bot wrote it), reset flag for next day
                     _sent_today_augmented = False
                     data = apply_db_cumulative(
-                        data, await self.db_reader.get_cumulative_overrides()
+                        data, await self.db_reader.get_cumulative_overrides(settings.baseline_date)
                     )
                     await self.manager.broadcast({
                         "type": "metrics_update",
@@ -277,10 +290,11 @@ class Broadcaster:
                         # (no double-count); during hours the DB lacks today so it adds.
                         base_metrics = apply_db_cumulative(
                             self.metrics_reader.read_latest() or {},
-                            await self.db_reader.get_cumulative_overrides(),
+                            await self.db_reader.get_cumulative_overrides(settings.baseline_date),
                         ) or {}
-                        if base_metrics:
-                            today = get_today_et()
+                        today = get_today_et()
+                        today_in_baseline = _on_or_after_baseline(today)
+                        if base_metrics and today_in_baseline:
                             # Only augment if metrics file hasn't been updated for today yet
                             if base_metrics.get("last_updated") != today:
                                 augmented = dict(base_metrics)
@@ -295,10 +309,9 @@ class Broadcaster:
                                 })
 
                         # Push performance data (daily P&L array + today)
-                        pnls = await self.db_reader.get_daily_pnls()
-                        today = get_today_et()
+                        pnls = await self.db_reader.get_daily_pnls(settings.baseline_date)
                         summaries = await self.db_reader.get_daily_summaries(limit=1)
-                        if not summaries or summaries[0].get("date") != today:
+                        if today_in_baseline and (not summaries or summaries[0].get("date") != today):
                             pnls = list(pnls) + [today_pnl]
                         await self.manager.broadcast({
                             "type": "performance_update",

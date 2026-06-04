@@ -192,7 +192,14 @@ export function MarketContextBanner() {
       {totalDays > 0 && (
         <div className="grid grid-cols-3 gap-4 max-sm:grid-cols-2">
           <div>
-            <div className="label-upper mb-1">Cumulative P&L</div>
+            <div className="label-upper mb-1">
+              Cumulative P&L
+              {metrics?.cumulative_baseline_date && (
+                <span className="ml-1 normal-case text-text-dim font-normal">
+                  · since {metrics.cumulative_baseline_date}
+                </span>
+              )}
+            </div>
             <div className="metric-body font-bold" style={{ color: pnlColor(cumulativePnl) }}>
               {formatPnL(cumulativePnl)}
             </div>

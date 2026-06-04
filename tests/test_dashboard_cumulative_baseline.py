@@ -1,0 +1,139 @@
+"""Dashboard cumulative-rebase regression (2026-06-04).
+
+The A/B/C cumulative track record can be rebased to a baseline date so the
+single P&L card + the Comparison lifetime totals + the running-cumulative
+curves all start from a chosen day (WHERE date >= baseline), zeroing prior
+history — without mutating the DB. These tests pin that:
+
+  * get_cumulative_overrides(baseline) rebases EVERY aggregate consistently
+    (P&L sum, win/loss day counts, entry/stop/credit totals) — never a rebased
+    P&L mixed with a lifetime count;
+  * get_all_summaries(baseline) / get_daily_pnls(baseline) return only >= baseline;
+  * _cumulative_series over the filtered summaries starts at the baseline day;
+  * empty baseline == full history (byte-identical to before the feature).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import sqlite3
+import sys
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from dashboard.backend.services.db_reader import BacktestingDBReader
+
+BASELINE = "2026-06-05"
+
+
+def _cumulative_series(summaries):
+    """Mirror of variants.py:_cumulative_series (running net-P&L total).
+
+    Inlined rather than imported so this test doesn't pull in fastapi (the
+    dashboard router deps aren't installed in the bot's test venv); the logic is
+    a plain running sum, so duplicating it here keeps the test hermetic.
+    """
+    out, running = [], 0.0
+    for s in summaries:
+        net = s.get("net_pnl") or 0.0
+        running += net
+        out.append({"date": s["date"], "net_pnl": net, "cumulative": round(running, 2)})
+    return out
+
+
+def _seed_db(path: Path) -> None:
+    conn = sqlite3.connect(str(path))
+    conn.executescript(
+        """
+        CREATE TABLE daily_summaries (date TEXT PRIMARY KEY, net_pnl REAL);
+        CREATE TABLE trade_entries (date TEXT, entry_number INTEGER, total_credit REAL);
+        CREATE TABLE trade_stops (date TEXT, entry_number INTEGER, side TEXT);
+        """
+    )
+    # 2 pre-baseline days, 1 boundary-1 day, 2 post-baseline days.
+    conn.executemany(
+        "INSERT INTO daily_summaries (date, net_pnl) VALUES (?, ?)",
+        [
+            ("2026-06-02", 100.0),   # pre
+            ("2026-06-03", 200.0),   # pre
+            ("2026-06-04", -50.0),   # pre (the skewed day — a LOSS, to exercise losing_days)
+            ("2026-06-05", 300.0),   # >= baseline
+            ("2026-06-06", 400.0),   # >= baseline
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO trade_entries (date, entry_number, total_credit) VALUES (?, ?, ?)",
+        [
+            ("2026-06-02", 1, 10.0),
+            ("2026-06-03", 1, 20.0),
+            ("2026-06-05", 1, 30.0),
+            ("2026-06-06", 1, 40.0),
+            ("2026-06-06", 2, 50.0),
+        ],
+    )
+    conn.executemany(
+        "INSERT INTO trade_stops (date, entry_number, side) VALUES (?, ?, ?)",
+        [
+            ("2026-06-03", 1, "call"),
+            ("2026-06-04", 1, "put"),
+            ("2026-06-05", 1, "put"),
+        ],
+    )
+    conn.commit()
+    conn.close()
+
+
+def _reader(tmp_path: Path) -> BacktestingDBReader:
+    db = tmp_path / "backtesting.db"
+    _seed_db(db)
+    return BacktestingDBReader(db)
+
+
+def test_full_history_when_no_baseline(tmp_path):
+    r = _reader(tmp_path)
+    o = asyncio.run(r.get_cumulative_overrides(""))
+    assert o["cumulative_pnl"] == 950.0            # 100+200-50+300+400
+    assert o["winning_days"] == 4
+    assert o["losing_days"] == 1
+    assert o["total_entries"] == 5
+    assert o["total_credit_collected"] == 150.0
+    assert o["total_stops"] == 3
+    assert o["last_updated"] == "2026-06-06"
+    # No-arg call is identical to empty-string (default param).
+    assert asyncio.run(r.get_cumulative_overrides()) == o
+
+
+def test_overrides_rebased_to_baseline(tmp_path):
+    r = _reader(tmp_path)
+    o = asyncio.run(r.get_cumulative_overrides(BASELINE))
+    assert o["cumulative_pnl"] == 700.0            # 300+400 only
+    assert o["winning_days"] == 2                  # 06-05, 06-06
+    assert o["losing_days"] == 0                   # the -50 (06-04) is pre-baseline
+    assert o["total_entries"] == 3                 # 06-05 + two 06-06
+    assert o["total_credit_collected"] == 120.0    # 30+40+50
+    assert o["total_stops"] == 1                   # only 06-05's stop
+    assert o["last_updated"] == "2026-06-06"
+
+
+def test_summaries_and_pnls_rebased(tmp_path):
+    r = _reader(tmp_path)
+    full = asyncio.run(r.get_all_summaries())
+    assert [s["date"] for s in full] == [
+        "2026-06-02", "2026-06-03", "2026-06-04", "2026-06-05", "2026-06-06",
+    ]
+    rebased = asyncio.run(r.get_all_summaries(BASELINE))
+    assert [s["date"] for s in rebased] == ["2026-06-05", "2026-06-06"]
+
+    assert asyncio.run(r.get_daily_pnls()) == [100.0, 200.0, -50.0, 300.0, 400.0]
+    assert asyncio.run(r.get_daily_pnls(BASELINE)) == [300.0, 400.0]
+
+
+def test_cumulative_curve_starts_at_baseline(tmp_path):
+    r = _reader(tmp_path)
+    rebased = asyncio.run(r.get_all_summaries(BASELINE))
+    series = _cumulative_series(rebased)
+    assert [(p["date"], p["cumulative"]) for p in series] == [
+        ("2026-06-05", 300.0),
+        ("2026-06-06", 700.0),   # running total starts fresh at the baseline day
+    ]

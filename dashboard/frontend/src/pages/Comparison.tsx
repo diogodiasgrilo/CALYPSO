@@ -198,6 +198,9 @@ interface AggregateVariant {
   lifetime: AggregateLifetime;
   cumulative_curve: CumulativePoint[];
   total_days: number;
+  // When set (YYYY-MM-DD), this variant's lifetime total + curve are rebased to
+  // start from this date (sums only days >= baseline). Empty = full history.
+  baseline_date?: string;
 }
 
 // Per-day H2H rows include dynamic per-variant fields like a_net_pnl,
@@ -1018,6 +1021,11 @@ function LifetimeStatsTable({ agg, ids }: { agg: AggregatePayload; ids: string[]
                 style={{ color: accentFor(vid) }}
               >
                 {agg.variants[vid]?.label ?? vid} ({agg.variants[vid]?.total_days ?? 0}d)
+                {agg.variants[vid]?.baseline_date && (
+                  <div className="text-[10px] text-text-dim font-normal normal-case">
+                    since {agg.variants[vid]?.baseline_date}
+                  </div>
+                )}
               </th>
             ))}
           </tr>

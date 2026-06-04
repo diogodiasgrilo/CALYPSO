@@ -71,6 +71,7 @@ export function DailyPnLCard() {
   const losingDays = metrics?.losing_days ?? 0;
   const totalDays = winningDays + losingDays;
   const avgPerDay = totalDays > 0 ? cumulativePnl / totalDays : 0;
+  const baselineDate = metrics?.cumulative_baseline_date || "";
 
   // Comparisons
   const avgPnl = comparisons?.avg_pnl ?? 0;
@@ -136,7 +137,14 @@ export function DailyPnLCard() {
 
       {/* Cumulative */}
       <div className="bg-card rounded-lg border border-border-dim p-4">
-        <h3 className="label-upper mb-2">Cumulative</h3>
+        <h3 className="label-upper mb-2">
+          Cumulative
+          {baselineDate && (
+            <span className="ml-1 normal-case text-text-dim font-normal">
+              · since {baselineDate}
+            </span>
+          )}
+        </h3>
 
         {/* Hero cumulative P&L */}
         <div className="text-center mb-4">

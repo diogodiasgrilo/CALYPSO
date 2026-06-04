@@ -814,15 +814,23 @@ async def get_aggregate():
     cumulative_curves: dict[str, list] = {}
     summaries_by_variant: dict[str, list[dict]] = {}
 
+    # Per-variant cumulative rebase baseline (empty = full history). Filtering
+    # get_all_summaries here rebases BOTH the lifetime cumulative_curve AND —
+    # because by_date_per_variant / common_dates / the H2H running totals are all
+    # built from these same `summaries` — the head-to-head window, so every curve
+    # family agrees. get_cumulative_overrides(baseline) rebases the lifetime card.
+    baselines: dict[str, str] = {}
     for vid in available_ids_lower:
         vid_upper = vid.upper()
-        summaries = await _db_readers[vid].get_all_summaries()
+        baseline = getattr(settings, f"variant_{vid}_baseline_date", "") or ""
+        baselines[vid_upper] = baseline
+        summaries = await _db_readers[vid].get_all_summaries(baseline)
         summaries_by_variant[vid_upper] = summaries
         cumulative_curves[vid_upper] = _cumulative_series(summaries)
         # DB-canonical lifetime stats (cumulative_pnl / win-loss / credit / stops)
         # so the cross-day table matches the main dashboard + Analytics + History,
         # rather than the bot-maintained metrics file which can drift.
-        overrides = await _db_readers[vid].get_cumulative_overrides()
+        overrides = await _db_readers[vid].get_cumulative_overrides(baseline)
         lifetimes[vid_upper] = _per_variant_lifetime_stats(overrides)
         lifetimes[vid_upper]["daily_returns_count"] = len(summaries)
 
@@ -890,6 +898,9 @@ async def get_aggregate():
             "lifetime": {**lifetimes[vid_upper], "win_rate": round(win_rate, 4), **advanced},
             "cumulative_curve": cumulative_curves[vid_upper],
             "total_days": len(summaries),
+            # Rebase baseline (empty = full history) so the UI can caption
+            # "cumulative since <date>" on the lifetime total + curve.
+            "baseline_date": baselines.get(vid_upper, ""),
         }
 
     # ---- H2H summary block (N-way) ----

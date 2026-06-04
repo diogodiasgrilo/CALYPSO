@@ -47,12 +47,18 @@ def _append_today_summary(summaries: list[dict]) -> list[dict]:
 
 @router.get("/cumulative")
 async def get_cumulative():
-    """Lifetime cumulative metrics (DB-canonical — see apply_db_cumulative)."""
+    """Lifetime cumulative metrics (DB-canonical — see apply_db_cumulative).
+
+    Rebased to settings.baseline_date when set (sums only days >= baseline);
+    the resolved baseline is echoed back so the UI can caption "since <date>".
+    """
     data = metrics_reader.read_latest()
-    overrides = await db_reader.get_cumulative_overrides()
+    overrides = await db_reader.get_cumulative_overrides(settings.baseline_date)
     data = apply_db_cumulative(data, overrides)
     if data is None:
-        return {"error": "Metrics file not available"}
+        data = {}
+    # Echo the rebase baseline (empty string = full history) for the UI caption.
+    data["cumulative_baseline_date"] = settings.baseline_date
     return data
 
 
@@ -142,8 +148,11 @@ async def get_comparisons():
 
 @router.get("/performance")
 async def get_performance():
-    """Daily P&L values for client-side performance metric calculations."""
-    pnls = await db_reader.get_daily_pnls()
+    """Daily P&L values for client-side performance metric calculations.
+
+    Rebased to settings.baseline_date so Sharpe/drawdown match the rebased card.
+    """
+    pnls = await db_reader.get_daily_pnls(settings.baseline_date)
 
     # Append today's net P&L only after market close
     if _live_state and is_after_market_close():
