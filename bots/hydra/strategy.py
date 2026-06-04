@@ -2563,17 +2563,20 @@ class HydraStrategy(MEICStrategy):
 
     def _count_active_position_legs(self) -> int:
         """Count individual position legs still open across all active entries."""
+        # Count by the CONID (uic), not position_id: IBKR has no per-leg
+        # position id (always None) so a pos_id count returns 0 on every live
+        # leg (06-04 audit). uic falls back to pos_id for the dry-run DRY_* ids.
         count = 0
         for entry in self.daily_state.active_entries:
             if not entry.call_side_stopped and not entry.call_side_expired and not getattr(entry, 'call_side_skipped', False):
-                if entry.short_call_position_id:
+                if entry.short_call_uic or entry.short_call_position_id:
                     count += 1
-                if entry.long_call_position_id:
+                if entry.long_call_uic or entry.long_call_position_id:
                     count += 1
             if not entry.put_side_stopped and not entry.put_side_expired and not getattr(entry, 'put_side_skipped', False):
-                if entry.short_put_position_id:
+                if entry.short_put_uic or entry.short_put_position_id:
                     count += 1
-                if entry.long_put_position_id:
+                if entry.long_put_uic or entry.long_put_position_id:
                     count += 1
         return count
 
@@ -2715,8 +2718,16 @@ class HydraStrategy(MEICStrategy):
         sides_to_close = []
 
         # Check call side
+        # P7-audit C1 (06-04): gate on the CONID (uic), NOT the per-leg
+        # position_id. IBKR has no per-leg position id — short_call_position_id
+        # is ALWAYS None on the live path — so gating on it skipped EVERY live
+        # close (Brandon TP + GEX breach exit), orphaning the position while the
+        # caller marked the side stopped. position_id kept as the dry-run
+        # fallback (_simulate_* sets truthy DRY_* ids). Mirrors the fix already
+        # in _execute_stop_loss.
         if (not entry.call_side_stopped and not entry.call_side_expired
-            and not getattr(entry, 'call_side_skipped', False) and entry.short_call_position_id):
+            and not getattr(entry, 'call_side_skipped', False)
+            and (entry.short_call_uic or entry.short_call_position_id)):
             sides_to_close.append(("call", [
                 ("short_call", entry.short_call_position_id, entry.short_call_uic),
                 ("long_call", entry.long_call_position_id, entry.long_call_uic),
@@ -2724,7 +2735,8 @@ class HydraStrategy(MEICStrategy):
 
         # Check put side
         if (not entry.put_side_stopped and not entry.put_side_expired
-            and not getattr(entry, 'put_side_skipped', False) and entry.short_put_position_id):
+            and not getattr(entry, 'put_side_skipped', False)
+            and (entry.short_put_uic or entry.short_put_position_id)):
             sides_to_close.append(("put", [
                 ("short_put", entry.short_put_position_id, entry.short_put_uic),
                 ("long_put", entry.long_put_position_id, entry.long_put_uic),
@@ -2735,7 +2747,10 @@ class HydraStrategy(MEICStrategy):
             side_legs_closed = 0
 
             for leg_name, pos_id, uic in legs:
-                if not pos_id:
+                # Gate on uic OR pos_id: pos_id is always None on the live IBKR
+                # path (close keys on uic via _close_position_with_retry_ib);
+                # pos_id is the truthy DRY_* fallback in dry-run.
+                if not (uic or pos_id):
                     continue
 
                 # Fix #81: Skip closing long legs with $0 bid (worthless, expire naturally)
@@ -3224,7 +3239,11 @@ class HydraStrategy(MEICStrategy):
         actual_close_cost = 0.0  # accumulator for short_cost - long_revenue
         legs_closed = 0
 
-        if short_pid:
+        # Gate on the CONID (uic), not position_id: pos_id is always None on
+        # the live IBKR path, so `if short_pid:` closed nothing live (06-04
+        # audit, same C1 class as _close_entry_early). pos_id kept as dry-run
+        # fallback; _close_position_with_retry keys on uic.
+        if short_uic or short_pid:
             ok, fill, _ = self._close_position_with_retry(
                 short_pid,
                 f"E#{entry.entry_number} {side} short (pivot)",
@@ -3237,7 +3256,7 @@ class HydraStrategy(MEICStrategy):
                 if fill is not None:
                     actual_close_cost += fill * 100 * contracts
 
-        if long_pid:
+        if long_uic or long_pid:
             ok, fill, _ = self._close_position_with_retry(
                 long_pid,
                 f"E#{entry.entry_number} {side} long (pivot)",
@@ -10837,7 +10856,15 @@ class HydraStrategy(MEICStrategy):
             )
 
             if call_had_positions and call_positions_gone:
-                if not entry.call_side_stopped and not entry.call_side_expired and not entry.call_side_skipped:
+                # 06-04 audit (fix #5): a Brandon TP/BREACH that closed 0 legs
+                # (the pre-fix orphan bug) set *_side_stopped + close_reason but
+                # never realized any P&L, and the position then expires here.
+                # Still book it. A GENUINE HYDRA stop books at stop time
+                # (close_reason != TP/BREACH) and a genuine TP/BREACH close sets
+                # *_side_expired (skipped just below), so this re-books ONLY the
+                # spurious never-booked case — no double-count.
+                call_genuine_stop = entry.call_side_stopped and getattr(entry, "close_reason", "") not in ("TP", "BREACH")
+                if not call_genuine_stop and not entry.call_side_expired and not entry.call_side_skipped:
                     entry.call_side_expired = True
                     # IBKR-audit #5: book actual settlement P&L (full credit if
                     # OTM/unverifiable; credit - intrinsic if ITM-settled).
@@ -10869,7 +10896,10 @@ class HydraStrategy(MEICStrategy):
             )
 
             if put_had_positions and put_positions_gone:
-                if not entry.put_side_stopped and not entry.put_side_expired and not entry.put_side_skipped:
+                # 06-04 audit (fix #5): see the call-side rationale above — re-book
+                # a side spuriously flagged stopped by a 0-leg Brandon TP/BREACH.
+                put_genuine_stop = entry.put_side_stopped and getattr(entry, "close_reason", "") not in ("TP", "BREACH")
+                if not put_genuine_stop and not entry.put_side_expired and not entry.put_side_skipped:
                     entry.put_side_expired = True
                     # IBKR-audit #5: book actual settlement P&L (full credit if
                     # OTM/unverifiable; credit - intrinsic if ITM-settled).
@@ -11599,6 +11629,15 @@ class HydraStrategy(MEICStrategy):
                 # tag for entries that closed before the last bot restart.
                 if "close_reason" in entry_data:
                     setattr(restored_entry, "close_reason", entry_data.get("close_reason") or "")
+
+                # 06-04 audit: restore the persisted is_complete (saved at
+                # close-tracking time) so a recovered entry with a side still
+                # OPEN keeps is_complete=True and stays in active_entries. The
+                # is_fully_done block below only UPGRADES it, never clobbers — a
+                # live entry's is_complete was lost on restart, dropping the open
+                # position from monitoring (belt-and-braces with the uic-aware
+                # active_entries fix).
+                restored_entry.is_complete = entry_data.get("is_complete", False)
 
                 if is_fully_done:
                     restored_entry.is_complete = True

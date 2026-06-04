@@ -636,12 +636,21 @@ class MEICDailyState:
                 # Entry with at least one side still open
                 active.append(e)
             else:
-                # Partial entry - check if ANY position ID exists
+                # Partial entry - check if ANY leg is open. Key on the CONID
+                # (uic) FIRST: IBKR has no per-leg position id (always None), so
+                # a pos_id-only check dropped every recovered LIVE open entry
+                # from monitoring after a mid-day restart (06-04 audit, same
+                # class as the H9 _get_current_position_size fix). pos_id is the
+                # dry-run DRY_* fallback.
                 has_any_position = any([
+                    getattr(e, 'short_call_uic', None),
+                    getattr(e, 'long_call_uic', None),
+                    getattr(e, 'short_put_uic', None),
+                    getattr(e, 'long_put_uic', None),
                     e.short_call_position_id,
                     e.long_call_position_id,
                     e.short_put_position_id,
-                    e.long_put_position_id
+                    e.long_put_position_id,
                 ])
                 if has_any_position:
                     active.append(e)

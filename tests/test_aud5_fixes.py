@@ -448,3 +448,155 @@ class TestOneSidedLiveEntry:
                         call_side_skipped=True)
         s._execute_entry(e)
         assert all(strike != 0.0 for _, strike in placed)
+
+
+# ─── 2026-06-04: live CLOSE paths gated on pos_id (None on IBKR) → 0 legs ──────
+class TestLiveCloseGating:
+    """_close_entry_early (Brandon TP + GEX-breach close) and
+    _count_active_position_legs gated on *_position_id, which is ALWAYS None on
+    IBKR — so they closed/counted 0 legs on every LIVE position and orphaned it
+    (the 06-04 'closed 0 legs' bug). They must gate on the conid (*_uic). The
+    dry-run path (truthy DRY_* position_ids) must keep working."""
+
+    def _strat(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.dry_run = False
+        s.commission_per_leg = 1.15
+        s.daily_state = base_mod.MEICDailyState()
+        s._read_option_quote = lambda uic: {"bid": 0.5}  # >0 so Fix #81 closes the long
+        s._record_stop_to_db = lambda *a, **k: None
+        closed = []
+
+        def _close(pos_id, leg_name, uic=None, entry_number=None, contracts=None):
+            closed.append((leg_name, pos_id, uic))
+            return (True, 0.10, "oid")
+        s._close_position_with_retry = _close
+        return s, closed
+
+    def _entry(self, **kw):
+        e = base_mod.IronCondorEntry(entry_number=1)
+        e.contracts = 10
+        e.close_commission = 0.0
+        for k, v in kw.items():
+            setattr(e, k, v)
+        return e
+
+    def test_close_entry_early_live_put_only_closes_put_legs(self):
+        # live put-only: put conids set, ALL position_ids None (IBKR)
+        s, closed = self._strat()
+        e = self._entry(call_side_skipped=True, put_only=True,
+                        short_call_strike=0.0, long_call_strike=0.0,
+                        short_put_strike=7550, long_put_strike=7545,
+                        short_put_uic=111, long_put_uic=222,
+                        short_call_uic=None, long_call_uic=None,
+                        short_put_position_id=None, long_put_position_id=None,
+                        put_spread_credit=400.0)
+        legs_closed, legs_failed, _ = s._close_entry_early(e)
+        assert legs_closed >= 1          # was 0 before the fix → orphaned position
+        assert legs_failed == 0
+        assert all(ln.endswith("put") for ln, _, _ in closed)   # never a call-side close
+        assert {u for _, _, u in closed} == {111, 222}          # closed BY CONID
+        assert e.put_side_expired is True                        # set iff legs closed
+
+    def test_close_entry_early_live_full_ic_closes_all_four(self):
+        s, closed = self._strat()
+        e = self._entry(short_call_strike=7600, long_call_strike=7605,
+                        short_put_strike=7550, long_put_strike=7545,
+                        short_call_uic=1, long_call_uic=2, short_put_uic=3, long_put_uic=4,
+                        short_call_position_id=None, long_call_position_id=None,
+                        short_put_position_id=None, long_put_position_id=None,
+                        call_spread_credit=200.0, put_spread_credit=200.0)
+        legs_closed, _, _ = s._close_entry_early(e)
+        assert legs_closed == 4          # full IC: both sides closed live
+
+    def test_count_active_position_legs_counts_on_uic(self):
+        s, _ = self._strat()
+        e = self._entry(put_only=True, call_side_skipped=True,
+                        short_put_strike=7550, long_put_strike=7545,
+                        short_put_uic=111, long_put_uic=222,
+                        short_put_position_id=None, long_put_position_id=None,
+                        is_complete=True)
+        s.daily_state.entries = [e]
+        assert s._count_active_position_legs() == 2   # was 0 before the fix
+
+
+# ─── 2026-06-04: recovery dropped a live open entry from active_entries ────────
+class TestRecoveryActiveEntries:
+    """active_entries.has_any_position checked *_position_id (None on IBKR), so a
+    recovered LIVE open entry was dropped from monitoring after a mid-day restart.
+    Must be conid-aware."""
+
+    def test_recovered_live_open_entry_is_active(self):
+        st = base_mod.MEICDailyState()
+        e = base_mod.IronCondorEntry(entry_number=1)
+        e.put_only = True
+        e.call_side_skipped = True
+        e.short_put_strike = 7550
+        e.long_put_strike = 7545
+        e.short_put_uic = 111            # live conid present
+        e.long_put_uic = 222
+        e.short_put_position_id = None   # IBKR: always None
+        e.long_put_position_id = None
+        e.is_complete = False            # worst case: not restored on recovery
+        st.entries = [e]
+        assert len(st.active_entries) == 1   # was 0 before the fix → unmonitored
+
+    def test_fully_done_entry_not_active(self):
+        st = base_mod.MEICDailyState()
+        e = base_mod.IronCondorEntry(entry_number=1)
+        e.put_only = True
+        e.call_side_skipped = True
+        e.put_side_stopped = True        # put side done → not active
+        e.short_put_uic = 111
+        e.short_put_position_id = None
+        st.entries = [e]
+        assert len(st.active_entries) == 0
+
+
+# ─── 2026-06-04: settlement re-books a spuriously-stopped (0-leg-TP) side ──────
+class TestSettlementRebook:
+    """A Brandon TP/BREACH that closed 0 legs spuriously set *_side_stopped +
+    close_reason='TP' WITHOUT booking P&L; the position then expires at
+    settlement. _process_expired_credits must re-book that side (else a full
+    credit is silently dropped). A GENUINE HYDRA stop (booked at stop time,
+    close_reason != TP/BREACH) must NOT be re-booked."""
+
+    def _strat(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.dry_run = True            # skips the IBKR settlement-verify tail
+        s.broker = None
+        s.daily_state = base_mod.MEICDailyState()
+        s._side_positions_gone = lambda entry, side, op: True   # expired/cleared
+        s._settlement_booked_pnl = lambda entry, side, lvl: (400.0, True)
+        s._settlement_spx_level = lambda: None
+        s._read_open_positions = lambda *a, **k: []
+        return s
+
+    def _put_entry(self, **kw):
+        e = base_mod.IronCondorEntry(entry_number=1)
+        # call_only/put_only are declared on the live HYDRA entry subclass; set
+        # them on the base test entry (_process_expired_credits reads them directly).
+        e.call_only = False
+        e.put_only = True
+        e.call_side_skipped = True
+        e.short_put_strike = 7550
+        e.long_put_strike = 7545
+        for k, v in kw.items():
+            setattr(e, k, v)
+        return e
+
+    def test_spurious_tp_stop_is_rebooked(self):
+        s = self._strat()
+        e = self._put_entry(put_side_stopped=True, close_reason="TP")  # 0-leg-TP artifact
+        s.daily_state.entries = [e]
+        booked = s._process_expired_credits()
+        assert booked == 400.0          # was 0 (skipped) before the fix
+        assert e.put_side_expired is True
+
+    def test_genuine_hydra_stop_not_rebooked(self):
+        s = self._strat()
+        e = self._put_entry(put_side_stopped=True, close_reason="STOP")  # genuine, already booked
+        s.daily_state.entries = [e]
+        booked = s._process_expired_credits()
+        assert booked == 0.0            # not double-booked
+        assert e.put_side_expired is False

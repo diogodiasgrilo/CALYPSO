@@ -495,23 +495,46 @@ class BrandonHydraStrategy(HydraStrategy):
         #    close_cost here to match what live mode converges to. The
         #    actual_*_stop_debit journaling field is set in BOTH modes (for the
         #    dashboard); only the total_realized_pnl subtraction is guarded.
-        if call_alive:
+        # FAIL-CLOSED (06-04 audit): only mark a side stopped if _close_entry_early
+        # ACTUALLY closed it. It sets *_side_expired iff >=1 leg of that side
+        # closed, so that flag is the per-side success signal. If a side was alive
+        # but did NOT close (broker failure), the live legs are STILL OPEN — do
+        # NOT mark it stopped (that would silently drop a live position from
+        # monitoring, the 06-04 orphan bug). Leave it alive so the next tick
+        # re-fires TP and retries, and alert.
+        call_did_close = call_alive and getattr(entry, "call_side_expired", False)
+        put_did_close = put_alive and getattr(entry, "put_side_expired", False)
+        if call_did_close:
             entry.call_side_stopped = True
             close_cost_call = float(entry.call_spread_value) if entry.call_spread_value else 0.0
             entry.actual_call_stop_debit = close_cost_call
             if self.dry_run:
                 self.daily_state.total_realized_pnl -= close_cost_call
-        if put_alive:
+        elif call_alive:
+            logger.critical(
+                "BRANDON-TP E#%s: call close returned 0 legs but the call legs are STILL OPEN "
+                "— NOT marking stopped, will retry next tick (orphaned live position; investigate).",
+                entry.entry_number,
+            )
+            self._brandon_alert_orphan_close(entry, "call", "TP")
+        if put_did_close:
             entry.put_side_stopped = True
             close_cost_put = float(entry.put_spread_value) if entry.put_spread_value else 0.0
             entry.actual_put_stop_debit = close_cost_put
             if self.dry_run:
                 self.daily_state.total_realized_pnl -= close_cost_put
+        elif put_alive:
+            logger.critical(
+                "BRANDON-TP E#%s: put close returned 0 legs but the put legs are STILL OPEN "
+                "— NOT marking stopped, will retry next tick (orphaned live position; investigate).",
+                entry.entry_number,
+            )
+            self._brandon_alert_orphan_close(entry, "put", "TP")
         # Tag the close so the dashboard / journal can distinguish "TP at 80%
-        # captured" from a stop or end-of-day expiry. Both sides share the
-        # same reason because Brandon TP fires aggregate (both legs go out
-        # together when total captured ≥ threshold).
-        entry.close_reason = "TP"
+        # captured" from a stop or end-of-day expiry. Only tag if something
+        # actually closed.
+        if call_did_close or put_did_close:
+            entry.close_reason = "TP"
         return (
             f"BRANDON-TP E#{entry.entry_number}: closed {legs_closed} legs "
             f"({legs_failed} failed) — {decision.profit_captured_pct:.1%} captured, "
@@ -636,21 +659,43 @@ class BrandonHydraStrategy(HydraStrategy):
                 # real fill-based close cost, so subtracting the pre-close mark
                 # here too would double-count it. actual_*_stop_debit is set in
                 # both modes for journaling.
-                if call_alive_pre:
+                # FAIL-CLOSED (06-04 audit): only mark a side stopped/pivot-closed
+                # if _close_entry_early ACTUALLY closed it (*_side_expired set iff
+                # >=1 leg closed). A 0-leg close on a breached side means the
+                # losing wing is STILL OPEN — never silently mark it done (that
+                # abandons a live, losing position). Keep it alive to retry + alert.
+                call_did_close = call_alive_pre and getattr(entry, "call_side_expired", False)
+                put_did_close = put_alive_pre and getattr(entry, "put_side_expired", False)
+                if call_did_close:
                     entry.call_side_stopped = True
                     entry.actual_call_stop_debit = close_cost_call_real
                     if self.dry_run:
                         self.daily_state.total_realized_pnl -= close_cost_call_real
                     setattr(entry, "call_side_pivot_closed", True)
-                if put_alive_pre:
+                elif call_alive_pre:
+                    logger.critical(
+                        "BRANDON-BREACH E#%s: call close returned 0 legs but the BREACHED call wing "
+                        "is STILL OPEN — NOT marking stopped, will retry (orphaned losing position!).",
+                        entry.entry_number,
+                    )
+                    self._brandon_alert_orphan_close(entry, "call", "BREACH")
+                if put_did_close:
                     entry.put_side_stopped = True
                     entry.actual_put_stop_debit = close_cost_put_real
                     if self.dry_run:
                         self.daily_state.total_realized_pnl -= close_cost_put_real
                     setattr(entry, "put_side_pivot_closed", True)
+                elif put_alive_pre:
+                    logger.critical(
+                        "BRANDON-BREACH E#%s: put close returned 0 legs but the BREACHED put wing "
+                        "is STILL OPEN — NOT marking stopped, will retry (orphaned losing position!).",
+                        entry.entry_number,
+                    )
+                    self._brandon_alert_orphan_close(entry, "put", "BREACH")
                 # Tag close type for the dashboard. BREACH = Brandon GEX wall
                 # breach, distinct from TP and from a HYDRA credit+buffer stop.
-                entry.close_reason = "BREACH"
+                if call_did_close or put_did_close:
+                    entry.close_reason = "BREACH"
                 return (
                     f"BRANDON-BREACH E#{entry.entry_number} {side}: closed "
                     f"{legs_closed} legs ({legs_failed} failed) on confirmed wall breach, "
@@ -1208,6 +1253,26 @@ class BrandonHydraStrategy(HydraStrategy):
             return get_us_market_time()
         except Exception:
             return datetime.now(timezone.utc)
+
+    def _brandon_alert_orphan_close(self, entry, side: str, close_kind: str) -> None:
+        """CRITICAL: a Brandon close (TP/BREACH) transacted 0 legs while the
+        side's legs are still OPEN at the broker — an orphaned live position the
+        bot must NOT mark flat. Alerts the operator; the side is kept alive to
+        retry on the next tick. Wrapped so an alert failure can't break the loop.
+        """
+        try:
+            self._brandon_send_telegram(
+                message=(
+                    f"Entry #{getattr(entry, 'entry_number', '?')} {side} side {close_kind} close "
+                    f"transacted 0 legs but the {side} legs are still OPEN at the broker. The bot "
+                    f"kept the side alive to retry — check for an orphaned/naked live position."
+                ),
+                title=f"ORPHANED CLOSE — {close_kind} closed 0 legs",
+                priority_name="CRITICAL",
+                alert_type_name="NAKED_POSITION",
+            )
+        except Exception as exc:
+            logger.debug("orphan-close alert failed (non-fatal): %s", exc)
 
     def _brandon_send_telegram(
         self,

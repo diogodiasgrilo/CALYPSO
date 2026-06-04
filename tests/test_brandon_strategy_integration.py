@@ -367,7 +367,14 @@ class TestTakeProfitDispatch:
         inst.daily_state.total_realized_pnl = 200.0
         # Total credit $200, total SV $40 → 80% captured exactly
         e = self._entry(call_spread_value=20.0, put_spread_value=20.0)
-        inst._close_entry_early = MagicMock(return_value=(4, 0, []))
+        # The REAL _close_entry_early sets *_side_expired on each side it closes;
+        # the 06-04 fail-closed fix requires that signal before the TP marks a
+        # side stopped, so the mock must set it too (both sides close here).
+        def _close(entry_arg):
+            entry_arg.call_side_expired = True
+            entry_arg.put_side_expired = True
+            return (4, 0, [])
+        inst._close_entry_early = MagicMock(side_effect=_close)
         result = inst._brandon_check_take_profit(e)
         assert result is not None
         assert "TP" in result
@@ -394,7 +401,11 @@ class TestTakeProfitDispatch:
             call_spread_value=999.0,  # ignored — call already dead
             put_spread_value=20.0,
         )
-        inst._close_entry_early = MagicMock(return_value=(2, 0, []))
+        # only the put side closes here (call already stopped) → set put_side_expired
+        def _close(entry_arg):
+            entry_arg.put_side_expired = True
+            return (2, 0, [])
+        inst._close_entry_early = MagicMock(side_effect=_close)
         result = inst._brandon_check_take_profit(e)
         assert result is not None
         # Put closed via Brandon TP → *_side_stopped + actual_*_stop_debit raw
@@ -402,6 +413,21 @@ class TestTakeProfitDispatch:
         assert e.actual_put_stop_debit == pytest.approx(20.0)
         # Only put side correction (call was already dead, not touched).
         assert inst.daily_state.total_realized_pnl == pytest.approx(80.0)
+
+    def test_zero_leg_close_keeps_side_alive(self):
+        # 06-04 fail-closed: if the close transacts 0 legs (no *_side_expired
+        # set), the TP must NOT mark the side stopped — the live legs are still
+        # open. Leave it alive to retry next tick + fire a CRITICAL orphan alert.
+        inst = _make_instance(brandon_take_profit_enabled=True, brandon_take_profit_threshold=0.80)
+        inst.daily_state = MagicMock()
+        inst.daily_state.total_realized_pnl = 0.0
+        e = self._entry(call_spread_value=20.0, put_spread_value=20.0)
+        inst._close_entry_early = MagicMock(return_value=(0, 0, []))  # closed nothing
+        inst._brandon_alert_orphan_close = MagicMock()
+        inst._brandon_check_take_profit(e)
+        assert e.call_side_stopped is False   # NOT marked — legs still open
+        assert e.put_side_stopped is False
+        assert inst._brandon_alert_orphan_close.called
 
     def test_no_op_when_all_sides_already_done(self):
         inst = _make_instance(brandon_take_profit_enabled=True)
