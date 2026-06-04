@@ -335,3 +335,36 @@ class TestOrderSizeLimitConfirmed:
         # we did NOT loosen the genuinely-protective refusals
         assert DEFAULT_ORDER_ANSWERS.get(QuestionType.MISSING_MARKET_DATA) is False
         assert DEFAULT_ORDER_ANSWERS.get(QuestionType.CLOSE_POSITION) is False
+
+
+# ─── 2026-06-03: phantom daily-summary guard (down-at-open → stale write) ──
+class TestPhantomSummaryGuard:
+    """A bot down at the 9:30 open that starts mid-session never fires the
+    new-day reset, so it can reach the close still holding the PRIOR day's
+    daily_state (entries + session-open) with no live price captured for
+    today. Writing the summary then records yesterday's entries/P&L under
+    today's date with spx_close=0 — the 06-03 phantom row. The guard
+    (_daily_summary_is_stale) must veto that write."""
+
+    _stale = staticmethod(HydraStrategy._daily_summary_is_stale)
+
+    def test_prior_day_state_is_stale(self):
+        # in-memory state belongs to a different calendar day → veto
+        assert self._stale("2026-06-02", "2026-06-03", 7556.0) is True
+
+    def test_zero_close_is_stale(self):
+        # no live SPX captured today (the phantom had spx_close=0) → veto
+        assert self._stale("2026-06-03", "2026-06-03", 0) is True
+        assert self._stale("2026-06-03", "2026-06-03", None) is True
+
+    def test_exact_phantom_signature_is_stale(self):
+        # the literal 06-03 phantom: yesterday's date + 0 close
+        assert self._stale("2026-06-02", "2026-06-03", 0.0) is True
+
+    def test_healthy_today_summary_writes(self):
+        # normal close: today's state + a real live price → allowed
+        assert self._stale("2026-06-03", "2026-06-03", 7556.82) is False
+
+    def test_empty_state_date_allowed(self):
+        # fresh recovery (date not yet set) is handled by _handle_idle, not vetoed
+        assert self._stale("", "2026-06-03", 7556.82) is False

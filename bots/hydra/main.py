@@ -497,7 +497,30 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                             )
                             is_after_market_close = now_et.hour >= 16  # 4 PM or later
 
-                            if had_trading_activity or is_after_market_close:
+                            # PHANTOM-SUMMARY GUARD (06-03 incident): if the bot
+                            # was down at the 9:30 open and started mid-session, it
+                            # can reach the close still holding the PRIOR day's
+                            # in-memory state with no live price captured for today.
+                            # A summary built from it records yesterday's entries/P&L
+                            # under today's date (spx_close=0) — the phantom row.
+                            _summary_stale = strategy._daily_summary_is_stale(
+                                getattr(strategy.daily_state, "date", "") or "",
+                                now_et.strftime("%Y-%m-%d"),
+                                strategy.current_price,
+                            )
+
+                            if (had_trading_activity or is_after_market_close) and _summary_stale:
+                                # Skip the WHOLE summary (DB + Sheets + metrics) and
+                                # lock the gate so we don't retry the stale write all
+                                # evening. A clean row records after the next reset.
+                                trade_logger.log_error(
+                                    "Daily summary SKIPPED — stale prior-day state "
+                                    f"(state_date={getattr(strategy.daily_state, 'date', '') or 'unset'}, "
+                                    f"today={now_et.strftime('%Y-%m-%d')}, spx_close={strategy.current_price}). "
+                                    "Avoids a phantom summary; resets at the next day boundary."
+                                )
+                                daily_summary_sent_date = today_date
+                            elif had_trading_activity or is_after_market_close:
                                 trade_logger.log_event("Settlement complete - sending daily summary...")
                                 try:
                                     strategy.log_daily_summary()

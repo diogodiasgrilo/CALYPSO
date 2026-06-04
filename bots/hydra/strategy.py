@@ -4955,6 +4955,29 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             logger.debug(f"DataRecorder stop write failed: {e}")
 
+    @staticmethod
+    def _daily_summary_is_stale(state_date: str, today: str, spx_close) -> bool:
+        """True if a daily summary built from the current in-memory state would
+        be a phantom row, i.e. it must NOT be written.
+
+        Two signatures of the 06-03 phantom (bot down at the 9:30 open, started
+        mid-session, so the new-day reset never fired and it reached the close
+        still holding the PRIOR day's daily_state + session-open, with no live
+        price ever captured for today):
+          • spx_close <= 0  — no live SPX was seen today, so there is nothing
+            legitimate to summarize (the phantom had spx_close=0 / vix=0).
+          • state_date set and != today — the in-memory aggregates belong to a
+            different calendar day than the row's date, so writing them records
+            yesterday's entries/P&L under today's date.
+        An empty state_date (fresh recovery, date not yet set) is allowed —
+        that path is handled by _handle_idle's initial-date logic.
+        """
+        if (spx_close or 0) <= 0:
+            return True
+        if state_date and state_date != today:
+            return True
+        return False
+
     def _record_daily_summary_to_db(self):
         """Record daily summary to SQLite with economic events and overnight gap."""
         if not self._data_recorder:
@@ -4965,6 +4988,19 @@ class HydraStrategy(MEICStrategy):
 
             now = get_us_market_time()
             date_str = now.strftime('%Y-%m-%d')
+
+            # PHANTOM-SUMMARY GUARD (06-03 incident): refuse to write a summary
+            # assembled from a prior day's stale in-memory state. See
+            # _daily_summary_is_stale. Prevents the duplicate/0-close phantom row.
+            if self._daily_summary_is_stale(self.daily_state.date or "", date_str, self.current_price):
+                logger.warning(
+                    "Skipping daily_summary DB write — stale/incomplete state "
+                    f"(state_date={self.daily_state.date or 'unset'}, today={date_str}, "
+                    f"spx_close={self.current_price}). Prevents a phantom summary row; "
+                    "a clean row records after the next new-day reset."
+                )
+                return
+
             summary = self.get_daily_summary()
 
             events = get_economic_events_for_date(now.date())
