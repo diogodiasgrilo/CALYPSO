@@ -2159,87 +2159,132 @@ class MEICStrategy:
         filled_legs = []  # Track what we've filled for rollback
 
         try:
-            # 1. Long Call (buy protection first)
-            logger.info(f"Placing Long Call at {entry.long_call_strike}")
-            long_call_result = self._place_option_order(
-                strike=entry.long_call_strike,
-                put_call="Call",
-                buy_sell=BuySell.BUY,
-                expiry=expiry,
-                external_ref=f"{entry.strategy_id}_LC"
+            # ONE-SIDED SUPPORT (06-04 fix): place only the ACTIVE side(s). A side
+            # is inactive when the HYDRA put_only/call_only flag is set, its
+            # *_side_skipped flag is set, or its strikes are unset (0) — e.g. the
+            # Brandon GEX adjuster zeroes the call strikes to route a put-only
+            # entry. _simulate_entry already gates this way (line ~2094); the LIVE
+            # path must match or it places a leg at strike 0.0 and aborts at leg 1
+            # ("Placing Long Call at 0.0", the 06-04 incident). C is the only live
+            # variant, so it was the only one exercising this path.
+            put_only = getattr(entry, "put_only", False)
+            call_only = getattr(entry, "call_only", False)
+            call_active = (
+                not put_only
+                and bool(entry.short_call_strike) and bool(entry.long_call_strike)
+                and not getattr(entry, "call_side_skipped", False)
             )
-            if not long_call_result:
-                raise Exception("Long Call order failed")
-            entry.long_call_position_id = long_call_result.get("position_id")
-            entry.long_call_uic = long_call_result.get("uic")
-            long_call_debit = long_call_result.get("debit", 0)  # Track debit for net credit calc
-            entry.long_call_fill_price = long_call_result.get("fill_price", 0)
-            entry.long_call_mid_at_fill = long_call_result.get("mid_at_fill", 0)
-            filled_legs.append(("long_call", entry.long_call_position_id, entry.long_call_uic))
-            self._register_position(entry, "long_call")
+            put_active = (
+                not call_only
+                and bool(entry.short_put_strike) and bool(entry.long_put_strike)
+                and not getattr(entry, "put_side_skipped", False)
+            )
+            if not call_active and not put_active:
+                logger.error(
+                    f"Entry #{entry.entry_number}: no active side to place "
+                    f"(strikes C {entry.short_call_strike}/{entry.long_call_strike} "
+                    f"P {entry.short_put_strike}/{entry.long_put_strike}, "
+                    f"put_only={put_only} call_only={call_only})"
+                )
+                return False
+
+            # Flag + zero-credit the side(s) we are NOT trading so monitoring,
+            # settlement and the credit roll-up treat the entry as one-sided.
+            if not call_active:
+                entry.call_side_skipped = True
+                entry.call_spread_credit = 0.0
+            if not put_active:
+                entry.put_side_skipped = True
+                entry.put_spread_credit = 0.0
+
+            long_call_debit = 0  # defined even when the call side is skipped
+            long_put_debit = 0
+
+            # 1. Long Call (buy protection first)
+            if call_active:
+                logger.info(f"Placing Long Call at {entry.long_call_strike}")
+                long_call_result = self._place_option_order(
+                    strike=entry.long_call_strike,
+                    put_call="Call",
+                    buy_sell=BuySell.BUY,
+                    expiry=expiry,
+                    external_ref=f"{entry.strategy_id}_LC"
+                )
+                if not long_call_result:
+                    raise Exception("Long Call order failed")
+                entry.long_call_position_id = long_call_result.get("position_id")
+                entry.long_call_uic = long_call_result.get("uic")
+                long_call_debit = long_call_result.get("debit", 0)  # Track debit for net credit calc
+                entry.long_call_fill_price = long_call_result.get("fill_price", 0)
+                entry.long_call_mid_at_fill = long_call_result.get("mid_at_fill", 0)
+                filled_legs.append(("long_call", entry.long_call_position_id, entry.long_call_uic))
+                self._register_position(entry, "long_call")
 
             # 2. Long Put
-            logger.info(f"Placing Long Put at {entry.long_put_strike}")
-            long_put_result = self._place_option_order(
-                strike=entry.long_put_strike,
-                put_call="Put",
-                buy_sell=BuySell.BUY,
-                expiry=expiry,
-                external_ref=f"{entry.strategy_id}_LP"
-            )
-            if not long_put_result:
-                raise Exception("Long Put order failed")
-            entry.long_put_position_id = long_put_result.get("position_id")
-            entry.long_put_uic = long_put_result.get("uic")
-            long_put_debit = long_put_result.get("debit", 0)  # Track debit for net credit calc
-            entry.long_put_fill_price = long_put_result.get("fill_price", 0)
-            entry.long_put_mid_at_fill = long_put_result.get("mid_at_fill", 0)
-            filled_legs.append(("long_put", entry.long_put_position_id, entry.long_put_uic))
-            self._register_position(entry, "long_put")
+            if put_active:
+                logger.info(f"Placing Long Put at {entry.long_put_strike}")
+                long_put_result = self._place_option_order(
+                    strike=entry.long_put_strike,
+                    put_call="Put",
+                    buy_sell=BuySell.BUY,
+                    expiry=expiry,
+                    external_ref=f"{entry.strategy_id}_LP"
+                )
+                if not long_put_result:
+                    raise Exception("Long Put order failed")
+                entry.long_put_position_id = long_put_result.get("position_id")
+                entry.long_put_uic = long_put_result.get("uic")
+                long_put_debit = long_put_result.get("debit", 0)  # Track debit for net credit calc
+                entry.long_put_fill_price = long_put_result.get("fill_price", 0)
+                entry.long_put_mid_at_fill = long_put_result.get("mid_at_fill", 0)
+                filled_legs.append(("long_put", entry.long_put_position_id, entry.long_put_uic))
+                self._register_position(entry, "long_put")
 
             # 3. Short Call (now we have the hedge)
-            logger.info(f"Placing Short Call at {entry.short_call_strike}")
-            short_call_result = self._place_option_order(
-                strike=entry.short_call_strike,
-                put_call="Call",
-                buy_sell=BuySell.SELL,
-                expiry=expiry,
-                external_ref=f"{entry.strategy_id}_SC"
-            )
-            if not short_call_result:
-                raise Exception("Short Call order failed")
-            entry.short_call_position_id = short_call_result.get("position_id")
-            entry.short_call_uic = short_call_result.get("uic")
-            entry.short_call_fill_price = short_call_result.get("fill_price", 0)
-            entry.short_call_mid_at_fill = short_call_result.get("mid_at_fill", 0)
-            # FIX (2026-02-04): Net credit = short credit - long debit (was only tracking short credit!)
-            short_call_credit = short_call_result.get("credit", 0)
-            entry.call_spread_credit = short_call_credit - long_call_debit
-            logger.debug(f"Call spread: short ${short_call_credit:.2f} - long ${long_call_debit:.2f} = net ${entry.call_spread_credit:.2f}")
-            filled_legs.append(("short_call", entry.short_call_position_id, entry.short_call_uic))
-            self._register_position(entry, "short_call")
+            if call_active:
+                logger.info(f"Placing Short Call at {entry.short_call_strike}")
+                short_call_result = self._place_option_order(
+                    strike=entry.short_call_strike,
+                    put_call="Call",
+                    buy_sell=BuySell.SELL,
+                    expiry=expiry,
+                    external_ref=f"{entry.strategy_id}_SC"
+                )
+                if not short_call_result:
+                    raise Exception("Short Call order failed")
+                entry.short_call_position_id = short_call_result.get("position_id")
+                entry.short_call_uic = short_call_result.get("uic")
+                entry.short_call_fill_price = short_call_result.get("fill_price", 0)
+                entry.short_call_mid_at_fill = short_call_result.get("mid_at_fill", 0)
+                # FIX (2026-02-04): Net credit = short credit - long debit (was only tracking short credit!)
+                short_call_credit = short_call_result.get("credit", 0)
+                entry.call_spread_credit = short_call_credit - long_call_debit
+                logger.debug(f"Call spread: short ${short_call_credit:.2f} - long ${long_call_debit:.2f} = net ${entry.call_spread_credit:.2f}")
+                filled_legs.append(("short_call", entry.short_call_position_id, entry.short_call_uic))
+                self._register_position(entry, "short_call")
 
             # 4. Short Put
-            logger.info(f"Placing Short Put at {entry.short_put_strike}")
-            short_put_result = self._place_option_order(
-                strike=entry.short_put_strike,
-                put_call="Put",
-                buy_sell=BuySell.SELL,
-                expiry=expiry,
-                external_ref=f"{entry.strategy_id}_SP"
-            )
-            if not short_put_result:
-                raise Exception("Short Put order failed")
-            entry.short_put_position_id = short_put_result.get("position_id")
-            entry.short_put_uic = short_put_result.get("uic")
-            entry.short_put_fill_price = short_put_result.get("fill_price", 0)
-            entry.short_put_mid_at_fill = short_put_result.get("mid_at_fill", 0)
-            # FIX (2026-02-04): Net credit = short credit - long debit (was only tracking short credit!)
-            short_put_credit = short_put_result.get("credit", 0)
-            entry.put_spread_credit = short_put_credit - long_put_debit
-            logger.debug(f"Put spread: short ${short_put_credit:.2f} - long ${long_put_debit:.2f} = net ${entry.put_spread_credit:.2f}")
-            filled_legs.append(("short_put", entry.short_put_position_id, entry.short_put_uic))
-            self._register_position(entry, "short_put")
+            if put_active:
+                logger.info(f"Placing Short Put at {entry.short_put_strike}")
+                short_put_result = self._place_option_order(
+                    strike=entry.short_put_strike,
+                    put_call="Put",
+                    buy_sell=BuySell.SELL,
+                    expiry=expiry,
+                    external_ref=f"{entry.strategy_id}_SP"
+                )
+                if not short_put_result:
+                    raise Exception("Short Put order failed")
+                entry.short_put_position_id = short_put_result.get("position_id")
+                entry.short_put_uic = short_put_result.get("uic")
+                entry.short_put_fill_price = short_put_result.get("fill_price", 0)
+                entry.short_put_mid_at_fill = short_put_result.get("mid_at_fill", 0)
+                # FIX (2026-02-04): Net credit = short credit - long debit (was only tracking short credit!)
+                short_put_credit = short_put_result.get("credit", 0)
+                entry.put_spread_credit = short_put_credit - long_put_debit
+                logger.debug(f"Put spread: short ${short_put_credit:.2f} - long ${long_put_debit:.2f} = net ${entry.put_spread_credit:.2f}")
+                filled_legs.append(("short_put", entry.short_put_position_id, entry.short_put_uic))
+                self._register_position(entry, "short_put")
 
             # FIX #70 Part A: Verify fill prices against PositionBase.OpenPrice
             # Activities endpoint may return limit price instead of actual execution price

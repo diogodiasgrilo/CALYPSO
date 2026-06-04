@@ -368,3 +368,83 @@ class TestPhantomSummaryGuard:
     def test_empty_state_date_allowed(self):
         # fresh recovery (date not yet set) is handled by _handle_idle, not vetoed
         assert self._stale("", "2026-06-03", 7556.82) is False
+
+
+# ─── 2026-06-04: one-sided LIVE entry execution (the 0.0-strike leg failure) ──
+class TestOneSidedLiveEntry:
+    """The LIVE _execute_entry placed all 4 legs unconditionally, so any
+    one-sided entry (put-only / call-only / Brandon GEX-skip / E6 conditional)
+    tried to place the skipped side's leg at strike 0.0 and aborted at leg 1
+    ('Placing Long Call at 0.0'). The dry-run _simulate_entry gates on `if
+    strike`, so A/B (dry-run) were fine — C, the only LIVE variant, was the only
+    one affected. _execute_entry must place only the ACTIVE side(s)."""
+
+    def _strategy(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.dry_run = False
+        placed: list = []
+
+        def _place(strike, put_call, buy_sell, expiry, external_ref, emergency_mode=False):
+            placed.append((put_call, strike))
+            return {"position_id": f"P_{external_ref}", "uic": 999,
+                    "debit": 1.0, "credit": 2.0, "fill_price": 1.5, "mid_at_fill": 1.5}
+
+        s._place_option_order = _place
+        s._get_todays_expiry = lambda: "2026-06-04"
+        s._register_position = lambda entry, leg: None
+        s._verify_entry_fill_prices = lambda entry: None
+        return s, placed
+
+    def _entry(self, **kw):
+        e = base_mod.IronCondorEntry(entry_number=2)
+        e.strategy_id = "C2"
+        for k, v in kw.items():
+            setattr(e, k, v)
+        return e
+
+    def test_put_only_skips_call_legs(self):
+        # Brandon GEX-skip: call strikes zeroed + call_side_skipped set → put-only
+        s, placed = self._strategy()
+        e = self._entry(short_call_strike=0.0, long_call_strike=0.0,
+                        short_put_strike=7540, long_put_strike=7535,
+                        call_side_skipped=True)
+        assert s._execute_entry(e) is True
+        # only the put spread was placed — NO "Call 0.0" leg
+        assert all(pc == "Put" for pc, _ in placed)
+        assert len(placed) == 2
+        assert e.call_spread_credit == 0.0
+
+    def test_call_only_skips_put_legs(self):
+        s, placed = self._strategy()
+        e = self._entry(short_call_strike=7600, long_call_strike=7605,
+                        short_put_strike=0.0, long_put_strike=0.0,
+                        put_side_skipped=True)
+        assert s._execute_entry(e) is True
+        assert all(pc == "Call" for pc, _ in placed)
+        assert len(placed) == 2
+
+    def test_full_ic_places_all_four(self):
+        s, placed = self._strategy()
+        e = self._entry(short_call_strike=7600, long_call_strike=7605,
+                        short_put_strike=7540, long_put_strike=7535)
+        assert s._execute_entry(e) is True
+        assert len(placed) == 4
+        assert sum(1 for pc, _ in placed if pc == "Call") == 2
+        assert sum(1 for pc, _ in placed if pc == "Put") == 2
+
+    def test_no_active_side_aborts_without_orders(self):
+        # both sides zeroed → refuse to place anything (no 0.0 leg)
+        s, placed = self._strategy()
+        e = self._entry(short_call_strike=0.0, long_call_strike=0.0,
+                        short_put_strike=0.0, long_put_strike=0.0)
+        assert s._execute_entry(e) is False
+        assert placed == []
+
+    def test_no_leg_is_ever_placed_at_zero_strike(self):
+        # the exact 06-04 signature: never a strike-0 order on a one-sided entry
+        s, placed = self._strategy()
+        e = self._entry(short_call_strike=0.0, long_call_strike=0.0,
+                        short_put_strike=7540, long_put_strike=7535,
+                        call_side_skipped=True)
+        s._execute_entry(e)
+        assert all(strike != 0.0 for _, strike in placed)
