@@ -130,6 +130,40 @@ def test_overrides_rebased_to_baseline(tmp_path):
     assert o["roi_pct"] == round(700.0 / 15000.0 * 100, 2)   # 4.67%
 
 
+def test_empty_window_returns_zero_not_null(tmp_path):
+    # Baseline AFTER all data (e.g. baseline=tomorrow): the rebased window is
+    # empty. The sums must COALESCE to 0.0 (not SQL NULL) so apply_db_cumulative
+    # OVERRIDES the stale metrics file instead of leaking it through. This is the
+    # exact "card shows the old metrics cumulative since <future date>" bug.
+    r = _reader(tmp_path)
+    o = asyncio.run(r.get_cumulative_overrides("2026-06-10"))
+    assert o["cumulative_pnl"] == 0.0          # not None
+    assert o["capital_deployed"] == 0.0        # not None
+    assert o["total_credit_collected"] == 0.0  # not None
+    assert o["winning_days"] == 0
+    assert o["losing_days"] == 0
+    assert o["roi_pct"] == 0.0
+    assert o["avg_capital_per_day"] == 0.0
+
+
+def test_no_baseline_empty_db_preserves_null_fallback(tmp_path):
+    # WITHOUT a baseline, a genuinely-empty DB keeps the legacy NULL so the
+    # metrics-file fallback in apply_db_cumulative still applies (no regression).
+    db = tmp_path / "empty.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        "CREATE TABLE daily_summaries (date TEXT, net_pnl REAL);"
+        "CREATE TABLE trade_entries (date TEXT, total_credit REAL, "
+        "call_spread_width REAL, put_spread_width REAL, contracts INTEGER);"
+        "CREATE TABLE trade_stops (date TEXT);"
+    )
+    conn.commit()
+    conn.close()
+    o = asyncio.run(BacktestingDBReader(db).get_cumulative_overrides())
+    assert o["cumulative_pnl"] is None         # NULL → metrics-file fallback
+    assert o["capital_deployed"] is None
+
+
 def test_summaries_and_pnls_rebased(tmp_path):
     r = _reader(tmp_path)
     full = asyncio.run(r.get_all_summaries())

@@ -270,6 +270,13 @@ class BacktestingDBReader:
         ds_and, p_dsand = self._baseline_clause(baseline_date, leading="AND")
         te, p_te = self._baseline_clause(baseline_date)
         ts, p_ts = self._baseline_clause(baseline_date)
+        # When a baseline is set, COALESCE the SUMs to 0 (not NULL) so an EMPTY
+        # rebased window (e.g. baseline=tomorrow) authoritatively OVERRIDES the
+        # stale metrics-file rollup in apply_db_cumulative — which only adopts a
+        # non-null override. Without a baseline, default to NULL (a no-op:
+        # COALESCE(x, NULL) == x) so a genuinely-empty DB still falls back to the
+        # metrics file, preserving the pre-feature behavior.
+        z = "0" if (baseline_date or "").strip() else "NULL"
         # capital_deployed = the max-risk notional of each entry = the wider of
         # the two spreads × $100/pt × contracts (matches the bot's
         # `capital_deployed`: e.g. C's 10c × 5pt = $5,000). entry_days = distinct
@@ -277,16 +284,16 @@ class BacktestingDBReader:
         rows = await to_thread(
             self._query,
             f"""SELECT
-                (SELECT ROUND(SUM(net_pnl), 2) FROM daily_summaries {ds}) AS cumulative_pnl,
+                (SELECT ROUND(COALESCE(SUM(net_pnl), {z}), 2) FROM daily_summaries {ds}) AS cumulative_pnl,
                 (SELECT COUNT(*) FROM daily_summaries WHERE ROUND(net_pnl, 2) > 0 {ds_and}) AS winning_days,
                 (SELECT COUNT(*) FROM daily_summaries WHERE ROUND(net_pnl, 2) < 0 {ds_and}) AS losing_days,
                 (SELECT COUNT(*) FROM trade_entries {te}) AS total_entries,
-                (SELECT ROUND(SUM(total_credit), 2) FROM trade_entries {te}) AS total_credit_collected,
+                (SELECT ROUND(COALESCE(SUM(total_credit), {z}), 2) FROM trade_entries {te}) AS total_credit_collected,
                 (SELECT COUNT(*) FROM trade_stops {ts}) AS total_stops,
                 (SELECT MAX(date) FROM daily_summaries {ds}) AS last_updated,
-                (SELECT ROUND(SUM(
+                (SELECT ROUND(COALESCE(SUM(
                     MAX(COALESCE(call_spread_width, 0), COALESCE(put_spread_width, 0))
-                    * 100 * COALESCE(contracts, 1)), 2) FROM trade_entries {te}) AS capital_deployed,
+                    * 100 * COALESCE(contracts, 1)), {z}), 2) FROM trade_entries {te}) AS capital_deployed,
                 (SELECT COUNT(DISTINCT date) FROM trade_entries {te}) AS entry_days
             """,
             p_ds + p_dsand + p_dsand + p_te + p_te + p_ts + p_ds + p_te + p_te,
