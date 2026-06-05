@@ -1868,6 +1868,10 @@ class HydraStrategy(MEICStrategy):
                     "right": norm.get("right"),
                     "expiry": norm.get("expiry"),
                     "unrealized_pnl": norm.get("unrealized_pnl"),
+                    # PER-SHARE cost basis (IBKR avgPrice) — used by the B3
+                    # combo-reconcile to compute an adopted leg's net credit.
+                    # NOT avg_cost (per-contract, ×100).
+                    "avg_price": norm.get("avg_price"),
                     # IBKR has no per-leg position id — see docstring.
                     "position_id": None,
                     "raw": norm.get("raw", raw),
@@ -5321,6 +5325,14 @@ class HydraStrategy(MEICStrategy):
                 credit_gate_handled = False
                 place_put_only = False  # v1.7.1: MKT-011 put-only conversion
                 place_call_only = False  # MKT-035: call-only on down days
+                # MKT-011 credit estimates (per-IC dollars, ×100). Threaded into
+                # _execute_entry so the combo limit pricer (B4) reuses the gate's
+                # validated mid instead of re-estimating from scratch, and into
+                # the combo fill positivity guard (B1). None when the branch
+                # taken didn't compute a side's estimate (then _execute_entry
+                # re-estimates / aborts that side).
+                est_call = None
+                est_put = None
                 original_trend = trend  # Save original trend for hybrid logic
 
                 # Check MKT-038 (FOMC T+1) once here so we can skip put tightening.
@@ -5729,21 +5741,30 @@ class HydraStrategy(MEICStrategy):
                 import time as _time
                 _fill_start = _time.monotonic()
 
+                # MKT-011 estimates (per-IC dollars) threaded into the live
+                # entry paths so the combo limit pricer reuses the gate's mid.
+                _credit_estimates = (est_call, est_put)
+
                 if place_call_only:
                     if self.dry_run:
                         success = self._simulate_call_spread_only(entry)
                     else:
-                        success = self._execute_call_spread_only(entry)
+                        # B2: route the single active vertical through the combo
+                        # path (no standalone single-leg naked short).
+                        success = self._execute_call_spread_only(
+                            entry, credit_estimates=_credit_estimates)
                 elif place_put_only:
                     if self.dry_run:
                         success = self._simulate_put_spread_only(entry)
                     else:
-                        success = self._execute_put_spread_only(entry)
+                        success = self._execute_put_spread_only(
+                            entry, credit_estimates=_credit_estimates)
                 else:
                     if self.dry_run:
                         success = self._simulate_entry(entry)
                     else:
-                        success = self._execute_entry(entry)
+                        success = self._execute_entry(
+                            entry, credit_estimates=_credit_estimates)
 
                 entry._fill_time_ms = int((_time.monotonic() - _fill_start) * 1000)
                 entry._fill_attempts = attempt + 1
@@ -5957,114 +5978,42 @@ class HydraStrategy(MEICStrategy):
     # verify fill prices via PositionBase.OpenPrice.
     # =========================================================================
 
-    def _execute_put_spread_only(self, entry: HydraIronCondorEntry) -> bool:
+    def _execute_put_spread_only(
+        self, entry: HydraIronCondorEntry,
+        credit_estimates: Optional[Tuple[float, float]] = None,
+    ) -> bool:
         """
-        Execute a put-only entry (MKT-011 conversion).
+        Execute a put-only entry (MKT-011 conversion / Upday-035).
 
-        Places only the put spread (2 legs) when call credit is non-viable.
-        Long put first for safety, then short put.
+        B2 (06-04 doubled-spread fix): the single active PUT vertical is now
+        placed as ONE defined-risk BAG combo by delegating to ``_execute_entry``
+        — NOT as two single-leg orders (a standalone short put is rejected as
+        naked on IBKR, the failure that orphaned a doubled spread). We set the
+        put_only + call_side_skipped flags so ``_execute_entry``'s active-side
+        detection places ONLY the put combo (its ``put_active`` is True,
+        ``call_active`` False), then map the result exactly as the full-IC path
+        does. No put-only-specific stop math is lost here: MKT-039 put-only stop
+        sizing runs later in ``_calculate_stop_levels_hydra`` (called from
+        ``_initiate_entry`` after this returns), keyed off ``put_only`` + the
+        booked ``put_spread_credit`` — both of which this path sets.
 
         Args:
-            entry: HydraIronCondorEntry with put_only=True already set
+            entry: HydraIronCondorEntry (put_only set by the router; set
+                defensively here too for direct callers).
+            credit_estimates: ``(est_call, est_put)`` per-IC dollars from the
+                gate, threaded to the combo limit pricer (B4) + positivity
+                guard (B1).
 
         Returns:
-            True if both put legs filled successfully
+            True if the put combo filled.
         """
-        expiry = self._get_todays_expiry()
-        if not expiry:
-            logger.error("Could not determine today's expiry")
-            return False
-
-        filled_legs = []
-
-        try:
-            # 1. Long Put (buy protection first)
-            logger.info(f"Placing Long Put at {entry.long_put_strike}")
-            long_put_result = self._place_option_order(
-                strike=entry.long_put_strike,
-                put_call="Put",
-                buy_sell=BuySell.BUY,
-                expiry=expiry,
-                external_ref=f"{entry.strategy_id}_LP"
-            )
-            if not long_put_result:
-                raise Exception("Long Put order failed")
-            entry.long_put_position_id = long_put_result.get("position_id")
-            entry.long_put_uic = long_put_result.get("uic")
-            long_put_debit = long_put_result.get("debit", 0)
-            entry.long_put_fill_price = long_put_result.get("fill_price", 0)
-            entry.long_put_mid_at_fill = long_put_result.get("mid_at_fill", 0)
-            filled_legs.append(("long_put", entry.long_put_position_id, entry.long_put_uic))
-            self._register_position(entry, "long_put")
-
-            # 2. Short Put (now we have the hedge)
-            logger.info(f"Placing Short Put at {entry.short_put_strike}")
-            short_put_result = self._place_option_order(
-                strike=entry.short_put_strike,
-                put_call="Put",
-                buy_sell=BuySell.SELL,
-                expiry=expiry,
-                external_ref=f"{entry.strategy_id}_SP"
-            )
-            if not short_put_result:
-                raise Exception("Short Put order failed")
-            entry.short_put_position_id = short_put_result.get("position_id")
-            entry.short_put_uic = short_put_result.get("uic")
-            entry.short_put_fill_price = short_put_result.get("fill_price", 0)
-            entry.short_put_mid_at_fill = short_put_result.get("mid_at_fill", 0)
-            short_put_credit = short_put_result.get("credit", 0)
-            entry.put_spread_credit = short_put_credit - long_put_debit
-            logger.debug(
-                f"Put spread: short ${short_put_credit:.2f} - long ${long_put_debit:.2f} "
-                f"= net ${entry.put_spread_credit:.2f}"
-            )
-            filled_legs.append(("short_put", entry.short_put_position_id, entry.short_put_uic))
-            self._register_position(entry, "short_put")
-
-            # Call side not placed — zero out
-            entry.call_spread_credit = 0
-            entry.short_call_fill_price = 0
-            entry.long_call_fill_price = 0
-
-            # FIX #70 Part A: Verify fill prices against PositionBase.OpenPrice
-            self._verify_entry_fill_prices(entry)
-
-            # Set initial monitoring prices for cushion calculation
-            entry.short_put_price = entry.short_put_fill_price
-            entry.long_put_price = entry.long_put_fill_price
-            entry.short_call_price = 0
-            entry.long_call_price = 0
-
-            logger.info(
-                f"Entry #{entry.entry_number} put-only complete: "
-                f"Put credit ${entry.put_spread_credit:.2f}"
-            )
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Put-only entry failed at leg {len(filled_legs) + 1}: {e}")
-
-            # Check for naked shorts (short put without long put hedge)
-            has_naked_short = False
-            naked_short_info = None
-            for leg_name, pos_id, uic in filled_legs:
-                if leg_name.startswith("short_"):
-                    hedge_name = "long_" + leg_name[6:]
-                    hedge_filled = any(l[0] == hedge_name for l in filled_legs)
-                    if not hedge_filled:
-                        has_naked_short = True
-                        naked_short_info = (leg_name, pos_id, uic)
-                        break
-
-            if has_naked_short:
-                logger.critical(f"NAKED SHORT DETECTED: {naked_short_info[0]}")
-                self._handle_naked_short(naked_short_info)
-
-            # Unwind filled legs
-            self._unwind_partial_entry(filled_legs, entry)
-
-            return False
+        # Force the one-sided invariant so _execute_entry places ONLY the put
+        # combo, regardless of how this method was reached.
+        entry.put_only = True
+        entry.call_only = False
+        entry.call_side_skipped = True
+        entry.call_spread_credit = 0.0
+        return self._execute_entry(entry, credit_estimates=credit_estimates)
 
     def _simulate_put_spread_only(self, entry: HydraIronCondorEntry) -> bool:
         """
@@ -6104,114 +6053,38 @@ class HydraStrategy(MEICStrategy):
     # rollback, verify fill prices via PositionBase.OpenPrice.
     # =========================================================================
 
-    def _execute_call_spread_only(self, entry: HydraIronCondorEntry) -> bool:
+    def _execute_call_spread_only(
+        self, entry: HydraIronCondorEntry,
+        credit_estimates: Optional[Tuple[float, float]] = None,
+    ) -> bool:
         """
-        Execute a call-only entry (MKT-035 down-day conversion).
+        Execute a call-only entry (MKT-035/Downday-035/MKT-038/MKT-040).
 
-        Places only the call spread (2 legs) when down-day filter triggers.
-        Long call first for safety, then short call.
+        B2 (06-04 doubled-spread fix): the single active CALL vertical is placed
+        as ONE defined-risk BAG combo by delegating to ``_execute_entry`` — NOT
+        as two single-leg orders (the standalone-naked-short reject that
+        orphaned a doubled spread). We set the call_only + put_side_skipped flags
+        so ``_execute_entry`` places ONLY the call combo (``call_active`` True,
+        ``put_active`` False), then map the result like the full-IC path. The
+        call-only stop math (MKT-040: ``call_credit + theoretical $2.60 put +
+        buffer``) is applied later in ``_calculate_stop_levels_hydra`` (from
+        ``_initiate_entry``), keyed off ``call_only`` + the booked
+        ``call_spread_credit`` — both set here — so nothing is lost by delegating.
 
         Args:
-            entry: HydraIronCondorEntry with call_only=True already set
+            entry: HydraIronCondorEntry (call_only set by the router; set
+                defensively here too).
+            credit_estimates: ``(est_call, est_put)`` per-IC dollars threaded to
+                the combo limit pricer (B4) + positivity guard (B1).
 
         Returns:
-            True if both call legs filled successfully
+            True if the call combo filled.
         """
-        expiry = self._get_todays_expiry()
-        if not expiry:
-            logger.error("Could not determine today's expiry")
-            return False
-
-        filled_legs = []
-
-        try:
-            # 1. Long Call (buy protection first)
-            logger.info(f"Placing Long Call at {entry.long_call_strike}")
-            long_call_result = self._place_option_order(
-                strike=entry.long_call_strike,
-                put_call="Call",
-                buy_sell=BuySell.BUY,
-                expiry=expiry,
-                external_ref=f"{entry.strategy_id}_LC"
-            )
-            if not long_call_result:
-                raise Exception("Long Call order failed")
-            entry.long_call_position_id = long_call_result.get("position_id")
-            entry.long_call_uic = long_call_result.get("uic")
-            long_call_debit = long_call_result.get("debit", 0)
-            entry.long_call_fill_price = long_call_result.get("fill_price", 0)
-            entry.long_call_mid_at_fill = long_call_result.get("mid_at_fill", 0)
-            filled_legs.append(("long_call", entry.long_call_position_id, entry.long_call_uic))
-            self._register_position(entry, "long_call")
-
-            # 2. Short Call (now we have the hedge)
-            logger.info(f"Placing Short Call at {entry.short_call_strike}")
-            short_call_result = self._place_option_order(
-                strike=entry.short_call_strike,
-                put_call="Call",
-                buy_sell=BuySell.SELL,
-                expiry=expiry,
-                external_ref=f"{entry.strategy_id}_SC"
-            )
-            if not short_call_result:
-                raise Exception("Short Call order failed")
-            entry.short_call_position_id = short_call_result.get("position_id")
-            entry.short_call_uic = short_call_result.get("uic")
-            entry.short_call_fill_price = short_call_result.get("fill_price", 0)
-            entry.short_call_mid_at_fill = short_call_result.get("mid_at_fill", 0)
-            short_call_credit = short_call_result.get("credit", 0)
-            entry.call_spread_credit = short_call_credit - long_call_debit
-            logger.debug(
-                f"Call spread: short ${short_call_credit:.2f} - long ${long_call_debit:.2f} "
-                f"= net ${entry.call_spread_credit:.2f}"
-            )
-            filled_legs.append(("short_call", entry.short_call_position_id, entry.short_call_uic))
-            self._register_position(entry, "short_call")
-
-            # Put side not placed — zero out
-            entry.put_spread_credit = 0
-            entry.short_put_fill_price = 0
-            entry.long_put_fill_price = 0
-
-            # FIX #70 Part A: Verify fill prices against PositionBase.OpenPrice
-            self._verify_entry_fill_prices(entry)
-
-            # Set initial monitoring prices for cushion calculation
-            entry.short_call_price = entry.short_call_fill_price
-            entry.long_call_price = entry.long_call_fill_price
-            entry.short_put_price = 0
-            entry.long_put_price = 0
-
-            logger.info(
-                f"Entry #{entry.entry_number} call-only complete: "
-                f"Call credit ${entry.call_spread_credit:.2f}"
-            )
-
-            return True
-
-        except Exception as e:
-            logger.error(f"Call-only entry failed at leg {len(filled_legs) + 1}: {e}")
-
-            # Check for naked shorts (short call without long call hedge)
-            has_naked_short = False
-            naked_short_info = None
-            for leg_name, pos_id, uic in filled_legs:
-                if leg_name.startswith("short_"):
-                    hedge_name = "long_" + leg_name[6:]
-                    hedge_filled = any(l[0] == hedge_name for l in filled_legs)
-                    if not hedge_filled:
-                        has_naked_short = True
-                        naked_short_info = (leg_name, pos_id, uic)
-                        break
-
-            if has_naked_short:
-                logger.critical(f"NAKED SHORT DETECTED: {naked_short_info[0]}")
-                self._handle_naked_short(naked_short_info)
-
-            # Unwind filled legs
-            self._unwind_partial_entry(filled_legs, entry)
-
-            return False
+        entry.call_only = True
+        entry.put_only = False
+        entry.put_side_skipped = True
+        entry.put_spread_credit = 0.0
+        return self._execute_entry(entry, credit_estimates=credit_estimates)
 
     def _simulate_call_spread_only(self, entry: HydraIronCondorEntry) -> bool:
         """

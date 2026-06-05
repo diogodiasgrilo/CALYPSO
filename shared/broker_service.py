@@ -36,6 +36,14 @@ ALLOWED_METHODS = frozenset({
     "get_order_status", "get_closed_position_price",
     # orders (writes)
     "place_and_wait_for_fill", "cancel_order",
+    # combo orders (writes) — defined-risk BAG entries so IBKR nets the long
+    # hedge at order-check time (spread margin ~$5k vs naked-short ~$1M reject,
+    # the 06-04 doubled-spread fix). place_vertical_spread_and_wait is the
+    # entry primitive; the two non-waiting variants are exposed for parity /
+    # future use. Their `expiry` arg crosses the wire as an ISO string (a
+    # datetime.date is JSON-serialized via _json_default.isoformat) and is
+    # re-coerced to a date by _coerce_expiry inside qualify_contract.
+    "place_vertical_spread_and_wait", "place_vertical_spread", "place_iron_condor",
     # operator override — clear the rate-limit penalty box (no restart needed)
     "clear_rate_penalty",
 })

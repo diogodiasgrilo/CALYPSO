@@ -116,6 +116,28 @@ PROGRESSIVE_RETRY_SEQUENCE = [
 ORDER_TIMEOUT_SECONDS = 30  # Shorter for 0DTE (vs 60s for Delta Neutral)
 ORDER_TIMEOUT_EMERGENCY_SECONDS = 15  # Even shorter for emergency closes
 
+# Combo (BAG vertical-spread) entry: limit-price concession below the estimated
+# mid net credit, per share, so the defined-risk combo limit order actually
+# fills (accept slightly less credit rather than sit unfilled). The combo limit
+# = max(min(estimated_mid_per_share - COMBO_CREDIT_SLIPPAGE, net_bid),
+#       COMBO_CREDIT_FLOOR), marketability-aware (B4).
+# Tunable; logged alongside the realized fill so it can be calibrated from logs.
+COMBO_CREDIT_SLIPPAGE = 0.10        # $0.10/share concession (= $10/contract)
+COMBO_CREDIT_FLOOR = 0.05           # floor only when a positive mid existed
+
+# B3a — the combo poll deadline. In broker mode the strategy reaches the combo
+# via BrokerClient over HTTP (default timeout 50s, raised from 35s in main.py /
+# broker_paper_smoke.py). The server-side work is: submit + up to this poll +
+# a post-fill get_positions (paginated, rate-gated). 30s (was 20s — FIX 5,
+# 2026-06-05) so a slow-but-real 0DTE / narrow combo that fills at 18–25s is
+# NOT cancelled out from under us as a false timeout (the prior 20s killed good
+# late fills). The worst case (30s poll + submit + get_positions under rate-gate
+# contention) still provably fits under the 50s HTTP timeout, so a late fill at
+# the broker is NOT misreported as a client-side BrokerError (which would orphan
+# an untracked combo — B3). NOTE: this can exceed ORDER_TIMEOUT_SECONDS (30s for
+# single-leg orders); the combo poll uses ITS OWN deadline, not that one.
+COMBO_FILL_TIMEOUT_S = 30
+
 # ORDER-009: Retry delay to prevent API conflicts
 # Without this, rapid retries cause 409 Conflict (stale order state) and 429 Rate Limit
 ORDER_RETRY_DELAY_SECONDS = 1.2  # Reduced from 2.0s with batch quote headroom
@@ -2140,11 +2162,399 @@ class MEICStrategy:
 
         return True
 
-    def _execute_entry(self, entry: IronCondorEntry) -> bool:
+    def _combo_side_net_bid(
+        self, entry: IronCondorEntry, side: str
+    ) -> Optional[float]:
+        """Per-share NATURAL net bid for one side's vertical: short_bid −
+        long_ask. This is the price at which the combo CROSSES immediately
+        (you sell the short at the bid, buy the long at the ask). A SELL-combo
+        limit at or below the net bid is marketable and fills; a flat
+        ``mid − slippage`` limit can rest ABOVE the net bid on a wide market and
+        sit unfilled (the failure mode for variant C's narrow 5/10pt spreads).
+
+        Returns the per-share net bid (can be small/negative on a degenerate
+        market), or ``None`` if either leg isn't quoted (caller then relies on
+        the mid-based limit only).
+        """
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            return None
+        if side == "call":
+            short_strike, long_strike, right = (
+                entry.short_call_strike, entry.long_call_strike, "C")
+        else:
+            short_strike, long_strike, right = (
+                entry.short_put_strike, entry.long_put_strike, "P")
+        try:
+            call_map, put_map = self._read_option_chain(
+                expiry, [float(short_strike), float(long_strike)])
+            strike_map = call_map if right == "C" else put_map
+            short_cid = strike_map.get(float(short_strike))
+            long_cid = strike_map.get(float(long_strike))
+            if not short_cid or not long_cid:
+                return None
+            quotes = self._read_option_quotes_batch([short_cid, long_cid])
+            short_q = quotes.get(int(short_cid))
+            long_q = quotes.get(int(long_cid))
+            if not short_q or not long_q:
+                return None
+            short_bid = short_q.get("bid")
+            long_ask = long_q.get("ask")
+            if short_bid is None or long_ask is None:
+                return None
+            return float(short_bid) - float(long_ask)
+        except Exception as e:  # noqa: BLE001 — net-bid read is best-effort
+            logger.warning(f"Combo {side} net-bid read failed: {e}")
+            return None
+
+    def _combo_credit_limit_for_side(
+        self, entry: IronCondorEntry, side: str,
+        est_per_share: Optional[float] = None,
+    ) -> Optional[float]:
+        """Per-spread, per-share LMT credit for one side's combo entry.
+
+        B4 — pricing is THREADED and marketability-aware:
+
+        * ``est_per_share``: the MKT-011-validated mid net credit for this side,
+          PER SHARE (e.g. 1.25). Passed in by the caller so we do NOT re-estimate
+          from scratch (saving an IBKR round-trip + avoiding a second quote that
+          could disagree with the gate decision). Only when it's None do we
+          re-estimate via ``_estimate_entry_credit`` (returns per-IC-unit
+          dollars, ×100, NOT ×contracts → divide by 100 here).
+
+        * Fail-closed: if no positive mid is available (estimate is 0/missing),
+          return ``None`` — the caller ABORTS the side. We do NOT bid the
+          ``COMBO_CREDIT_FLOOR`` (a SELL combo at $0.05 is maximally marketable
+          and would DUMP the spread for ~$5/contract at full spread risk).
+
+        * Marketability: price off the NATURAL net bid (short_bid − long_ask) so
+          the SELL combo actually crosses, instead of a flat ``mid − slippage``
+          that can rest above the net bid and sit unfilled. The limit is
+          ``min(mid − slippage, net_bid)``. A marketable limit still captures
+          price improvement (the matching engine fills at the better price), so
+          we keep the credit AND guarantee the fill. ``COMBO_CREDIT_FLOOR`` only
+          binds when a positive mid existed but ``mid − slippage`` (or the net
+          bid) fell non-positive — we log a WARNING when it does.
+
+        Returns the PER-SHARE limit (``place_vertical_spread`` rounds it to the
+        0.05 combo tick), or ``None`` to signal "abort this side, fail closed".
+        """
+        # Mid source: prefer the threaded MKT-011 estimate; re-estimate only if
+        # not provided.
+        mid_per_share: Optional[float] = None
+        if est_per_share is not None and est_per_share > 0:
+            mid_per_share = float(est_per_share)
+        else:
+            try:
+                est_call, est_put = self._estimate_entry_credit(entry)
+            except Exception as e:  # noqa: BLE001 — estimation is best-effort
+                logger.warning(
+                    f"Combo credit estimate failed for {side} side: {e}")
+                est_call = est_put = 0.0
+            est_dollars_per_ic = est_call if side == "call" else est_put
+            if est_dollars_per_ic > 0:
+                mid_per_share = est_dollars_per_ic / 100.0
+
+        # B4(b): no usable mid → ABORT the side (do NOT bid the $0.05 floor).
+        if mid_per_share is None or mid_per_share <= 0:
+            logger.error(
+                f"Combo {side} limit: no usable credit estimate "
+                f"(est_per_share={est_per_share}) — aborting side, fail closed"
+            )
+            return None
+
+        # B4(c): marketability-aware. Cross at/below the natural net bid.
+        net_bid = self._combo_side_net_bid(entry, side)
+        mid_minus_slip = mid_per_share - COMBO_CREDIT_SLIPPAGE
+
+        # B4(d) — net-bid floor-dump guard. When the natural net bid
+        # (short_bid − long_ask) has COLLAPSED to/below the floor (routine for
+        # C's wide narrow-spread book), clamping to COMBO_CREDIT_FLOOR and
+        # submitting a SELL combo there is maximally marketable and DUMPS the
+        # spread for ~$5/contract at full spread risk. The mid being healthy
+        # does not rescue this — the order would still cross at the collapsed
+        # net bid. So ABORT the side (fail closed) rather than clamp-and-place.
+        # The floor-clamp is reserved ONLY for the net_bid-unavailable
+        # (mid-only) path below, where mid − slippage is the binding term.
+        if net_bid is not None and net_bid <= COMBO_CREDIT_FLOOR:
+            logger.warning(
+                f"Combo {side} limit: natural net_bid ${net_bid:.2f}/share "
+                f"≤ floor ${COMBO_CREDIT_FLOOR:.2f} (collapsed/degenerate "
+                f"market, mid ${mid_per_share:.2f}) — ABORTING side (fail "
+                f"closed), refusing to dump the spread at the floor"
+            )
+            return None
+
+        if net_bid is not None:
+            limit_raw = min(mid_minus_slip, net_bid)
+            bid_note = f"net_bid ${net_bid:.2f}"
+        else:
+            # No net bid available → fall back to the mid-based limit only.
+            limit_raw = mid_minus_slip
+            bid_note = "net_bid unavailable"
+
+        limit_per_share = max(COMBO_CREDIT_FLOOR, limit_raw)
+        if limit_raw < COMBO_CREDIT_FLOOR:
+            # The collapsed-net_bid DUMP case already aborted above (B4(d)).
+            # This clamp now only binds when mid − slippage is the small-but-
+            # positive binding term (net_bid unavailable, or net_bid > floor but
+            # mid is tiny) — a sane low-credit limit, not a floor dump.
+            logger.warning(
+                f"Combo {side} limit: mid ${mid_per_share:.2f} − slippage / "
+                f"{bid_note} fell below floor → clamped to "
+                f"${COMBO_CREDIT_FLOOR:.2f}/share (thin/degenerate market)"
+            )
+        logger.info(
+            f"Combo {side} limit: mid ${mid_per_share:.2f}/share, "
+            f"{bid_note}, − ${COMBO_CREDIT_SLIPPAGE:.2f} slippage "
+            f"→ ${limit_per_share:.2f}/share (floor ${COMBO_CREDIT_FLOOR:.2f})"
+        )
+        return limit_per_share
+
+    def _reconcile_combo_at_broker(
+        self, *, expiry, short_strike: float, long_strike: float, right: str,
+        contracts: int, est_per_share: Optional[float] = None,
+    ) -> Optional[dict]:
+        """B3c — after a BrokerError/exception (or a timed_out return) from a
+        combo placement, check whether the combo's legs are ACTUALLY present at
+        the broker (the combo may have FILLED right as the HTTP call timed out
+        client-side, or in the cancel/fill race window). If both legs are live
+        AND pass the safety guards, return a synthetic fill-result dict (same
+        shape as ``place_vertical_spread_and_wait``) so the caller can ADOPT the
+        position — track it, set its *_uic, compute its stop — instead of
+        declaring the side unfilled and leaving a phantom untracked + unstopped
+        live spread.
+
+        FIX 3 (2026-06-05) — before adopting, fail closed on anything that
+        isn't a clean, fully-filled vertical:
+          * the short leg MUST be actually SHORT (quantity < 0),
+          * the long leg MUST be actually LONG (quantity > 0),
+          * |quantity| MUST equal entry.contracts for BOTH legs.
+        A netted / partial / wrong-strike residual that violates any of these is
+        NOT our combo — adopt it and the stop math is corrupted. Reject → None
+        (side treated as unfilled). And the adopted net_credit gets the SAME
+        positivity guard the happy path (_build_combo_fill_result) uses: a
+        non-positive (short_avgPrice − long_avgPrice) falls back to the MKT-011
+        ``est_per_share`` rather than booking a bogus credit into the stop.
+
+        Returns the adopt-result dict if both legs are present and valid, else
+        ``None`` (genuine non-fill / unsafe residual → caller fails closed).
+        """
+        try:
+            short_cid = self.broker.qualify_contract(
+                "SPX", expiry, short_strike, right, "SPXW")
+            long_cid = self.broker.qualify_contract(
+                "SPX", expiry, long_strike, right, "SPXW")
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                f"Combo reconcile: could not resolve leg conids ({e}) — "
+                f"cannot confirm fill, treating as non-fill (fail closed)")
+            return None
+
+        try:
+            positions = self._read_open_positions() or []
+        except Exception as e:  # noqa: BLE001
+            logger.error(
+                f"Combo reconcile: get_positions failed ({e}) — cannot confirm "
+                f"fill, treating as non-fill (fail closed)")
+            return None
+
+        by_conid = {}
+        for p in positions:
+            cid = p.get("instrument_id")
+            qty = p.get("quantity") or 0
+            if cid is not None and qty != 0:
+                by_conid[int(cid)] = p
+
+        short_pos = by_conid.get(int(short_cid)) if short_cid else None
+        long_pos = by_conid.get(int(long_cid)) if long_cid else None
+        if not (short_pos and long_pos):
+            logger.warning(
+                f"Combo reconcile: legs NOT present at broker "
+                f"(short {short_strike} cid={short_cid} "
+                f"{'live' if short_pos else 'absent'}, long {long_strike} "
+                f"cid={long_cid} {'live' if long_pos else 'absent'}) — genuine "
+                f"non-fill, failing closed")
+            return None
+
+        # FIX 3 — sign + magnitude guards. Only adopt a CLEAN, fully-filled
+        # vertical: short leg actually SHORT (qty < 0), long leg actually LONG
+        # (qty > 0), and |qty| == contracts on BOTH legs. A netted / partial /
+        # wrong-strike residual fails any of these → it is NOT our combo; adopt
+        # it and the stop math (and unwind sizing) is corrupted. Fail closed.
+        try:
+            short_qty = int(short_pos.get("quantity") or 0)
+            long_qty = int(long_pos.get("quantity") or 0)
+        except (TypeError, ValueError):
+            short_qty = long_qty = 0
+        if not (
+            short_qty < 0
+            and long_qty > 0
+            and abs(short_qty) == int(contracts)
+            and abs(long_qty) == int(contracts)
+        ):
+            logger.warning(
+                f"Combo reconcile: legs present but FAIL sign/magnitude guard "
+                f"(short {short_strike} cid={short_cid} qty={short_qty}, "
+                f"long {long_strike} cid={long_cid} qty={long_qty}; "
+                f"expected short<0, long>0, |qty|=={contracts}) — netted/"
+                f"partial/wrong residual, NOT adopting (fail closed)")
+            return None
+
+        # Both legs live AND valid → ADOPT. Read per-share avgPrice for the net
+        # credit (B1 unit convention — NOT avgCost, which is ×100). Prefer the
+        # normalized top-level `avg_price` (_read_open_positions →
+        # _normalize_position_dict surfaces it); fall back to the untouched
+        # `raw.avgPrice`.
+        def _avg_price(pos: dict):
+            px = pos.get("avg_price")
+            if px is None and isinstance(pos.get("raw"), dict):
+                px = pos["raw"].get("avgPrice")
+            return px
+
+        short_px = _avg_price(short_pos)
+        long_px = _avg_price(long_pos)
+        # FIX 3 — positivity guard, mirroring _build_combo_fill_result's happy
+        # path. A FILLED SELL vertical cannot economically yield a non-positive
+        # (short_avgPrice − long_avgPrice). If the diff is missing / <= 0, the
+        # avgPrice read was wrong/stale — fall back to the MKT-011-validated
+        # est_per_share rather than booking a non-positive/bogus credit (which
+        # would make the stop unreachable → ride to max loss).
+        net_per_share: Optional[float] = None
+        if short_px is not None and long_px is not None:
+            try:
+                net_per_share = float(short_px) - float(long_px)
+            except (TypeError, ValueError):
+                net_per_share = None
+        if net_per_share is None or net_per_share <= 0.0:
+            if est_per_share is not None and est_per_share > 0.0:
+                logger.error(
+                    f"Combo reconcile: adopted net credit from avgPrice was "
+                    f"non-positive ({net_per_share}/share) — falling back to "
+                    f"MKT-011 estimate {est_per_share:.4f}/share for the stop "
+                    f"math (avgPrice read likely missing/stale)")
+                net_per_share = float(est_per_share)
+            else:
+                logger.error(
+                    f"Combo reconcile: adopted net credit non-positive "
+                    f"({net_per_share}/share) AND no usable MKT-011 estimate "
+                    f"({est_per_share}) — NOT adopting (fail closed), refusing "
+                    f"to book a bogus credit into the stop math")
+                return None
+        net_credit = net_per_share * 100.0 * contracts
+        logger.critical(
+            f"Combo reconcile: ADOPTING orphaned combo legs present at broker "
+            f"(short {short_strike} cid={short_cid}, long {long_strike} "
+            f"cid={long_cid}, net_credit ${net_credit:.2f}) — was about to be "
+            f"left untracked/unstopped after a broker timeout")
+        return {
+            "status": "filled", "filled": True,
+            "short_conid": int(short_cid), "long_conid": int(long_cid),
+            "short_fill_price": float(short_px) if short_px is not None else 0,
+            "long_fill_price": float(long_px) if long_px is not None else 0,
+            "net_credit": net_credit, "order_id": None, "raw": {"adopted": True},
+        }
+
+    def _place_side_combo(
+        self, *, entry: IronCondorEntry, side: str, expiry,
+        est_per_share: Optional[float],
+    ) -> dict:
+        """Place ONE side's vertical as a defined-risk combo and return the
+        normalized fill result. Handles B4 (abort on no-mid) + B3 (reconcile a
+        broker-timeout into an adopt-or-fail decision). Raises on a genuine
+        non-fill so the caller's fail-closed path runs.
+        """
+        if side == "call":
+            short_strike, long_strike, right = (
+                entry.short_call_strike, entry.long_call_strike, "C")
+        else:
+            short_strike, long_strike, right = (
+                entry.short_put_strike, entry.long_put_strike, "P")
+
+        # B4: marketability-aware, threaded limit. None → abort (fail closed).
+        limit = self._combo_credit_limit_for_side(entry, side, est_per_share)
+        if limit is None:
+            raise Exception(
+                f"{side.capitalize()} combo aborted: no usable credit estimate "
+                f"(fail closed, no $0.05-floor dump)")
+
+        logger.info(
+            f"Placing {side.upper()} combo: short {short_strike:.0f} / "
+            f"long {long_strike:.0f} x{entry.contracts} @ limit ${limit:.2f}/share"
+        )
+        try:
+            result = self.broker.place_vertical_spread_and_wait(
+                expiry=expiry,
+                short_strike=short_strike,
+                long_strike=long_strike,
+                right=right,
+                contracts=entry.contracts,
+                net_credit_limit=limit,
+                action="SELL",
+                timeout_seconds=COMBO_FILL_TIMEOUT_S,
+                estimated_credit_per_share=est_per_share,
+            )
+        except Exception as e:  # noqa: BLE001 — incl. BrokerError on HTTP timeout
+            # B3c — the combo may have FILLED at the broker right as the HTTP
+            # call timed out (BrokerError) or some other transport hiccup. Do
+            # NOT blindly declare it unfilled: reconcile against get_positions
+            # and ADOPT the legs if they're live (else the position is orphaned
+            # untracked + unstopped — worse than the original 06-04 orphan).
+            logger.error(
+                f"{side.capitalize()} combo placement raised ({type(e).__name__}: "
+                f"{e}) — reconciling against broker positions before failing")
+            adopted = self._reconcile_combo_at_broker(
+                expiry=expiry, short_strike=short_strike,
+                long_strike=long_strike, right=right, contracts=entry.contracts,
+                est_per_share=est_per_share)
+            if adopted is not None:
+                return adopted
+            raise
+
+        if not (result and result.get("filled")):
+            status = (result or {}).get("status", "no-result")
+            # FIX 5(b) — a CLEAN timed_out RETURN (filled=False, no exception)
+            # is ALSO a race window: place_vertical_spread_and_wait cancels the
+            # combo on timeout, but if that cancel lost the race to a fill (or
+            # the cancel itself failed), the legs are LIVE at the broker. Run
+            # the same get_positions reconcile we run on a raised exception, so
+            # such a fill is ADOPTED (with the FIX 3 guards) instead of orphaned
+            # untracked + unstopped. Only the genuine non-fill falls through to
+            # the fail-closed raise below.
+            logger.error(
+                f"{side.capitalize()} combo returned non-fill (status={status}) "
+                f"— reconciling against broker positions before failing")
+            adopted = self._reconcile_combo_at_broker(
+                expiry=expiry, short_strike=short_strike,
+                long_strike=long_strike, right=right, contracts=entry.contracts,
+                est_per_share=est_per_share)
+            if adopted is not None:
+                return adopted
+            raise Exception(f"{side.capitalize()} combo did not fill (status={status})")
+        return result
+
+    def _execute_entry(
+        self, entry: IronCondorEntry,
+        credit_estimates: Optional[Tuple[float, float]] = None,
+    ) -> bool:
         """
         Execute a real iron condor entry.
 
-        ORDER-002 Critical: If any short fills without its hedge, we must
+        Each active vertical spread is placed as ONE defined-risk BAG combo
+        (``broker.place_vertical_spread_and_wait``) — a full IC is two combos
+        (call + put), a one-sided entry is one. The combo nets the protective
+        long at IBKR's order-check time (spread margin) and fills atomically on
+        the complex book, so the standalone-naked-short reject + doubled-spread
+        orphan (06-04 incident) cannot happen and a non-fill has nothing to
+        unwind.
+
+        This is the SINGLE combo entry path for full ICs AND one-sided entries
+        (B2): _execute_put_spread_only / _execute_call_spread_only set the
+        put_only/call_only + *_side_skipped flags and delegate here, so there is
+        NO standalone single-leg short on any live entry path.
+
+        ORDER-002 (legacy, single-leg path): If any short fills without its
+        hedge, we must
         immediately hedge or close the short to avoid naked exposure.
 
         Leg order (safest):
@@ -2155,10 +2565,20 @@ class MEICStrategy:
 
         Args:
             entry: IronCondorEntry to execute
+            credit_estimates: optional ``(est_call, est_put)`` from the MKT-011
+                credit gate, in per-IC-unit dollars (×100, NOT ×contracts) —
+                the shape ``_check_credit_gate`` returns. Threaded through to
+                the combo limit pricing (B4) so we don't re-estimate from
+                scratch, and into the combo fill's positivity guard (B1). When
+                None (e.g. MKT-010 fallback path where estimation failed), the
+                limit pricer re-estimates and aborts the side if still
+                unavailable (fail closed).
 
         Returns:
             True if all 4 legs filled successfully
         """
+        est_call_per_ic, est_put_per_ic = (
+            credit_estimates if credit_estimates is not None else (None, None))
         # Get option expiry (today for 0DTE)
         expiry = self._get_todays_expiry()
         if not expiry:
@@ -2206,93 +2626,81 @@ class MEICStrategy:
                 entry.put_side_skipped = True
                 entry.put_spread_credit = 0.0
 
-            long_call_debit = 0  # defined even when the call side is skipped
-            long_put_debit = 0
+            # COMBO ENTRY (06-04 doubled-spread fix): place each active vertical
+            # spread as ONE defined-risk BAG combo via the broker, instead of
+            # legging in 4 single-leg orders. On IBKR a standalone SHORT leg is
+            # rejected as naked at order-check time ("EQUITY WITH LOAN VALUE
+            # [~1M] MUST EXCEED THE INITIAL MARGIN [~1.09M] ... MARGIN DEFICIT"),
+            # and the entry-retry then re-placed legs and orphaned a doubled
+            # spread. A combo nets the protective long at order-check time
+            # (spread margin ~$5k) and fills atomically on the complex book, so
+            # there is no naked-short window and nothing to unwind on a non-fill.
+            #
+            # One combo per active side: a full IC = call-spread combo +
+            # put-spread combo (2 combos), each mapping cleanly to
+            # call_spread_credit / put_spread_credit; a one-sided entry (Brandon
+            # GEX SKIP / put_only / call_only) = exactly one combo.
 
-            # 1. Long Call (buy protection first)
+            # Per-share mids from the MKT-011 gate (per-IC dollars ÷ 100). None
+            # when the gate couldn't estimate → _combo_credit_limit_for_side
+            # re-estimates and aborts the side if still unavailable (fail closed).
+            call_mid_per_share = (
+                est_call_per_ic / 100.0
+                if est_call_per_ic is not None and est_call_per_ic > 0 else None)
+            put_mid_per_share = (
+                est_put_per_ic / 100.0
+                if est_put_per_ic is not None and est_put_per_ic > 0 else None)
+
+            # 1. Call spread combo (SELL the call vertical)
             if call_active:
-                logger.info(f"Placing Long Call at {entry.long_call_strike}")
-                long_call_result = self._place_option_order(
-                    strike=entry.long_call_strike,
-                    put_call="Call",
-                    buy_sell=BuySell.BUY,
-                    expiry=expiry,
-                    external_ref=f"{entry.strategy_id}_LC"
+                call_result = self._place_side_combo(
+                    entry=entry, side="call", expiry=expiry,
+                    est_per_share=call_mid_per_share)
+                # IBKR has no per-leg position id — keep None (matches the prior
+                # single-leg behavior, which the *_uic-gated action paths rely on).
+                entry.short_call_position_id = None
+                entry.long_call_position_id = None
+                entry.short_call_uic = call_result.get("short_conid")
+                entry.long_call_uic = call_result.get("long_conid")
+                entry.short_call_fill_price = call_result.get("short_fill_price") or 0
+                entry.long_call_fill_price = call_result.get("long_fill_price") or 0
+                # mid_at_fill reference: per-leg mid is not separable from a combo
+                # fill, so use the per-leg fill price as the reference (slippage
+                # math then reads structurally 0 for combos — acceptable; combo
+                # execution quality is captured by net_credit vs the limit).
+                entry.short_call_mid_at_fill = entry.short_call_fill_price
+                entry.long_call_mid_at_fill = entry.long_call_fill_price
+                entry.call_spread_credit = call_result.get("net_credit", 0.0)
+                logger.info(
+                    f"Call combo FILLED: net credit ${entry.call_spread_credit:.2f} "
+                    f"(SC conid {entry.short_call_uic}, LC conid {entry.long_call_uic})"
                 )
-                if not long_call_result:
-                    raise Exception("Long Call order failed")
-                entry.long_call_position_id = long_call_result.get("position_id")
-                entry.long_call_uic = long_call_result.get("uic")
-                long_call_debit = long_call_result.get("debit", 0)  # Track debit for net credit calc
-                entry.long_call_fill_price = long_call_result.get("fill_price", 0)
-                entry.long_call_mid_at_fill = long_call_result.get("mid_at_fill", 0)
-                filled_legs.append(("long_call", entry.long_call_position_id, entry.long_call_uic))
+                filled_legs.append(("long_call", None, entry.long_call_uic))
+                filled_legs.append(("short_call", None, entry.short_call_uic))
                 self._register_position(entry, "long_call")
-
-            # 2. Long Put
-            if put_active:
-                logger.info(f"Placing Long Put at {entry.long_put_strike}")
-                long_put_result = self._place_option_order(
-                    strike=entry.long_put_strike,
-                    put_call="Put",
-                    buy_sell=BuySell.BUY,
-                    expiry=expiry,
-                    external_ref=f"{entry.strategy_id}_LP"
-                )
-                if not long_put_result:
-                    raise Exception("Long Put order failed")
-                entry.long_put_position_id = long_put_result.get("position_id")
-                entry.long_put_uic = long_put_result.get("uic")
-                long_put_debit = long_put_result.get("debit", 0)  # Track debit for net credit calc
-                entry.long_put_fill_price = long_put_result.get("fill_price", 0)
-                entry.long_put_mid_at_fill = long_put_result.get("mid_at_fill", 0)
-                filled_legs.append(("long_put", entry.long_put_position_id, entry.long_put_uic))
-                self._register_position(entry, "long_put")
-
-            # 3. Short Call (now we have the hedge)
-            if call_active:
-                logger.info(f"Placing Short Call at {entry.short_call_strike}")
-                short_call_result = self._place_option_order(
-                    strike=entry.short_call_strike,
-                    put_call="Call",
-                    buy_sell=BuySell.SELL,
-                    expiry=expiry,
-                    external_ref=f"{entry.strategy_id}_SC"
-                )
-                if not short_call_result:
-                    raise Exception("Short Call order failed")
-                entry.short_call_position_id = short_call_result.get("position_id")
-                entry.short_call_uic = short_call_result.get("uic")
-                entry.short_call_fill_price = short_call_result.get("fill_price", 0)
-                entry.short_call_mid_at_fill = short_call_result.get("mid_at_fill", 0)
-                # FIX (2026-02-04): Net credit = short credit - long debit (was only tracking short credit!)
-                short_call_credit = short_call_result.get("credit", 0)
-                entry.call_spread_credit = short_call_credit - long_call_debit
-                logger.debug(f"Call spread: short ${short_call_credit:.2f} - long ${long_call_debit:.2f} = net ${entry.call_spread_credit:.2f}")
-                filled_legs.append(("short_call", entry.short_call_position_id, entry.short_call_uic))
                 self._register_position(entry, "short_call")
 
-            # 4. Short Put
+            # 2. Put spread combo (SELL the put vertical)
             if put_active:
-                logger.info(f"Placing Short Put at {entry.short_put_strike}")
-                short_put_result = self._place_option_order(
-                    strike=entry.short_put_strike,
-                    put_call="Put",
-                    buy_sell=BuySell.SELL,
-                    expiry=expiry,
-                    external_ref=f"{entry.strategy_id}_SP"
+                put_result = self._place_side_combo(
+                    entry=entry, side="put", expiry=expiry,
+                    est_per_share=put_mid_per_share)
+                entry.short_put_position_id = None
+                entry.long_put_position_id = None
+                entry.short_put_uic = put_result.get("short_conid")
+                entry.long_put_uic = put_result.get("long_conid")
+                entry.short_put_fill_price = put_result.get("short_fill_price") or 0
+                entry.long_put_fill_price = put_result.get("long_fill_price") or 0
+                entry.short_put_mid_at_fill = entry.short_put_fill_price
+                entry.long_put_mid_at_fill = entry.long_put_fill_price
+                entry.put_spread_credit = put_result.get("net_credit", 0.0)
+                logger.info(
+                    f"Put combo FILLED: net credit ${entry.put_spread_credit:.2f} "
+                    f"(SP conid {entry.short_put_uic}, LP conid {entry.long_put_uic})"
                 )
-                if not short_put_result:
-                    raise Exception("Short Put order failed")
-                entry.short_put_position_id = short_put_result.get("position_id")
-                entry.short_put_uic = short_put_result.get("uic")
-                entry.short_put_fill_price = short_put_result.get("fill_price", 0)
-                entry.short_put_mid_at_fill = short_put_result.get("mid_at_fill", 0)
-                # FIX (2026-02-04): Net credit = short credit - long debit (was only tracking short credit!)
-                short_put_credit = short_put_result.get("credit", 0)
-                entry.put_spread_credit = short_put_credit - long_put_debit
-                logger.debug(f"Put spread: short ${short_put_credit:.2f} - long ${long_put_debit:.2f} = net ${entry.put_spread_credit:.2f}")
-                filled_legs.append(("short_put", entry.short_put_position_id, entry.short_put_uic))
+                filled_legs.append(("long_put", None, entry.long_put_uic))
+                filled_legs.append(("short_put", None, entry.short_put_uic))
+                self._register_position(entry, "long_put")
                 self._register_position(entry, "short_put")
 
             # FIX #70 Part A: Verify fill prices against PositionBase.OpenPrice
@@ -3024,8 +3432,11 @@ class MEICStrategy:
         """
         try:
             # GAP-G (F7.7): IBKR keys the price lookup by conid (str) and
-            # the legs by *_uic — IBKR has no per-leg position id, and
-            # `avg_cost` is the actual execution price.
+            # the legs by *_uic — IBKR has no per-leg position id. B1 (2026-06-05):
+            # use the PER-SHARE `avg_price`, NOT `avg_cost` (which is PER-CONTRACT,
+            # ≈100× the per-share price). Reading avg_cost here re-derives a 100×
+            # credit and CLOBBERS the combo path's correct per-share credit →
+            # 100× stop level → never triggers → rides to max loss.
             #
             # P7-audit M6: the prior `if self.broker is not None:` guard
             # was vacuous (HYDRA always has a broker on the IBKR path) AND
@@ -3037,10 +3448,10 @@ class MEICStrategy:
                 logger.warning("FIX-70: Could not fetch positions for entry price verification")
                 return
             price_lookup = {
-                str(p["instrument_id"]): p["avg_cost"]
+                str(p["instrument_id"]): p["avg_price"]
                 for p in positions
                 if p.get("instrument_id") is not None
-                and (p.get("avg_cost") or 0) > 0
+                and (p.get("avg_price") or 0) > 0
             }
             legs = [
                 ("short_call_uic", "short_call"),

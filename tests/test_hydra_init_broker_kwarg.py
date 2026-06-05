@@ -2791,7 +2791,8 @@ class _FakeFillVerifyEntry:
 
 class TestVerifyEntryFillPricesIb:
     """F7.7 / GAP-G — _verify_entry_fill_prices on the IBKR path keys the
-    price lookup by conid (str) and reads avg_cost as the actual fill."""
+    price lookup by conid (str) and reads avg_price (per-share) as the actual
+    fill. NOT avg_cost (per-contract, ≈100×) — B1 (2026-06-05)."""
 
     def _make(self, positions):
         s = HydraStrategy.__new__(HydraStrategy)
@@ -2801,12 +2802,12 @@ class TestVerifyEntryFillPricesIb:
         return s
 
     def test_price_improvement_updates_both_credits(self):
-        # avg_cost differs from the recorded credit → correction applied.
+        # avg_price (per-share) differs from the recorded credit → correction.
         positions = [
-            {"instrument_id": 11, "avg_cost": 2.10},  # short call
-            {"instrument_id": 12, "avg_cost": 0.40},  # long call
-            {"instrument_id": 13, "avg_cost": 2.30},  # short put
-            {"instrument_id": 14, "avg_cost": 0.50},  # long put
+            {"instrument_id": 11, "avg_price": 2.10},  # short call
+            {"instrument_id": 12, "avg_price": 0.40},  # long call
+            {"instrument_id": 13, "avg_price": 2.30},  # short put
+            {"instrument_id": 14, "avg_price": 0.50},  # long put
         ]
         s = self._make(positions)
         entry = _FakeFillVerifyEntry(
@@ -2820,10 +2821,10 @@ class TestVerifyEntryFillPricesIb:
 
     def test_contracts_scales_credit(self):
         positions = [
-            {"instrument_id": 11, "avg_cost": 2.00},
-            {"instrument_id": 12, "avg_cost": 0.50},
-            {"instrument_id": 13, "avg_cost": 2.00},
-            {"instrument_id": 14, "avg_cost": 0.50},
+            {"instrument_id": 11, "avg_price": 2.00},
+            {"instrument_id": 12, "avg_price": 0.50},
+            {"instrument_id": 13, "avg_price": 2.00},
+            {"instrument_id": 14, "avg_price": 0.50},
         ]
         s = self._make(positions)
         entry = _FakeFillVerifyEntry(
@@ -2844,8 +2845,8 @@ class TestVerifyEntryFillPricesIb:
     def test_missing_conid_skips_that_leg(self):
         # only call legs resolve; put legs have no matching position
         positions = [
-            {"instrument_id": 11, "avg_cost": 2.10},
-            {"instrument_id": 12, "avg_cost": 0.40},
+            {"instrument_id": 11, "avg_price": 2.10},
+            {"instrument_id": 12, "avg_price": 0.40},
         ]
         s = self._make(positions)
         entry = _FakeFillVerifyEntry(

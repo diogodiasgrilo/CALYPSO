@@ -377,19 +377,34 @@ class TestOneSidedLiveEntry:
     tried to place the skipped side's leg at strike 0.0 and aborted at leg 1
     ('Placing Long Call at 0.0'). The dry-run _simulate_entry gates on `if
     strike`, so A/B (dry-run) were fine — C, the only LIVE variant, was the only
-    one affected. _execute_entry must place only the ACTIVE side(s)."""
+    one affected. _execute_entry must place only the ACTIVE side(s).
+
+    Updated for the 06-04 doubled-spread fix: _execute_entry now places each
+    active side as ONE defined-risk BAG combo via
+    broker.place_vertical_spread_and_wait (no longer 4 single-leg orders), so
+    these tests assert at combo (per-side) granularity. The one-sided-active
+    invariant (never a strike-0 combo) is unchanged."""
 
     def _strategy(self):
         s = HydraStrategy.__new__(HydraStrategy)
         s.dry_run = False
-        placed: list = []
+        s.contracts_per_entry = 10
+        placed: list = []  # one tuple per combo: (right, short_strike, long_strike)
 
-        def _place(strike, put_call, buy_sell, expiry, external_ref, emergency_mode=False):
-            placed.append((put_call, strike))
-            return {"position_id": f"P_{external_ref}", "uic": 999,
-                    "debit": 1.0, "credit": 2.0, "fill_price": 1.5, "mid_at_fill": 1.5}
+        s.broker = MagicMock()
 
-        s._place_option_order = _place
+        def _combo(*, expiry, short_strike, long_strike, right, contracts,
+                   net_credit_limit, action="SELL", **kw):
+            placed.append((right, short_strike, long_strike))
+            base = 100 + len(placed)
+            return {"status": "filled", "filled": True,
+                    "short_conid": base, "long_conid": base + 1,
+                    "short_fill_price": 2.0, "long_fill_price": 0.5,
+                    "net_credit": (2.0 - 0.5) * 100 * contracts,
+                    "order_id": "OID", "raw": {}}
+
+        s.broker.place_vertical_spread_and_wait.side_effect = _combo
+        s._estimate_entry_credit = lambda entry: (300.0, 350.0)
         s._get_todays_expiry = lambda: "2026-06-04"
         s._register_position = lambda entry, leg: None
         s._verify_entry_fill_prices = lambda entry: None
@@ -398,6 +413,7 @@ class TestOneSidedLiveEntry:
     def _entry(self, **kw):
         e = base_mod.IronCondorEntry(entry_number=2)
         e.strategy_id = "C2"
+        e.contracts = 10
         for k, v in kw.items():
             setattr(e, k, v)
         return e
@@ -409,9 +425,9 @@ class TestOneSidedLiveEntry:
                         short_put_strike=7540, long_put_strike=7535,
                         call_side_skipped=True)
         assert s._execute_entry(e) is True
-        # only the put spread was placed — NO "Call 0.0" leg
-        assert all(pc == "Put" for pc, _ in placed)
-        assert len(placed) == 2
+        # only the put combo was placed — NO "Call" combo at strike 0.0
+        assert all(right == "P" for right, _, _ in placed)
+        assert len(placed) == 1
         assert e.call_spread_credit == 0.0
 
     def test_call_only_skips_put_legs(self):
@@ -420,17 +436,18 @@ class TestOneSidedLiveEntry:
                         short_put_strike=0.0, long_put_strike=0.0,
                         put_side_skipped=True)
         assert s._execute_entry(e) is True
-        assert all(pc == "Call" for pc, _ in placed)
-        assert len(placed) == 2
+        assert all(right == "C" for right, _, _ in placed)
+        assert len(placed) == 1
 
     def test_full_ic_places_all_four(self):
         s, placed = self._strategy()
         e = self._entry(short_call_strike=7600, long_call_strike=7605,
                         short_put_strike=7540, long_put_strike=7535)
         assert s._execute_entry(e) is True
-        assert len(placed) == 4
-        assert sum(1 for pc, _ in placed if pc == "Call") == 2
-        assert sum(1 for pc, _ in placed if pc == "Put") == 2
+        # Full IC = exactly 2 combos: one call spread, one put spread.
+        assert len(placed) == 2
+        assert sum(1 for right, _, _ in placed if right == "C") == 1
+        assert sum(1 for right, _, _ in placed if right == "P") == 1
 
     def test_no_active_side_aborts_without_orders(self):
         # both sides zeroed → refuse to place anything (no 0.0 leg)
@@ -441,13 +458,15 @@ class TestOneSidedLiveEntry:
         assert placed == []
 
     def test_no_leg_is_ever_placed_at_zero_strike(self):
-        # the exact 06-04 signature: never a strike-0 order on a one-sided entry
+        # the exact 06-04 signature: never a strike-0 combo on a one-sided entry
         s, placed = self._strategy()
         e = self._entry(short_call_strike=0.0, long_call_strike=0.0,
                         short_put_strike=7540, long_put_strike=7535,
                         call_side_skipped=True)
         s._execute_entry(e)
-        assert all(strike != 0.0 for _, strike in placed)
+        assert all(
+            short != 0.0 and long != 0.0 for _, short, long in placed
+        )
 
 
 # ─── 2026-06-04: live CLOSE paths gated on pos_id (None on IBKR) → 0 legs ──────

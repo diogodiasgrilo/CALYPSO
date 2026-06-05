@@ -77,7 +77,9 @@ def _alert(ok: bool, lines: list) -> None:
 
 def main() -> int:
     from shared.broker_client import BrokerClient, BrokerError
-    bc = BrokerClient(BROKER_URL)
+    # B3a — match the strategy's HTTP timeout margin (combo + post-fill
+    # get_positions can exceed the default 35s under rate-gate contention).
+    bc = BrokerClient(BROKER_URL, timeout=50.0)
     out: list = []
 
     def log(m):

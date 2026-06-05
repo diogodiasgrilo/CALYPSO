@@ -79,6 +79,24 @@ CASES = [
     ("place_and_wait_for_fill", (), {"conid": 55813670, "side": "SELL", "quantity": 1,
                                      "order_type": "LMT", "limit_price": 1.0, "coid": "x"},
      {"order_id": "O1", "status": "filled", "filled_quantity": 1, "avg_fill_price": 1.0, "raw": {}}),
+    # Combo entry (06-04 doubled-spread fix). expiry crosses the wire as a
+    # datetime.date → isoformat string, exercising the same arg-forwarding the
+    # qualify_contract/get_option_chain cases above pin.
+    ("place_vertical_spread_and_wait", (),
+     {"expiry": _EXPIRY, "short_strike": 5400.0, "long_strike": 5350.0,
+      "right": "P", "contracts": 10, "net_credit_limit": 3.4},
+     {"status": "filled", "filled": True, "short_conid": 711, "long_conid": 712,
+      "short_fill_price": 4.2, "long_fill_price": 0.7, "net_credit": 3500.0,
+      "order_id": "O1", "raw": {}}),
+    ("place_vertical_spread", (),
+     {"expiry": _EXPIRY, "short_strike": 5400.0, "long_strike": 5350.0,
+      "right": "P", "contracts": 10, "net_credit_limit": 3.4},
+     {"order_id": "O1", "order_status": "submitted"}),
+    ("place_iron_condor", (),
+     {"expiry": _EXPIRY, "short_call_strike": 5500.0, "long_call_strike": 5550.0,
+      "short_put_strike": 5400.0, "long_put_strike": 5350.0, "contracts": 10,
+      "net_credit_limit": 6.5},
+     {"order_id": "O1", "order_status": "submitted"}),
     ("cancel_order", ("O1",), {}, True),
     # operator override — returns seconds that were left on the penalty box
     ("clear_rate_penalty", (), {}, 0.0),

@@ -290,9 +290,9 @@ class BrandonHydraStrategy(HydraStrategy):
     # Strike adjuster — applied just before order placement (live + dry)
     # ------------------------------------------------------------------
 
-    def _execute_entry(self, entry) -> bool:
+    def _execute_entry(self, entry, credit_estimates=None) -> bool:
         self._brandon_apply_strike_adjuster(entry)
-        return super()._execute_entry(entry)
+        return super()._execute_entry(entry, credit_estimates=credit_estimates)
 
     def _simulate_entry(self, entry) -> bool:
         self._brandon_apply_strike_adjuster(entry)

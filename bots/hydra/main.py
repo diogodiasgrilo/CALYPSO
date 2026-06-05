@@ -232,7 +232,14 @@ def _build_broker():
     """
     broker_url = os.environ.get("CALYPSO_BROKER_URL")
     if broker_url:
-        return BrokerClient(broker_url)
+        # B3a — HTTP timeout must comfortably exceed the combo's server-side
+        # work: submit + COMBO_FILL_TIMEOUT_S (30s) poll + a post-fill
+        # get_positions (paginated, rate-gated). 50s leaves real margin so a
+        # late combo fill at the broker is NOT misreported as a client-side
+        # BrokerError (which would orphan an untracked, unstopped live spread).
+        # The strategy never blocks the trading loop on this — the combo call
+        # runs inside a single entry attempt with its own poll deadline.
+        return BrokerClient(broker_url, timeout=50.0)
     return IBClient(IBConfig(credentials=load_credentials("paper")))
 
 

@@ -36,6 +36,49 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2.0.0-rc.1 defined-risk COMBO entry (2026-06-05): iron-condor entries now go
+  in as defined-risk BAG vertical-spread COMBOS, not 4 legged-in single-leg
+  orders. On IBKR a standalone SHORT leg is rejected as naked at order-check
+  ("EQUITY WITH LOAN VALUE [~1M] MUST EXCEED THE INITIAL MARGIN") and the
+  entry-retry orphaned a doubled spread (06-04). A combo nets the protective
+  long at order-check time (spread margin ~$5k) and fills atomically on the
+  complex book. `IBClient.place_vertical_spread_and_wait` is the entry
+  primitive (submit + poll-to-fill); `_execute_entry` places one combo per
+  active side. Hardening from the adversarial review:
+  • B1 (CRITICAL): net_credit reads per-share `avgPrice`, NOT per-contract
+    `avgCost` (≈100× larger) — avgCost would have overstated the stop level
+    100× so it never triggers → ride to max loss. `_normalize_position_dict`
+    now surfaces `avg_price`. A positivity guard falls back to the MKT-011
+    estimate if a filled combo's per-leg diff comes out ≤ 0.
+  • B2: HYDRA's one-sided paths (`_execute_put_spread_only`/
+    `_execute_call_spread_only` — MKT-011 put-only, MKT-040/035/Downday/Upday
+    call-only) now delegate to `_execute_entry` (one combo), so NO standalone
+    single-leg short remains on any live entry path (variant C reaches these).
+  • B3: combo HTTP timeout raised to 50s (> poll 20s + post-fill get_positions)
+    so a late broker fill isn't misreported as BrokerError; a timed_out combo
+    is CANCELLED; a BrokerError reconciles against get_positions and ADOPTS
+    live legs instead of orphaning them.
+  • B4: combo limit pricing is threaded from the MKT-011 gate (no re-estimate),
+    aborts the side if no positive estimate (no $0.05-floor dump), and is
+    marketability-aware (prices at/below short_bid − long_ask so narrow spreads
+    actually cross). Tests: tests/test_combo_entry.py (26), test_aud5_fixes.py
+    one-sided combo updates, test_broker_session_service.py combo allowlist.
+  Second adversarial-review fixes (2026-06-05):
+  • FIX 1 (CRITICAL): BrandonHydraStrategy._execute_entry override was still
+    2-arg and raised TypeError on the new credit_estimates kwarg → ZERO entries
+    on variant C (live outage). Now 3-arg, forwards credit_estimates to super.
+  • FIX 3: _reconcile_combo_at_broker now fails closed on a netted/partial/
+    wrong residual — requires short qty<0, long qty>0, |qty|==contracts on BOTH
+    legs — and applies the B1 positivity fallback (MKT-011 est_per_share threaded
+    in) instead of adopting a bogus/non-positive credit.
+  • FIX 4: the net-bid floor-clamp is gone — when short_bid−long_ask collapses
+    to/below the $0.05 floor the side ABORTS (fail closed) rather than dumping
+    the spread at the floor; the floor-clamp is reserved for the net_bid-
+    unavailable (mid-only) path.
+  • FIX 5: COMBO_FILL_TIMEOUT_S 20s→30s (slow 0DTE/narrow combos fill at 18–25s;
+    still < the 50s HTTP timeout), and a clean timed_out RETURN now also runs the
+    get_positions reconcile (not just a raised exception), so a fill in the
+    cancel/fill race window is adopted, not orphaned.
 - 2.0.0-rc.1 post-AUD5 go-live hardening (2026-06-03 → 06-04): the first real
   live-paper fills exposed a cluster of IBKR-path bugs the dry-run masked.
   • Phantom daily-summary (`4dd0a41`): the bot booted after the open into stale

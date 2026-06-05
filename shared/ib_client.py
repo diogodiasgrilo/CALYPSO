@@ -233,7 +233,8 @@ def _normalize_position_dict(raw_position: dict) -> dict:
           asset_type: str ("OPT" / "STK" / "IND" / "BAG" / "FUT" / "")
           quantity: int (signed — negative means short)
           side: "LONG" | "SHORT" | "FLAT"
-          avg_cost: Optional[float]
+          avg_cost: Optional[float]   # IBKR avgCost — PER-CONTRACT (×100)
+          avg_price: Optional[float]  # IBKR avgPrice — PER-SHARE cost basis
           market_price: Optional[float]
           market_value: Optional[float]
           unrealized_pnl: Optional[float]
@@ -316,7 +317,14 @@ def _normalize_position_dict(raw_position: dict) -> dict:
         "asset_type": (raw_position.get("assetClass") or "").upper(),
         "quantity": quantity,
         "side": side,
+        # avgCost is PER-CONTRACT (×100 the per-share price): a leg filled at
+        # $2.35/share reports avgCost≈246.2 (incl. commission). avgPrice is the
+        # PER-SHARE cost basis (≈2.46). The combo net-credit math MUST use the
+        # per-share `avg_price`, NOT `avg_cost` — reading avg_cost overstates the
+        # credit (and thus the stop level) by 100×. Both are surfaced; callers
+        # pick the right one for their unit convention.
         "avg_cost": _to_float_or_none("avgCost"),
+        "avg_price": _to_float_or_none("avgPrice"),
         "market_price": _to_float_or_none("mktPrice"),
         "market_value": _to_float_or_none("mktValue"),
         "unrealized_pnl": _to_float_or_none("unrealizedPnl"),
@@ -2981,6 +2989,403 @@ class IBClient:
         )
 
         return self._submit_order(order, answers=answers)
+
+    def place_vertical_spread_and_wait(
+        self,
+        *,
+        expiry,
+        short_strike: float,
+        long_strike: float,
+        right: str,                       # 'C' or 'P'
+        contracts: int,
+        net_credit_limit: float,          # PER-SPREAD, PER-SHARE credit (e.g. 1.25)
+        action: str = "SELL",
+        timeout_seconds: float = _DEFAULT_FILL_TIMEOUT_S,
+        poll_interval_s: float = _DEFAULT_FILL_POLL_INTERVAL_S,
+        tif: str = "DAY",
+        coid: Optional[str] = None,
+        answers: Optional[dict] = None,
+        symbol: str = "SPX",
+        trading_class: str = "SPXW",
+        estimated_credit_per_share: Optional[float] = None,
+    ) -> dict:
+        """Place a 2-leg vertical spread as a defined-risk BAG combo and poll
+        until it reaches a terminal state or times out.
+
+        This is the fill-waiting counterpart of :meth:`place_vertical_spread`
+        (which only SUBMITS). It is the entry primitive for HYDRA's combo
+        entry path: placing each side of an iron condor as ONE defined-risk
+        combo so IBKR nets the protective long leg at order-check time and
+        charges *spread* margin (~$5k) rather than rejecting the standalone
+        short as naked (the ~$1M EQUITY-WITH-LOAN reject behind the 06-04
+        doubled-spread incident).
+
+        Atomic fill / no-naked-window: a combo on the CP API fills on the
+        complex (BAG) book — both legs fill together or neither does — so
+        there is NO partial-fill window that leaves a naked short. (ibind's
+        ``OrderRequest`` in the pinned version does NOT expose an
+        ``allOrNone`` ticket field, so we rely on the inherent atomicity of
+        the BAG book rather than setting that flag; if a future ibind adds
+        the field, set it on the combo for belt-and-braces enforcement.)
+        Therefore, on a non-fill we return ``filled=False`` and the caller
+        has nothing to unwind.
+
+        Args:
+            expiry: option expiry. Accepts a ``datetime.date`` OR an ISO
+                ``YYYY-MM-DD`` / compact ``YYYYMMDD`` string — over the
+                calypso-broker RPC wire a ``date`` is JSON-serialized to its
+                isoformat string, so this method (like qualify_contract) must
+                accept either. ``place_vertical_spread`` → ``qualify_contract``
+                already normalizes via ``_coerce_expiry``; we coerce here too
+                so our own ``get_positions``-match leg resolution uses a
+                ``date``.
+            short_strike, long_strike: the short (credit) and long (hedge)
+                strikes of the vertical.
+            right: 'C' (call spread) or 'P' (put spread).
+            contracts: number of spreads (not legs).
+            net_credit_limit: PER-SPREAD, PER-SHARE credit limit (e.g. 1.25
+                for $125/spread). Passed straight through to
+                ``place_vertical_spread`` which rounds it to the 0.05 combo
+                tick and uses it as the combo limit price. NOT a dollar total.
+            action: 'SELL' to open a short vertical (default), 'BUY' to close.
+            timeout_seconds / poll_interval_s: poll mechanics, modeled on
+                ``place_and_wait_for_fill``. The caller (in broker mode) must
+                keep ``timeout_seconds`` + submit + post-fill get_positions
+                inside the BrokerClient HTTP timeout, else a late fill at the
+                broker raises BrokerError client-side and orphans the combo
+                (B3 — _execute_entry reconciles against get_positions to adopt
+                such a fill rather than leave it unstopped).
+            tif, coid, answers, symbol, trading_class: as
+                ``place_vertical_spread``.
+            estimated_credit_per_share: the MKT-011-validated mid net credit
+                for this side, PER SHARE (e.g. 1.25). Used ONLY as the
+                fail-safe fallback when the authoritative per-leg fill diff
+                comes out non-positive (a SELL combo can never truly fill for
+                a non-positive credit, so a <=0 here means the avgPrice read
+                was wrong/missing — we book the validated estimate rather than
+                a bogus stop input). Not used on the happy path.
+
+        Returns a normalized dict:
+            {
+              status: terminal status string ("filled"/"cancelled"/...
+                       /"timed_out"),
+              filled: bool (True iff status == "filled"),
+              short_conid: Optional[int],
+              long_conid: Optional[int],
+              short_fill_price: Optional[float],  # per-share, from avgPrice
+              long_fill_price: Optional[float],   # per-share, from avgPrice
+              net_credit: float,   # actual filled net credit in DOLLARS,
+                                   # positive = credit. = (short_avgPrice -
+                                   # long_avgPrice) * 100 * contracts. avgPrice
+                                   # is the PER-SHARE cost basis; reading
+                                   # avgCost (per-CONTRACT, ×100) would
+                                   # overstate this 100×. Falls back to the
+                                   # combo avg fill price × 100 × contracts
+                                   # when per-leg avgPrice is unavailable, and
+                                   # to estimated_credit_per_share × 100 ×
+                                   # contracts if BOTH come out non-positive.
+              order_id: Optional[str],
+              raw: dict,           # last order-status / place response
+            }
+
+        On a `timed_out` combo we CANCEL the working order before returning
+        (B3 — mirrors the single-leg "caller cancels on timeout" contract) so
+        a fill seconds after the poll deadline cannot leave an untracked live
+        spread. Fail-closed: a rejected/timed-out combo returns filled=False
+        with the terminal status; the caller treats that as an entry failure.
+        There is no naked leg to clean up (see atomic-fill note above).
+        """
+        if right not in ("C", "P"):
+            raise IBClientError(f"right must be 'C' or 'P', got {right!r}")
+        if contracts <= 0:
+            raise IBClientError(f"contracts must be positive, got {contracts}")
+
+        # Accept an ISO string over the RPC wire (#4) — normalize once so our
+        # own qualify_contract leg-resolution below uses a date. place_vertical_
+        # spread re-coerces internally, so passing the date through is fine.
+        expiry = _coerce_expiry(expiry)
+
+        # 1. SUBMIT the combo (place_vertical_spread resolves both leg conids,
+        #    builds the BAG conidex, rounds the price, ensures a cOID).
+        place_resp = self.place_vertical_spread(
+            expiry=expiry,
+            short_strike=short_strike,
+            long_strike=long_strike,
+            right=right,
+            contracts=contracts,
+            net_credit_limit=net_credit_limit,
+            action=action,
+            tif=tif,
+            coid=coid,
+            symbol=symbol,
+            trading_class=trading_class,
+            answers=answers,
+        )
+
+        order_id = place_resp.get("order_id") or place_resp.get("id")
+        if not order_id:
+            raise IBClientError(
+                f"place_vertical_spread returned no order_id: {place_resp!r}"
+            )
+        order_id = str(order_id)
+
+        # 2. Poll for terminal state. Modeled EXACTLY on
+        #    place_and_wait_for_fill: same terminal-status set, same
+        #    `order_status` (place-resp) vs `status` (live-order) precedence
+        #    (P7-audit C3), same "order purged after fill" + CircuitBreakerOpen
+        #    handling, same instant-terminal short-circuit.
+        initial_status = (
+            place_resp.get("order_status")
+            or place_resp.get("status")
+            or ""
+        ).lower()
+        if initial_status in _TERMINAL_ORDER_STATUSES:
+            fill_raw = place_resp
+            if initial_status == "filled":
+                try:
+                    status_resp = self.get_order_status(order_id)
+                    if status_resp:
+                        fill_raw = status_resp
+                except IBClientError:
+                    pass  # purged post-fill — fall back to place_resp
+            return self._build_combo_fill_result(
+                order_id=order_id, status=initial_status, raw=fill_raw,
+                expiry=expiry, short_strike=short_strike,
+                long_strike=long_strike, right=right, contracts=contracts,
+                symbol=symbol, trading_class=trading_class,
+                estimated_credit_per_share=estimated_credit_per_share,
+            )
+
+        deadline = time.monotonic() + timeout_seconds
+        last_status_resp: dict = place_resp
+        terminal_status: Optional[str] = None
+        while time.monotonic() < deadline:
+            try:
+                status_resp = self.get_order_status(order_id)
+            except IBClientError as exc:
+                # IBKR's misuse of 503 for "not found" = order purged after a
+                # terminal state (same pattern place_and_wait_for_fill handles).
+                msg = str(exc).lower()
+                if any(p in msg for p in ("is not found", "no longer found")):
+                    terminal_status = "cancelled"
+                    break
+                raise
+            except CircuitBreakerOpen as exc:
+                # Orders breaker opened mid-poll — order state unknown; surface
+                # as timed_out (NOT filled) so the caller fails closed. A combo
+                # is atomic, so an unconfirmed order is either fully filled or
+                # not at all; treating it as not-filled is the safe default
+                # (the caller will see no *_uic set and skip the side).
+                logger.error(
+                    "place_vertical_spread_and_wait: orders breaker OPEN during "
+                    "status poll for %s (%s) — surfacing as timed_out",
+                    order_id, exc,
+                )
+                terminal_status = "timed_out"
+                break
+
+            last_status_resp = status_resp or {}
+            status = (
+                last_status_resp.get("status")
+                or last_status_resp.get("order_status")
+                or ""
+            ).lower()
+            if status in _TERMINAL_ORDER_STATUSES:
+                terminal_status = status
+                break
+            time.sleep(poll_interval_s)
+
+        if terminal_status is None:
+            terminal_status = "timed_out"
+
+        # B3b — a timed_out combo may still be WORKING in the market and could
+        # fill seconds after the poll deadline, leaving an untracked + unstopped
+        # live spread. Cancel it before returning filled=False (mirrors the
+        # single-leg "caller cancels on timeout" contract). cancel_order is
+        # idempotent on an already-terminal order (returns True), so a combo
+        # that filled in the gap is harmless to "cancel". If the cancel itself
+        # FAILS (breaker open / transient), the order MAY remain working — the
+        # caller's get_positions reconcile (B3c) is the backstop that adopts it.
+        if terminal_status == "timed_out":
+            try:
+                cancelled = self.cancel_order(order_id)
+                logger.warning(
+                    "place_vertical_spread_and_wait: combo %s timed out — "
+                    "cancel_order returned %s", order_id, cancelled,
+                )
+            except Exception as exc:  # noqa: BLE001 — cancel best-effort
+                logger.error(
+                    "place_vertical_spread_and_wait: combo %s timed out and "
+                    "cancel raised (%s) — order MAY still be working; caller "
+                    "must reconcile against get_positions", order_id, exc,
+                )
+
+        return self._build_combo_fill_result(
+            order_id=order_id, status=terminal_status, raw=last_status_resp,
+            expiry=expiry, short_strike=short_strike, long_strike=long_strike,
+            right=right, contracts=contracts, symbol=symbol,
+            trading_class=trading_class,
+            estimated_credit_per_share=estimated_credit_per_share,
+        )
+
+    def _build_combo_fill_result(
+        self,
+        *,
+        order_id: str,
+        status: str,
+        raw: dict,
+        expiry,
+        short_strike: float,
+        long_strike: float,
+        right: str,
+        contracts: int,
+        symbol: str,
+        trading_class: str,
+        estimated_credit_per_share: Optional[float] = None,
+    ) -> dict:
+        """Build the normalized result dict for place_vertical_spread_and_wait.
+
+        On a fill, resolves the two leg conids (same qualify_contract call the
+        combo used — cached, so no extra network round-trip) and reads each
+        leg's PER-SHARE fill price from the live position's ``avg_price`` (the
+        IBKR ``avgPrice`` field normalized by ``_normalize_position_dict``).
+
+        CRITICAL UNIT NOTE (B1): we use ``avg_price`` (per-share), NOT
+        ``avg_cost``. IBKR's ``avgCost`` is PER-CONTRACT (≈100× the per-share
+        price): a leg filled at $2.35/share reports avgCost≈246.2 while
+        avgPrice≈2.46. Reading avgCost here would overstate net_credit (and the
+        downstream stop level) by 100×, so the stop would never trigger and the
+        position would ride to max loss. ``net_credit`` is computed in DOLLARS
+        as (short_avgPrice − long_avgPrice) × 100 × contracts, matching the
+        per-leg ``credit``/``debit`` dollar convention the entry code expects
+        (entry.call_spread_credit is dollars, e.g. $500).
+
+        avgPrice carries the cost basis INCL. commission (e.g. $2.46 vs the
+        $2.35 raw fill) — that's the realized credit we want in the stop math.
+        For a SELL spread short_avgPrice (premium received) − long_avgPrice
+        (premium paid) is the net credit, positive. A non-positive result on a
+        FILLED combo is impossible economically → indicates a bad/missing
+        avgPrice read; we log an ERROR and fall back to the combo avg fill
+        price, then to the MKT-011 estimated credit, rather than booking a
+        non-positive credit into the stop math.
+
+        Non-fill → filled=False, conids/prices None, net_credit 0.0.
+        """
+        filled = (str(status).strip().lower() == "filled")
+        result = {
+            "status": status,
+            "filled": filled,
+            "short_conid": None,
+            "long_conid": None,
+            "short_fill_price": None,
+            "long_fill_price": None,
+            "net_credit": 0.0,
+            "order_id": order_id,
+            "raw": raw,
+        }
+        if not filled:
+            return result
+
+        # Resolve the two leg conids (cached from the place_vertical_spread
+        # call → no extra API hit on the happy path).
+        try:
+            short_conid = self.qualify_contract(
+                symbol, expiry, short_strike, right, trading_class
+            )
+            long_conid = self.qualify_contract(
+                symbol, expiry, long_strike, right, trading_class
+            )
+        except Exception as exc:  # noqa: BLE001 — conid resolve is best-effort
+            logger.warning(
+                "combo fill %s: could not resolve leg conids (%s); "
+                "falling back to combo avg-price for net_credit", order_id, exc,
+            )
+            short_conid = long_conid = None
+
+        result["short_conid"] = short_conid
+        result["long_conid"] = long_conid
+
+        # Per-leg PER-SHARE fill prices from the live positions' avg_price
+        # (IBKR avgPrice). NOT avg_cost — see CRITICAL UNIT NOTE above.
+        short_price: Optional[float] = None
+        long_price: Optional[float] = None
+        if short_conid is not None and long_conid is not None:
+            try:
+                price_by_conid: dict[int, float] = {}
+                for raw_pos in (self.get_positions() or []):
+                    try:
+                        norm = _normalize_position_dict(raw_pos)
+                    except ValueError:
+                        continue
+                    cid = norm.get("instrument_id")
+                    px = norm.get("avg_price")
+                    if cid is not None and px is not None:
+                        price_by_conid[int(cid)] = float(px)
+                short_price = price_by_conid.get(int(short_conid))
+                long_price = price_by_conid.get(int(long_conid))
+            except Exception as exc:  # noqa: BLE001 — position read is best-effort
+                logger.warning(
+                    "combo fill %s: per-leg price lookup failed (%s); "
+                    "falling back to combo avg-price for net_credit",
+                    order_id, exc,
+                )
+
+        result["short_fill_price"] = short_price
+        result["long_fill_price"] = long_price
+
+        # net_credit PER SHARE, positive = credit. Prefer the authoritative
+        # per-leg avgPrice diff; fall back to the combo order's average fill
+        # price (already the net credit PER SHARE for a SELL combo) when a leg
+        # price is unavailable.
+        net_per_share: Optional[float] = None
+        net_source = ""
+        if short_price is not None and long_price is not None:
+            net_per_share = short_price - long_price
+            net_source = "per-leg avgPrice"
+        else:
+            combo_avg = (
+                raw.get("avg_fill_price")
+                or raw.get("avgPrice")
+                or raw.get("average_price")
+                or raw.get("avgFillPrice")
+            )
+            try:
+                if combo_avg is not None and combo_avg != "":
+                    net_per_share = float(combo_avg)
+                    net_source = "combo avg fill price"
+            except (TypeError, ValueError):
+                net_per_share = None
+            logger.warning(
+                "combo fill %s: using combo avg fill price for net_credit "
+                "(per-leg avgPrice unavailable): %r", order_id, combo_avg,
+            )
+
+        # B1 positivity guard: a FILLED SELL combo cannot economically yield a
+        # non-positive credit. If the avgPrice diff (or the combo avg) is None
+        # or <= 0, the price read was wrong/missing — fall back to the
+        # MKT-011-validated estimate so the stop math gets a sane positive
+        # credit rather than 0/negative (which would make the stop never fire).
+        if net_per_share is None or net_per_share <= 0.0:
+            fallback = estimated_credit_per_share
+            if fallback is not None and fallback > 0.0:
+                logger.error(
+                    "combo fill %s: net credit from %s was non-positive "
+                    "(%r/share) — falling back to MKT-011 estimate %.4f/share "
+                    "for the stop math (avgPrice read likely missing/stale)",
+                    order_id, net_source or "broker", net_per_share, fallback,
+                )
+                net_per_share = float(fallback)
+            else:
+                logger.error(
+                    "combo fill %s: net credit non-positive (%r/share) AND no "
+                    "usable MKT-011 estimate (%r) — booking 0.0; stop math will "
+                    "be unreliable for this side, operator review needed",
+                    order_id, net_per_share, estimated_credit_per_share,
+                )
+                net_per_share = 0.0
+
+        result["net_credit"] = net_per_share * 100.0 * contracts
+        return result
 
     def place_order(
         self,
