@@ -133,3 +133,31 @@ class StrangleStrategy(HydraStrategy):
             f"total ${entry.total_credit:.2f}"
         )
         return True
+
+    def _calculate_stop_levels_hydra(self, entry: HydraIronCondorEntry) -> None:
+        """Strangle stop policy: each naked short stops on ITS OWN credit + buffer.
+
+        This is the key exit difference from the iron-condor base, which stops
+        both sides on the *total* credit (the IC is managed as one unit). A
+        strangle's two legs are independent naked positions, so the call stops
+        when buying it back costs more than the call premium + buffer, and the
+        put likewise on its own premium. Reuses the base buffer convention
+        (`call_stop_buffer`/`put_stop_buffer` × contracts, regime-adjusted
+        upstream) and the per-side MIN_STOP_LEVEL floor — only the credit basis
+        differs (per-side, not total).
+        """
+        n = self.contracts_per_entry
+        min_stop_level = 50.0 * n
+        call_buf = self.call_stop_buffer * n
+        put_buf = self.put_stop_buffer * n
+
+        call_credit = max(entry.call_spread_credit, min_stop_level)
+        put_credit = max(entry.put_spread_credit, min_stop_level)
+        entry.call_side_stop = call_credit + call_buf
+        entry.put_side_stop = put_credit + put_buf
+
+        logger.info(
+            f"STRANGLE stops (per-side): call ${entry.call_side_stop:.2f} "
+            f"(credit ${call_credit:.2f} + buf ${call_buf:.2f}), put "
+            f"${entry.put_side_stop:.2f} (credit ${put_credit:.2f} + buf ${put_buf:.2f})"
+        )

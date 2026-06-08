@@ -116,3 +116,43 @@ class TestSimulateEntry:
         s = self._strat()
         s._get_todays_expiry = lambda: None
         assert s._simulate_entry(HydraIronCondorEntry(entry_number=1)) is False
+
+
+class TestStopLevels:
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s.contracts_per_entry = 1
+        s.call_stop_buffer = 75.0
+        s.put_stop_buffer = 175.0
+        return s
+
+    def test_per_side_credit_basis(self):
+        # Each naked leg stops on ITS OWN credit + buffer — NOT total credit.
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.call_spread_credit = 150.0
+        e.put_spread_credit = 200.0
+        s._calculate_stop_levels_hydra(e)
+        assert e.call_side_stop == 150.0 + 75.0   # per-side call
+        assert e.put_side_stop == 200.0 + 175.0   # per-side put
+        # Contrast: the IC base would stop BOTH sides on total credit (350 + buf).
+        # The strangle deliberately does not — proving the per-strategy exit policy.
+
+    def test_min_stop_floor_applies_per_side(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.call_spread_credit = 10.0   # below the 50 floor
+        e.put_spread_credit = 200.0
+        s._calculate_stop_levels_hydra(e)
+        assert e.call_side_stop == 50.0 + 75.0    # floored to 50
+        assert e.put_side_stop == 200.0 + 175.0
+
+    def test_contracts_scale_buffer_and_floor(self):
+        s = self._strat()
+        s.contracts_per_entry = 2
+        e = HydraIronCondorEntry(entry_number=1)
+        e.call_spread_credit = 300.0
+        e.put_spread_credit = 400.0
+        s._calculate_stop_levels_hydra(e)
+        assert e.call_side_stop == 300.0 + 75.0 * 2
+        assert e.put_side_stop == 400.0 + 175.0 * 2
