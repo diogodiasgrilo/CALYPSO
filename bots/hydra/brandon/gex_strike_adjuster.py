@@ -70,10 +70,13 @@ class AdjusterConfig:
     max_shift_pts: float = 25.0
     shift_buffer_pts: float = 5.0
     accel_peak_locality_pts: float = 25.0
+    # Strike-grid increment for snapping a shifted strike (modularity-audit
+    # item 2). Default 5.0 = SPX; a different-increment underlying passes its own.
+    strike_increment: float = SPX_STRIKE_INCREMENT
 
 
-def _snap(strike: float) -> float:
-    return round(strike / SPX_STRIKE_INCREMENT) * SPX_STRIKE_INCREMENT
+def _snap(strike: float, increment: float = SPX_STRIKE_INCREMENT) -> float:
+    return round(strike / increment) * increment
 
 
 def adjust_call_strike(
@@ -110,7 +113,7 @@ def adjust_call_strike(
     walls_above_proposed = [c for c in decel_walls if c.strike_low > proposed_short]
     if walls_above_proposed:
         wall = min(walls_above_proposed, key=lambda c: c.strike_low)
-        target = _snap(wall.strike_high + config.shift_buffer_pts)
+        target = _snap(wall.strike_high + config.shift_buffer_pts, config.strike_increment)
         if target - proposed_short <= config.max_shift_pts and target > proposed_short:
             return AdjustResult(
                 AdjustAction.SHIFT,
@@ -155,7 +158,7 @@ def adjust_put_strike(
     walls_below_proposed = [c for c in decel_walls if c.strike_high < proposed_short]
     if walls_below_proposed:
         wall = max(walls_below_proposed, key=lambda c: c.strike_high)
-        target = _snap(wall.strike_low - config.shift_buffer_pts)
+        target = _snap(wall.strike_low - config.shift_buffer_pts, config.strike_increment)
         if proposed_short - target <= config.max_shift_pts and target < proposed_short:
             return AdjustResult(
                 AdjustAction.SHIFT,

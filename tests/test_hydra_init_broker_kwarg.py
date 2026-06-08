@@ -323,12 +323,16 @@ class TestReadOptionChain:
         fake_broker.qualify_option_strikes.return_value = {(6735.0, "C"): 1}
         s = self._make_bare_strategy(broker=fake_broker)
         s._read_option_chain("2026-05-21", [6735.0])
+        # Item 2 commit 9: the caller now threads trading_class + exchange
+        # (class defaults SPXW/CBOE on a bare strategy).
         fake_broker.get_option_chain.assert_called_once_with(
-            "SPX", date(2026, 5, 21)
+            "SPX", date(2026, 5, 21), trading_class="SPXW", exchange="CBOE"
         )
         qual_kwargs = fake_broker.qualify_option_strikes.call_args.kwargs
         assert qual_kwargs["symbol"] == "SPX"
         assert qual_kwargs["expiry"] == date(2026, 5, 21)
+        assert qual_kwargs["trading_class"] == "SPXW"
+        assert qual_kwargs["exchange"] == "CBOE"
 
     def test_ib_path_snaps_candidate_to_nearest_real_strike(self):
         """A 5pt-step candidate that isn't a listed strike snaps to the
@@ -2606,7 +2610,8 @@ class TestReadIndexPrice:
         b.get_quote.return_value = {"mid": 6800.5, "last": 6800.0, "availability": "R"}
         s = self._make(broker=b)
         assert s._read_index_price("SPX") == (6800.5, "R")
-        b.qualify_contract.assert_called_once_with("SPX", sec_type="IND")
+        # G5: index read now threads self.exchange (class-default CBOE here).
+        b.qualify_contract.assert_called_once_with("SPX", sec_type="IND", exchange="CBOE")
         b.get_quote.assert_called_once_with(416904)
 
     def test_ib_spx_falls_back_to_last(self):
@@ -2624,7 +2629,7 @@ class TestReadIndexPrice:
         b.get_quote.return_value = {"mid": None, "last": None, "mark": 18.4, "availability": "R"}
         s = self._make(broker=b)
         assert s._read_index_price("VIX") == (18.4, "R")
-        b.qualify_contract.assert_called_once_with("VIX", sec_type="IND")
+        b.qualify_contract.assert_called_once_with("VIX", sec_type="IND", exchange="CBOE")
 
     def test_exception_returns_none_tuple(self):
         b = MagicMock()
@@ -2935,8 +2940,9 @@ class TestExecuteStopLossClosesOnIBKR:
     gates on `if uic:` (the conid)."""
 
     def _entry(self):
-        e = HydraIronCondorEntry.__new__(HydraIronCondorEntry)
-        e.entry_number = 1
+        # Construct via __init__ (not __new__) so the `legs` LegSet is populated
+        # — the flat *_uic / *_strike attrs set below are property bridges over it.
+        e = HydraIronCondorEntry(entry_number=1)
         e.contracts = 1
         e.call_side_stopped = False
         e.put_side_stopped = False

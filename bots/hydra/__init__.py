@@ -36,6 +36,31 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2.0.0-rc.1 modularity refactor — instrument parameterization (2026-06-08, NO
+  behavior change): the hardcoded SPX / VIX / SPXW / CBOE / 5pt-grid / 0DTE-expiry
+  literals are now config-driven via _load_instrument_params (underlying_symbol /
+  volatility_symbol / trading_class / exchange / strike_increment / target_dte),
+  each defaulting to today's literal so an absent config is byte-identical. A
+  startup assertion (ConfigError, subclass of ValueError) fails fast on an
+  unset/invalid value; class-level fallbacks on MEICStrategy keep __new__-built
+  objects safe. Threaded through: the option-chain path (qualify_contract /
+  qualify_option_strikes / get_option_chain gained an `exchange` param + the live
+  caller passes trading_class/exchange), the SPX + VIX index reads, the strike grid
+  (HydraStrategy._snap_to_grid + the MKT-020/022 + MKT-040 step sites + Brandon's
+  AdjusterConfig.strike_increment), and _get_todays_expiry (target_dte, weekday-aware;
+  exchange-holiday-aware expiry deferred). Item 2 of docs/MODULARITY_AUDIT.md /
+  docs/PR_SCOPE_LEG_INSTRUMENT.md. +29 tests (test_instrument_params); full suite
+  1189 passing.
+- 2.0.0-rc.1 modularity refactor — Leg/LegSet substrate (2026-06-08, NO behavior
+  change): IronCondorEntry's 24 flat leg fields (short_call_strike … *_mid_at_fill)
+  are now backward-compat @property bridges over a `legs` dict of first-class `Leg`
+  objects (bots/hydra/leg.py + bind_leg_bridge). Reads, writes, and dynamic
+  getattr/setattr all resolve to the legs; the on-disk state schema, serialization,
+  and all ~1,011 flat leg references are unchanged. Substrate for future
+  non-iron-condor strategies (strangle/butterfly/ratio/…) — item 1 of
+  docs/MODULARITY_AUDIT.md / docs/PR_SCOPE_LEG_INSTRUMENT.md. Pinned by 79 new
+  tests (test_leg, test_state_serialization_roundtrip, test_entry_leg_accessors);
+  full suite 1160 passing.
 - 2.0.0-rc.1 post-AUD5 go-live hardening (2026-06-03 → 06-04): the first real
   live-paper fills exposed a cluster of IBKR-path bugs the dry-run masked.
   • Phantom daily-summary (`4dd0a41`): the bot booted after the open into stale

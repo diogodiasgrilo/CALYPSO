@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from bots.hydra.order_types import BuySell
+from bots.hydra.leg import LEG_NAMES
 from shared.ib_client import (
     IBClient, AmbiguousOrderError, RatePenaltyError, _normalize_position_dict,
 )
@@ -877,7 +878,7 @@ class HydraStrategy(MEICStrategy):
             vix: Current VIX level
             side: "call" or "put" — determines which floor to use
         """
-        spread_width = round(vix * self.spread_vix_multiplier / 5) * 5
+        spread_width = self._snap_to_grid(vix * self.spread_vix_multiplier)
         if side == "put":
             spread_width = max(self.put_min_spread_width, spread_width)
         else:
@@ -888,6 +889,15 @@ class HydraStrategy(MEICStrategy):
     # =========================================================================
     # OVERRIDE: Strike calculation with wider starting OTM (MKT-024)
     # =========================================================================
+
+    def _snap_to_grid(self, value: float) -> float:
+        """Round to the nearest strike-grid increment (MKT-024/027 candidate
+        generation). Was a hardcoded 5pt grid; now self.strike_increment, so a
+        different-increment underlying can be configured. With increment 5
+        (the default) this is byte-identical to the old round(x / 5) * 5.
+        """
+        inc = self.strike_increment
+        return round(value / inc) * inc
 
     def _calculate_strikes(self, entry: HydraIronCondorEntry) -> bool:
         """
@@ -921,14 +931,14 @@ class HydraStrategy(MEICStrategy):
             vix = 15.0
 
         # Round SPX to nearest 5 (SPX strikes are 5-point increments)
-        rounded_spx = round(spx / 5) * 5
+        rounded_spx = self._snap_to_grid(spx)
 
         # Same base OTM calculation as parent MEIC
         base_distance_at_vix15 = 40  # Points OTM for ~8 delta at VIX 15
         delta_adjustment = 8.0 / self.target_delta
         vix_factor = max(0.7, min(2.5, vix / 15.0))
         otm_distance = base_distance_at_vix15 * vix_factor * delta_adjustment
-        otm_distance = round(otm_distance / 5) * 5
+        otm_distance = self._snap_to_grid(otm_distance)
         otm_distance = max(25, min(120, otm_distance))
 
         # MKT-024: Apply separate multipliers for wider starting distance.
@@ -936,9 +946,9 @@ class HydraStrategy(MEICStrategy):
         # call settled at 116pt) with margin and the theoretical 8-delta
         # strike at VIX 50 (~133pt). Larger clamps just waste MKT-020/022
         # scan distance — settled strikes don't actually land further OTM.
-        call_otm = round((otm_distance * self.call_starting_otm_multiplier) / 5) * 5
+        call_otm = self._snap_to_grid(otm_distance * self.call_starting_otm_multiplier)
         call_otm = max(25, min(180, call_otm))
-        put_otm = round((otm_distance * self.put_starting_otm_multiplier) / 5) * 5
+        put_otm = self._snap_to_grid(otm_distance * self.put_starting_otm_multiplier)
         put_otm = max(25, min(180, put_otm))
 
         # MKT-027/028: Asymmetric VIX-adjusted spread widths
@@ -1534,7 +1544,7 @@ class HydraStrategy(MEICStrategy):
                     )
                 period_arg = f"{period_hours}h"
             raw_bars = self.broker.get_chart_data(
-                symbol="SPX", bar=bar_arg, period=period_arg,
+                symbol=self.underlying_symbol, bar=bar_arg, period=period_arg,
                 outside_rth=False,
             )
             if not raw_bars:
@@ -1994,7 +2004,7 @@ class HydraStrategy(MEICStrategy):
         Used by GAP-C ``_update_market_data`` and GAP-E ``_check_market_halt``.
         """
         try:
-            conid = self.broker.qualify_contract(symbol, sec_type="IND")
+            conid = self.broker.qualify_contract(symbol, sec_type="IND", exchange=self.exchange)
             q = self.broker.get_quote(conid)
             if not q:
                 return (None, None)
@@ -3771,7 +3781,10 @@ class HydraStrategy(MEICStrategy):
             return {}, {}
 
         try:
-            strike_list = self.broker.get_option_chain("SPX", expiry_date)
+            strike_list = self.broker.get_option_chain(
+                self.underlying_symbol, expiry_date,
+                trading_class=self.trading_class, exchange=self.exchange,
+            )
         except RatePenaltyError as e:
             self._alert_rate_penalty("option-chain fetch", e)
             return {}, {}
@@ -3800,9 +3813,11 @@ class HydraStrategy(MEICStrategy):
 
         try:
             conid_map = self.broker.qualify_option_strikes(
-                symbol="SPX",
+                symbol=self.underlying_symbol,
                 expiry=expiry_date,
                 strikes=sorted(snapped),
+                trading_class=self.trading_class,
+                exchange=self.exchange,
             )
         except RatePenaltyError as e:
             self._alert_rate_penalty("strike conid resolution", e)
@@ -4040,7 +4055,7 @@ class HydraStrategy(MEICStrategy):
             logger.info("MKT-020: skipped (Brandon disable_progressive_tightening=True)")
             return False
 
-        spx = round(self.current_price / 5) * 5
+        spx = self._snap_to_grid(self.current_price)
         min_otm = self.min_call_otm_distance
         min_credit = self.min_viable_credit_per_side  # In cents; VIX-regime-overridden
         spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "call")
@@ -4063,7 +4078,7 @@ class HydraStrategy(MEICStrategy):
             short_s = spx + otm
             long_s = short_s + spread_width
             candidates.append((otm, short_s, long_s))
-            otm -= 5
+            otm -= self.strike_increment
 
         if not candidates:
             return False
@@ -4288,7 +4303,7 @@ class HydraStrategy(MEICStrategy):
         if entry.call_only or entry.put_only:
             return False
 
-        spx = round(self.current_price / 5) * 5
+        spx = self._snap_to_grid(self.current_price)
         min_otm = self.min_put_otm_distance
         min_credit = self.min_viable_credit_put_side  # Put-specific; VIX-regime-overridden
         spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "put")
@@ -4311,7 +4326,7 @@ class HydraStrategy(MEICStrategy):
             short_s = spx - otm          # Put: BELOW SPX
             long_s = short_s - spread_width  # Put: FURTHER below
             candidates.append((otm, short_s, long_s))
-            otm -= 5
+            otm -= self.strike_increment
 
         if not candidates:
             return False
@@ -4707,8 +4722,8 @@ class HydraStrategy(MEICStrategy):
                 return
 
             # Calculate shadow strikes — round to nearest 5pt (SPX option increment)
-            shadow_sc = round((spx + call_otm) / 5) * 5
-            shadow_sp = round((spx - put_otm) / 5) * 5
+            shadow_sc = self._snap_to_grid(spx + call_otm)
+            shadow_sp = self._snap_to_grid(spx - put_otm)
 
             # Spread width: use current bot's VIX-adjusted width (MKT-027)
             try:
@@ -5577,9 +5592,9 @@ class HydraStrategy(MEICStrategy):
                             if current_put_otm <= min_put_floor:
                                 break  # at floor, can't tighten more
 
-                            # Tighten 5pt closer to ATM
-                            entry.short_put_strike += 5
-                            entry.long_put_strike += 5
+                            # Tighten one strike-increment closer to ATM
+                            entry.short_put_strike += self.strike_increment
+                            entry.long_put_strike += self.strike_increment
                             current_put_otm = abs(self.current_price - entry.short_put_strike)
 
                             # Re-estimate credit at new strikes
@@ -7173,9 +7188,9 @@ class HydraStrategy(MEICStrategy):
                 put_done = entry.put_side_stopped or getattr(entry, 'put_side_expired', False) or getattr(entry, 'put_side_skipped', False)
                 if call_done and put_done:
                     continue
-                has_uic = any(getattr(entry, f"{leg}_uic", 0) for leg in ("short_call", "long_call", "short_put", "long_put"))
+                has_uic = any(getattr(entry, f"{leg}_uic", 0) for leg in LEG_NAMES)
                 if has_uic:
-                    for leg in ("short_call", "long_call", "short_put", "long_put"):
+                    for leg in LEG_NAMES:
                         uic = getattr(entry, f"{leg}_uic", 0)
                         if uic:
                             uic_map.setdefault(uic, []).append((entry, leg))
@@ -7220,7 +7235,7 @@ class HydraStrategy(MEICStrategy):
         for entry in self.daily_state.active_entries:
             if entry.call_side_stopped and entry.put_side_stopped:
                 continue
-            for leg in ("short_call", "long_call", "short_put", "long_put"):
+            for leg in LEG_NAMES:
                 uic = getattr(entry, f"{leg}_uic", 0)
                 if uic:
                     uic_map.setdefault(uic, []).append((entry, leg))
@@ -10232,7 +10247,7 @@ class HydraStrategy(MEICStrategy):
         expected: Dict[Any, int] = {}
         for entry in self.daily_state.entries:
             contracts = getattr(entry, "contracts", 1) or 1
-            for leg in ("short_call", "long_call", "short_put", "long_put"):
+            for leg in LEG_NAMES:
                 uic = getattr(entry, f"{leg}_uic", None)
                 if not uic:
                     continue
@@ -10280,7 +10295,7 @@ class HydraStrategy(MEICStrategy):
             legs = [
                 (entry, leg)
                 for entry in self.daily_state.entries
-                for leg in ("short_call", "long_call", "short_put", "long_put")
+                for leg in LEG_NAMES
                 if getattr(entry, f"{leg}_uic", None) == conid
             ]
             if len(legs) != 1:
@@ -10749,7 +10764,7 @@ class HydraStrategy(MEICStrategy):
         to the legacy worthless assumption rather than crashing settlement).
         """
         try:
-            price, _avail = self._read_index_price("SPX")
+            price, _avail = self._read_index_price(self.underlying_symbol)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(f"  Settlement SPX read failed ({exc}); "
                            f"cannot verify ITM settlement, assuming worthless")
@@ -11226,7 +11241,7 @@ class HydraStrategy(MEICStrategy):
                 # Clear BOTH the uic and (legacy) position_id of every
                 # leg sitting on a settled conid.
                 for entry in self.daily_state.entries:
-                    for leg_name in ("short_call", "long_call", "short_put", "long_put"):
+                    for leg_name in LEG_NAMES:
                         uic = getattr(entry, f"{leg_name}_uic", None)
                         if uic and uic in settled_conids:
                             setattr(entry, f"{leg_name}_uic", None)

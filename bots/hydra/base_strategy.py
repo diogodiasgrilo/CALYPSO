@@ -49,6 +49,7 @@ from enum import Enum
 
 from shared.ib_client import IBClient
 from bots.hydra.order_types import BuySell, OrderType
+from bots.hydra.leg import LEG_NAMES, Leg, _new_legset, bind_leg_bridge
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_hours import get_us_market_time, is_market_open, is_early_close_day
 from shared.event_calendar import is_fomc_meeting_day, is_fomc_announcement_day
@@ -162,7 +163,8 @@ MARGIN_CHECK_ENABLED = True  # Can be disabled if the broker margin API is unava
 MARKET_HALT_CHECK_ENABLED = True  # Check for trading halts before entry
 
 # MKT-007: Strike adjustment for illiquidity
-ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS = 5  # Adjust strikes 5 points if illiquid
+# MKT-007/008 illiquidity strike step now uses self.strike_increment
+# (was a hardcoded 5pt constant — modularity-audit item 2 completion).
 MAX_STRIKE_ADJUSTMENT_ATTEMPTS = 2  # Max adjustments per side
 
 # TIME-001: Clock sync validation
@@ -295,6 +297,7 @@ class MEICState(Enum):
     HALTED = "Halted"                       # Critical error, manual intervention required
 
 
+@bind_leg_bridge
 @dataclass
 class IronCondorEntry:
     """
@@ -318,23 +321,16 @@ class IronCondorEntry:
     entry_number: int  # 1-6
     entry_time: Optional[datetime] = None
 
-    # Strikes
-    short_call_strike: float = 0.0
-    long_call_strike: float = 0.0
-    short_put_strike: float = 0.0
-    long_put_strike: float = 0.0
+    # Legs — the entry is a set of first-class Leg objects keyed by canonical
+    # name (short_call/long_call/short_put/long_put). The flat
+    # {leg}_{strike,position_id,uic,price,fill_price,mid_at_fill} attributes
+    # are backward-compat @property bridges installed by @bind_leg_bridge; they
+    # read/write legs[...]. See docs/PR_SCOPE_LEG_INSTRUMENT.md.
+    legs: Dict[str, Leg] = field(default_factory=_new_legset)
 
-    # Position IDs (from Saxo after fill)
-    short_call_position_id: Optional[str] = None
-    long_call_position_id: Optional[str] = None
-    short_put_position_id: Optional[str] = None
-    long_put_position_id: Optional[str] = None
-
-    # UICs (for price streaming)
-    short_call_uic: Optional[int] = None
-    long_call_uic: Optional[int] = None
-    short_put_uic: Optional[int] = None
-    long_put_uic: Optional[int] = None
+    # Strikes — bridge properties over legs[*].strike
+    # Position IDs (Saxo-era; None on IBKR) — bridge properties over legs[*].position_id
+    # UICs (= conid on IBKR; the F4 reconcile key) — bridge properties over legs[*].uic
 
     # Credits received
     call_spread_credit: float = 0.0  # Credit from selling call spread
@@ -349,28 +345,14 @@ class IronCondorEntry:
     actual_call_stop_debit: float = 0.0
     actual_put_stop_debit: float = 0.0
 
-    # Current option prices (for P&L / cushion calculation — updated every heartbeat)
-    short_call_price: float = 0.0
-    long_call_price: float = 0.0
-    short_put_price: float = 0.0
-    long_put_price: float = 0.0
-
-    # Fill prices at entry (option price points — multiply by 100 for dollars)
-    # Set once in _execute_entry(), corrected by _verify_entry_fill_prices()
-    short_call_fill_price: float = 0.0
-    long_call_fill_price: float = 0.0
-    short_put_fill_price: float = 0.0
-    long_put_fill_price: float = 0.0
-
-    # Per-leg MID at fill time ((bid+ask)/2 of the filling attempt), captured in
-    # _execute_entry BEFORE the monitoring *_price is overwritten with the fill.
-    # The reference for REAL entry slippage = fill - mid (the dry-run-era
-    # slippage was structurally 0 because it diffed fill against fill). 0.0 means
-    # not captured (e.g. dry-run / a leg with no quote).
-    short_call_mid_at_fill: float = 0.0
-    long_call_mid_at_fill: float = 0.0
-    short_put_mid_at_fill: float = 0.0
-    long_put_mid_at_fill: float = 0.0
+    # Current option prices (updated every heartbeat for P&L / cushion) —
+    # bridge properties over legs[*].price
+    # Fill prices at entry (option points; ×100 for dollars). Set in
+    # _execute_entry(), corrected by _verify_entry_fill_prices() — bridge
+    # properties over legs[*].fill_price.
+    # Per-leg MID at fill time ((bid+ask)/2 of the filling attempt). REAL entry
+    # slippage reference = fill - mid (0.0 = not captured, e.g. dry-run / no
+    # quote) — bridge properties over legs[*].mid_at_fill.
 
     # Status tracking
     is_complete: bool = False  # All 4 legs filled
@@ -891,6 +873,13 @@ class MarketData:
 # MAIN STRATEGY CLASS
 # =============================================================================
 
+class ConfigError(ValueError):
+    """Invalid strategy configuration (e.g. an instrument parameter is unset).
+
+    Subclasses ValueError so existing broad config-error handling still catches it.
+    """
+
+
 class MEICStrategy:
     """
     MEIC (Multiple Entry Iron Condors) Strategy Implementation.
@@ -915,6 +904,20 @@ class MEICStrategy:
     """
 
     BOT_NAME = "MEIC"
+
+    # Instrument-parameter fallbacks (modularity-audit item 2). __init__ calls
+    # _load_instrument_params() which sets INSTANCE attributes from config,
+    # shadowing these. They exist so the threaded call sites (which read
+    # self.underlying_symbol / .volatility_symbol / .trading_class / .exchange /
+    # .strike_increment / .target_dte) never AttributeError on an object built
+    # via __new__ that bypassed __init__ — a test-only construction path. Values
+    # equal today's SPX/0DTE literals, so the fallback is behavior-identical.
+    underlying_symbol = "SPX"
+    volatility_symbol = "VIX"
+    trading_class = "SPXW"
+    exchange = "CBOE"
+    strike_increment = 5
+    target_dte = 0
 
     def __init__(
         self,
@@ -989,7 +992,9 @@ class MEICStrategy:
         # / `IBClient.qualify_contract`, not these JSON-pinned IDs.
         # `underlying_symbol` is still meaningful (it's the lookup key
         # for `qualify_contract("SPX", sec_type="IND")`).
-        self.underlying_symbol = self.strategy_config.get("underlying_symbol", "SPX")
+        # Instrument + expiry parameters (modularity-audit item 2) — defaults
+        # equal today's SPX/0DTE literals, so an absent config is byte-identical.
+        self._load_instrument_params()
 
         # Entry parameters
         self._parse_entry_times()
@@ -1712,7 +1717,7 @@ class MEICStrategy:
         # Check long call strike
         original_long_call = entry.long_call_strike
         while entry.long_call_strike in occupied:
-            entry.long_call_strike += 5  # Move further OTM (up for calls)
+            entry.long_call_strike += self.strike_increment  # Move further OTM (up for calls)
         if entry.long_call_strike != original_long_call:
             logger.warning(
                 f"MKT-012: Long call {original_long_call} conflicts with existing short strike, "
@@ -1722,7 +1727,7 @@ class MEICStrategy:
         # Check long put strike
         original_long_put = entry.long_put_strike
         while entry.long_put_strike in occupied:
-            entry.long_put_strike -= 5  # Move further OTM (down for puts)
+            entry.long_put_strike -= self.strike_increment  # Move further OTM (down for puts)
         if entry.long_put_strike != original_long_put:
             logger.warning(
                 f"MKT-012: Long put {original_long_put} conflicts with existing short strike, "
@@ -1770,8 +1775,8 @@ class MEICStrategy:
         original_long_call = entry.long_call_strike
         while entry.short_call_strike and entry.short_call_strike in existing_short_calls:
             # Move both short and long call UP by 5 (further OTM)
-            entry.short_call_strike += 5
-            entry.long_call_strike += 5
+            entry.short_call_strike += self.strike_increment
+            entry.long_call_strike += self.strike_increment
         if entry.short_call_strike != original_short_call:
             logger.warning(
                 f"MKT-013: Short call {original_short_call} overlaps existing entry, "
@@ -1797,8 +1802,8 @@ class MEICStrategy:
         original_long_put = entry.long_put_strike
         while entry.short_put_strike and entry.short_put_strike in existing_short_puts:
             # Move both short and long put DOWN by 5 (further OTM)
-            entry.short_put_strike -= 5
-            entry.long_put_strike -= 5
+            entry.short_put_strike -= self.strike_increment
+            entry.long_put_strike -= self.strike_increment
         if entry.short_put_strike != original_short_put:
             logger.warning(
                 f"MKT-013: Short put {original_short_put} overlaps existing entry, "
@@ -1857,7 +1862,7 @@ class MEICStrategy:
         # Check and adjust long call strike
         original_long_call = entry.long_call_strike
         while entry.long_call_strike and entry.long_call_strike in existing_long_calls:
-            entry.long_call_strike += 5  # Move further OTM (up for calls)
+            entry.long_call_strike += self.strike_increment  # Move further OTM (up for calls)
         if entry.long_call_strike != original_long_call:
             logger.warning(
                 f"MKT-015: Long call {original_long_call} overlaps existing entry's long call, "
@@ -1873,7 +1878,7 @@ class MEICStrategy:
         # Check and adjust long put strike
         original_long_put = entry.long_put_strike
         while entry.long_put_strike and entry.long_put_strike in existing_long_puts:
-            entry.long_put_strike -= 5  # Move further OTM (down for puts)
+            entry.long_put_strike -= self.strike_increment  # Move further OTM (down for puts)
         if entry.long_put_strike != original_long_put:
             logger.warning(
                 f"MKT-015: Long put {original_long_put} overlaps existing entry's long put, "
@@ -3107,8 +3112,27 @@ class MEICStrategy:
             logger.warning(f"FIX-70: Entry price verification failed (non-critical): {e}")
 
     def _get_todays_expiry(self) -> Optional[str]:
-        """Get today's expiry date string for 0DTE options."""
-        return get_us_market_time().strftime("%Y-%m-%d")
+        """Target option expiry as a YYYY-MM-DD string.
+
+        Default (target_dte == 0) returns today's date — 0DTE, byte-identical
+        to the prior hardcoded behavior. A positive target_dte (modularity-audit
+        item 2) shifts the expiry forward by that many trading days (weekends
+        skipped), enabling non-0DTE strategies. NOTE: weekday-only — exchange
+        holidays are not yet skipped; a holiday-aware calendar is a future
+        refinement (tracked in docs/PR_SCOPE_LEG_INSTRUMENT.md). The method name
+        is retained (not _get_target_expiry) to avoid churning its 11 call sites.
+        """
+        base = get_us_market_time()
+        dte = getattr(self, "target_dte", 0)
+        if dte <= 0:
+            return base.strftime("%Y-%m-%d")
+        d = base
+        added = 0
+        while added < dte:
+            d = d + timedelta(days=1)
+            if d.weekday() < 5:  # Mon–Fri are trading days
+                added += 1
+        return d.strftime("%Y-%m-%d")
 
     def _handle_naked_short(self, naked_info: Tuple[str, str, int]):
         """
@@ -4155,7 +4179,7 @@ class MEICStrategy:
         tick does not refresh the freshness clock (DATA-001 can then trip on a
         frozen feed). See _split_index_read for the compatibility shim.
         """
-        price, spx_avail = self._split_index_read(self._read_index_price("SPX"))
+        price, spx_avail = self._split_index_read(self._read_index_price(self.underlying_symbol))
         if price:
             self.market_data.update_spx(price, availability=spx_avail)
             # #17/#18: only treat the SPX spot as current when the broker did
@@ -4168,7 +4192,7 @@ class MEICStrategy:
             if (avail[:1] if avail else None) not in ("Z", "Y", "N"):
                 self.current_price = price
 
-        vix, vix_avail = self._split_index_read(self._read_index_price("VIX"))
+        vix, vix_avail = self._split_index_read(self._read_index_price(self.volatility_symbol))
         if vix:
             self.market_data.update_vix(vix, availability=vix_avail)
             avail = vix_avail.upper() if isinstance(vix_avail, str) else None
@@ -4349,7 +4373,7 @@ class MEICStrategy:
         for entry in self.daily_state.active_entries:
             missing_legs = []
 
-            for leg_name in ["short_call", "long_call", "short_put", "long_put"]:
+            for leg_name in LEG_NAMES:
                 pos_id = getattr(entry, f"{leg_name}_position_id")
                 if pos_id and pos_id not in valid_ids:
                     missing_legs.append(leg_name)
@@ -5366,7 +5390,7 @@ class MEICStrategy:
         # Position counts
         # IBKR has no per-leg position id — count open legs by conid (*_uic).
         total_legs = sum(
-            len([1 for leg in ['short_call', 'long_call', 'short_put', 'long_put']
+            len([1 for leg in LEG_NAMES
                  if getattr(e, f'{leg}_uic')])
             for e in self.daily_state.active_entries
         )
@@ -5638,7 +5662,7 @@ class MEICStrategy:
             # during the session is exactly the degraded-feed/halt case this
             # guards. First char of 6509 in (Z=Frozen, Y=Frozen-Delayed,
             # N=Not-Subscribed) all mean "not real-time" → treat as halt.
-            price, avail = self._split_index_read(self._read_index_price("SPX"))
+            price, avail = self._split_index_read(self._read_index_price(self.underlying_symbol))
             if not price:
                 logger.warning(
                     "MKT-005: No SPX price available — possible market halt"
@@ -5691,7 +5715,7 @@ class MEICStrategy:
             uic = self._get_option_uic(strike, put_call, expiry)
             if not uic:
                 # Strike doesn't exist in chain - try next
-                adjustment = ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS * adjustment_direction
+                adjustment = self.strike_increment * adjustment_direction
                 strike += adjustment
                 continue
 
@@ -5700,7 +5724,7 @@ class MEICStrategy:
             quote = self._read_option_quote(uic)
             if not quote:
                 # No quote - try adjusted strike
-                adjustment = ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS * adjustment_direction
+                adjustment = self.strike_increment * adjustment_direction
                 strike += adjustment
                 continue
 
@@ -5720,7 +5744,7 @@ class MEICStrategy:
 
             # Illiquid - try adjusting
             if attempt < MAX_STRIKE_ADJUSTMENT_ATTEMPTS:
-                adjustment = ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS * adjustment_direction
+                adjustment = self.strike_increment * adjustment_direction
                 strike += adjustment
                 logger.info(f"MKT-007: {put_call} {original_strike} illiquid, trying {strike}")
 
@@ -5762,7 +5786,7 @@ class MEICStrategy:
 
         # Max attempts = (current_spread_width - min_spread_width) / 5
         current_spread = abs(long_strike - short_strike)
-        max_attempts = int((current_spread - min_spread_width) / ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS)
+        max_attempts = int((current_spread - min_spread_width) / self.strike_increment)
         max_attempts = max(0, min(6, max_attempts))  # Cap at 6 attempts
 
         for attempt in range(max_attempts + 1):
@@ -5779,14 +5803,14 @@ class MEICStrategy:
             uic = self._get_option_uic(long_strike, put_call, expiry)
             if not uic:
                 # Strike doesn't exist - try closer
-                long_strike += adjustment_direction * ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS
+                long_strike += adjustment_direction * self.strike_increment
                 continue
 
             # Check quote for liquidity (F7.6: broker-agnostic via
             # _read_option_quote — normalized {bid, ask, ...}).
             quote = self._read_option_quote(uic)
             if not quote:
-                long_strike += adjustment_direction * ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS
+                long_strike += adjustment_direction * self.strike_increment
                 continue
 
             bid = quote.get("bid") or 0
@@ -5817,7 +5841,7 @@ class MEICStrategy:
 
             # Illiquid - try closer to short strike
             if attempt < max_attempts:
-                long_strike += adjustment_direction * ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS
+                long_strike += adjustment_direction * self.strike_increment
 
         # Could not find liquid long wing - return original
         # MKT-010: Still mark as illiquid so HYDRA can use one-sided entry
@@ -5867,6 +5891,44 @@ class MEICStrategy:
     # =========================================================================
     # CONFIG-001: CONFIGURATION VALIDATION
     # =========================================================================
+
+    def _load_instrument_params(self) -> None:
+        """Read instrument + expiry parameters from config (modularity-audit item 2).
+
+        Every default equals today's SPX/0DTE literal, so a config without these
+        keys produces byte-identical behavior. These fields back the call sites
+        that used to hardcode SPX / VIX / SPXW / CBOE / the 5pt strike grid /
+        today-expiry — threaded through in the commits that follow.
+        """
+        cfg = self.strategy_config
+        self.underlying_symbol = cfg.get("underlying_symbol", "SPX")
+        self.volatility_symbol = cfg.get("volatility_symbol", "VIX")
+        self.trading_class = cfg.get("trading_class", "SPXW")
+        self.exchange = cfg.get("exchange", "CBOE")
+        self.strike_increment = cfg.get("strike_increment", 5)
+        self.target_dte = cfg.get("target_dte", 0)
+        self._assert_instrument_parameterized()
+
+    def _assert_instrument_parameterized(self) -> None:
+        """Fail fast if any instrument field is unset/invalid — a guard so a
+        future edit that re-introduces a hardcoded symbol/exchange/grid/expiry
+        (instead of threading the config value) trips at startup, not mid-trade.
+        """
+        missing = [
+            n for n in ("underlying_symbol", "volatility_symbol", "trading_class", "exchange")
+            if not getattr(self, n, None)
+        ]
+        if missing:
+            raise ConfigError(f"instrument params unset: {missing}")
+        if not (isinstance(self.strike_increment, (int, float))
+                and not isinstance(self.strike_increment, bool)
+                and self.strike_increment > 0):
+            raise ConfigError(
+                f"strike_increment must be a positive number, got {self.strike_increment!r}")
+        if not (isinstance(self.target_dte, int)
+                and not isinstance(self.target_dte, bool)
+                and self.target_dte >= 0):
+            raise ConfigError(f"target_dte must be an int >= 0, got {self.target_dte!r}")
 
     def _validate_config(self) -> Tuple[bool, List[str]]:
         """
