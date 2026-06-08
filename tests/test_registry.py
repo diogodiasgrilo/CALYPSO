@@ -50,12 +50,15 @@ class TestResolveClass:
     def test_brandon_resolves(self):
         assert resolve_strategy_class("brandon").__name__ == "BrandonHydraStrategy"
 
+    def test_strangle_resolves(self):
+        assert resolve_strategy_class("strangle").__name__ == "StrangleStrategy"
+
     def test_unknown_raises(self):
         with pytest.raises(StrategyNotRegistered):
             resolve_strategy_class("nope")
 
-    def test_available_lists_both(self):
-        assert available_strategies() == ["brandon", "hydra"]
+    def test_available_lists_registered(self):
+        assert available_strategies() == ["brandon", "hydra", "strangle"]
 
 
 class TestBuildStrategy:

@@ -24,6 +24,9 @@ from typing import Any, Dict
 _REGISTRY: Dict[str, str] = {
     "hydra": "bots.hydra.strategy:HydraStrategy",
     "brandon": "bots.hydra.brandon.strategy:BrandonHydraStrategy",
+    # 0DTE SPX short strangle (undefined-risk). Selected via strategy.name =
+    # "strangle"; dry-run only until paper-verified + an explicit operator flip.
+    "strangle": "bots.hydra.strangle_strategy:StrangleStrategy",
 }
 
 # Default when neither brandon.enabled nor strategy.name is set — preserves the

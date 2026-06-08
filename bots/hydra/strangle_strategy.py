@@ -24,9 +24,13 @@ from __future__ import annotations
 
 import logging
 from datetime import datetime
+from typing import Optional
 
+from bots.hydra.base_strategy import MEICState
 from bots.hydra.order_types import BuySell
 from bots.hydra.strategy import HydraIronCondorEntry, HydraStrategy
+from shared.event_calendar import is_fomc_t_plus_one
+from shared.market_hours import get_us_market_time
 
 logger = logging.getLogger(__name__)
 
@@ -234,3 +238,103 @@ class StrangleStrategy(HydraStrategy):
             # unhedged short is expected here; just unwind whatever filled.
             self._unwind_partial_entry(filled_legs, entry)
             return False
+
+    def _strangle_pre_entry_gates(self, entry_num: int) -> Optional[str]:
+        """Run the shared pre-entry gates (reusing the base check helpers) and
+        return a skip/delay string if any blocks, else None. Mirrors HYDRA's gate
+        sequence + side effects, minus the IC-specific conditional/credit logic.
+
+        (The base `_initiate_entry` keeps these gates inline; deduplicating them
+        into a shared helper on MEICStrategy is a later, paper-verified refactor.
+        Reusing the *helpers* here keeps the gate LOGIC single-sourced.)
+        """
+        if self._has_orphaned_orders():
+            logger.error(f"Strangle entry #{entry_num} blocked by orphaned orders")
+            self._next_entry_index += 1
+            return f"Entry #{entry_num} skipped - orphaned orders blocking"
+
+        is_halted, halt_reason = self._check_market_halt()
+        if is_halted:
+            # A halt is a DELAY (retry later), not a skip — do NOT advance the index.
+            return f"Entry #{entry_num} delayed - {halt_reason}"
+
+        has_bp, bp_message = self._check_buying_power()
+        if not has_bp:
+            self.daily_state.entries_skipped += 1
+            self._next_entry_index += 1
+            self._record_skipped_entry(entry_num, f"Insufficient margin: {bp_message}", send_alert=False)
+            return f"Entry #{entry_num} skipped - {bp_message}"
+
+        whipsaw_reason = self._check_whipsaw_filter()
+        if whipsaw_reason:
+            self.daily_state.entries_skipped += 1
+            self._next_entry_index += 1
+            self._record_skipped_entry(entry_num, whipsaw_reason, send_alert=True)
+            return f"Entry #{entry_num} skipped - {whipsaw_reason}"
+
+        if (self.fomc_t1_skip_enabled and is_fomc_t_plus_one() and not self._force_normal_day()):
+            self.daily_state.entries_skipped += 1
+            self._next_entry_index += 1
+            self._record_skipped_entry(entry_num, "FOMC T+1 blackout", send_alert=True)
+            return f"Entry #{entry_num} skipped - FOMC T+1 blackout"
+
+        return None
+
+    def _initiate_entry(self) -> str:
+        """Strangle entry orchestration: shared gates → strikes → place → book.
+
+        Deliberately simpler than HYDRA's IC `_initiate_entry`: a strangle always
+        places both naked legs (no one-sided conversion, no MKT-011 spread-credit
+        gate, no conditional E6). v1 is single-attempt (no retry loop). Reuses the
+        base bookkeeping verbatim (entry tracking, 2-leg commission, stop levels,
+        state-save, Sheets/DB logging).
+        """
+        entry_num = self._next_entry_index + 1
+        logger.info(f"STRANGLE: initiating entry #{entry_num}")
+
+        gate = self._strangle_pre_entry_gates(entry_num)
+        if gate is not None:
+            return gate
+
+        self._entry_in_progress = True
+        self.state = MEICState.ENTRY_IN_PROGRESS
+        try:
+            entry = HydraIronCondorEntry(entry_number=entry_num)
+            entry.strategy_id = f"strangle_{get_us_market_time().strftime('%Y%m%d')}_{entry_num:03d}"
+
+            if not self._calculate_strikes(entry):
+                self.daily_state.entries_skipped += 1
+                self._next_entry_index += 1
+                self._record_skipped_entry(entry_num, "strangle: strike calculation failed", send_alert=False)
+                return f"Entry #{entry_num} skipped - strike calculation failed"
+
+            success = self._simulate_entry(entry) if self.dry_run else self._execute_entry(entry)
+            if not success:
+                self.daily_state.entries_failed += 1
+                self._next_entry_index += 1
+                return f"Entry #{entry_num} failed - placement unsuccessful"
+
+            entry.entry_time = get_us_market_time()
+            entry.is_complete = True
+            self.daily_state.entries.append(entry)
+            self.daily_state.entries_completed += 1
+            self.daily_state.total_credit_received += entry.total_credit
+            # Two naked legs (no long wings) → 2-leg open commission.
+            entry.open_commission = 2 * self.commission_per_leg * self.contracts_per_entry
+            self.daily_state.total_commission += entry.open_commission
+
+            self._calculate_stop_levels_hydra(entry)
+            self._save_state_to_disk()      # persist before logging (crash-window guard)
+            self._log_entry(entry)
+            entry._spx_at_entry = self.current_price
+            self._record_entry_to_db(entry)
+            self._next_entry_index += 1
+
+            return (
+                f"Entry #{entry_num} placed: STRANGLE "
+                f"SC {entry.short_call_strike:.0f} / SP {entry.short_put_strike:.0f}, "
+                f"credit ${entry.total_credit:.2f}"
+            )
+        finally:
+            self._entry_in_progress = False
+            self.state = MEICState.MONITORING

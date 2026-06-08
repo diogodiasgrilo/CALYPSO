@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
@@ -214,3 +215,112 @@ class TestExecuteEntry:
         e = HydraIronCondorEntry(entry_number=1)
         e.strategy_id = "x"  # strikes default 0
         assert s._execute_entry(e) is False
+
+
+class TestInitiateEntry:
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s._next_entry_index = 0
+        s.dry_run = True
+        s.contracts_per_entry = 1
+        s.commission_per_leg = 1.15
+        s.current_price = 7465.0
+        s.current_vix = 18.0
+        s.target_delta = 8
+        s.strike_increment = 5
+        s.call_stop_buffer = 75.0
+        s.put_stop_buffer = 175.0
+        s.daily_state = SimpleNamespace(
+            entries=[], entries_completed=0, entries_skipped=0,
+            entries_failed=0, total_credit_received=0.0, total_commission=0.0,
+        )
+        # Gate helpers → all pass by default.
+        s._has_orphaned_orders = lambda: False
+        s._check_market_halt = lambda: (False, "")
+        s._check_buying_power = lambda: (True, "ok")
+        s._check_whipsaw_filter = lambda: None
+        s.fomc_t1_skip_enabled = False
+        s._force_normal_day = lambda: False
+        # Placement (dry) → set credits + succeed.
+        def fake_sim(entry):
+            entry.call_spread_credit = 150.0
+            entry.put_spread_credit = 150.0
+            return True
+        s._simulate_entry = fake_sim
+        # Heavy bookkeeping → no-ops.
+        s._save_state_to_disk = lambda: None
+        s._log_entry = lambda e: None
+        s._record_entry_to_db = lambda e: None
+        s._record_skipped_entry = lambda *a, **k: None
+        return s
+
+    def test_successful_entry_books_everything(self):
+        s = self._strat()
+        result = s._initiate_entry()
+        assert "placed: STRANGLE" in result
+        assert len(s.daily_state.entries) == 1
+        assert s.daily_state.entries_completed == 1
+        assert s.daily_state.total_credit_received == 300.0
+        assert s.daily_state.total_commission == 2 * 1.15 * 1   # two naked legs
+        assert s._next_entry_index == 1
+        e = s.daily_state.entries[0]
+        assert e.is_complete is True
+        assert e.short_call_strike > 7465.0 and e.short_put_strike < 7465.0
+        assert e.call_side_stop > 0 and e.put_side_stop > 0     # per-side stops computed
+
+    def test_buying_power_gate_skips(self):
+        s = self._strat()
+        s._check_buying_power = lambda: (False, "no margin")
+        result = s._initiate_entry()
+        assert "skipped" in result and "no margin" in result
+        assert s.daily_state.entries == []
+        assert s.daily_state.entries_skipped == 1
+        assert s._next_entry_index == 1
+
+    def test_halt_delays_without_advancing_index(self):
+        s = self._strat()
+        s._check_market_halt = lambda: (True, "halt detected")
+        result = s._initiate_entry()
+        assert "delayed" in result
+        assert s._next_entry_index == 0     # a delay must NOT advance the slot
+        assert s.daily_state.entries == []
+
+    def test_placement_failure_counts_failed(self):
+        s = self._strat()
+        s._simulate_entry = lambda e: False
+        result = s._initiate_entry()
+        assert "failed" in result
+        assert s.daily_state.entries_failed == 1
+        assert s._next_entry_index == 1
+        assert s.daily_state.entries == []
+
+
+class TestSettlement:
+    """Verify the inherited dry-run settlement books a 2-naked-leg strangle
+    correctly at long=0 (both sides expire worthless → keep full premium)."""
+
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s.dry_run = True
+        s.broker = None
+        s.contracts_per_entry = 1
+        s.daily_state = SimpleNamespace(entries=[], total_realized_pnl=0.0)
+        s._get_todays_expiry = lambda: "2026-06-08"
+        s._get_option_uic = lambda strike, right, expiry: 111 if right == "Call" else 222
+        s._read_option_quote = lambda uic: {"mid": 1.5}
+        return s
+
+    def test_both_sides_expire_worthless_book_full_credit(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.short_call_strike, e.short_put_strike = 7600.0, 7300.0
+        e.strategy_id = "strangle_test"
+        s._simulate_entry(e)  # books 150 credit per naked short, DRY ids
+        s.daily_state.entries.append(e)
+
+        booked = s._process_expired_credits()
+
+        assert e.call_side_expired is True and e.put_side_expired is True
+        assert booked == 300.0           # full credit kept (both legs OTM at expiry)
+        # long legs were never touched (no wings)
+        assert e.long_call_uic in (None, 0) and e.long_put_uic in (None, 0)
