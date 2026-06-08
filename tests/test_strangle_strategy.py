@@ -11,6 +11,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+from unittest.mock import MagicMock
+
+from bots.hydra.order_types import BuySell
 from bots.hydra.strangle_strategy import StrangleStrategy
 from bots.hydra.strategy import HydraIronCondorEntry
 
@@ -156,3 +159,58 @@ class TestStopLevels:
         s._calculate_stop_levels_hydra(e)
         assert e.call_side_stop == 300.0 + 75.0 * 2
         assert e.put_side_stop == 400.0 + 175.0 * 2
+
+
+class TestExecuteEntry:
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s._get_todays_expiry = lambda: "2026-06-08"
+        s._register_position = lambda entry, leg: None
+        s._unwind_partial_entry = MagicMock()
+        return s
+
+    def _entry(self):
+        e = HydraIronCondorEntry(entry_number=1)
+        e.short_call_strike, e.short_put_strike = 7600.0, 7300.0
+        e.strategy_id = "strangle_test"
+        return e
+
+    def test_sells_two_shorts_no_longs(self):
+        s = self._strat()
+        placed = []
+
+        def fake_place(*, strike, put_call, buy_sell, expiry, external_ref):
+            placed.append((put_call, buy_sell))
+            return {"position_id": f"P_{put_call}", "uic": 1,
+                    "fill_price": 1.5, "mid_at_fill": 1.5, "credit": 150.0}
+
+        s._place_option_order = fake_place
+        e = self._entry()
+        assert s._execute_entry(e) is True
+        assert ("Call", BuySell.SELL) in placed and ("Put", BuySell.SELL) in placed
+        assert all(bs == BuySell.SELL for _, bs in placed)  # no protective BUYs
+        assert e.call_spread_credit == 150.0 and e.put_spread_credit == 150.0
+        assert e.is_complete is True
+        assert e.long_call_position_id is None and e.long_put_position_id is None
+
+    def test_partial_fill_unwinds_and_aborts(self):
+        s = self._strat()
+
+        def fake_place(*, strike, put_call, buy_sell, expiry, external_ref):
+            if put_call == "Put":  # second leg fails
+                return None
+            return {"position_id": "P_C", "uic": 1, "fill_price": 1.5,
+                    "mid_at_fill": 1.5, "credit": 150.0}
+
+        s._place_option_order = fake_place
+        e = self._entry()
+        assert s._execute_entry(e) is False
+        s._unwind_partial_entry.assert_called_once()
+        filled = s._unwind_partial_entry.call_args[0][0]
+        assert any(leg[0] == "short_call" for leg in filled)  # the filled short was unwound
+
+    def test_missing_strikes_returns_false(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.strategy_id = "x"  # strikes default 0
+        assert s._execute_entry(e) is False

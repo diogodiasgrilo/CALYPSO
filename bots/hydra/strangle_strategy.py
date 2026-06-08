@@ -25,6 +25,7 @@ from __future__ import annotations
 import logging
 from datetime import datetime
 
+from bots.hydra.order_types import BuySell
 from bots.hydra.strategy import HydraIronCondorEntry, HydraStrategy
 
 logger = logging.getLogger(__name__)
@@ -161,3 +162,75 @@ class StrangleStrategy(HydraStrategy):
             f"(credit ${call_credit:.2f} + buf ${call_buf:.2f}), put "
             f"${entry.put_side_stop:.2f} (credit ${put_credit:.2f} + buf ${put_buf:.2f})"
         )
+
+    def _execute_entry(self, entry: HydraIronCondorEntry) -> bool:
+        """Real-order entry: SELL the two naked shorts. No protective longs and
+        no hedge-pairing — the strangle is undefined-risk by design (S1 keeps an
+        unhedged short off the emergency path). On a partial fill the base
+        unwinder closes whatever filled, aborting the entry cleanly.
+
+        Credit on each side is the full short premium (no long debit). Mirrors
+        the base IC placement primitives (`_place_option_order`,
+        `_register_position`, `_unwind_partial_entry`) — only the leg set differs.
+        """
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            logger.error("Strangle: could not determine expiry")
+            return False
+        if not (entry.short_call_strike and entry.short_put_strike):
+            logger.error(
+                f"Strangle entry #{entry.entry_number}: both short strikes "
+                f"required (SC {entry.short_call_strike} / SP {entry.short_put_strike})"
+            )
+            return False
+
+        filled_legs = []
+        try:
+            logger.info(f"STRANGLE: selling Short Call at {entry.short_call_strike}")
+            sc = self._place_option_order(
+                strike=entry.short_call_strike, put_call="Call",
+                buy_sell=BuySell.SELL, expiry=expiry,
+                external_ref=f"{entry.strategy_id}_SC",
+            )
+            if not sc:
+                raise Exception("Short Call order failed")
+            entry.short_call_position_id = sc.get("position_id")
+            entry.short_call_uic = sc.get("uic")
+            entry.short_call_fill_price = sc.get("fill_price", 0)
+            entry.short_call_mid_at_fill = sc.get("mid_at_fill", 0)
+            entry.call_spread_credit = sc.get("credit", 0)  # naked: full premium, no long debit
+            filled_legs.append(("short_call", entry.short_call_position_id, entry.short_call_uic))
+            self._register_position(entry, "short_call")
+
+            logger.info(f"STRANGLE: selling Short Put at {entry.short_put_strike}")
+            sp = self._place_option_order(
+                strike=entry.short_put_strike, put_call="Put",
+                buy_sell=BuySell.SELL, expiry=expiry,
+                external_ref=f"{entry.strategy_id}_SP",
+            )
+            if not sp:
+                raise Exception("Short Put order failed")
+            entry.short_put_position_id = sp.get("position_id")
+            entry.short_put_uic = sp.get("uic")
+            entry.short_put_fill_price = sp.get("fill_price", 0)
+            entry.short_put_mid_at_fill = sp.get("mid_at_fill", 0)
+            entry.put_spread_credit = sp.get("credit", 0)
+            filled_legs.append(("short_put", entry.short_put_position_id, entry.short_put_uic))
+            self._register_position(entry, "short_put")
+
+            # Seed monitoring prices with the fills (overwritten each heartbeat).
+            entry.short_call_price = entry.short_call_fill_price
+            entry.short_put_price = entry.short_put_fill_price
+            entry.is_complete = True
+            logger.info(
+                f"STRANGLE entry #{entry.entry_number} complete: "
+                f"call ${entry.call_spread_credit:.2f}, put ${entry.put_spread_credit:.2f}"
+            )
+            return True
+
+        except Exception as e:
+            logger.error(f"Strangle entry failed at leg {len(filled_legs) + 1}: {e}")
+            # No naked-short emergency: requires_protective_wings=False means an
+            # unhedged short is expected here; just unwind whatever filled.
+            self._unwind_partial_entry(filled_legs, entry)
+            return False
