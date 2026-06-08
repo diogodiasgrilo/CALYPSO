@@ -44,6 +44,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from bots.hydra.order_types import BuySell
+from bots.hydra.leg import LEG_NAMES
 from shared.ib_client import (
     IBClient, AmbiguousOrderError, RatePenaltyError, _normalize_position_dict,
 )
@@ -7187,9 +7188,9 @@ class HydraStrategy(MEICStrategy):
                 put_done = entry.put_side_stopped or getattr(entry, 'put_side_expired', False) or getattr(entry, 'put_side_skipped', False)
                 if call_done and put_done:
                     continue
-                has_uic = any(getattr(entry, f"{leg}_uic", 0) for leg in ("short_call", "long_call", "short_put", "long_put"))
+                has_uic = any(getattr(entry, f"{leg}_uic", 0) for leg in LEG_NAMES)
                 if has_uic:
-                    for leg in ("short_call", "long_call", "short_put", "long_put"):
+                    for leg in LEG_NAMES:
                         uic = getattr(entry, f"{leg}_uic", 0)
                         if uic:
                             uic_map.setdefault(uic, []).append((entry, leg))
@@ -7234,7 +7235,7 @@ class HydraStrategy(MEICStrategy):
         for entry in self.daily_state.active_entries:
             if entry.call_side_stopped and entry.put_side_stopped:
                 continue
-            for leg in ("short_call", "long_call", "short_put", "long_put"):
+            for leg in LEG_NAMES:
                 uic = getattr(entry, f"{leg}_uic", 0)
                 if uic:
                     uic_map.setdefault(uic, []).append((entry, leg))
@@ -10246,7 +10247,7 @@ class HydraStrategy(MEICStrategy):
         expected: Dict[Any, int] = {}
         for entry in self.daily_state.entries:
             contracts = getattr(entry, "contracts", 1) or 1
-            for leg in ("short_call", "long_call", "short_put", "long_put"):
+            for leg in LEG_NAMES:
                 uic = getattr(entry, f"{leg}_uic", None)
                 if not uic:
                     continue
@@ -10294,7 +10295,7 @@ class HydraStrategy(MEICStrategy):
             legs = [
                 (entry, leg)
                 for entry in self.daily_state.entries
-                for leg in ("short_call", "long_call", "short_put", "long_put")
+                for leg in LEG_NAMES
                 if getattr(entry, f"{leg}_uic", None) == conid
             ]
             if len(legs) != 1:
@@ -11240,7 +11241,7 @@ class HydraStrategy(MEICStrategy):
                 # Clear BOTH the uic and (legacy) position_id of every
                 # leg sitting on a settled conid.
                 for entry in self.daily_state.entries:
-                    for leg_name in ("short_call", "long_call", "short_put", "long_put"):
+                    for leg_name in LEG_NAMES:
                         uic = getattr(entry, f"{leg_name}_uic", None)
                         if uic and uic in settled_conids:
                             setattr(entry, f"{leg_name}_uic", None)

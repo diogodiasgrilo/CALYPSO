@@ -7,9 +7,10 @@ strategy (strangle / butterfly / ratio / vertical / calendar) can describe its
 legs as a plain list without inheriting the 4-leg iron-condor shape.
 
 `IronCondorEntry` keeps its flat ``short_call_strike`` etc. attribute surface as
-a backward-compat property bridge over a ``legs`` dict of these objects — see
-``docs/PR_SCOPE_LEG_INSTRUMENT.md``. Nothing imports this module yet; wiring the
-bridge happens in a later commit.
+a backward-compat property bridge over a ``legs`` dict of these objects, wired
+by ``bind_leg_bridge`` (applied in ``base_strategy``) — see
+``docs/PR_SCOPE_LEG_INSTRUMENT.md``. ``LEG_NAMES`` is the single source of truth
+for canonical leg ordering; the strategy iterates it instead of inline tuples.
 
 A ``Leg`` is mutable on purpose: an iron-condor leg is re-struck (strike scan /
 chain snapping), filled, and re-priced in place over its lifetime. (Contrast

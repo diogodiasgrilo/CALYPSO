@@ -49,7 +49,7 @@ from enum import Enum
 
 from shared.ib_client import IBClient
 from bots.hydra.order_types import BuySell, OrderType
-from bots.hydra.leg import Leg, _new_legset, bind_leg_bridge
+from bots.hydra.leg import LEG_NAMES, Leg, _new_legset, bind_leg_bridge
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_hours import get_us_market_time, is_market_open, is_early_close_day
 from shared.event_calendar import is_fomc_meeting_day, is_fomc_announcement_day
@@ -4373,7 +4373,7 @@ class MEICStrategy:
         for entry in self.daily_state.active_entries:
             missing_legs = []
 
-            for leg_name in ["short_call", "long_call", "short_put", "long_put"]:
+            for leg_name in LEG_NAMES:
                 pos_id = getattr(entry, f"{leg_name}_position_id")
                 if pos_id and pos_id not in valid_ids:
                     missing_legs.append(leg_name)
@@ -5390,7 +5390,7 @@ class MEICStrategy:
         # Position counts
         # IBKR has no per-leg position id — count open legs by conid (*_uic).
         total_legs = sum(
-            len([1 for leg in ['short_call', 'long_call', 'short_put', 'long_put']
+            len([1 for leg in LEG_NAMES
                  if getattr(e, f'{leg}_uic')])
             for e in self.daily_state.active_entries
         )
