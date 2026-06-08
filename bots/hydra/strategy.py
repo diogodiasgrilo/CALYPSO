@@ -6028,7 +6028,7 @@ class HydraStrategy(MEICStrategy):
                         naked_short_info = (leg_name, pos_id, uic)
                         break
 
-            if has_naked_short:
+            if has_naked_short and self.requires_protective_wings:
                 logger.critical(f"NAKED SHORT DETECTED: {naked_short_info[0]}")
                 self._handle_naked_short(naked_short_info)
 
@@ -6175,7 +6175,7 @@ class HydraStrategy(MEICStrategy):
                         naked_short_info = (leg_name, pos_id, uic)
                         break
 
-            if has_naked_short:
+            if has_naked_short and self.requires_protective_wings:
                 logger.critical(f"NAKED SHORT DETECTED: {naked_short_info[0]}")
                 self._handle_naked_short(naked_short_info)
 

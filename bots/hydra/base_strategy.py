@@ -920,6 +920,13 @@ class MEICStrategy(abc.ABC):
     strike_increment = 5
     target_dte = 0
 
+    # Strategy risk policy (modularity-audit item 6a). Defined-risk strategies
+    # (the iron-condor family) require every short to be hedged by a long wing —
+    # an unhedged short is a CRITICAL naked-short emergency. An undefined-risk
+    # strategy (e.g. a short strangle) sets this False: its shorts are naked by
+    # design and must NOT be emergency-closed. Default True = today's behavior.
+    requires_protective_wings = True
+
     # ── Strategy extension points (template-method hooks) ──────────────────
     # The base monitoring loop (_check_entries / run-loop) calls these; every
     # concrete strategy MUST implement them. Declared @abstractmethod so a new
@@ -2357,7 +2364,7 @@ class MEICStrategy(abc.ABC):
                         naked_short_info = (leg_name, pos_id, uic)
                         break
 
-            if has_naked_short:
+            if has_naked_short and self.requires_protective_wings:
                 logger.critical(f"NAKED SHORT DETECTED: {naked_short_info[0]}")
                 self._handle_naked_short(naked_short_info)
 
@@ -3164,6 +3171,18 @@ class MEICStrategy(abc.ABC):
             naked_info: Tuple of (leg_name, position_id, uic)
         """
         leg_name, pos_id, uic = naked_info
+
+        # Item 6a: strategies that don't require protective wings (e.g. a short
+        # strangle) hold naked shorts BY DESIGN — an unhedged short is the
+        # position, not an emergency, so it must NOT be emergency-closed. The
+        # iron-condor family keeps requires_protective_wings=True → no-op here.
+        if not getattr(self, "requires_protective_wings", True):
+            logger.info(
+                f"_handle_naked_short skipped for {leg_name}: strategy is "
+                f"undefined-risk (requires_protective_wings=False) — naked "
+                f"shorts are held by design, not emergency-closed."
+            )
+            return
 
         # SAFETY-DRY-02: Defense-in-depth dry-run gate.
         # Naked-short detection happens after a leg "fills" during entry
