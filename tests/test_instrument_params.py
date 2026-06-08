@@ -8,7 +8,9 @@ isolation via __new__ + an injected strategy_config (the full __init__ is heavy)
 from __future__ import annotations
 
 import sys
+from datetime import date
 from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -73,3 +75,28 @@ class TestAssertion:
         # Existing broad ValueError config handling must still catch it.
         with pytest.raises(ValueError):
             _strat({"underlying_symbol": ""})._load_instrument_params()
+
+
+class TestUnderlyingSymbolThreading:
+    """Commit 7 — the override path: a non-SPX underlying threads to the broker
+    (not a hardcoded "SPX"). The default path is covered by the existing
+    TestReadOptionChain suite."""
+
+    def test_read_option_chain_uses_underlying_symbol(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.underlying_symbol = "NDX"  # override; class default is "SPX"
+        broker = MagicMock()
+        broker.get_option_chain.return_value = [6735.0]
+        broker.qualify_option_strikes.return_value = {(6735.0, "C"): 1}
+        s.broker = broker
+
+        s._read_option_chain("2026-05-21", [6735.0])
+
+        assert broker.get_option_chain.call_args[0][0] == "NDX"
+        assert broker.qualify_option_strikes.call_args.kwargs["symbol"] == "NDX"
+
+    def test_class_default_underlying_is_spx(self):
+        # A __new__-built strategy that never ran _load_instrument_params still
+        # reads SPX (the canonical fallback) — pins the no-AttributeError contract.
+        s = HydraStrategy.__new__(HydraStrategy)
+        assert s.underlying_symbol == "SPX"

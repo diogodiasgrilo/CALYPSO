@@ -904,6 +904,20 @@ class MEICStrategy:
 
     BOT_NAME = "MEIC"
 
+    # Instrument-parameter fallbacks (modularity-audit item 2). __init__ calls
+    # _load_instrument_params() which sets INSTANCE attributes from config,
+    # shadowing these. They exist so the threaded call sites (which read
+    # self.underlying_symbol / .volatility_symbol / .trading_class / .exchange /
+    # .strike_increment / .target_dte) never AttributeError on an object built
+    # via __new__ that bypassed __init__ — a test-only construction path. Values
+    # equal today's SPX/0DTE literals, so the fallback is behavior-identical.
+    underlying_symbol = "SPX"
+    volatility_symbol = "VIX"
+    trading_class = "SPXW"
+    exchange = "CBOE"
+    strike_increment = 5
+    target_dte = 0
+
     def __init__(
         self,
         broker: IBClient,
@@ -4145,7 +4159,7 @@ class MEICStrategy:
         tick does not refresh the freshness clock (DATA-001 can then trip on a
         frozen feed). See _split_index_read for the compatibility shim.
         """
-        price, spx_avail = self._split_index_read(self._read_index_price("SPX"))
+        price, spx_avail = self._split_index_read(self._read_index_price(self.underlying_symbol))
         if price:
             self.market_data.update_spx(price, availability=spx_avail)
             # #17/#18: only treat the SPX spot as current when the broker did
@@ -5628,7 +5642,7 @@ class MEICStrategy:
             # during the session is exactly the degraded-feed/halt case this
             # guards. First char of 6509 in (Z=Frozen, Y=Frozen-Delayed,
             # N=Not-Subscribed) all mean "not real-time" → treat as halt.
-            price, avail = self._split_index_read(self._read_index_price("SPX"))
+            price, avail = self._split_index_read(self._read_index_price(self.underlying_symbol))
             if not price:
                 logger.warning(
                     "MKT-005: No SPX price available — possible market halt"

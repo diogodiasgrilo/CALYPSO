@@ -1534,7 +1534,7 @@ class HydraStrategy(MEICStrategy):
                     )
                 period_arg = f"{period_hours}h"
             raw_bars = self.broker.get_chart_data(
-                symbol="SPX", bar=bar_arg, period=period_arg,
+                symbol=self.underlying_symbol, bar=bar_arg, period=period_arg,
                 outside_rth=False,
             )
             if not raw_bars:
@@ -3771,7 +3771,7 @@ class HydraStrategy(MEICStrategy):
             return {}, {}
 
         try:
-            strike_list = self.broker.get_option_chain("SPX", expiry_date)
+            strike_list = self.broker.get_option_chain(self.underlying_symbol, expiry_date)
         except RatePenaltyError as e:
             self._alert_rate_penalty("option-chain fetch", e)
             return {}, {}
@@ -3800,7 +3800,7 @@ class HydraStrategy(MEICStrategy):
 
         try:
             conid_map = self.broker.qualify_option_strikes(
-                symbol="SPX",
+                symbol=self.underlying_symbol,
                 expiry=expiry_date,
                 strikes=sorted(snapped),
             )
@@ -10749,7 +10749,7 @@ class HydraStrategy(MEICStrategy):
         to the legacy worthless assumption rather than crashing settlement).
         """
         try:
-            price, _avail = self._read_index_price("SPX")
+            price, _avail = self._read_index_price(self.underlying_symbol)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(f"  Settlement SPX read failed ({exc}); "
                            f"cannot verify ITM settlement, assuming worthless")
