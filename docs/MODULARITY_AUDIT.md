@@ -117,6 +117,20 @@ Ordered by leverage (highest first). Each item is independently shippable. **Non
 
 ---
 
+## 7. Completeness sweep (2026-06-08) — status of items 1 & 2 + 3 newly-found gaps
+
+After Items 1 & 2 shipped (PR #1), a 6-agent adversarial completeness sweep verified they are byte-identical for SPX/0DTE and found **6 in-scope residual misses** (all now **CLOSED** on the branch — commits 12 & 13): the Brandon `find_strike_at_delta` 8δ picker (was hard-snapped to a 5pt grid), the MKT-007/008 illiquidity step, the MKT-012/013/015 overlap shifts, `get_vix_price`'s hardcoded `"VIX"`, `_read_index_price` not threading `exchange`, and the dead `LEG_NAMES` constant (now the leg-order source of truth).
+
+The sweep also surfaced **3 gaps not captured by items 1–9** — added to the roadmap:
+
+10. **Parameterize the option *price tick* (N1).** `place_order`/`place_and_wait_for_fill` default `price_increment=_SPX_TIERED_TICK` (the CBOE SPX $0.05/$0.10 rule) and the entry caller passes no override (`strategy.py` entry path; `ib_client.py:551`). This is a *separate* axis from `strike_increment` — NDX/RUT use different price-tick rules → `PriceNotInTickSizeIncrements` rejections. Add a `price_tick` field to `_load_instrument_params` and thread it. *(Natural extension of Item 2.)*
+11. **Replace the SPX-scaled point-distance constants (N2).** `_calculate_strikes` uses absolute point distances (`base_distance_at_vix15 = 40`, clamps `25..120` / `25..180`) calibrated to SPX's ~5–6k level; on NDX (~20k) they collapse to ATM. Needs a level-relative (% of spot) or config-driven distance model. *(Pairs with Item 3's `StrikeSelector` extraction.)*
+12. **Allowlist `what_if_order` on the broker (N3).** Item 6 proposes wiring `what_if_order` into `_check_buying_power`, but in deployed broker mode `BrokerClient.__getattr__` raises for non-allowlisted names — Item 6 must also add `what_if_order` to `ALLOWED_METHODS` + the dispatcher (`shared/broker_service.py`). *(Scope note on Item 6.)*
+
+Also deferred (noted in the version history): `_get_todays_expiry` is weekday-aware only — an exchange-holiday calendar is needed before any real multi-day strategy (pairs with Item 5).
+
+---
+
 ## Relevant files
 
 - `bots/hydra/strategy.py` (11,816 lines) — the monolith; strike calc, stops, serialization, settlement

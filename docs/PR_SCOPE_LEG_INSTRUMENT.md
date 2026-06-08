@@ -2,8 +2,10 @@
 
 > Scopes **items 1 & 2** of the [Modularity Audit](MODULARITY_AUDIT.md) roadmap. Produced 2026-06-07 by a 6-agent investigation+design workflow (5 parallel code investigators → staff-engineer design pass), all grounded in re-read file:line.
 
-**Branch base:** `hydra-ibkr-standalone` · **Status:** scoping
+**Branch base:** `hydra-ibkr-standalone` · **Status:** ✅ SHIPPED (PR #1, branch `leg-instrument-refactor`)
 **Constraint:** live (paper) trading bot. Correctness > cleverness. **Zero behavior change** in every commit. Small commits, tests-with-code.
+
+> **Shipped 2026-06-08.** Item 1 (commits 1–3) + Item 2 (commits 6–11) landed zero-behavior-change. A post-merge 6-agent completeness sweep then closed 6 residual in-scope misses (commits 12–13: Brandon delta-picker grid, MKT-007/008 + MKT-012/013/015 strike steps, `get_vix_price` symbol, `_read_index_price` exchange, dead `LEG_NAMES` wired). Full suite **1192 passing**. Deferred to the roadmap: the optional Item-1 internal-loop cleanup (scope commits 4–5), and the 3 newly-found gaps (price-tick / SPX-scaled distances / `what_if` allowlist) — see [MODULARITY_AUDIT.md §7](MODULARITY_AUDIT.md).
 
 > **Audit corrections surfaced during this scoping (re-read against source):**
 > - The audit's "**561** leg-name references in `strategy.py`" is **unreproducible**. Real counts: `strategy.py` ~576, `base_strategy.py` ~435 (~1,011 in-file; ~940 tree-wide). Do not anchor on 561.
