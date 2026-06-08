@@ -3111,8 +3111,27 @@ class MEICStrategy:
             logger.warning(f"FIX-70: Entry price verification failed (non-critical): {e}")
 
     def _get_todays_expiry(self) -> Optional[str]:
-        """Get today's expiry date string for 0DTE options."""
-        return get_us_market_time().strftime("%Y-%m-%d")
+        """Target option expiry as a YYYY-MM-DD string.
+
+        Default (target_dte == 0) returns today's date — 0DTE, byte-identical
+        to the prior hardcoded behavior. A positive target_dte (modularity-audit
+        item 2) shifts the expiry forward by that many trading days (weekends
+        skipped), enabling non-0DTE strategies. NOTE: weekday-only — exchange
+        holidays are not yet skipped; a holiday-aware calendar is a future
+        refinement (tracked in docs/PR_SCOPE_LEG_INSTRUMENT.md). The method name
+        is retained (not _get_target_expiry) to avoid churning its 11 call sites.
+        """
+        base = get_us_market_time()
+        dte = getattr(self, "target_dte", 0)
+        if dte <= 0:
+            return base.strftime("%Y-%m-%d")
+        d = base
+        added = 0
+        while added < dte:
+            d = d + timedelta(days=1)
+            if d.weekday() < 5:  # Mon–Fri are trading days
+                added += 1
+        return d.strftime("%Y-%m-%d")
 
     def _handle_naked_short(self, naked_info: Tuple[str, str, int]):
         """

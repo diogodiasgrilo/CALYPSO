@@ -8,7 +8,7 @@ isolation via __new__ + an injected strategy_config (the full __init__ is heavy)
 from __future__ import annotations
 
 import sys
-from datetime import date
+from datetime import date, datetime
 from pathlib import Path
 from unittest.mock import MagicMock
 
@@ -170,3 +170,27 @@ class TestStrikeGrid:
     def test_brandon_adjuster_config_default_increment(self):
         from bots.hydra.brandon.gex_strike_adjuster import AdjusterConfig
         assert AdjusterConfig().strike_increment == 5.0
+
+
+class TestTargetDTE:
+    """Commit 11 — _get_todays_expiry honors target_dte (0 = today, byte-identical)."""
+
+    def test_dte_0_is_today(self):
+        from shared.market_hours import get_us_market_time
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.target_dte = 0
+        assert s._get_todays_expiry() == get_us_market_time().strftime("%Y-%m-%d")
+
+    def test_class_default_dte_is_today(self):
+        from shared.market_hours import get_us_market_time
+        s = HydraStrategy.__new__(HydraStrategy)  # class default target_dte=0
+        assert s._get_todays_expiry() == get_us_market_time().strftime("%Y-%m-%d")
+
+    def test_positive_dte_shifts_to_a_future_weekday(self):
+        from shared.market_hours import get_us_market_time
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.target_dte = 3
+        result = datetime.strptime(s._get_todays_expiry(), "%Y-%m-%d").date()
+        today = get_us_market_time().date()
+        assert result > today
+        assert result.weekday() < 5  # lands on a trading weekday (weekends skipped)
