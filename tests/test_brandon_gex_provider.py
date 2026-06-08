@@ -603,6 +603,16 @@ class TestFindStrikeAtDelta:
         # (nearest even) → 7290.
         assert result == 7290.0
 
+    def test_snaps_to_configured_increment(self):
+        # Modularity item-2 completion (G1): a non-default strike increment is
+        # honored by the delta-target picker (the primary B/C short selector).
+        prof = self._profile_with([(7285.0, "put", -0.08)])
+        # default 5pt grid leaves 7285 (already a 5-multiple) unchanged
+        assert find_strike_at_delta(prof, side="put", target_delta_abs=0.08) == 7285.0
+        # increment=10 snaps 7285 → 7280 (round(728.5)=728, banker's even)
+        assert find_strike_at_delta(
+            prof, side="put", target_delta_abs=0.08, increment=10) == 7280.0
+
     def test_excludes_wrong_side_of_spot(self):
         # A put with stale data showing positive delta above spot should not
         # be selected. spot=7350; put at 7400 ignored.

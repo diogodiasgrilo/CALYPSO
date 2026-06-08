@@ -252,11 +252,11 @@ class BrandonHydraStrategy(HydraStrategy):
         t_years = self._brandon_estimate_t_years_to_close()
         call_short = gex_provider.find_strike_at_delta(
             profile, side="call", target_delta_abs=target, spot_fallback=spot,
-            recompute_t_years=t_years,
+            recompute_t_years=t_years, increment=self.strike_increment,
         )
         put_short = gex_provider.find_strike_at_delta(
             profile, side="put", target_delta_abs=target, spot_fallback=spot,
-            recompute_t_years=t_years,
+            recompute_t_years=t_years, increment=self.strike_increment,
         )
         if call_short is None or put_short is None:
             logger.warning(

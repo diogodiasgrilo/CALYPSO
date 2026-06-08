@@ -2003,7 +2003,7 @@ class HydraStrategy(MEICStrategy):
         Used by GAP-C ``_update_market_data`` and GAP-E ``_check_market_halt``.
         """
         try:
-            conid = self.broker.qualify_contract(symbol, sec_type="IND")
+            conid = self.broker.qualify_contract(symbol, sec_type="IND", exchange=self.exchange)
             q = self.broker.get_quote(conid)
             if not q:
                 return (None, None)

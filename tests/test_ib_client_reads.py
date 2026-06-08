@@ -851,6 +851,18 @@ class TestGetVixPrice:
             }])
             assert client.get_vix_price() is None
 
+    def test_threads_symbol_to_underlying_search(self, connected_client):
+        """Modularity item-2 completion (G4): the volatility symbol is
+        configurable — get_vix_price(symbol=...) resolves that symbol, not a
+        hardcoded VIX. (Dormant for HYDRA, but the method is broker-allowlisted.)"""
+        client, mock_ibkr = connected_client
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 77}])
+        mock_ibkr.live_marketdata_snapshot.return_value = _mk_result([{
+            "conid": 77, FIELD_MARK: "20.0",
+        }])
+        assert client.get_vix_price(symbol="VXN") == pytest.approx(20.0)
+        assert mock_ibkr.search_contract_by_symbol.call_args.kwargs.get("symbol") == "VXN"
+
 
 class TestGetOptionGreeks:
     def test_returns_full_greeks(self, connected_client):

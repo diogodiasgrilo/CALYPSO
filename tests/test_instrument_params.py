@@ -194,3 +194,21 @@ class TestTargetDTE:
         today = get_us_market_time().date()
         assert result > today
         assert result.weekday() < 5  # lands on a trading weekday (weekends skipped)
+
+
+class TestIndexReadExchange:
+    """Commit 12 / G5 — the index-spot read threads self.exchange too."""
+
+    def test_read_index_price_threads_exchange(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.exchange = "NASDAQ"  # override; class default is CBOE
+        broker = MagicMock()
+        broker.qualify_contract.return_value = 123
+        broker.get_quote.return_value = {"mid": 100.0, "availability": "R"}
+        s.broker = broker
+
+        price, avail = s._read_index_price("NDX")
+
+        assert price == 100.0
+        assert broker.qualify_contract.call_args.kwargs.get("exchange") == "NASDAQ"
+        assert broker.qualify_contract.call_args.kwargs.get("sec_type") == "IND"

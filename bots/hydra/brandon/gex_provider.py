@@ -320,6 +320,7 @@ def find_strike_at_delta(
     target_delta_abs: float,
     spot_fallback: Optional[float] = None,
     recompute_t_years: Optional[float] = None,
+    increment: float = SPX_STRIKE_GRID_PT,
 ) -> Optional[float]:
     """Find the strike whose `side` option delta is closest to ±target_delta_abs.
 
@@ -398,7 +399,7 @@ def find_strike_at_delta(
 
     # Closest by absolute delta distance to target.
     best_d, _ = min(candidates, key=lambda item: abs(abs(item[1]) - target_delta_abs))
-    snapped = round(best_d.strike / SPX_STRIKE_GRID_PT) * SPX_STRIKE_GRID_PT
+    snapped = round(best_d.strike / increment) * increment
     return snapped
 
 

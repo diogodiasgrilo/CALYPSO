@@ -163,7 +163,8 @@ MARGIN_CHECK_ENABLED = True  # Can be disabled if the broker margin API is unava
 MARKET_HALT_CHECK_ENABLED = True  # Check for trading halts before entry
 
 # MKT-007: Strike adjustment for illiquidity
-ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS = 5  # Adjust strikes 5 points if illiquid
+# MKT-007/008 illiquidity strike step now uses self.strike_increment
+# (was a hardcoded 5pt constant — modularity-audit item 2 completion).
 MAX_STRIKE_ADJUSTMENT_ATTEMPTS = 2  # Max adjustments per side
 
 # TIME-001: Clock sync validation
@@ -1716,7 +1717,7 @@ class MEICStrategy:
         # Check long call strike
         original_long_call = entry.long_call_strike
         while entry.long_call_strike in occupied:
-            entry.long_call_strike += 5  # Move further OTM (up for calls)
+            entry.long_call_strike += self.strike_increment  # Move further OTM (up for calls)
         if entry.long_call_strike != original_long_call:
             logger.warning(
                 f"MKT-012: Long call {original_long_call} conflicts with existing short strike, "
@@ -1726,7 +1727,7 @@ class MEICStrategy:
         # Check long put strike
         original_long_put = entry.long_put_strike
         while entry.long_put_strike in occupied:
-            entry.long_put_strike -= 5  # Move further OTM (down for puts)
+            entry.long_put_strike -= self.strike_increment  # Move further OTM (down for puts)
         if entry.long_put_strike != original_long_put:
             logger.warning(
                 f"MKT-012: Long put {original_long_put} conflicts with existing short strike, "
@@ -1774,8 +1775,8 @@ class MEICStrategy:
         original_long_call = entry.long_call_strike
         while entry.short_call_strike and entry.short_call_strike in existing_short_calls:
             # Move both short and long call UP by 5 (further OTM)
-            entry.short_call_strike += 5
-            entry.long_call_strike += 5
+            entry.short_call_strike += self.strike_increment
+            entry.long_call_strike += self.strike_increment
         if entry.short_call_strike != original_short_call:
             logger.warning(
                 f"MKT-013: Short call {original_short_call} overlaps existing entry, "
@@ -1801,8 +1802,8 @@ class MEICStrategy:
         original_long_put = entry.long_put_strike
         while entry.short_put_strike and entry.short_put_strike in existing_short_puts:
             # Move both short and long put DOWN by 5 (further OTM)
-            entry.short_put_strike -= 5
-            entry.long_put_strike -= 5
+            entry.short_put_strike -= self.strike_increment
+            entry.long_put_strike -= self.strike_increment
         if entry.short_put_strike != original_short_put:
             logger.warning(
                 f"MKT-013: Short put {original_short_put} overlaps existing entry, "
@@ -1861,7 +1862,7 @@ class MEICStrategy:
         # Check and adjust long call strike
         original_long_call = entry.long_call_strike
         while entry.long_call_strike and entry.long_call_strike in existing_long_calls:
-            entry.long_call_strike += 5  # Move further OTM (up for calls)
+            entry.long_call_strike += self.strike_increment  # Move further OTM (up for calls)
         if entry.long_call_strike != original_long_call:
             logger.warning(
                 f"MKT-015: Long call {original_long_call} overlaps existing entry's long call, "
@@ -1877,7 +1878,7 @@ class MEICStrategy:
         # Check and adjust long put strike
         original_long_put = entry.long_put_strike
         while entry.long_put_strike and entry.long_put_strike in existing_long_puts:
-            entry.long_put_strike -= 5  # Move further OTM (down for puts)
+            entry.long_put_strike -= self.strike_increment  # Move further OTM (down for puts)
         if entry.long_put_strike != original_long_put:
             logger.warning(
                 f"MKT-015: Long put {original_long_put} overlaps existing entry's long put, "
@@ -5714,7 +5715,7 @@ class MEICStrategy:
             uic = self._get_option_uic(strike, put_call, expiry)
             if not uic:
                 # Strike doesn't exist in chain - try next
-                adjustment = ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS * adjustment_direction
+                adjustment = self.strike_increment * adjustment_direction
                 strike += adjustment
                 continue
 
@@ -5723,7 +5724,7 @@ class MEICStrategy:
             quote = self._read_option_quote(uic)
             if not quote:
                 # No quote - try adjusted strike
-                adjustment = ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS * adjustment_direction
+                adjustment = self.strike_increment * adjustment_direction
                 strike += adjustment
                 continue
 
@@ -5743,7 +5744,7 @@ class MEICStrategy:
 
             # Illiquid - try adjusting
             if attempt < MAX_STRIKE_ADJUSTMENT_ATTEMPTS:
-                adjustment = ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS * adjustment_direction
+                adjustment = self.strike_increment * adjustment_direction
                 strike += adjustment
                 logger.info(f"MKT-007: {put_call} {original_strike} illiquid, trying {strike}")
 
@@ -5785,7 +5786,7 @@ class MEICStrategy:
 
         # Max attempts = (current_spread_width - min_spread_width) / 5
         current_spread = abs(long_strike - short_strike)
-        max_attempts = int((current_spread - min_spread_width) / ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS)
+        max_attempts = int((current_spread - min_spread_width) / self.strike_increment)
         max_attempts = max(0, min(6, max_attempts))  # Cap at 6 attempts
 
         for attempt in range(max_attempts + 1):
@@ -5802,14 +5803,14 @@ class MEICStrategy:
             uic = self._get_option_uic(long_strike, put_call, expiry)
             if not uic:
                 # Strike doesn't exist - try closer
-                long_strike += adjustment_direction * ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS
+                long_strike += adjustment_direction * self.strike_increment
                 continue
 
             # Check quote for liquidity (F7.6: broker-agnostic via
             # _read_option_quote — normalized {bid, ask, ...}).
             quote = self._read_option_quote(uic)
             if not quote:
-                long_strike += adjustment_direction * ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS
+                long_strike += adjustment_direction * self.strike_increment
                 continue
 
             bid = quote.get("bid") or 0
@@ -5840,7 +5841,7 @@ class MEICStrategy:
 
             # Illiquid - try closer to short strike
             if attempt < max_attempts:
-                long_strike += adjustment_direction * ILLIQUIDITY_STRIKE_ADJUSTMENT_POINTS
+                long_strike += adjustment_direction * self.strike_increment
 
         # Could not find liquid long wing - return original
         # MKT-010: Still mark as illiquid so HYDRA can use one-sided entry

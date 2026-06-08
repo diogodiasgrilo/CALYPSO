@@ -2186,7 +2186,7 @@ class IBClient:
             for r in rows
         ]
 
-    def get_vix_price(self) -> Optional[float]:
+    def get_vix_price(self, symbol: str = "VIX") -> Optional[float]:
         """Latest VIX index price. Tries mid (bid/ask average) → last → mark.
 
         Fix 2026-05-18 (Monday smoke diagnostic): VIX over IBKR's snapshot
@@ -2199,7 +2199,7 @@ class IBClient:
 
         SaxoClient.get_vix_price() equivalent — returns a single float.
         """
-        conid = self.qualify_contract("VIX", sec_type="IND")
+        conid = self.qualify_contract(symbol, sec_type="IND")
         q = self.get_quote(conid)
         if q.get("mid") is not None:
             return q["mid"]

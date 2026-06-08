@@ -2610,7 +2610,8 @@ class TestReadIndexPrice:
         b.get_quote.return_value = {"mid": 6800.5, "last": 6800.0, "availability": "R"}
         s = self._make(broker=b)
         assert s._read_index_price("SPX") == (6800.5, "R")
-        b.qualify_contract.assert_called_once_with("SPX", sec_type="IND")
+        # G5: index read now threads self.exchange (class-default CBOE here).
+        b.qualify_contract.assert_called_once_with("SPX", sec_type="IND", exchange="CBOE")
         b.get_quote.assert_called_once_with(416904)
 
     def test_ib_spx_falls_back_to_last(self):
@@ -2628,7 +2629,7 @@ class TestReadIndexPrice:
         b.get_quote.return_value = {"mid": None, "last": None, "mark": 18.4, "availability": "R"}
         s = self._make(broker=b)
         assert s._read_index_price("VIX") == (18.4, "R")
-        b.qualify_contract.assert_called_once_with("VIX", sec_type="IND")
+        b.qualify_contract.assert_called_once_with("VIX", sec_type="IND", exchange="CBOE")
 
     def test_exception_returns_none_tuple(self):
         b = MagicMock()
