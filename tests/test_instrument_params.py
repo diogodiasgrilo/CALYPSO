@@ -100,3 +100,29 @@ class TestUnderlyingSymbolThreading:
         # reads SPX (the canonical fallback) — pins the no-AttributeError contract.
         s = HydraStrategy.__new__(HydraStrategy)
         assert s.underlying_symbol == "SPX"
+
+
+class TestVolatilitySymbolThreading:
+    """Commit 8 — the VIX index read uses self.volatility_symbol, not a literal."""
+
+    def test_update_market_data_reads_configured_vol_symbol(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.underlying_symbol = "SPX"
+        s.volatility_symbol = "VXN"  # override; class default is "VIX"
+        s.market_data = MagicMock()
+        s.current_price = 0.0
+        s.current_vix = 0.0
+        seen = []
+
+        def fake_read(sym):
+            seen.append(sym)
+            return (6000.0 if sym == "SPX" else 15.0, "R")
+
+        s._read_index_price = fake_read
+        s._update_market_data()
+        assert "VXN" in seen  # vol leg used the configured symbol, not "VIX"
+        assert "SPX" in seen
+
+    def test_class_default_volatility_is_vix(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        assert s.volatility_symbol == "VIX"

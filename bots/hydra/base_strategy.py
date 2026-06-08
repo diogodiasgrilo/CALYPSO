@@ -4172,7 +4172,7 @@ class MEICStrategy:
             if (avail[:1] if avail else None) not in ("Z", "Y", "N"):
                 self.current_price = price
 
-        vix, vix_avail = self._split_index_read(self._read_index_price("VIX"))
+        vix, vix_avail = self._split_index_read(self._read_index_price(self.volatility_symbol))
         if vix:
             self.market_data.update_vix(vix, availability=vix_avail)
             avail = vix_avail.upper() if isinstance(vix_avail, str) else None
