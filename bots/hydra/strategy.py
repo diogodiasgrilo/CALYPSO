@@ -45,6 +45,7 @@ from enum import Enum
 
 from bots.hydra.order_types import BuySell
 from bots.hydra.leg import LEG_NAMES
+from shared import market_data_adapter
 from shared.ib_client import (
     IBClient, AmbiguousOrderError, RatePenaltyError, _normalize_position_dict,
 )
@@ -1461,31 +1462,11 @@ class HydraStrategy(MEICStrategy):
         downstream (see ATR + EMA loops).
 
         Static so it's unit-testable without HydraStrategy construction.
+
+        Item 3: the pure logic lives in shared.market_data_adapter; this is a
+        thin delegating wrapper so existing call sites stay unchanged.
         """
-        def _f(v) -> float:
-            if v is None or v == "":
-                return 0.0
-            try:
-                return float(v)
-            except (TypeError, ValueError):
-                return 0.0
-
-        def _i(v) -> int:
-            if v is None or v == "":
-                return 0
-            try:
-                return int(float(v))
-            except (TypeError, ValueError):
-                return 0
-
-        return {
-            "open": _f(raw_bar.get("o")),
-            "high": _f(raw_bar.get("h")),
-            "low": _f(raw_bar.get("l")),
-            "close": _f(raw_bar.get("c")),
-            "volume": _i(raw_bar.get("v")),
-            "timestamp_ms": _i(raw_bar.get("t")),
-        }
+        return market_data_adapter.normalize_chart_bar(raw_bar)
 
     def _read_recent_bars(
         self,
@@ -3857,22 +3838,10 @@ class HydraStrategy(MEICStrategy):
 
         Returns:
             (actual_strike, uic) if found within tolerance, (None, None) otherwise
+
+        Item 3: pure logic in shared.market_data_adapter; thin delegating wrapper.
         """
-        if target in uic_map:
-            return target, uic_map[target]
-
-        best_strike = None
-        best_dist = max_snap + 1
-        for strike in uic_map:
-            dist = abs(strike - target)
-            if dist < best_dist:
-                best_dist = dist
-                best_strike = strike
-
-        if best_strike is not None and best_dist <= max_snap:
-            return best_strike, uic_map[best_strike]
-
-        return None, None
+        return market_data_adapter.snap_to_chain_strike(target, uic_map, max_snap)
 
     @staticmethod
     def _snap_long_for_spread(short_strike: float, target_width: int,
@@ -3892,24 +3861,11 @@ class HydraStrategy(MEICStrategy):
 
         Returns:
             (actual_strike, uic) if found, (None, None) otherwise
+
+        Item 3: pure logic in shared.market_data_adapter; thin delegating wrapper.
         """
-        ideal_long = short_strike + target_width if is_call else short_strike - target_width
-
-        best_strike = None
-        best_dist = 16  # Max tolerance: 15pt
-        for strike in uic_map:
-            dist = abs(strike - ideal_long)
-            if dist < best_dist:
-                # Ensure spread is at least min_width (don't snap to tiny spreads)
-                actual_width = abs(strike - short_strike)
-                if actual_width >= target_width - 15:  # Allow slightly narrower
-                    best_dist = dist
-                    best_strike = strike
-
-        if best_strike is not None:
-            return best_strike, uic_map[best_strike]
-
-        return None, None
+        return market_data_adapter.snap_long_for_spread(
+            short_strike, target_width, uic_map, is_call)
 
     def _snap_entry_strikes_to_chain(self, entry: HydraIronCondorEntry) -> bool:
         """
@@ -6072,7 +6028,7 @@ class HydraStrategy(MEICStrategy):
                         naked_short_info = (leg_name, pos_id, uic)
                         break
 
-            if has_naked_short:
+            if has_naked_short and self.requires_protective_wings:
                 logger.critical(f"NAKED SHORT DETECTED: {naked_short_info[0]}")
                 self._handle_naked_short(naked_short_info)
 
@@ -6219,7 +6175,7 @@ class HydraStrategy(MEICStrategy):
                         naked_short_info = (leg_name, pos_id, uic)
                         break
 
-            if has_naked_short:
+            if has_naked_short and self.requires_protective_wings:
                 logger.critical(f"NAKED SHORT DETECTED: {naked_short_info[0]}")
                 self._handle_naked_short(naked_short_info)
 

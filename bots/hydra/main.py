@@ -298,14 +298,14 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
 
     strategy = None
     try:
-        strategy_cfg = config.get("strategy", {}) or {}
-        brandon_cfg = strategy_cfg.get("brandon") or {}
-        if brandon_cfg.get("enabled", False):
-            from bots.hydra.brandon.strategy import BrandonHydraStrategy
-            trade_logger.log_event("Loading BrandonHydraStrategy (TP / GEX / overlay / narrow-spread)")
-            strategy = BrandonHydraStrategy(broker, config, trade_logger, dry_run=dry_run)
-        else:
-            strategy = HydraStrategy(broker, config, trade_logger, dry_run=dry_run)
+        # Item 4a: strategy selected by name via the registry (was a hardcoded
+        # if brandon.enabled / else). resolve_strategy_name preserves the legacy
+        # precedence (brandon.enabled wins, else strategy.name, else "hydra"), so
+        # this is behavior-identical for the current config.
+        from bots.hydra.registry import build_strategy, resolve_strategy_name
+        selected = resolve_strategy_name(config)
+        trade_logger.log_event(f"Loading strategy: {selected}")
+        strategy = build_strategy(config, broker, trade_logger, dry_run=dry_run)
     except Exception as e:
         trade_logger.log_error(f"Failed to initialize strategy: {e}")
         logger.exception("Strategy initialization failed")
