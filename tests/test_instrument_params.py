@@ -95,6 +95,26 @@ class TestUnderlyingSymbolThreading:
         assert broker.get_option_chain.call_args[0][0] == "NDX"
         assert broker.qualify_option_strikes.call_args.kwargs["symbol"] == "NDX"
 
+    def test_trading_class_and_exchange_thread_to_broker(self):
+        # Commit 9: the live option-chain path threads trading_class + exchange.
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.underlying_symbol = "NDX"
+        s.trading_class = "NDXP"
+        s.exchange = "NASDAQ"
+        broker = MagicMock()
+        broker.get_option_chain.return_value = [6735.0]
+        broker.qualify_option_strikes.return_value = {(6735.0, "C"): 1}
+        s.broker = broker
+
+        s._read_option_chain("2026-05-21", [6735.0])
+
+        oc_kwargs = broker.get_option_chain.call_args.kwargs
+        assert oc_kwargs["trading_class"] == "NDXP"
+        assert oc_kwargs["exchange"] == "NASDAQ"
+        qs_kwargs = broker.qualify_option_strikes.call_args.kwargs
+        assert qs_kwargs["trading_class"] == "NDXP"
+        assert qs_kwargs["exchange"] == "NASDAQ"
+
     def test_class_default_underlying_is_spx(self):
         # A __new__-built strategy that never ran _load_instrument_params still
         # reads SPX (the canonical fallback) — pins the no-AttributeError contract.

@@ -3771,7 +3771,10 @@ class HydraStrategy(MEICStrategy):
             return {}, {}
 
         try:
-            strike_list = self.broker.get_option_chain(self.underlying_symbol, expiry_date)
+            strike_list = self.broker.get_option_chain(
+                self.underlying_symbol, expiry_date,
+                trading_class=self.trading_class, exchange=self.exchange,
+            )
         except RatePenaltyError as e:
             self._alert_rate_penalty("option-chain fetch", e)
             return {}, {}
@@ -3803,6 +3806,8 @@ class HydraStrategy(MEICStrategy):
                 symbol=self.underlying_symbol,
                 expiry=expiry_date,
                 strikes=sorted(snapped),
+                trading_class=self.trading_class,
+                exchange=self.exchange,
             )
         except RatePenaltyError as e:
             self._alert_rate_penalty("strike conid resolution", e)

@@ -1470,6 +1470,7 @@ class IBClient:
         strike: Optional[float] = None,
         right: Optional[str] = None,
         trading_class: str = "SPXW",
+        exchange: str = "CBOE",
         sec_type: Optional[str] = None,
     ) -> int:
         """Resolve a contract identifier to its IBKR conid.
@@ -1548,7 +1549,7 @@ class IBClient:
                 # still walks the secdef chain to the exact strike.
                 candidates = [{
                     "conid": pinned,
-                    "sections": [{"secType": underlying_sec_type, "exchange": "CBOE"}],
+                    "sections": [{"secType": underlying_sec_type, "exchange": exchange}],
                 }]
             else:
                 candidates = self._ib_call(
@@ -1583,7 +1584,7 @@ class IBClient:
                         continue
                     if (s.get("secType") or "").upper() != underlying_sec_type.upper():
                         continue
-                    if "CBOE" in (s.get("exchange") or "").upper():
+                    if exchange.upper() in (s.get("exchange") or "").upper():
                         return True
                 return False
 
@@ -1594,7 +1595,7 @@ class IBClient:
                 if sec and sec != underlying_sec_type.upper():
                     return False
                 exch = (d.get("exchange") or "").upper()
-                if exch and "CBOE" not in exch:
+                if exch and exchange.upper() not in exch:
                     return False
                 return True
 
@@ -1640,7 +1641,7 @@ class IBClient:
                     conid=str(underlying_conid),
                     sec_type="OPT",
                     month=month,
-                    exchange="CBOE",
+                    exchange=exchange,
                     strike=str(strike),
                     right=right.upper(),
                 ) or []
@@ -1730,6 +1731,7 @@ class IBClient:
         expiry: date,
         strikes: Iterable[float],
         trading_class: str = "SPXW",
+        exchange: str = "CBOE",
         max_workers: int = 8,
     ) -> dict[tuple[float, str], int]:
         """Batch-resolve conids for many (strike, right) pairs at one expiry.
@@ -1786,7 +1788,7 @@ class IBClient:
         # Resolve the underlying conid ONCE (cached after first call).
         # This is a normal serialized _ib_call — happens before the
         # parallel section.
-        underlying_conid = self.qualify_contract(symbol, sec_type="IND")
+        underlying_conid = self.qualify_contract(symbol, sec_type="IND", exchange=exchange)
         month = _ib_month_str(expiry)
         want_yyyymmdd = expiry.strftime("%Y%m%d")
         expiry_iso = expiry.isoformat()
@@ -1823,7 +1825,7 @@ class IBClient:
                         "market", self._client.search_secdef_info_by_conid,
                         _serialize=False,
                         conid=str(underlying_conid), sec_type="OPT",
-                        month=month, exchange="CBOE", strike=str(strike),
+                        month=month, exchange=exchange, strike=str(strike),
                     ) or []
                 rows = secdef_data if isinstance(secdef_data, list) else [secdef_data]
 
@@ -2614,6 +2616,7 @@ class IBClient:
         symbol: str,
         expiry: date,
         trading_class: str = "SPXW",
+        exchange: str = "CBOE",
     ) -> list[float]:
         """List of strike prices available for a given expiry.
 
@@ -2626,14 +2629,14 @@ class IBClient:
         self._require_connected()
         expiry = _coerce_expiry(expiry)  # accept ISO string over the RPC wire (#4)
         # Resolve underlying conid first
-        underlying_conid = self.qualify_contract(symbol, sec_type="IND")
+        underlying_conid = self.qualify_contract(symbol, sec_type="IND", exchange=exchange)
         month = _ib_month_str(expiry)
         data = self._ib_call(
             "market", self._client.search_strikes_by_conid,
             conid=str(underlying_conid),
             sec_type="OPT",
             month=month,
-            exchange="CBOE",
+            exchange=exchange,
         ) or {}
         # Response shape: {"call": [strikes], "put": [strikes]}
         # P7-audit L8: coerce each side to a list explicitly — `calls + puts`

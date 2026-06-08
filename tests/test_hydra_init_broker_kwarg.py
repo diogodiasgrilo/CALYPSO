@@ -323,12 +323,16 @@ class TestReadOptionChain:
         fake_broker.qualify_option_strikes.return_value = {(6735.0, "C"): 1}
         s = self._make_bare_strategy(broker=fake_broker)
         s._read_option_chain("2026-05-21", [6735.0])
+        # Item 2 commit 9: the caller now threads trading_class + exchange
+        # (class defaults SPXW/CBOE on a bare strategy).
         fake_broker.get_option_chain.assert_called_once_with(
-            "SPX", date(2026, 5, 21)
+            "SPX", date(2026, 5, 21), trading_class="SPXW", exchange="CBOE"
         )
         qual_kwargs = fake_broker.qualify_option_strikes.call_args.kwargs
         assert qual_kwargs["symbol"] == "SPX"
         assert qual_kwargs["expiry"] == date(2026, 5, 21)
+        assert qual_kwargs["trading_class"] == "SPXW"
+        assert qual_kwargs["exchange"] == "CBOE"
 
     def test_ib_path_snaps_candidate_to_nearest_real_strike(self):
         """A 5pt-step candidate that isn't a listed strike snaps to the
