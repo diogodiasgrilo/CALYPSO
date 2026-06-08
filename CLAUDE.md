@@ -677,6 +677,26 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 # 3. Restart HYDRA (config / strategy change)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart hydra"
 
+# 3b. ⚠️ MANDATORY when the change touches shared/ code that calypso-broker imports
+#     (shared/ib_client.py, shared/broker_service.py, shared/ib_retry.py, shared/ib_oauth.py):
+#     calypso-broker owns the ONE IBClient and holds LOADED BYTECODE until restarted — a
+#     `git pull` does NOT update a running process. The strategies proxy data calls to it via
+#     BrokerClient and forward new kwargs BLINDLY over /rpc, so an un-restarted broker on old
+#     code raises e.g. `TypeError: unexpected keyword argument 'exchange'` → BrokerError → the
+#     bot goes blind (no quotes/chains, all entries skipped). This is the 2026-06-08 modularity
+#     deploy bug. Restart the broker FIRST, then the strategies:
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart calypso-broker && sleep 15 && curl -s http://127.0.0.1:8788/health"
+#     Prove the new signature is live (resolves WITH the new kwarg):
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="curl -s -X POST http://127.0.0.1:8788/rpc -H 'Content-Type: application/json' -d '{\"method\":\"qualify_contract\",\"args\":[\"SPX\"],\"kwargs\":{\"sec_type\":\"IND\",\"exchange\":\"CBOE\"}}'"
+
+# 3c. ⚠️ Newly-LIVE config knobs (modularity item 2, 2026-06-08): underlying_symbol /
+#     volatility_symbol / trading_class / exchange / strike_increment / target_dte are now
+#     read live (no longer cosmetic). The per-strategy config.json is gitignored/skip-worktree
+#     on the VM, so a `git pull` does NOT correct a stale value in place. After any deploy that
+#     makes a knob live, VERIFY the VM config: a stale Saxo value (e.g. underlying_symbol
+#     "US500.I") passes the truthiness-only startup assertion but then fails qualify_contract →
+#     SPX/VIX never resolve → blind. Confirm `underlying_symbol: "SPX"` per config.
+
 # 4. Verify
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status hydra"
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -n 50 --no-pager"
