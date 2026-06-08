@@ -18,7 +18,10 @@ entrypoint always used: ``Cls(broker, config, trade_logger, dry_run=dry_run)``.
 from __future__ import annotations
 
 import importlib
+import logging
 from typing import Any, Dict
+
+logger = logging.getLogger(__name__)
 
 # name → "module.path:ClassName". Add a row to register a new strategy.
 _REGISTRY: Dict[str, str] = {
@@ -47,13 +50,28 @@ def resolve_strategy_name(config: Dict[str, Any]) -> str:
     """Resolve the selected strategy name from config, preserving legacy precedence.
 
     1. ``strategy.brandon.enabled == True`` → ``"brandon"`` (legacy flag, wins).
-    2. else ``strategy.name`` if set.
+    2. else ``strategy.name`` IF it is a registered key.
     3. else ``DEFAULT_STRATEGY`` (``"hydra"``).
+
+    Step 2 only honors a ``strategy.name`` that names a registered strategy.
+    Existing configs carry a *descriptive* label there (e.g. "HYDRA (Trend
+    Following Hybrid)") that the pre-registry entrypoint ignored entirely — those
+    must fall through to the default, NOT raise StrategyNotRegistered. An
+    unrecognized name is logged (catches typos) but never crashes startup.
     """
     scfg = config.get("strategy") or {}
     if (scfg.get("brandon") or {}).get("enabled", False):
         return "brandon"
-    return scfg.get("name") or DEFAULT_STRATEGY
+    name = scfg.get("name")
+    if name and name in _REGISTRY:
+        return name
+    if name and name != DEFAULT_STRATEGY:
+        logger.warning(
+            "strategy.name=%r is not a registered strategy %s — using default %r "
+            "(legacy/descriptive name ignored, as the pre-registry entrypoint did)",
+            name, available_strategies(), DEFAULT_STRATEGY,
+        )
+    return DEFAULT_STRATEGY
 
 
 def resolve_strategy_class(name: str):

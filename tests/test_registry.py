@@ -34,8 +34,19 @@ class TestResolveName:
     def test_brandon_disabled_falls_through(self):
         assert resolve_strategy_name({"strategy": {"brandon": {"enabled": False}}}) == "hydra"
 
-    def test_explicit_name(self):
+    def test_explicit_registered_name(self):
+        # A name that IS a registered key is honored.
         assert resolve_strategy_name({"strategy": {"name": "strangle"}}) == "strangle"
+
+    def test_descriptive_legacy_name_falls_through_to_default(self):
+        # Regression: the real A config carries a human-readable label here that
+        # the pre-registry entrypoint ignored. It must NOT crash with
+        # StrategyNotRegistered — fall through to the default "hydra".
+        cfg = {"strategy": {"name": "HYDRA (Trend Following Hybrid)"}}
+        assert resolve_strategy_name(cfg) == "hydra"
+
+    def test_unregistered_name_falls_through_to_default(self):
+        assert resolve_strategy_name({"strategy": {"name": "typo_strat"}}) == "hydra"
 
     def test_brandon_flag_wins_over_name(self):
         # Legacy precedence: the brandon.enabled boolean is checked first.
