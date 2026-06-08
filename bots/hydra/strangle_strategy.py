@@ -12,12 +12,15 @@ What makes it different from the iron-condor family:
   - **Undefined risk** — sized by broker margin, not the defined-risk floor
     (wired in a later step, S2).
 
-Build status: INCREMENTAL. This commit lands the class + 2-leg strike selection
-(``_calculate_strikes``). The entry placement (2 shorts, no longs/hedge-pairing)
-and the naked-short exit rule land in subsequent commits. The strategy is
-**deliberately NOT registered** in ``bots/hydra/registry.py`` yet — it cannot be
-selected/run until those pieces exist, so it is inert and safe. It is also
-**dry-run only**; going live is a separate, explicit operator decision.
+Build status: registered and dry-run-RUNNABLE, NOT hardened for live. It IS
+registered in ``bots/hydra/registry.py`` ("strangle") and selectable via
+``strategy.name="strangle"``, so it is **gated DRY-RUN ONLY in __init__** — a
+non-dry-run construction raises ``ConfigError``. Two pre-live gates remain open:
+  - audit **S-CRIT-1**: the naked-short stop is not yet wired through
+    ``_validate_pnl_sanity`` (the full-IC P&L-sanity guard rejects every tick at
+    long=0), so the stop would NOT fire — undefined risk with no working stop.
+  - **S2**: margin sizing still uses the defined-risk IC floor, not broker margin.
+Going live requires both fixed + paper verification + an explicit operator flip.
 """
 
 from __future__ import annotations
@@ -26,7 +29,7 @@ import logging
 from datetime import datetime
 from typing import Optional
 
-from bots.hydra.base_strategy import MEICState
+from bots.hydra.base_strategy import ConfigError, MEICState
 from bots.hydra.order_types import BuySell
 from bots.hydra.strategy import HydraIronCondorEntry, HydraStrategy
 from shared.event_calendar import is_fomc_t_plus_one
@@ -46,6 +49,25 @@ class StrangleStrategy(HydraStrategy):
 
     BOT_NAME = "STRANGLE"
     requires_protective_wings = False  # undefined-risk: naked shorts by design
+
+    def __init__(self, *args, **kwargs):
+        """Construct, then enforce the dry-run-only gate (audit S-HIGH-3).
+
+        The strangle is registered + selectable, but two pre-live gates are still
+        open: its naked-short stop is not yet wired (S-CRIT-1 — it would NOT stop)
+        and margin sizing is the defined-risk IC floor, not broker margin (S2).
+        Until those land + paper verification, refuse any non-dry-run construction
+        so a stray ``strategy.name="strangle"`` on a ``dry_run=false`` variant
+        cannot silently arm real, un-stopped, undefined-risk naked-short trading.
+        """
+        super().__init__(*args, **kwargs)
+        if not getattr(self, "dry_run", False):
+            raise ConfigError(
+                "StrangleStrategy is dry-run-only until hardened: the naked-short "
+                "stop is not yet wired (audit S-CRIT-1) and sizing uses the "
+                "defined-risk IC margin floor (S2). Set dry_run=true, or do not "
+                "select strategy.name='strangle'."
+            )
 
     def _calculate_strikes(self, entry: HydraIronCondorEntry) -> bool:
         """Select the two short strikes — a short call and a short put at a
@@ -300,6 +322,9 @@ class StrangleStrategy(HydraStrategy):
         self.state = MEICState.ENTRY_IN_PROGRESS
         try:
             entry = HydraIronCondorEntry(entry_number=entry_num)
+            # Audit S-HIGH-1: stamp contracts (the IC path does this) — credits,
+            # commission, stops, spread_value and reconciliation all scale by it.
+            entry.contracts = self.contracts_per_entry
             entry.strategy_id = f"strangle_{get_us_market_time().strftime('%Y%m%d')}_{entry_num:03d}"
 
             if not self._calculate_strikes(entry):

@@ -14,9 +14,12 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from unittest.mock import MagicMock
 
+import pytest
+
+from bots.hydra.base_strategy import ConfigError
 from bots.hydra.order_types import BuySell
 from bots.hydra.strangle_strategy import StrangleStrategy
-from bots.hydra.strategy import HydraIronCondorEntry
+from bots.hydra.strategy import HydraIronCondorEntry, HydraStrategy
 
 
 def _strat(spx, vix, *, target_delta=8, increment=5):
@@ -26,6 +29,29 @@ def _strat(spx, vix, *, target_delta=8, increment=5):
     s.target_delta = target_delta
     s.strike_increment = increment
     return s
+
+
+class TestDryRunGate:
+    """Audit S-HIGH-3: the strangle must refuse non-dry-run construction until
+    hardened, so a stray strategy.name='strangle' on a live variant can't arm
+    un-stopped naked-short trading."""
+
+    def _patch_super_init(self, monkeypatch):
+        # Lightweight super().__init__ that only sets dry_run (avoids the heavy
+        # real HydraStrategy construction; we're testing the strangle's gate).
+        def fake_init(self, *a, **k):
+            self.dry_run = k.get("dry_run", False)
+        monkeypatch.setattr(HydraStrategy, "__init__", fake_init)
+
+    def test_refuses_non_dry_run(self, monkeypatch):
+        self._patch_super_init(monkeypatch)
+        with pytest.raises(ConfigError):
+            StrangleStrategy(None, {}, None, dry_run=False)
+
+    def test_allows_dry_run(self, monkeypatch):
+        self._patch_super_init(monkeypatch)
+        s = StrangleStrategy(None, {}, None, dry_run=True)
+        assert isinstance(s, StrangleStrategy)
 
 
 class TestContract:
@@ -267,6 +293,15 @@ class TestInitiateEntry:
         assert e.is_complete is True
         assert e.short_call_strike > 7465.0 and e.short_put_strike < 7465.0
         assert e.call_side_stop > 0 and e.put_side_stop > 0     # per-side stops computed
+
+    def test_stamps_contracts_for_multi_contract(self):
+        # Audit S-HIGH-1: entry.contracts must be set from contracts_per_entry,
+        # else credits/commission/stops/reconciliation desync at >1 contract.
+        s = self._strat()
+        s.contracts_per_entry = 5
+        s._initiate_entry()
+        assert s.daily_state.entries[0].contracts == 5
+        assert s.daily_state.total_commission == 2 * 1.15 * 5
 
     def test_buying_power_gate_skips(self):
         s = self._strat()
