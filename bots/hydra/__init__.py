@@ -36,6 +36,16 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2.0.0-rc.1 modularity refactor — Leg/LegSet substrate (2026-06-08, NO behavior
+  change): IronCondorEntry's 24 flat leg fields (short_call_strike … *_mid_at_fill)
+  are now backward-compat @property bridges over a `legs` dict of first-class `Leg`
+  objects (bots/hydra/leg.py + bind_leg_bridge). Reads, writes, and dynamic
+  getattr/setattr all resolve to the legs; the on-disk state schema, serialization,
+  and all ~1,011 flat leg references are unchanged. Substrate for future
+  non-iron-condor strategies (strangle/butterfly/ratio/…) — item 1 of
+  docs/MODULARITY_AUDIT.md / docs/PR_SCOPE_LEG_INSTRUMENT.md. Pinned by 79 new
+  tests (test_leg, test_state_serialization_roundtrip, test_entry_leg_accessors);
+  full suite 1160 passing.
 - 2.0.0-rc.1 post-AUD5 go-live hardening (2026-06-03 → 06-04): the first real
   live-paper fills exposed a cluster of IBKR-path bugs the dry-run masked.
   • Phantom daily-summary (`4dd0a41`): the bot booted after the open into stale

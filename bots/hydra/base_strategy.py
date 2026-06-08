@@ -49,6 +49,7 @@ from enum import Enum
 
 from shared.ib_client import IBClient
 from bots.hydra.order_types import BuySell, OrderType
+from bots.hydra.leg import Leg, _new_legset, bind_leg_bridge
 from shared.alert_service import AlertService, AlertType, AlertPriority
 from shared.market_hours import get_us_market_time, is_market_open, is_early_close_day
 from shared.event_calendar import is_fomc_meeting_day, is_fomc_announcement_day
@@ -295,6 +296,7 @@ class MEICState(Enum):
     HALTED = "Halted"                       # Critical error, manual intervention required
 
 
+@bind_leg_bridge
 @dataclass
 class IronCondorEntry:
     """
@@ -318,23 +320,16 @@ class IronCondorEntry:
     entry_number: int  # 1-6
     entry_time: Optional[datetime] = None
 
-    # Strikes
-    short_call_strike: float = 0.0
-    long_call_strike: float = 0.0
-    short_put_strike: float = 0.0
-    long_put_strike: float = 0.0
+    # Legs — the entry is a set of first-class Leg objects keyed by canonical
+    # name (short_call/long_call/short_put/long_put). The flat
+    # {leg}_{strike,position_id,uic,price,fill_price,mid_at_fill} attributes
+    # are backward-compat @property bridges installed by @bind_leg_bridge; they
+    # read/write legs[...]. See docs/PR_SCOPE_LEG_INSTRUMENT.md.
+    legs: Dict[str, Leg] = field(default_factory=_new_legset)
 
-    # Position IDs (from Saxo after fill)
-    short_call_position_id: Optional[str] = None
-    long_call_position_id: Optional[str] = None
-    short_put_position_id: Optional[str] = None
-    long_put_position_id: Optional[str] = None
-
-    # UICs (for price streaming)
-    short_call_uic: Optional[int] = None
-    long_call_uic: Optional[int] = None
-    short_put_uic: Optional[int] = None
-    long_put_uic: Optional[int] = None
+    # Strikes — bridge properties over legs[*].strike
+    # Position IDs (Saxo-era; None on IBKR) — bridge properties over legs[*].position_id
+    # UICs (= conid on IBKR; the F4 reconcile key) — bridge properties over legs[*].uic
 
     # Credits received
     call_spread_credit: float = 0.0  # Credit from selling call spread
@@ -349,28 +344,14 @@ class IronCondorEntry:
     actual_call_stop_debit: float = 0.0
     actual_put_stop_debit: float = 0.0
 
-    # Current option prices (for P&L / cushion calculation — updated every heartbeat)
-    short_call_price: float = 0.0
-    long_call_price: float = 0.0
-    short_put_price: float = 0.0
-    long_put_price: float = 0.0
-
-    # Fill prices at entry (option price points — multiply by 100 for dollars)
-    # Set once in _execute_entry(), corrected by _verify_entry_fill_prices()
-    short_call_fill_price: float = 0.0
-    long_call_fill_price: float = 0.0
-    short_put_fill_price: float = 0.0
-    long_put_fill_price: float = 0.0
-
-    # Per-leg MID at fill time ((bid+ask)/2 of the filling attempt), captured in
-    # _execute_entry BEFORE the monitoring *_price is overwritten with the fill.
-    # The reference for REAL entry slippage = fill - mid (the dry-run-era
-    # slippage was structurally 0 because it diffed fill against fill). 0.0 means
-    # not captured (e.g. dry-run / a leg with no quote).
-    short_call_mid_at_fill: float = 0.0
-    long_call_mid_at_fill: float = 0.0
-    short_put_mid_at_fill: float = 0.0
-    long_put_mid_at_fill: float = 0.0
+    # Current option prices (updated every heartbeat for P&L / cushion) —
+    # bridge properties over legs[*].price
+    # Fill prices at entry (option points; ×100 for dollars). Set in
+    # _execute_entry(), corrected by _verify_entry_fill_prices() — bridge
+    # properties over legs[*].fill_price.
+    # Per-leg MID at fill time ((bid+ask)/2 of the filling attempt). REAL entry
+    # slippage reference = fill - mid (0.0 = not captured, e.g. dry-run / no
+    # quote) — bridge properties over legs[*].mid_at_fill.
 
     # Status tracking
     is_complete: bool = False  # All 4 legs filled

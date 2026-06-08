@@ -2935,8 +2935,9 @@ class TestExecuteStopLossClosesOnIBKR:
     gates on `if uic:` (the conid)."""
 
     def _entry(self):
-        e = HydraIronCondorEntry.__new__(HydraIronCondorEntry)
-        e.entry_number = 1
+        # Construct via __init__ (not __new__) so the `legs` LegSet is populated
+        # — the flat *_uic / *_strike attrs set below are property bridges over it.
+        e = HydraIronCondorEntry(entry_number=1)
         e.contracts = 1
         e.call_side_stopped = False
         e.put_side_stopped = False

@@ -72,3 +72,39 @@ def _new_legset() -> Dict[str, Leg]:
         "short_put": Leg("short", "put"),
         "long_put": Leg("long", "put"),
     }
+
+
+def bind_leg_bridge(cls):
+    """Class decorator: install ``{leg}_{prop}`` property/setter pairs that
+    delegate to ``self.legs[leg].{prop}`` for the 4 legs × 6 leg-scoped props.
+
+    This is the backward-compat bridge for the Leg/LegSet refactor: the ~1,011
+    flat ``short_call_strike`` / ``long_put_uic`` / … references across the
+    strategy keep working unchanged — reads, writes, and dynamic
+    ``getattr/setattr(entry, f"{leg}_{prop}")`` all resolve through these
+    properties. Apply AFTER ``@dataclass`` so the 24 names are properties on the
+    class rather than ``__init__`` fields:
+
+        @bind_leg_bridge
+        @dataclass
+        class IronCondorEntry:
+            legs: Dict[str, Leg] = field(default_factory=_new_legset)
+            ...
+
+    The setter is non-negotiable: live position-clearing paths do
+    ``setattr(entry, f"{leg}_uic", None)`` — a getter-only property would raise
+    ``AttributeError`` there and leave a vanished leg uncleared.
+    """
+    def _make(leg_name, prop_name):
+        def _get(self, _l=leg_name, _p=prop_name):
+            return getattr(self.legs[_l], _p)
+
+        def _set(self, value, _l=leg_name, _p=prop_name):
+            setattr(self.legs[_l], _p, value)
+
+        return property(_get, _set)
+
+    for leg_name in LEG_NAMES:
+        for prop_name in LEG_PROPS:
+            setattr(cls, f"{leg_name}_{prop_name}", _make(leg_name, prop_name))
+    return cls
