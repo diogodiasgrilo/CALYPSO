@@ -293,3 +293,34 @@ class TestInitiateEntry:
         assert s.daily_state.entries_failed == 1
         assert s._next_entry_index == 1
         assert s.daily_state.entries == []
+
+
+class TestSettlement:
+    """Verify the inherited dry-run settlement books a 2-naked-leg strangle
+    correctly at long=0 (both sides expire worthless → keep full premium)."""
+
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s.dry_run = True
+        s.broker = None
+        s.contracts_per_entry = 1
+        s.daily_state = SimpleNamespace(entries=[], total_realized_pnl=0.0)
+        s._get_todays_expiry = lambda: "2026-06-08"
+        s._get_option_uic = lambda strike, right, expiry: 111 if right == "Call" else 222
+        s._read_option_quote = lambda uic: {"mid": 1.5}
+        return s
+
+    def test_both_sides_expire_worthless_book_full_credit(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.short_call_strike, e.short_put_strike = 7600.0, 7300.0
+        e.strategy_id = "strangle_test"
+        s._simulate_entry(e)  # books 150 credit per naked short, DRY ids
+        s.daily_state.entries.append(e)
+
+        booked = s._process_expired_credits()
+
+        assert e.call_side_expired is True and e.put_side_expired is True
+        assert booked == 300.0           # full credit kept (both legs OTM at expiry)
+        # long legs were never touched (no wings)
+        assert e.long_call_uic in (None, 0) and e.long_put_uic in (None, 0)
