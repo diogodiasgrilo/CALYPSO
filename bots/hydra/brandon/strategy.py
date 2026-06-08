@@ -324,6 +324,7 @@ class BrandonHydraStrategy(HydraStrategy):
             max_shift_pts=self.brandon_max_shift_pts,
             shift_buffer_pts=self.brandon_shift_buffer_pts,
             accel_peak_locality_pts=self.brandon_accel_peak_locality_pts,
+            strike_increment=self.strike_increment,
         )
 
         if entry.short_call_strike and not getattr(entry, "call_side_skipped", False):

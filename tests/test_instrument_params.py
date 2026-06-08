@@ -146,3 +146,27 @@ class TestVolatilitySymbolThreading:
     def test_class_default_volatility_is_vix(self):
         s = HydraStrategy.__new__(HydraStrategy)
         assert s.volatility_symbol == "VIX"
+
+
+class TestStrikeGrid:
+    """Commit 10 — the strike grid is self.strike_increment, not a literal 5."""
+
+    def test_snap_default_increment_is_5(self):
+        s = HydraStrategy.__new__(HydraStrategy)  # class default strike_increment=5
+        assert s._snap_to_grid(7464.79) == 7465   # round(.../5)*5, byte-identical
+        assert s._snap_to_grid(7462.0) == 7460
+
+    def test_snap_respects_increment_override(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.strike_increment = 10
+        assert s._snap_to_grid(7464.0) == 7460
+        assert s._snap_to_grid(7466.0) == 7470
+
+    def test_brandon_snap_uses_increment(self):
+        from bots.hydra.brandon.gex_strike_adjuster import _snap
+        assert _snap(7464.0) == 7465        # default SPX 5pt grid
+        assert _snap(7464.0, 10) == 7460    # configured increment
+
+    def test_brandon_adjuster_config_default_increment(self):
+        from bots.hydra.brandon.gex_strike_adjuster import AdjusterConfig
+        assert AdjusterConfig().strike_increment == 5.0
