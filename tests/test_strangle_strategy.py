@@ -68,3 +68,51 @@ class TestStrikeSelection:
     def test_no_price_returns_false(self):
         s = _strat(0.0, 18.0)
         assert s._calculate_strikes(HydraIronCondorEntry(entry_number=1)) is False
+
+
+class TestSimulateEntry:
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s.contracts_per_entry = 1
+        s._get_todays_expiry = lambda: "2026-06-08"
+        s._get_option_uic = lambda strike, right, expiry: 111 if right == "Call" else 222
+        s._read_option_quote = lambda uic: {"mid": 1.5}
+        return s
+
+    def test_books_two_naked_shorts(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.short_call_strike, e.short_put_strike = 7600.0, 7300.0
+        assert s._simulate_entry(e) is True
+        assert e.short_call_uic == 111 and e.short_put_uic == 222
+        # premium 1.5 × 100 × 1 contract per side
+        assert e.call_spread_credit == 150.0 and e.put_spread_credit == 150.0
+        assert e.total_credit == 300.0
+        assert e.is_complete is True
+
+    def test_dry_ids_assigned_to_shorts_only(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.short_call_strike, e.short_put_strike = 7600.0, 7300.0
+        s._simulate_entry(e)
+        assert e.short_call_position_id.startswith("DRY_") and e.short_call_position_id.endswith("_SC")
+        assert e.short_put_position_id.startswith("DRY_") and e.short_put_position_id.endswith("_SP")
+        # no long legs
+        assert e.long_call_position_id is None and e.long_put_position_id is None
+
+    def test_unrealized_pnl_is_naked_short_shaped(self):
+        # With longs priced 0, the IC entry model collapses to the strangle's
+        # economics: pnl = credit - cost_to_buy_back_the_two_shorts.
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.short_call_strike, e.short_put_strike = 7600.0, 7300.0
+        s._simulate_entry(e)
+        # shorts now cost 0.80 each to close (price dropped from 1.5)
+        e.short_call_price, e.short_put_price = 0.80, 0.80
+        # credit 300 - (0.80+0.80)*100 = 300 - 160 = 140
+        assert e.unrealized_pnl == 140.0
+
+    def test_no_expiry_returns_false(self):
+        s = self._strat()
+        s._get_todays_expiry = lambda: None
+        assert s._simulate_entry(HydraIronCondorEntry(entry_number=1)) is False

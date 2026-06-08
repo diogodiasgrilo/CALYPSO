@@ -23,6 +23,7 @@ selected/run until those pieces exist, so it is inert and safe. It is also
 from __future__ import annotations
 
 import logging
+from datetime import datetime
 
 from bots.hydra.strategy import HydraIronCondorEntry, HydraStrategy
 
@@ -75,5 +76,60 @@ class StrangleStrategy(HydraStrategy):
         logger.info(
             f"STRANGLE strikes: SC {entry.short_call_strike:.0f} / "
             f"SP {entry.short_put_strike:.0f} (±{otm_distance:.0f}pt OTM, VIX {vix:.1f})"
+        )
+        return True
+
+    def _estimate_short_premium(self, uic) -> float:
+        """Per-contract premium (option points) of a short leg — mid, then last,
+        then mark. 0.0 if the leg has no uic or no usable quote. Reuses the base
+        normalized-quote reader (`_read_option_quote`)."""
+        if not uic:
+            return 0.0
+        quote = self._read_option_quote(uic) or {}
+        for key in ("mid", "last", "mark"):
+            value = quote.get(key)
+            if value is not None:
+                return float(value)
+        return 0.0
+
+    def _simulate_entry(self, entry: HydraIronCondorEntry) -> bool:
+        """Dry-run entry: resolve the two short conids, book the premium collected,
+        and assign synthetic DRY ids — the strangle analogue of the base IC
+        simulation (which requires long wings the strangle doesn't have).
+
+        Credit is the sum of the two short premiums (no long debit — naked). The
+        entry's spread-value / unrealized-pnl math collapses correctly because the
+        unused long legs price at 0 (long_*_price stays 0.0).
+        """
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            logger.error(f"[DRY RUN] Strangle: no expiry for entry #{entry.entry_number}")
+            return False
+
+        # Resolve the two short conids so heartbeat monitoring fetches real quotes.
+        if entry.short_call_strike:
+            entry.short_call_uic = self._get_option_uic(entry.short_call_strike, "Call", expiry) or 0
+        if entry.short_put_strike:
+            entry.short_put_uic = self._get_option_uic(entry.short_put_strike, "Put", expiry) or 0
+
+        # Credit = premium collected on each naked short (per-contract × 100 × contracts).
+        call_premium = self._estimate_short_premium(entry.short_call_uic)
+        put_premium = self._estimate_short_premium(entry.short_put_uic)
+        entry.call_spread_credit = call_premium * 100 * self.contracts_per_entry
+        entry.put_spread_credit = put_premium * 100 * self.contracts_per_entry
+        entry.short_call_fill_price = call_premium
+        entry.short_put_fill_price = put_premium
+
+        # Synthetic DRY ids for the two shorts (longs are unused).
+        base_id = int(datetime.now().timestamp() * 1000)
+        entry.short_call_position_id = f"DRY_{base_id}_SC"
+        entry.short_put_position_id = f"DRY_{base_id}_SP"
+        entry.is_complete = True
+
+        logger.info(
+            f"[DRY RUN] Simulated STRANGLE entry #{entry.entry_number}: "
+            f"SC {entry.short_call_strike:.0f} (${entry.call_spread_credit:.2f}) / "
+            f"SP {entry.short_put_strike:.0f} (${entry.put_spread_credit:.2f}), "
+            f"total ${entry.total_credit:.2f}"
         )
         return True
