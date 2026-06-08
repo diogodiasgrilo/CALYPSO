@@ -872,6 +872,13 @@ class MarketData:
 # MAIN STRATEGY CLASS
 # =============================================================================
 
+class ConfigError(ValueError):
+    """Invalid strategy configuration (e.g. an instrument parameter is unset).
+
+    Subclasses ValueError so existing broad config-error handling still catches it.
+    """
+
+
 class MEICStrategy:
     """
     MEIC (Multiple Entry Iron Condors) Strategy Implementation.
@@ -970,7 +977,9 @@ class MEICStrategy:
         # / `IBClient.qualify_contract`, not these JSON-pinned IDs.
         # `underlying_symbol` is still meaningful (it's the lookup key
         # for `qualify_contract("SPX", sec_type="IND")`).
-        self.underlying_symbol = self.strategy_config.get("underlying_symbol", "SPX")
+        # Instrument + expiry parameters (modularity-audit item 2) — defaults
+        # equal today's SPX/0DTE literals, so an absent config is byte-identical.
+        self._load_instrument_params()
 
         # Entry parameters
         self._parse_entry_times()
@@ -5848,6 +5857,44 @@ class MEICStrategy:
     # =========================================================================
     # CONFIG-001: CONFIGURATION VALIDATION
     # =========================================================================
+
+    def _load_instrument_params(self) -> None:
+        """Read instrument + expiry parameters from config (modularity-audit item 2).
+
+        Every default equals today's SPX/0DTE literal, so a config without these
+        keys produces byte-identical behavior. These fields back the call sites
+        that used to hardcode SPX / VIX / SPXW / CBOE / the 5pt strike grid /
+        today-expiry — threaded through in the commits that follow.
+        """
+        cfg = self.strategy_config
+        self.underlying_symbol = cfg.get("underlying_symbol", "SPX")
+        self.volatility_symbol = cfg.get("volatility_symbol", "VIX")
+        self.trading_class = cfg.get("trading_class", "SPXW")
+        self.exchange = cfg.get("exchange", "CBOE")
+        self.strike_increment = cfg.get("strike_increment", 5)
+        self.target_dte = cfg.get("target_dte", 0)
+        self._assert_instrument_parameterized()
+
+    def _assert_instrument_parameterized(self) -> None:
+        """Fail fast if any instrument field is unset/invalid — a guard so a
+        future edit that re-introduces a hardcoded symbol/exchange/grid/expiry
+        (instead of threading the config value) trips at startup, not mid-trade.
+        """
+        missing = [
+            n for n in ("underlying_symbol", "volatility_symbol", "trading_class", "exchange")
+            if not getattr(self, n, None)
+        ]
+        if missing:
+            raise ConfigError(f"instrument params unset: {missing}")
+        if not (isinstance(self.strike_increment, (int, float))
+                and not isinstance(self.strike_increment, bool)
+                and self.strike_increment > 0):
+            raise ConfigError(
+                f"strike_increment must be a positive number, got {self.strike_increment!r}")
+        if not (isinstance(self.target_dte, int)
+                and not isinstance(self.target_dte, bool)
+                and self.target_dte >= 0):
+            raise ConfigError(f"target_dte must be an int >= 0, got {self.target_dte!r}")
 
     def _validate_config(self) -> Tuple[bool, List[str]]:
         """
