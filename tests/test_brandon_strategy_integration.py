@@ -101,9 +101,11 @@ class TestCapitalDeployedSweep:
 
     def _strategy(self, entries):
         from unittest.mock import MagicMock
-        # HYDRA's base lives here post-P1 reparent — Brandon inherits it.
-        from bots.hydra.base_strategy import MEICStrategy
-        inst = MEICStrategy.__new__(MEICStrategy)
+        # _calculate_capital_deployed is a base method; build via the concrete
+        # HydraStrategy (which inherits it). MEICStrategy is abstract since item
+        # 4b (template-method hooks), so MEICStrategy.__new__ now raises.
+        from bots.hydra.strategy import HydraStrategy
+        inst = HydraStrategy.__new__(HydraStrategy)
         ds = MagicMock()
         ds.entries = entries
         inst.daily_state = ds

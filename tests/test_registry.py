@@ -83,3 +83,25 @@ class TestBuildStrategy:
         monkeypatch.setattr(reg, "resolve_strategy_class", fake_resolve)
         build_strategy({"strategy": {"brandon": {"enabled": True}}}, None, None)
         assert seen["name"] == "brandon"
+
+
+class TestStrategyContract:
+    """Item 4b — MEICStrategy is an abc with the template-method hooks; the
+    concrete strategies implement all of them (else they'd be uninstantiable)."""
+
+    HOOKS = frozenset({"_calculate_strikes", "_initiate_entry", "_check_stop_losses"})
+
+    def test_base_is_abstract_with_the_three_hooks(self):
+        from bots.hydra.base_strategy import MEICStrategy
+        assert MEICStrategy.__abstractmethods__ == self.HOOKS
+
+    def test_concrete_strategies_implement_all_hooks(self):
+        from bots.hydra.brandon.strategy import BrandonHydraStrategy
+        from bots.hydra.strategy import HydraStrategy
+        assert HydraStrategy.__abstractmethods__ == frozenset()
+        assert BrandonHydraStrategy.__abstractmethods__ == frozenset()
+
+    def test_base_cannot_be_instantiated(self):
+        from bots.hydra.base_strategy import MEICStrategy
+        with pytest.raises(TypeError):
+            MEICStrategy.__new__(MEICStrategy)

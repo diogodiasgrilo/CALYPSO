@@ -34,6 +34,7 @@ Edge Case Audit: 2026-01-27
 See docs/MEIC_STRATEGY_SPECIFICATION.md for full specification.
 """
 
+import abc
 import json
 import logging
 import math
@@ -880,7 +881,7 @@ class ConfigError(ValueError):
     """
 
 
-class MEICStrategy:
+class MEICStrategy(abc.ABC):
     """
     MEIC (Multiple Entry Iron Condors) Strategy Implementation.
 
@@ -918,6 +919,25 @@ class MEICStrategy:
     exchange = "CBOE"
     strike_increment = 5
     target_dte = 0
+
+    # ── Strategy extension points (template-method hooks) ──────────────────
+    # The base monitoring loop (_check_entries / run-loop) calls these; every
+    # concrete strategy MUST implement them. Declared @abstractmethod so a new
+    # strategy that forgets one fails fast at construction (a clear TypeError)
+    # rather than mid-trade. MEICStrategy is therefore abstract and never
+    # instantiated directly — only HydraStrategy / BrandonHydraStrategy are.
+    # (modularity-audit item 4b)
+    @abc.abstractmethod
+    def _calculate_strikes(self, entry) -> bool:
+        """Select and populate this entry's strikes. Return True if viable."""
+
+    @abc.abstractmethod
+    def _initiate_entry(self) -> str:
+        """Attempt the next scheduled entry. Return a human-readable status."""
+
+    @abc.abstractmethod
+    def _check_stop_losses(self):
+        """Check open positions for stop/exit conditions. Return an action string or None."""
 
     def __init__(
         self,
