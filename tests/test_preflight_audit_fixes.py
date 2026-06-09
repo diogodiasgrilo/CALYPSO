@@ -127,6 +127,10 @@ def _make_strategy():
     s._max_absolute_slippage = 10.0
     s._monitor_fill_slippage = MagicMock()
     s._cancel_order = MagicMock(return_value=True)
+    # Default: post-cancel status carries no fill field → _extract returns None,
+    # so the fill-the-remainder loop falls back to the pre-cancel snapshot.
+    # Tests that exercise the race override this.
+    s._get_order_status = MagicMock(return_value={})
     s._validate_order_size = MagicMock(return_value=(True, None))
     # Chain reader: strike 5000 Call → conid 12345
     s._read_option_chain = MagicMock(return_value=({5000.0: 12345}, {}))
@@ -194,10 +198,14 @@ class TestProgressiveRetryCoid:
 
 
 class TestPartialFillHandling:
-    """M3: a partial fill must be flattened, not silently dropped or
-    re-attempted at full size (which would overfill)."""
+    """ORDER-010 (fill-the-remainder): a partial fill is COMPLETED by re-placing
+    ONLY the still-unfilled remainder up the progressive ladder — NOT aborted
+    (the 2026-06-08 forensic's #1 entry-blocker). An accumulated partial is
+    flattened only as a last resort (all rungs exhausted) so we never strand a
+    naked 0DTE leg, and a clean full fill never cancels."""
 
-    def test_partial_fill_is_flattened_and_aborts(self):
+    def test_partial_then_remainder_completes_leg(self):
+        # Attempt 1 fills 3/10; attempt 2 places the remaining 7 and completes.
         s = _make_strategy()
         calls = []
 
@@ -206,14 +214,46 @@ class TestPartialFillHandling:
             calls.append({"side": side, "quantity": quantity,
                           "order_type": order_type, "coid": coid})
             if len(calls) == 1:
-                # First attempt: 3 of 10 fill → partial.
                 return {"success": True, "filled": False, "filled_quantity": 3,
                         "requested_quantity": quantity, "order_id": "OP",
-                        "fill_price": 1.0, "position_id": None, "raw": {}}
-            # The flatten order fills fully.
+                        "fill_price": 1.00, "position_id": None, "raw": {}}
             return {"success": True, "filled": True, "filled_quantity": quantity,
-                    "requested_quantity": quantity, "order_id": "OF",
-                    "fill_price": 1.0, "position_id": None, "raw": {}}
+                    "requested_quantity": quantity, "order_id": "OR",
+                    "fill_price": 1.10, "position_id": None, "raw": {}}
+
+        s._place_leg_order = fake_leg
+        # Post-cancel terminal fill == the pre-cancel snapshot (3).
+        s._get_order_status = MagicMock(return_value={"filled_quantity": 3})
+        with patch("bots.hydra.base_strategy.time.sleep"):
+            result = s._place_option_order_ib(
+                strike=5000.0, put_call="Call", buy_sell=BuySell.SELL,
+                expiry="20260528", external_ref="hydra_20260528_entry1_SC",
+            )
+
+        assert result is not None, "leg must complete via the remainder"
+        # Two places: the full-target first rung (3 fill), then ONLY the 7 left.
+        assert len(calls) == 2, calls
+        assert calls[0]["side"] == "SELL" and calls[0]["quantity"] == 10
+        assert calls[1]["side"] == "SELL" and calls[1]["quantity"] == 7
+        # The partial's working remainder was cancelled before re-placing.
+        s._cancel_order.assert_called_once_with("OP")
+        # Credit/price reflect the FULL 10 contracts at the blended avg:
+        # (1.00*3 + 1.10*7) / 10 = 1.07.
+        assert result["fill_price"] == pytest.approx(1.07)
+        assert result["credit"] == pytest.approx(1.07 * 100 * 10)
+
+    def test_full_fill_first_attempt_never_cancels(self):
+        # A clean full fill on the first rung returns immediately — no cancel,
+        # no flatten, no second place.
+        s = _make_strategy()
+        calls = []
+
+        def fake_leg(*, instrument_id, side, quantity,
+                     order_type="LMT", limit_price=None, coid=None, **_kw):
+            calls.append(side)
+            return {"success": True, "filled": True, "filled_quantity": quantity,
+                    "requested_quantity": quantity, "order_id": "OK",
+                    "fill_price": 1.05, "position_id": None, "raw": {}}
 
         s._place_leg_order = fake_leg
         with patch("bots.hydra.base_strategy.time.sleep"):
@@ -221,36 +261,61 @@ class TestPartialFillHandling:
                 strike=5000.0, put_call="Call", buy_sell=BuySell.SELL,
                 expiry="20260528", external_ref="hydra_20260528_entry1_SC",
             )
+        assert result is not None
+        assert len(calls) == 1
+        assert result["credit"] == pytest.approx(1.05 * 100 * 10)
+        s._cancel_order.assert_not_called()
 
-        assert result is None
-        # Exactly two legs: the partial entry + the flatten. No 3rd attempt.
-        assert len(calls) == 2, f"must not retry after partial, got {calls}"
-        # Working remainder cancelled.
-        s._cancel_order.assert_called_once_with("OP")
-        # Flatten is opposite side (SELL→BUY), only the filled qty, market.
-        flat = calls[1]
-        assert flat["side"] == "BUY"
-        assert flat["quantity"] == 3
-        assert flat["order_type"] == "MKT"
-
-    def test_failed_flatten_is_tracked_as_orphan(self):
+    def test_partial_never_completes_flattens_on_exhaust(self):
+        # Every rung fills 1 and never reaches target → after all rungs, the
+        # accumulated partial is flattened ONCE + the leg aborts (return None).
         s = _make_strategy()
-        s._add_orphaned_order = MagicMock()
-        calls = []
+        places, flattens = [], []
 
         def fake_leg(*, instrument_id, side, quantity,
                      order_type="LMT", limit_price=None, coid=None, **_kw):
-            calls.append(coid)
-            if len(calls) == 1:
-                return {"success": True, "filled": False, "filled_quantity": 3,
+            if side == "SELL":
+                places.append(quantity)
+                return {"success": True, "filled": False, "filled_quantity": 1,
+                        "requested_quantity": quantity,
+                        "order_id": f"OP{len(places)}",
+                        "fill_price": 1.0, "position_id": None, "raw": {}}
+            flattens.append(quantity)  # the BUY flatten — fills cleanly
+            return {"success": True, "filled": True, "filled_quantity": quantity,
+                    "requested_quantity": quantity, "order_id": "OF",
+                    "fill_price": 1.0, "position_id": None, "raw": {}}
+
+        s._place_leg_order = fake_leg
+        s._get_order_status = MagicMock(return_value={"filled_quantity": 1})
+        with patch("bots.hydra.base_strategy.time.sleep"):
+            result = s._place_option_order_ib(
+                strike=5000.0, put_call="Call", buy_sell=BuySell.SELL,
+                expiry="20260528", external_ref="hydra_20260528_entry1_SC",
+            )
+
+        assert result is None
+        # One SELL per rung; a SINGLE flatten of the accumulated partial.
+        assert len(places) == len(PROGRESSIVE_RETRY_SEQUENCE)
+        assert len(flattens) == 1
+        assert flattens[0] == len(places)  # accumulated 1-per-rung total
+
+    def test_failed_flatten_on_exhaust_is_orphaned(self):
+        s = _make_strategy()
+        s._add_orphaned_order = MagicMock()
+
+        def fake_leg(*, instrument_id, side, quantity,
+                     order_type="LMT", limit_price=None, coid=None, **_kw):
+            if side == "SELL":
+                return {"success": True, "filled": False, "filled_quantity": 1,
                         "requested_quantity": quantity, "order_id": "OP",
                         "fill_price": 1.0, "position_id": None, "raw": {}}
-            # Flatten FAILS to fill.
+            # The exhaust-flatten FAILS to fill.
             return {"success": False, "filled": False, "filled_quantity": 0,
                     "requested_quantity": quantity, "order_id": None,
                     "fill_price": None, "position_id": None, "raw": {}}
 
         s._place_leg_order = fake_leg
+        s._get_order_status = MagicMock(return_value={"filled_quantity": 1})
         with patch("bots.hydra.base_strategy.time.sleep"):
             result = s._place_option_order_ib(
                 strike=5000.0, put_call="Call", buy_sell=BuySell.SELL,
@@ -462,34 +527,40 @@ class TestOrderWriteDoubleFillGuards:
         # Exactly ONE place attempt — the loop aborted, did not re-place.
         assert s.broker.place_and_wait_for_fill.call_count == 1
 
-    def test_lc3_race_fill_after_cancel_is_flattened_not_replaced(self):
-        # L-C3 mode 1: a timed-out place that actually filled (race vs cancel)
-        # is flattened, NOT re-placed under a new cOID.
+    def test_lc3_race_fill_completing_leg_is_kept_not_flattened(self):
+        # L-C3 / ORDER-010: a place that reports 0 but whose post-cancel TERMINAL
+        # status shows the full fill (a fill racing the poll timeout) now
+        # COMPLETES the leg — we KEEP a confirmed full fill instead of wastefully
+        # flattening it (double commission + slippage) and aborting the whole IC.
+        # The cancel returns True (order confirmed no-longer-working), so the
+        # count is safe to keep.
         s = _make_strategy()
         place_calls, flatten_calls = [], []
 
         def fake_leg(*, instrument_id, side, quantity, order_type="LMT",
                      limit_price=None, coid=None, **_kw):
-            if side == "SELL":  # the entry place — never fills
+            if side == "SELL":  # the entry place — reports 0 at the timeout
                 place_calls.append(coid)
                 return {"success": True, "filled": False, "filled_quantity": 0,
                         "requested_quantity": quantity, "order_id": "OENTRY",
                         "fill_price": None, "position_id": None, "raw": {}}
-            flatten_calls.append(coid)  # the BUY flatten — fills
+            flatten_calls.append(coid)  # a BUY flatten would mean we wasted it
             return {"success": True, "filled": True, "filled_quantity": quantity,
                     "requested_quantity": quantity, "order_id": "OFLAT",
                     "fill_price": 1.0, "position_id": None, "raw": {}}
 
         s._place_leg_order = fake_leg
-        # Post-cancel status shows the entry actually filled.
+        s._cancel_order = MagicMock(return_value=True)  # cancel confirms dead
+        # Post-cancel terminal status shows the entry actually filled in full.
         s._get_order_status = MagicMock(return_value={"filled_quantity": 10})
         with patch("bots.hydra.base_strategy.time.sleep"):
             result = s._place_option_order_ib(
                 strike=5000.0, put_call="Call", buy_sell=BuySell.SELL,
                 expiry="20260528", external_ref="hydra_20260528_entry1_SC")
-        assert result is None
-        assert len(place_calls) == 1   # ONE entry place — no re-place
-        assert len(flatten_calls) == 1  # the race fill was flattened
+        assert result is not None          # the full race-fill is KEPT
+        assert len(place_calls) == 1       # ONE entry place — no re-place
+        assert len(flatten_calls) == 0     # NOT flattened
+        assert result["credit"] > 0
 
     def test_lc3_failed_cancel_aborts_without_replace(self):
         # L-C3 mode 2: a failed cancel (order may still be working) with no

@@ -2525,11 +2525,27 @@ class MEICStrategy(abc.ABC):
         # place that secretly succeeded is still deduped, not double-filled).
         placement_nonce = uuid.uuid4().hex[:6]
 
+        # ORDER-010 (fill-the-remainder): a multi-contract leg can fill in
+        # pieces. Rather than ABORT the whole IC on the first partial — the
+        # 2026-06-08 forensic's #1 entry-blocker, where a 2/7 partial unwound an
+        # otherwise-fillable condor — we KEEP each filled chunk and re-place ONLY
+        # the still-unfilled remainder up the progressive-slippage ladder until
+        # the leg is whole. An accumulated partial is flattened ONLY as a last
+        # resort (ambiguous placement / failed cancel / all rungs exhausted) so
+        # we never carry an untracked naked 0DTE leg.
+        target_qty = int(self.contracts_per_entry)
+        filled_so_far = 0
+        weighted_fill_sum = 0.0  # Σ (chunk fill_price × chunk qty) → blended avg
+        first_fill_mid = None    # mid of the first filling chunk (slippage ref)
+
         # Progressive retry sequence (same as the Saxo path).
         for attempt, (slippage_percent, is_market) in enumerate(
             PROGRESSIVE_RETRY_SEQUENCE
         ):
             attempt_coid = f"{external_ref}_{placement_nonce}{attempt}"
+            remaining = target_qty - filled_so_far
+            if remaining <= 0:
+                break  # leg already whole (defensive — we return on completion)
             quote = self._read_option_quote(conid)
             if not quote:
                 logger.warning(
@@ -2587,7 +2603,7 @@ class MEICStrategy(abc.ABC):
                 )
                 result = self._place_leg_order(
                     instrument_id=conid, side=side,
-                    quantity=self.contracts_per_entry,
+                    quantity=remaining,
                     order_type="MKT", coid=attempt_coid,
                     ambiguous_on_timeout=True,  # L-H1: entry place — abort on transport-timeout
                 )
@@ -2609,7 +2625,7 @@ class MEICStrategy(abc.ABC):
                 )
                 result = self._place_leg_order(
                     instrument_id=conid, side=side,
-                    quantity=self.contracts_per_entry,
+                    quantity=remaining,
                     order_type="LMT", limit_price=limit_price,
                     coid=attempt_coid,
                     ambiguous_on_timeout=True,  # L-H1: entry place — abort on transport-timeout
@@ -2628,177 +2644,167 @@ class MEICStrategy(abc.ABC):
                     f"unconfirmed placement (coid={attempt_coid}) — will NOT "
                     f"retry under a new cOID; reconcile the possibly-open order."
                 )
+                # If PRIOR rungs already filled part of this leg, flatten that
+                # confirmed partial so the abort never strands a naked leg.
+                self._flatten_accumulated_partial(
+                    conid, side, filled_so_far, external_ref,
+                    f"{placement_nonce}flatamb", leg_description,
+                )
                 return None
 
+            # Authoritative per-rung fill count + a HARD safety gate: we only
+            # fold a rung's fills into the leg total (and continue to the next
+            # rung) when that rung's order is CONFIRMED DEAD. A full fill is
+            # terminal by definition; otherwise we cancel and require the cancel
+            # to confirm "no longer working" before trusting the count — a fill
+            # can race the poll timeout (ORDER-010 race fix), and re-placing
+            # against a still-working order would double-fill (L-C3).
             if result and result.get("filled"):
-                fill_price = result.get("fill_price") or expected_price
+                rung_filled = remaining  # order terminal-filled its full request
+            else:
+                snapshot = (result or {}).get("filled_quantity") or 0
+                order_id = (result or {}).get("order_id")
+                if not order_id:
+                    rung_filled = 0  # nothing placed / nothing working
+                else:
+                    logger.info(
+                        f"  Cancelling working order {order_id} "
+                        f"({snapshot}/{remaining} filled) before next rung"
+                    )
+                    cancelled = self._cancel_order(order_id)
+                    # Re-read the order's TERMINAL cumulative fill post-cancel:
+                    # the remainder can fill between the last poll and the cancel
+                    # taking effect (cancel is async). That count — not the
+                    # pre-cancel snapshot — is authoritative.
+                    terminal = self._extract_filled_quantity(
+                        self._get_order_status(order_id)
+                    )
+                    confirmed = terminal if terminal is not None else snapshot
+                    if cancelled:
+                        # Order is dead — its fill count is final and safe to keep.
+                        rung_filled = confirmed
+                    else:
+                        # L-C3 (a): cancel FAILED — the order may still be working.
+                        # We must NOT trust this rung's fills or re-place against
+                        # it (double-fill). Flatten the PRIOR confirmed partial
+                        # (those orders were all confirmed dead), orphan this
+                        # uncertain order, and abort the leg for reconciliation.
+                        logger.critical(
+                            f"  L-C3: cancel of order {order_id} on "
+                            f"{leg_description} FAILED — order may still be "
+                            f"working. Aborting leg (no re-place); flattening the "
+                            f"prior {filled_so_far}-contract partial + flagging "
+                            f"order {order_id} for reconciliation."
+                        )
+                        self._add_orphaned_order(order_id)
+                        self._flatten_accumulated_partial(
+                            conid, side, filled_so_far, external_ref,
+                            f"{placement_nonce}flatlc", leg_description,
+                        )
+                        return None
 
-                # ORDER-007: fill-price slippage monitoring.
+            rung_filled = min(int(rung_filled or 0), remaining)
+
+            if rung_filled > 0:
+                fill_price = (result or {}).get("fill_price") or expected_price
+                # ORDER-007: per-chunk fill-price slippage monitoring.
                 self._monitor_fill_slippage(
                     expected_price=expected_price,
                     actual_fill_price=fill_price,
                     buy_sell=buy_sell,
                     leg_description=leg_description,
                 )
-                logger.info(
-                    f"  ✓ Filled {leg_description} @ ${fill_price:.2f}"
-                )
-                qty_mult = 100 * self.contracts_per_entry
-                return {
-                    "position_id": None,  # IBKR has no per-leg position id
-                    "uic": conid,
-                    "credit": fill_price * qty_mult if buy_sell == BuySell.SELL else 0,
-                    "debit": fill_price * qty_mult if buy_sell == BuySell.BUY else 0,
-                    "fill_price": fill_price,
-                    # MID of the FILLING attempt (the slippage reference). Real
-                    # entry slippage = fill - mid; persisted per leg so the DB can
-                    # show live execution quality (vs the dry-run's structural 0).
-                    "mid_at_fill": mid_price,
-                }
+                weighted_fill_sum += fill_price * rung_filled
+                filled_so_far += rung_filled
+                if first_fill_mid is None:
+                    first_fill_mid = mid_price
 
-            # ORDER-010: partial fill. The leg filled SOME but not all
-            # contracts. We must NOT fall through to cancel-and-retry the
-            # full quantity — the already-filled contracts are real, so a
-            # retry would overfill. Cancel the working remainder and flatten
-            # the filled portion with an opposite market order, so we never
-            # carry an untracked naked leg into a 0DTE position. Return None
-            # so the IC builder unwinds cleanly (this leg ends flat).
-            partial_qty = (result or {}).get("filled_quantity") or 0
-            if result and 0 < partial_qty < self.contracts_per_entry:
-                order_id = result.get("order_id")
-                logger.critical(
-                    f"  ORDER-010: PARTIAL FILL {partial_qty}/"
-                    f"{self.contracts_per_entry} on {leg_description} "
-                    f"(order {order_id}) — cancelling remainder + flattening "
-                    f"the actually-filled contract(s)"
-                )
-                if order_id:
-                    self._cancel_order(order_id)
-
-                # ORDER-010 (race fix): `partial_qty` is a pre-cancel snapshot
-                # from the last poll while the order was still WORKING. The
-                # remainder can fill MORE contracts between that snapshot and the
-                # cancel taking effect at IBKR (cancel is async). Flattening the
-                # stale snapshot would leave the extra fills as an untracked
-                # naked 0DTE short — the exact outcome this block must prevent.
-                # Re-fetch the order's TERMINAL cumulative fill after the cancel
-                # and flatten THAT actual count. If the post-cancel status can't
-                # be read, fall back to the snapshot — strictly no worse than the
-                # prior behavior, and flattening the known-filled portion is safer
-                # than leaving it (a residual from a late fill is then caught by
-                # the post-flatten orphan check + hourly POS-003 reconciliation).
-                flatten_qty = partial_qty
-                if order_id:
-                    status = self._get_order_status(order_id)
-                    final_qty = self._extract_filled_quantity(status)
-                    if final_qty is None:
-                        logger.warning(
-                            "  ORDER-010: could not read post-cancel fill for "
-                            f"order {order_id} on {leg_description} — falling back "
-                            f"to pre-cancel snapshot {partial_qty}; a late fill "
-                            f"during cancel may leave a residual for POS-003"
-                        )
-                    elif final_qty != partial_qty:
-                        logger.warning(
-                            f"  ORDER-010: post-cancel fill {final_qty} differs "
-                            f"from pre-cancel snapshot {partial_qty} on "
-                            f"{leg_description} (remainder filled during cancel) "
-                            f"— flattening the actual {final_qty}"
-                        )
-                        flatten_qty = final_qty
-                    else:
-                        flatten_qty = final_qty
-
-                if flatten_qty <= 0:
-                    # Nothing actually filled after reconciliation — leg is flat.
+                if filled_so_far >= target_qty:
+                    # LEG WHOLE — return the blended average across all chunks.
+                    avg_fill = weighted_fill_sum / filled_so_far
                     logger.info(
-                        f"  ORDER-010: {leg_description} ended flat after "
-                        f"cancel (0 contracts filled) — nothing to flatten"
+                        f"  ✓ Filled {leg_description} "
+                        f"{filled_so_far}/{target_qty} @ avg ${avg_fill:.2f}"
                     )
-                    return None
+                    qty_mult = 100 * target_qty
+                    return {
+                        "position_id": None,  # IBKR has no per-leg position id
+                        "uic": conid,
+                        "credit": avg_fill * qty_mult if buy_sell == BuySell.SELL else 0,
+                        "debit": avg_fill * qty_mult if buy_sell == BuySell.BUY else 0,
+                        "fill_price": avg_fill,
+                        # MID of the FIRST filling chunk (the slippage reference).
+                        # Real entry slippage = fill - mid; persisted per leg so
+                        # the DB shows live execution quality.
+                        "mid_at_fill": first_fill_mid,
+                    }
 
-                close_side = "SELL" if side == "BUY" else "BUY"
-                flat = self._place_leg_order(
-                    instrument_id=conid, side=close_side, quantity=flatten_qty,
-                    order_type="MKT",
-                    coid=f"{external_ref}_{placement_nonce}flat{attempt}",
+                logger.warning(
+                    f"  ORDER-010: partial {filled_so_far}/{target_qty} on "
+                    f"{leg_description} — escalating to fill the remainder"
                 )
-                if not (flat and flat.get("filled")):
-                    logger.critical(
-                        "  ORDER-010: FAILED to flatten partial fill on "
-                        f"{leg_description} — MANUAL INTERVENTION REQUIRED"
-                    )
-                    self._add_orphaned_order(
-                        order_id or f"PARTIAL_{conid}"
-                    )
-                return None
-
-            # Not filled. The order may still be WORKING in IBKR's book
-            # (place_and_wait_for_fill leaves a timed-out order live) — cancel
-            # it before the next attempt, otherwise it could fill late. L-C3: we
-            # must (a) HONOR the cancel result — a failed cancel means the order
-            # may still be working, so advancing to a new cOID risks a
-            # double-fill; and (b) after cancelling, VERIFY the order didn't
-            # actually fill in the race between the last poll and the cancel
-            # taking effect (cancel is async; "already filled" reports success).
-            if result and result.get("order_id"):
-                stale_order_id = result["order_id"]
-                logger.info(
-                    f"  Cancelling unfilled order {stale_order_id} before retry"
-                )
-                cancelled = self._cancel_order(stale_order_id)
-
-                # (b) Re-fetch terminal status post-cancel. If it actually
-                # filled (race fill), DO NOT place a second order — flatten the
-                # filled contracts and end this leg flat (mirrors ORDER-010).
-                post = self._get_order_status(stale_order_id)
-                filled_after = self._extract_filled_quantity(post) or 0
-                if filled_after > 0:
-                    logger.critical(
-                        f"  L-C3: order {stale_order_id} on {leg_description} "
-                        f"actually FILLED {filled_after} during/after cancel — "
-                        f"NOT re-placing; flattening to avoid a double position"
-                    )
-                    close_side = "SELL" if side == "BUY" else "BUY"
-                    flat = self._place_leg_order(
-                        instrument_id=conid, side=close_side,
-                        quantity=filled_after, order_type="MKT",
-                        coid=f"{external_ref}_{placement_nonce}lcflat{attempt}",
-                    )
-                    if not (flat and flat.get("filled")):
-                        logger.critical(
-                            "  L-C3: FAILED to flatten the late fill on "
-                            f"{leg_description} — MANUAL INTERVENTION REQUIRED"
-                        )
-                        self._add_orphaned_order(stale_order_id)
-                    return None
-
-                # (a) Cancel failed AND no confirmed fill — the order may still
-                # be working. Advancing to a new cOID could double-fill, so
-                # abort this leg for reconciliation instead of retrying.
-                if not cancelled:
-                    logger.critical(
-                        f"  L-C3: cancel of unfilled order {stale_order_id} on "
-                        f"{leg_description} FAILED and fill is unconfirmed — the "
-                        f"order may still be working. Aborting leg (no re-place); "
-                        f"flagging for reconciliation to avoid a double-fill."
-                    )
-                    self._add_orphaned_order(stale_order_id)
-                    return None
 
             # Delay before the next retry level.
             if attempt < len(PROGRESSIVE_RETRY_SEQUENCE) - 1:
-                logger.warning(
-                    f"  ⚠ {leg_description} not filled — retrying "
-                    f"(ORDER-009 {ORDER_RETRY_DELAY_SECONDS}s delay)..."
-                )
+                if rung_filled <= 0:
+                    logger.warning(
+                        f"  ⚠ {leg_description} not filled "
+                        f"({filled_so_far}/{target_qty}) — retrying "
+                        f"(ORDER-009 {ORDER_RETRY_DELAY_SECONDS}s delay)..."
+                    )
                 time.sleep(ORDER_RETRY_DELAY_SECONDS)
+
+        # All rungs exhausted. If we accumulated a PARTIAL leg we could not
+        # complete, flatten it now — a residual naked 0DTE leg is the one
+        # outcome we must never leave (filled_so_far == 0 → nothing to flatten).
+        if filled_so_far > 0:
+            logger.critical(
+                f"  ORDER-010: {leg_description} only filled "
+                f"{filled_so_far}/{target_qty} after all "
+                f"{len(PROGRESSIVE_RETRY_SEQUENCE)} rungs — flattening the "
+                f"partial to avoid an untracked naked leg"
+            )
+            self._flatten_accumulated_partial(
+                conid, side, filled_so_far, external_ref,
+                f"{placement_nonce}flatexh", leg_description,
+            )
+            return None
 
         logger.error(
             f"  ✗ {leg_description} failed all "
             f"{len(PROGRESSIVE_RETRY_SEQUENCE)} attempts (IBKR)"
         )
         return None
+
+    def _flatten_accumulated_partial(
+        self, conid, side: str, filled_qty: int, external_ref: str,
+        coid_suffix: str, leg_description: str,
+    ) -> None:
+        """ORDER-010 last resort: market-close an accumulated partial leg.
+
+        When the fill-the-remainder loop aborts (ambiguous placement, a failed
+        cancel with unconfirmed fill, or all rungs exhausted) while some
+        contracts of this leg ARE confirmed filled, those contracts are a naked
+        0DTE leg. Flatten them with an opposite MARKET order so the abort starts
+        the IC builder's unwind from a clean slate. ``filled_qty`` MUST be the
+        CONFIRMED-dead count (orders whose cancel returned True / that fully
+        filled) — never an uncertain still-working order, which is orphaned for
+        POS-003 reconciliation instead. A failed flatten is flagged for manual
+        intervention + the orphan sweep.
+        """
+        if filled_qty <= 0:
+            return
+        close_side = "SELL" if side == "BUY" else "BUY"
+        flat = self._place_leg_order(
+            instrument_id=conid, side=close_side, quantity=int(filled_qty),
+            order_type="MKT", coid=f"{external_ref}_{coid_suffix}",
+        )
+        if not (flat and flat.get("filled")):
+            logger.critical(
+                f"  ORDER-010: FAILED to flatten the {filled_qty}-contract "
+                f"partial on {leg_description} — MANUAL INTERVENTION REQUIRED"
+            )
+            self._add_orphaned_order(f"PARTIAL_{conid}")
 
     @staticmethod
     def _extract_filled_quantity(status: dict) -> Optional[int]:
