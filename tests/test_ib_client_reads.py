@@ -1077,6 +1077,23 @@ class TestGetOptionChain:
         assert call.kwargs["month"] == "MAY26"
         assert call.kwargs["exchange"] == "CBOE"
 
+    def test_self_heals_empty_chain_via_reprime_retry(self, connected_client):
+        """Lost-priming self-heal: an empty strikes result (the daily-reset
+        'No Contracts retrieved' symptom) forces a fresh secdef/search re-prime
+        and retries ONCE — recovering the chain without a restart."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
+        # First strikes call empty (stale priming), second returns real strikes.
+        mock_ibkr.search_strikes_by_conid.side_effect = [
+            _mk_result({"call": [], "put": []}),
+            _mk_result({"call": [5500, 5510], "put": [5510, 5520]}),
+        ]
+        # Simulate the stale-primed state surviving the daily reset.
+        client._secdef_search_primed.add(("SPX", "IND"))
+        strikes = client.get_option_chain("SPX", date(2026, 5, 16))
+        assert strikes == [5500.0, 5510.0, 5520.0]            # recovered
+        assert mock_ibkr.search_strikes_by_conid.call_count == 2  # retried once after reprime
+
 
 # ─── Orders (read) ─────────────────────────────────────────────────────────
 

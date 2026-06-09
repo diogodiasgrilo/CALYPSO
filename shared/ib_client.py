@@ -1890,11 +1890,29 @@ class IBClient:
 
         # Parallel resolution. ThreadPoolExecutor.map preserves input
         # order, but order doesn't matter — we merge into one dict.
-        workers = min(max_workers, len(unique_strikes))
-        results: dict[tuple[float, str], int] = {}
-        with ThreadPoolExecutor(max_workers=workers) as pool:
-            for partial in pool.map(_resolve_one, unique_strikes):
-                results.update(partial)
+        def _run_batch() -> dict[tuple[float, str], int]:
+            out: dict[tuple[float, str], int] = {}
+            workers = min(max_workers, len(unique_strikes))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                for partial in pool.map(_resolve_one, unique_strikes):
+                    out.update(partial)
+            return out
+
+        results = _run_batch()
+        # Self-heal lost secdef priming: if NOTHING resolved across all
+        # candidate strikes, the symbol's secdef/search priming was almost
+        # certainly lost (the 01:00 ET daily reset, while OAuth stays authed —
+        # see _ensure_secdef_search_primed). CircuitBreakerOpen / RatePenaltyError
+        # already propagated from _resolve_one, so an empty result here is NOT a
+        # broker outage — it is lost priming. Force a re-prime and retry once.
+        if not results and unique_strikes:
+            logger.warning(
+                "qualify_option_strikes(%s): 0/%d strikes resolved — re-priming "
+                "secdef/search and retrying once (lost-priming self-heal)",
+                symbol, len(unique_strikes),
+            )
+            self._ensure_secdef_search_primed(symbol, "IND", force=True)
+            results = _run_batch()
 
         # Populate the shared conid cache so later qualify_contract
         # calls for these strikes are cache hits.
@@ -1936,7 +1954,9 @@ class IBClient:
                           _risk_critical=_risk_critical)
             self._iserver_primed = True
 
-    def _ensure_secdef_search_primed(self, symbol: str, sec_type: str) -> None:
+    def _ensure_secdef_search_primed(
+        self, symbol: str, sec_type: str, *, force: bool = False
+    ) -> None:
         """Issue /iserver/secdef/search for `symbol` once per session.
 
         IBKR requires a secdef/search for a symbol before /secdef/strikes and
@@ -1949,14 +1969,21 @@ class IBClient:
 
         Idempotent per (symbol, sec_type); the set is cleared in lockstep with
         _conid_cache on disconnect so a cached conid never outlives its priming.
-        Best-effort: a priming failure is logged, not raised — the subsequent
-        strikes/info call will surface any genuine error.
+
+        ``force=True`` re-issues the search even if the key is already in the
+        primed set. This is the self-heal for the daily-reset case: the IBKR
+        01:00 ET session reset wipes the SERVER-side priming, but OAuth 1.0a
+        stays authenticated (no disconnect → the primed set is NOT cleared),
+        so the cached-conid path keeps skipping the re-prime and option secdef
+        calls 500 "No Contracts retrieved" all day. The strikes/info call sites
+        detect that empty result and call this with force=True to re-prime +
+        retry. Best-effort: a priming failure is logged, not raised.
         """
         key = (symbol, sec_type)
         # _call_lock is an RLock; qualify_contract already holds it, and the
         # nested _ib_call re-acquisition on this thread is free.
         with self._call_lock:
-            if key in self._secdef_search_primed:
+            if key in self._secdef_search_primed and not force:
                 return
             try:
                 self._ib_call(
@@ -1965,6 +1992,8 @@ class IBClient:
                 )
                 self._secdef_search_primed.add(key)
             except Exception as exc:
+                # Drop the key so a later call re-attempts the prime.
+                self._secdef_search_primed.discard(key)
                 logger.warning(
                     "secdef search-prime for %s/%s failed (%s) — option-chain "
                     "secdef calls may 500 'No Contracts retrieved' until it "
@@ -2631,31 +2660,55 @@ class IBClient:
         # Resolve underlying conid first
         underlying_conid = self.qualify_contract(symbol, sec_type="IND", exchange=exchange)
         month = _ib_month_str(expiry)
-        data = self._ib_call(
-            "market", self._client.search_strikes_by_conid,
-            conid=str(underlying_conid),
-            sec_type="OPT",
-            month=month,
-            exchange=exchange,
-        ) or {}
-        # Response shape: {"call": [strikes], "put": [strikes]}
-        # P7-audit L8: coerce each side to a list explicitly — `calls + puts`
-        # would raise TypeError if either side came back as a single
-        # scalar (we've seen IBKR return one strike as a bare number on
-        # very thin chains) or a dict instead of a list.
-        if isinstance(data, dict):
-            def _as_list(v):
-                if v is None:
-                    return []
-                if isinstance(v, list):
-                    return v
-                return [v]  # scalar or unexpected shape — treat as one entry
-            calls = _as_list(data.get("call") or data.get("calls"))
-            puts = _as_list(data.get("put") or data.get("puts"))
-            return sorted({float(s) for s in (calls + puts)})
-        if isinstance(data, list):
-            return sorted({float(s) for s in data})
-        return []
+
+        def _fetch_strikes() -> list[float]:
+            data = self._ib_call(
+                "market", self._client.search_strikes_by_conid,
+                conid=str(underlying_conid),
+                sec_type="OPT",
+                month=month,
+                exchange=exchange,
+            ) or {}
+            # Response shape: {"call": [strikes], "put": [strikes]}
+            # P7-audit L8: coerce each side to a list explicitly — `calls + puts`
+            # would raise TypeError if either side came back as a single
+            # scalar (we've seen IBKR return one strike as a bare number on
+            # very thin chains) or a dict instead of a list.
+            if isinstance(data, dict):
+                def _as_list(v):
+                    if v is None:
+                        return []
+                    if isinstance(v, list):
+                        return v
+                    return [v]  # scalar or unexpected shape — treat as one entry
+                calls = _as_list(data.get("call") or data.get("calls"))
+                puts = _as_list(data.get("put") or data.get("puts"))
+                return sorted({float(s) for s in (calls + puts)})
+            if isinstance(data, list):
+                return sorted({float(s) for s in data})
+            return []
+
+        try:
+            strikes = _fetch_strikes()
+        except IBClientError:
+            strikes = []
+        # Self-heal lost secdef priming: an empty strikes result means the
+        # symbol's secdef/search priming was lost (typically the 01:00 ET daily
+        # reset, while OAuth stays authed so no disconnect cleared the primed
+        # set → /secdef/strikes 500s "No Contracts retrieved"). Force a fresh
+        # secdef/search re-prime and retry ONCE. For a super-liquid instrument
+        # like SPX, an empty chain is never real — it is always lost priming.
+        if not strikes:
+            logger.warning(
+                "get_option_chain(%s, %s): empty strikes — re-priming secdef/search "
+                "and retrying once (lost-priming self-heal)", symbol, month,
+            )
+            self._ensure_secdef_search_primed(symbol, "IND", force=True)
+            try:
+                strikes = _fetch_strikes()
+            except IBClientError:
+                strikes = []
+        return strikes
 
     # ─── Orders (read) ────────────────────────────────────────────────────
 
