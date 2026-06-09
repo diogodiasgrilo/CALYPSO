@@ -2087,6 +2087,15 @@ class HydraStrategy(MEICStrategy):
                 "self.broker"
             )
         ib_type = "MKT" if str(order_type).upper().startswith("M") else "LMT"
+        # Fill timeout scales modestly with size. A serial multi-contract 0DTE
+        # fill needs more poll time than a 1-lot — the 2026-06-08 forensic found
+        # a 7-lot leg cut off mid-fill at the flat 30s default (a contributor to
+        # the partial-fill entry-blocker). fill-the-remainder (ORDER-010) handles
+        # anything beyond this, so the cap stays tight enough that 4 legs still
+        # fit the entry window. The BrokerClient HTTP read timeout tracks this
+        # per-call (broker_client._http_transport) so a still-filling order does
+        # NOT trip an L-H1 transport-timeout abort.
+        fill_timeout = min(30.0 + 3.0 * max(0, int(quantity) - 1), 45.0)
         try:
             res = self.broker.place_and_wait_for_fill(
                 conid=int(instrument_id),
@@ -2094,6 +2103,7 @@ class HydraStrategy(MEICStrategy):
                 quantity=int(quantity),
                 order_type=ib_type,
                 limit_price=limit_price,
+                timeout_seconds=fill_timeout,
                 coid=coid,
             )
         except AmbiguousOrderError as e:

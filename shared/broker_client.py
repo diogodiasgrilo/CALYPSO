@@ -126,6 +126,18 @@ class BrokerClient:
         import json
 
         import requests
+        # place_and_wait_for_fill polls server-side up to its `timeout_seconds`,
+        # which scales with order size (bots.hydra.strategy._place_leg_order).
+        # The HTTP READ timeout MUST exceed that or a legitimately-still-filling
+        # multi-contract order trips a transport timeout → L-H1 ambiguous abort
+        # (the exact false-abort the size-scaled timeout exists to prevent). Give
+        # the fill call its server budget + a 10s transport buffer; every other
+        # method keeps the snappy default (a hung quote must NOT wait that long).
+        http_timeout = self._timeout
+        if method == "place_and_wait_for_fill":
+            server_timeout = kwargs.get("timeout_seconds")
+            if server_timeout:
+                http_timeout = max(self._timeout, float(server_timeout) + 10.0)
         try:
             # Serialize the request body with the SAME _json_default the broker's
             # return path (broker_service.to_jsonable) uses, so JSON-incompatible
@@ -141,7 +153,7 @@ class BrokerClient:
                 f"{self._base_url}/rpc",
                 data=body,
                 headers={"Content-Type": "application/json"},
-                timeout=self._timeout,
+                timeout=http_timeout,
             )
             r.raise_for_status()
             return r.json()

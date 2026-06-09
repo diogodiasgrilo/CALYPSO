@@ -17,7 +17,7 @@ import datetime
 import json
 import sys
 from pathlib import Path
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import pytest
 
@@ -201,6 +201,46 @@ class TestBrokerContract:
             raise ConnectionError("broker down")
         client.health = boom
         assert client.ensure_connected() is False  # never raises → gate handles it
+
+    def _capture_http_timeout(self, method, kwargs):
+        """Drive the REAL _http_transport with requests.post stubbed, returning
+        the ``timeout=`` it passed."""
+        import requests
+        captured = {}
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"result": True}
+
+        def fake_post(url, data=None, headers=None, timeout=None):
+            captured["timeout"] = timeout
+            return _Resp()
+
+        client = BrokerClient(base_url="http://127.0.0.1:8788", timeout=35.0)
+        with patch.object(requests, "post", fake_post):
+            client._http_transport(method, [], kwargs)
+        return captured["timeout"]
+
+    def test_fill_call_extends_http_timeout_above_server_poll(self):
+        # 45s size-scaled server poll → 55s HTTP read timeout (poll + 10s buffer)
+        # so a still-filling multi-contract order does NOT trip an L-H1 abort.
+        assert self._capture_http_timeout(
+            "place_and_wait_for_fill", {"timeout_seconds": 45.0}
+        ) == 55.0
+
+    def test_fill_call_never_below_the_default_timeout(self):
+        # A small server poll still gets at least the snappy default.
+        assert self._capture_http_timeout(
+            "place_and_wait_for_fill", {"timeout_seconds": 5.0}
+        ) == 35.0
+
+    def test_non_fill_methods_keep_the_snappy_default(self):
+        # A hung quote must fail fast — never wait the fill budget.
+        assert self._capture_http_timeout("get_quote", {}) == 35.0
+        assert self._capture_http_timeout("place_and_wait_for_fill", {}) == 35.0
 
     def test_dispatcher_health_never_raises(self):
         # Audit #13: /health is now AUTHORITATIVE (a live check_auth_status
