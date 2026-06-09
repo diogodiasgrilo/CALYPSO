@@ -413,8 +413,24 @@ class BrandonHydraStrategy(HydraStrategy):
                 if action:
                     return action
 
-        # 2. GEX breach exit (LIVE) — Brandon's stop. Replaces credit+buffer in B/C.
+        # 2. GEX breach exit — Brandon's PRIMARY stop, but ONLY when GEX is
+        #    actually armed this tick. L-C1: GEX can be unavailable (no Polygon
+        #    key, fetch failure, failure-cooldown, empty profile, or breach-exit
+        #    disabled) — and when it is, the breach exit can NEVER fire, leaving
+        #    a defined-risk IC riding to ~max loss with NO acting stop. We probe
+        #    availability up front (cheap — the profile is cached / cooldown'd
+        #    and returns None instantly when no Polygon key) and, when GEX is
+        #    down, promote HYDRA's proven credit+buffer stop from SHADOW to the
+        #    LIVE-acting fallback (super()._check_stop_losses — the same
+        #    MKT-046-confirmed stop + _execute_stop_loss that variant A runs).
+        #    Per tick the GEX stop and the fallback are mutually exclusive, so
+        #    there is never a double-stop.
+        gex_stop_armed = False
         if self.brandon_gex_enabled and self.brandon_breach_exit_enabled:
+            gex_profile = self._brandon_get_gex_profile(self._brandon_today_date())
+            gex_stop_armed = gex_profile is not None
+
+        if gex_stop_armed:
             for entry in list(self.daily_state.active_entries):
                 action = self._brandon_check_breach_exit(entry)
                 if action:
@@ -423,8 +439,20 @@ class BrandonHydraStrategy(HydraStrategy):
                     self._brandon_check_hydra_shadow_stop(entry)
                     return action
 
-        # 3. HYDRA credit+buffer stop (SHADOW) — never acts; Telegram on first fire per side
-        if self.brandon_hydra_shadow_enabled:
+        # 3. HYDRA credit+buffer stop.
+        if not gex_stop_armed:
+            # FALLBACK (L-C1): GEX is unavailable → HYDRA's stop is the ONLY
+            # protection, so it ACTS (not shadow). A one-time-per-day alert
+            # announces the degraded mode; open positions ARE protected by the
+            # fallback. Restoring the GEX feed re-arms the primary next tick.
+            if list(self.daily_state.active_entries):
+                self._brandon_alert_gex_fallback()
+                action = super()._check_stop_losses()
+                if action:
+                    return action
+        elif self.brandon_hydra_shadow_enabled:
+            # GEX armed → HYDRA stop stays SHADOW (logs only; never closes), so
+            # the head-to-head comparison with Brandon's GEX breach is preserved.
             for entry in list(self.daily_state.active_entries):
                 self._brandon_check_hydra_shadow_stop(entry)
 
@@ -745,6 +773,37 @@ class BrandonHydraStrategy(HydraStrategy):
                 alert_type_name="STOP_LOSS",
             )
 
+    def _brandon_alert_gex_fallback(self) -> None:
+        """L-C1: announce (once per ET day) that GEX/Polygon is unavailable so
+        HYDRA's credit+buffer stop is now the LIVE-acting fallback.
+
+        Positions ARE protected by the fallback — this is operational awareness
+        that the PRIMARY GEX breach stop is down (no Polygon key, fetch failure,
+        failure-cooldown, empty profile, or breach-exit disabled). Restoring the
+        GEX feed re-arms the primary on the next tick. HIGH (not CRITICAL): the
+        IC is still stopped, so it is degraded, not unprotected.
+        """
+        today = self._brandon_today_date()
+        if getattr(self, "_brandon_gex_fallback_alert_date", None) == today:
+            return
+        self._brandon_gex_fallback_alert_date = today
+        msg = (
+            "Brandon GEX/Polygon UNAVAILABLE — primary GEX breach stop is DOWN. "
+            "HYDRA credit+buffer stop is now the LIVE-acting fallback, so open "
+            "positions ARE protected. Restore POLYGON_API_KEY / the GEX feed to "
+            "re-arm the primary stop."
+        )
+        logger.warning("BRANDON-GEX-FALLBACK active: %s", msg)
+        try:
+            self._brandon_send_telegram(
+                msg,
+                title="Brandon GEX DOWN — HYDRA fallback stop ACTIVE",
+                priority_name="HIGH",
+                alert_type_name="DATA_QUALITY",
+            )
+        except Exception as exc:
+            logger.debug("BRANDON-GEX-FALLBACK alert send failed (non-fatal): %s", exc)
+
     # ------------------------------------------------------------------
     # Defensive overlay (LIVE) — debit / butterfly hedge placement
     # ------------------------------------------------------------------
@@ -828,34 +887,43 @@ class BrandonHydraStrategy(HydraStrategy):
         spot = float(self.current_price or 0.0)
         t_years = self._brandon_estimate_t_years_to_close()
         placed_at = self._brandon_now_et()
-        hedge_legs: list[HedgeLeg] = []
-        for i, leg in enumerate(proposal.legs):
-            fill_price = hedge_position.estimate_fill_price(
-                contract_type=leg.contract_type,
-                strike=leg.strike,
-                spot=spot,
-                t_years=t_years,
-            )
-            position_id = f"DRY_OVERLAY_{entry.entry_number}_{proposal.threatened_side}_{i}"
-            hedge_legs.append(HedgeLeg(
-                entry_number=entry.entry_number,
-                side=leg.side,
-                contract_type=leg.contract_type,
-                strike=leg.strike,
-                quantity=leg.quantity,
-                fill_price=fill_price,
-                position_id=position_id,
-                structure=proposal.structure.value,
-                threatened_side=proposal.threatened_side,
-                placed_at=placed_at,
-            ))
-        self._brandon_hedge_legs.setdefault(entry.entry_number, []).extend(hedge_legs)
-        self._brandon_save_hedge_state()
 
+        # DRY-RUN: synthetic legs with a Black-Scholes-estimated fill (unchanged).
         if self.dry_run:
+            hedge_legs: list[HedgeLeg] = []
+            for i, leg in enumerate(proposal.legs):
+                fill_price = hedge_position.estimate_fill_price(
+                    contract_type=leg.contract_type,
+                    strike=leg.strike,
+                    spot=spot,
+                    t_years=t_years,
+                )
+                position_id = f"DRY_OVERLAY_{entry.entry_number}_{proposal.threatened_side}_{i}"
+                hedge_legs.append(HedgeLeg(
+                    entry_number=entry.entry_number,
+                    side=leg.side,
+                    contract_type=leg.contract_type,
+                    strike=leg.strike,
+                    quantity=leg.quantity,
+                    fill_price=fill_price,
+                    position_id=position_id,
+                    structure=proposal.structure.value,
+                    threatened_side=proposal.threatened_side,
+                    placed_at=placed_at,
+                ))
+            self._brandon_hedge_legs.setdefault(entry.entry_number, []).extend(hedge_legs)
+            self._brandon_save_hedge_state()
             return
 
-        # Live wiring — mirrors _execute_entry's per-leg pattern.
+        # LIVE wiring (L-H6). Previously this pre-built synthetic-id legs +
+        # saved state BEFORE placement, then placed each leg and DISCARDED the
+        # return — so the real overlay conids were never tracked
+        # (_expected_position_quantities blind → spurious POS-003 mismatch) and
+        # settlement priced the hedge off a model estimate, not the real fill.
+        # Now we place first, capture the REAL conid + fill per leg, track ONLY
+        # legs that actually filled (with the native-type conid so
+        # reconciliation matches), save state AFTER, and surface any partial
+        # failure with a CRITICAL alert instead of swallowing it.
         from bots.hydra.order_types import BuySell
         expiry = self._get_todays_expiry() if hasattr(self, "_get_todays_expiry") else None
         if not expiry:
@@ -863,14 +931,27 @@ class BrandonHydraStrategy(HydraStrategy):
                 "BRANDON-OVERLAY E#%s: could not determine expiry — skipping placement",
                 entry.entry_number,
             )
+            self._brandon_alert_overlay_partial(
+                entry, proposal, placed=0,
+                expected=sum(int(l.quantity) for l in proposal.legs),
+            )
             return
+
+        filled_legs: list[HedgeLeg] = []
+        expected_orders = 0
+        placed_orders = 0
         for i, leg in enumerate(proposal.legs):
             buy_sell = BuySell.BUY if leg.side == "long" else BuySell.SELL
             put_call = "Call" if leg.contract_type == "call" else "Put"
             external_ref = f"OVERLAY_{entry.entry_number}_{proposal.threatened_side}_{i}"
-            for q in range(leg.quantity):
+            leg_filled_qty = 0
+            leg_conid = None
+            leg_fill_price = 0.0
+            for q in range(int(leg.quantity)):
+                expected_orders += 1
+                res = None
                 try:
-                    self._place_option_order(
+                    res = self._place_option_order(
                         strike=leg.strike,
                         put_call=put_call,
                         buy_sell=buy_sell,
@@ -882,6 +963,86 @@ class BrandonHydraStrategy(HydraStrategy):
                         "BRANDON-OVERLAY E#%s leg %s %s %.0f failed: %s",
                         entry.entry_number, leg.side, leg.contract_type, leg.strike, exc,
                     )
+                if res and res.get("uic"):
+                    placed_orders += 1
+                    leg_filled_qty += 1
+                    leg_conid = res.get("uic")  # raw native conid — matches IC uic type
+                    fp = res.get("fill_price")
+                    if fp:
+                        leg_fill_price = float(fp)
+            if leg_filled_qty > 0:
+                # Fall back to the BS estimate ONLY if the broker reported no
+                # fill price, so settlement still has a non-zero basis.
+                if leg_fill_price <= 0:
+                    leg_fill_price = hedge_position.estimate_fill_price(
+                        contract_type=leg.contract_type,
+                        strike=leg.strike,
+                        spot=spot,
+                        t_years=t_years,
+                    )
+                filled_legs.append(HedgeLeg(
+                    entry_number=entry.entry_number,
+                    side=leg.side,
+                    contract_type=leg.contract_type,
+                    strike=leg.strike,
+                    quantity=leg_filled_qty,
+                    fill_price=leg_fill_price,
+                    position_id=str(leg_conid),
+                    structure=proposal.structure.value,
+                    threatened_side=proposal.threatened_side,
+                    placed_at=placed_at,
+                    conid=leg_conid,
+                ))
+
+        if filled_legs:
+            self._brandon_hedge_legs.setdefault(entry.entry_number, []).extend(filled_legs)
+            self._brandon_save_hedge_state()
+
+        if placed_orders < expected_orders:
+            self._brandon_alert_overlay_partial(
+                entry, proposal, placed=placed_orders, expected=expected_orders,
+            )
+
+    def _brandon_alert_overlay_partial(self, entry, proposal, *, placed: int, expected: int) -> None:
+        """L-H6: a LIVE overlay that did not fully fill leaves an INCOMPLETE
+        hedge. The legs that DID fill are tracked (so they reconcile + settle),
+        but the operator must know the protection is partial — surface it as a
+        CRITICAL alert rather than swallowing it in a log line."""
+        msg = (
+            f"BRANDON-OVERLAY E#{entry.entry_number} {proposal.threatened_side}: "
+            f"PARTIAL hedge — only {placed}/{expected} legs filled. Filled legs "
+            f"are tracked and will reconcile/settle, but the hedge is INCOMPLETE. "
+            f"Manual review recommended."
+        )
+        logger.critical(msg)
+        try:
+            self._brandon_send_telegram(
+                msg,
+                title=f"Brandon overlay PARTIAL E#{entry.entry_number}",
+                priority_name="CRITICAL",
+                alert_type_name="CRITICAL_INTERVENTION",
+            )
+        except Exception as exc:
+            logger.debug("BRANDON-OVERLAY partial alert send failed (non-fatal): %s", exc)
+
+    def _expected_position_quantities(self):
+        """Brandon override (L-H6): fold LIVE overlay hedge legs into the
+        expected-position set so reconciliation accounts for the real IBKR
+        overlay positions. The base method only counts the 4 IC legs, so an
+        untracked overlay leg would otherwise show as a spurious POS-003
+        mismatch. Only legs with a real conid (live placement) are added;
+        dry-run DRY_OVERLAY_* placeholders (conid=None) are skipped. The conid
+        is kept in its native type to match `_actual_position_quantities`.
+        """
+        expected = super()._expected_position_quantities()
+        for legs in self._brandon_hedge_legs.values():
+            for hl in legs:
+                conid = getattr(hl, "conid", None)
+                if conid is None:
+                    continue
+                sign = 1 if hl.side == "long" else -1
+                expected[conid] = expected.get(conid, 0) + sign * int(hl.quantity)
+        return expected
 
     def _brandon_estimate_t_years_to_close(self) -> float:
         """Calendar time from now to today's 4 PM ET expiry, in years."""
@@ -1193,6 +1354,9 @@ class BrandonHydraStrategy(HydraStrategy):
                     structure=str(d["structure"]),
                     threatened_side=str(d["threatened_side"]),
                     placed_at=placed_at,
+                    # L-H6: keep the real conid RAW (no str coercion) so an int
+                    # conid round-trips as int and still matches reconciliation.
+                    conid=d.get("conid"),
                 ))
             if restored:
                 self._brandon_hedge_legs[ent] = restored
@@ -1220,6 +1384,7 @@ class BrandonHydraStrategy(HydraStrategy):
                             "quantity": l.quantity,
                             "fill_price": l.fill_price,
                             "position_id": l.position_id,
+                            "conid": l.conid,  # L-H6: real broker conid (live), raw type
                             "structure": l.structure,
                             "threatened_side": l.threatened_side,
                             "placed_at": l.placed_at.isoformat(),

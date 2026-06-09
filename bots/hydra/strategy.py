@@ -2736,6 +2736,10 @@ class HydraStrategy(MEICStrategy):
         for side_name, legs in sides_to_close:
             side_close_cost = 0.0
             side_legs_closed = 0
+            # L-M2: leg_names ACTUALLY closed at the broker (qty→0). Worthless
+            # longs skipped via Fix #81 are NOT added here — they stay open to
+            # 0DTE expiry, so their uic must remain set for reconciliation.
+            closed_leg_names: set = set()
 
             for leg_name, pos_id, uic in legs:
                 # Gate on uic OR pos_id: pos_id is always None on the live IBKR
@@ -2773,6 +2777,7 @@ class HydraStrategy(MEICStrategy):
                 if success:
                     legs_closed += 1
                     side_legs_closed += 1
+                    closed_leg_names.add(leg_name)  # L-M2: closed at broker
                     if fill_price and fill_price > 0:
                         cost = fill_price * 100 * entry.contracts
                         if leg_name.startswith("short"):
@@ -2795,6 +2800,16 @@ class HydraStrategy(MEICStrategy):
                 credit = getattr(entry, f"{side_name}_spread_credit", 0)
                 setattr(entry, f"{side_name}_side_expired", True)
                 entry.early_closed = True
+                # L-M2: clear the uics of legs ACTUALLY closed at the broker so
+                # they drop out of _expected_position_quantities. Otherwise a
+                # normally-closed Brandon TP/breach side lingers in the expected
+                # set and reconciliation raises a spurious POS-003 "manual
+                # review" mismatch every tick (broker shows qty 0 for a leg we
+                # still 'expect'). Worthless longs skipped via Fix #81 are NOT
+                # in closed_leg_names, so their uic stays set (they remain open
+                # at the broker until 0DTE expiry → expected == actual).
+                for closed_leg in closed_leg_names:
+                    setattr(entry, f"{closed_leg}_uic", None)
                 # Record the actual close moment so capital-deployed
                 # sweep-line and any other timing-aware metric can pick it
                 # up. HYDRA stop paths set call_stop_time / put_stop_time;
