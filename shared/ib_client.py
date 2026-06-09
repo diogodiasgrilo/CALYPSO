@@ -2692,10 +2692,19 @@ class IBClient:
             return data.get("orders") or []
         return data if isinstance(data, list) else []
 
-    def get_order_status(self, order_id: str) -> dict:
+    def get_order_status(
+        self, order_id: str, _policy: Optional["RetryPolicy"] = None
+    ) -> dict:
         """Current status of a specific order_id.
 
         SaxoClient.get_order_status() equivalent.
+
+        ``_policy`` (L-H1): an optional bounded RetryPolicy for the caller that
+        polls in a loop (place_and_wait_for_fill). It caps a SINGLE poll's
+        retry budget so one degenerate status read can't run the full 6-attempt
+        backoff (~31s) and push the server-side place_and_wait_for_fill past the
+        BrokerClient HTTP timeout — which would drop the order_id and risk a
+        re-place / double-fill. The outer poll loop still provides persistence.
         """
         self._require_connected()
         # Risk-critical: place_and_wait_for_fill polls this to confirm a
@@ -2705,6 +2714,7 @@ class IBClient:
             "orders", self._client.order_status,
             order_id=str(order_id),
             _risk_critical=True,
+            _policy=_policy,
         ) or {}
 
     # ─── Historical bars ─────────────────────────────────────────────────
@@ -3192,11 +3202,16 @@ class IBClient:
 
         # Poll for terminal state. Each poll is its own _ib_call with
         # retry+breaker; transient 429/5xx are absorbed automatically.
+        # L-H1: each poll uses a BOUNDED retry policy so a single degenerate
+        # status read can't run the full ~31s backoff and push this server-side
+        # call past the BrokerClient HTTP timeout (which would drop the order_id
+        # → re-place → double-fill). Persistence comes from this outer loop.
+        _poll_policy = RetryPolicy(max_attempts=2, base_delay_s=0.5, max_delay_s=2.0)
         deadline = time.monotonic() + timeout_seconds
         last_status_resp: dict = place_resp
         while time.monotonic() < deadline:
             try:
-                status_resp = self.get_order_status(str(order_id))
+                status_resp = self.get_order_status(str(order_id), _policy=_poll_policy)
             except IBClientError as exc:
                 # IBKR's misuse of 503 for "not found" means the order was
                 # purged after reaching a terminal state. Sunday's diagnostic
@@ -3247,6 +3262,36 @@ class IBClient:
                     requested_quantity=quantity,
                 )
             time.sleep(poll_interval_s)
+
+        # L-M5: before declaring timed_out, do ONE final authoritative status
+        # read. A fill landing between the last poll and the deadline would
+        # otherwise be reported not-filled — the primary trigger for the L-C3
+        # entry-retry double-fill (caller cancels + re-places a SECOND order
+        # under a new cOID for an order that actually filled).
+        try:
+            final_resp = self.get_order_status(str(order_id), _policy=_poll_policy)
+            if final_resp:
+                last_status_resp = final_resp
+                final_status = (
+                    final_resp.get("status")
+                    or final_resp.get("order_status")
+                    or ""
+                ).lower()
+                if final_status in _TERMINAL_ORDER_STATUSES:
+                    return _build_fill_result_dict(
+                        order_id=str(order_id),
+                        raw=final_resp,
+                        status=final_status,
+                        requested_quantity=quantity,
+                    )
+        except (IBClientError, CircuitBreakerOpen) as exc:
+            # Best-effort: on any error fall through to timed_out, and the
+            # caller's cancel-then-verify path resolves the ambiguity.
+            logger.debug(
+                "place_and_wait_for_fill: final status poll for %s failed "
+                "(%s) — returning timed_out",
+                order_id, exc,
+            )
 
         # Timed out — order still working. Caller decides next step.
         # Surface the last observed status response in `raw` for debugging.

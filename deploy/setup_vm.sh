@@ -177,18 +177,24 @@ echo ""
 # Step 8: Install systemd service
 # =============================================================================
 echo -e "${YELLOW}[8/9] Installing systemd service...${NC}"
-if [ -f "/opt/calypso/deploy/calypso.service" ]; then
-    cp /opt/calypso/deploy/calypso.service /etc/systemd/system/
-elif [ -f "$SCRIPT_DIR/calypso.service" ]; then
-    cp "$SCRIPT_DIR/calypso.service" /etc/systemd/system/
-else
-    echo -e "${RED}calypso.service not found!${NC}"
-    echo "Please copy it to /etc/systemd/system/ manually."
+# I-M7: the legacy Saxo `calypso.service` (ExecStart=src/main.py) does NOT exist
+# on the IBKR-standalone branch — installing/enabling it would register a unit
+# that can never start while installing NONE of the real units (calypso-broker,
+# hydra, hydra_variant_{b,c}, dashboard, + agent timers). Refuse to install it
+# and point the operator at the real, current deploy units instead.
+if [ -f "/opt/calypso/deploy/calypso.service" ] || [ -f "$SCRIPT_DIR/calypso.service" ]; then
+    echo -e "${RED}Refusing to install legacy Saxo calypso.service (dead on this branch).${NC}"
 fi
+echo -e "${YELLOW}This cold-deploy script predates the IBKR-standalone unit set.${NC}"
+echo "Install the REAL units from deploy/ instead:"
+echo "  calypso-broker.service (owns the IBKR session — start FIRST),"
+echo "  hydra.service, hydra_variant_b.service, hydra_variant_c.service,"
+echo "  dashboard.service, + the agent .service/.timer pairs."
+echo "See deploy/IBKR_CREDENTIALS_SETUP.md and CLAUDE.md 'Cold deploy' for the"
+echo "mandatory pre-start credential verification before enabling anything."
 
 systemctl daemon-reload
-systemctl enable calypso.service
-echo -e "${GREEN}Done.${NC}"
+echo -e "${GREEN}Done (no legacy unit enabled — install the real units per the docs above).${NC}"
 echo ""
 
 # =============================================================================

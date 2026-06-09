@@ -112,13 +112,21 @@ class LiveStateProvider:
         if (spx_close is None or spx_open is None or vix_close is None) and self._db_reader:
             try:
                 import sqlite3
-                conn = sqlite3.connect(self._db_reader.db_path)
-                conn.row_factory = sqlite3.Row
-                rows = conn.execute(
-                    "SELECT spx_price, vix_level FROM market_ticks WHERE timestamp LIKE ? ORDER BY timestamp",
-                    (f"{get_today_et()}%",),
-                ).fetchall()
-                conn.close()
+                # I-M9: open the live trading DB READ-ONLY (uri mode=ro) so the
+                # dashboard can never write or create it (preserves the 100%
+                # read-only guarantee + can't plant a phantom zero-byte DB), and
+                # close in a finally so an exception can't leak the handle.
+                conn = sqlite3.connect(
+                    f"file:{self._db_reader.db_path}?mode=ro", uri=True
+                )
+                try:
+                    conn.row_factory = sqlite3.Row
+                    rows = conn.execute(
+                        "SELECT spx_price, vix_level FROM market_ticks WHERE timestamp LIKE ? ORDER BY timestamp",
+                        (f"{get_today_et()}%",),
+                    ).fetchall()
+                finally:
+                    conn.close()
                 spx_prices = [r["spx_price"] for r in rows if r["spx_price"]]
                 vix_levels = [r["vix_level"] for r in rows if r["vix_level"]]
                 if spx_prices:

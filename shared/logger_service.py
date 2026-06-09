@@ -379,6 +379,12 @@ class GoogleSheetsLogger:
         if timeout is None:
             timeout = self.SHEETS_API_TIMEOUT
 
+        # L-M1: track whether the LAST call timed out (ambiguous — the daemon
+        # thread may still complete the write server-side) vs returned cleanly.
+        # The trade-append retry loop reads this to avoid re-appending a row that
+        # may have landed (a duplicate that would inflate logged credit/loss).
+        self._last_sheets_timed_out = False
+
         result = [None]
         exception = [None]
 
@@ -394,6 +400,7 @@ class GoogleSheetsLogger:
 
         if thread.is_alive():
             # Thread is still running - timeout occurred
+            self._last_sheets_timed_out = True  # L-M1: ambiguous — may still land
             logger.warning(f"SHEETS-TIMEOUT: Google Sheets API call timed out after {timeout}s: {func.__name__ if hasattr(func, '__name__') else str(func)}")
             return None
 
@@ -3964,6 +3971,21 @@ class TradeLoggerService:
                     for attempt in range(1, self.SHEETS_WRITE_MAX_RETRIES + 1):
                         if self.google_logger.log_trade(trade):
                             success = True
+                            break
+                        # L-M1: if the failed attempt TIMED OUT, the append may
+                        # have landed server-side (the daemon thread keeps
+                        # running). Re-appending would create a DUPLICATE row
+                        # that inflates the logged credit/loss totals HOMER and
+                        # /lastday read. Treat a timeout as ambiguous: do NOT
+                        # retry. The DB remains the authoritative record, so at
+                        # worst we lose one Sheets row (recoverable) rather than
+                        # double-count it.
+                        if getattr(self.google_logger, "_last_sheets_timed_out", False):
+                            logger.warning(
+                                f"SHEETS-AMBIGUOUS: append for {trade.action} timed "
+                                f"out — it may have landed; NOT retrying to avoid a "
+                                f"duplicate row (DB stays authoritative)."
+                            )
                             break
                         if attempt < self.SHEETS_WRITE_MAX_RETRIES:
                             logger.warning(

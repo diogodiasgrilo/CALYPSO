@@ -235,10 +235,21 @@ class AlertService:
         self._initialize()
 
     def _initialize(self) -> None:
-        """Initialize Pub/Sub publisher if running on GCP."""
+        """Initialize Pub/Sub publisher if running on GCP.
+
+        L-C2: the publisher is initialized even when alerts are DISABLED so the
+        severity bypass in ``send_alert`` can still deliver CRITICAL/HIGH events
+        (a disabled config must never silence an emergency on the live-order
+        variant). Routine LOW/MEDIUM alerts are still suppressed at the
+        ``send_alert`` gate — only the publisher setup is no longer skipped.
+        """
         if not self._enabled:
-            logger.info("Alert service disabled in config")
-            return
+            logger.info(
+                "Alert service: routine alerts DISABLED in config "
+                "(CRITICAL/HIGH still delivered via severity bypass)"
+            )
+            # Intentionally fall through to publisher init below so the bypass
+            # path has a working Pub/Sub channel for emergencies.
 
         if self._dry_run:
             logger.info("Alert service running in DRY RUN mode (ALERT_DRY_RUN=true)")
@@ -298,13 +309,19 @@ class AlertService:
         Returns:
             bool: True if alert was published successfully
         """
-        if not self._enabled:
-            logger.debug(f"Alert skipped (disabled): {alert_type.value} - {title}")
-            return False
-
-        # Get priority from mapping if not specified
+        # Resolve priority FIRST so the disabled-gate can honor a severity bypass.
         if priority is None:
             priority = DEFAULT_PRIORITIES.get(alert_type, AlertPriority.MEDIUM)
+
+        # L-C2 severity bypass: when alerts are disabled we still publish
+        # CRITICAL/HIGH. On the live-order (paper) variant, a naked short, a
+        # failed emergency close, or a tripped breaker must never be silenced
+        # just because alerts.enabled=false. LOW/MEDIUM stay suppressed.
+        if not self._enabled and priority not in (AlertPriority.CRITICAL, AlertPriority.HIGH):
+            logger.debug(
+                f"Alert skipped (disabled, {priority.value}): {alert_type.value} - {title}"
+            )
+            return False
 
         # Determine delivery channels based on priority and alert type
         send_email = self._should_send_email(alert_type, priority)

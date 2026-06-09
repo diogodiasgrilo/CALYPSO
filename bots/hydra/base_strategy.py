@@ -1243,9 +1243,27 @@ class MEICStrategy(abc.ABC):
         # Update market data
         self._update_market_data()
 
-        # DATA-001: Validate data freshness before trading
+        # DATA-001: Validate data freshness before trading.
         if self._is_data_stale_for_trading():
-            return "Skipping action - market data is stale"
+            # L-H4: a stale SPX INDEX snapshot must NOT disable stop monitoring
+            # on EXISTING positions. The default HYDRA stop is credit-based
+            # (driven by OPTION leg mids, which `_check_stop_losses` re-fetches
+            # itself and which can be fresh even when the SPX index snapshot is
+            # stale), so blanket-returning here left open positions UNMONITORED
+            # whenever SPX froze (fails-unmonitored, not fails-safe). Run the
+            # stop check (it carries its own per-leg DATA-004 zero-price guard)
+            # for any open positions before bailing — only NEW entries are gated
+            # on SPX freshness.
+            if self.daily_state.active_entries:
+                try:
+                    stop_result = self._check_stop_losses()
+                    if stop_result:
+                        return stop_result
+                except Exception as exc:
+                    logger.error(
+                        f"DATA-001: stop check during stale-SPX window failed: {exc}"
+                    )
+            return "Skipping new entries - market data is stale (stops still monitored)"
 
         # MKT-002: Check for flash crash conditions
         flash_crash, direction, pct_change = self.market_data.check_flash_crash_velocity()
@@ -2560,6 +2578,7 @@ class MEICStrategy(abc.ABC):
                     instrument_id=conid, side=side,
                     quantity=self.contracts_per_entry,
                     order_type="MKT", coid=attempt_coid,
+                    ambiguous_on_timeout=True,  # L-H1: entry place — abort on transport-timeout
                 )
             else:
                 if slippage_percent > 0:
@@ -2582,6 +2601,7 @@ class MEICStrategy(abc.ABC):
                     quantity=self.contracts_per_entry,
                     order_type="LMT", limit_price=limit_price,
                     coid=attempt_coid,
+                    ambiguous_on_timeout=True,  # L-H1: entry place — abort on transport-timeout
                 )
 
             # ORDER double-execution guard: a placement whose live state could
@@ -2703,15 +2723,57 @@ class MEICStrategy(abc.ABC):
                 return None
 
             # Not filled. The order may still be WORKING in IBKR's book
-            # (place_and_wait_for_fill leaves a timed-out order live) —
-            # cancel it before the next attempt, otherwise it could fill
-            # late and leave us with a stale / orphaned leg.
+            # (place_and_wait_for_fill leaves a timed-out order live) — cancel
+            # it before the next attempt, otherwise it could fill late. L-C3: we
+            # must (a) HONOR the cancel result — a failed cancel means the order
+            # may still be working, so advancing to a new cOID risks a
+            # double-fill; and (b) after cancelling, VERIFY the order didn't
+            # actually fill in the race between the last poll and the cancel
+            # taking effect (cancel is async; "already filled" reports success).
             if result and result.get("order_id"):
+                stale_order_id = result["order_id"]
                 logger.info(
-                    f"  Cancelling unfilled order {result['order_id']} "
-                    f"before retry"
+                    f"  Cancelling unfilled order {stale_order_id} before retry"
                 )
-                self._cancel_order(result["order_id"])
+                cancelled = self._cancel_order(stale_order_id)
+
+                # (b) Re-fetch terminal status post-cancel. If it actually
+                # filled (race fill), DO NOT place a second order — flatten the
+                # filled contracts and end this leg flat (mirrors ORDER-010).
+                post = self._get_order_status(stale_order_id)
+                filled_after = self._extract_filled_quantity(post) or 0
+                if filled_after > 0:
+                    logger.critical(
+                        f"  L-C3: order {stale_order_id} on {leg_description} "
+                        f"actually FILLED {filled_after} during/after cancel — "
+                        f"NOT re-placing; flattening to avoid a double position"
+                    )
+                    close_side = "SELL" if side == "BUY" else "BUY"
+                    flat = self._place_leg_order(
+                        instrument_id=conid, side=close_side,
+                        quantity=filled_after, order_type="MKT",
+                        coid=f"{external_ref}_{placement_nonce}lcflat{attempt}",
+                    )
+                    if not (flat and flat.get("filled")):
+                        logger.critical(
+                            "  L-C3: FAILED to flatten the late fill on "
+                            f"{leg_description} — MANUAL INTERVENTION REQUIRED"
+                        )
+                        self._add_orphaned_order(stale_order_id)
+                    return None
+
+                # (a) Cancel failed AND no confirmed fill — the order may still
+                # be working. Advancing to a new cOID could double-fill, so
+                # abort this leg for reconciliation instead of retrying.
+                if not cancelled:
+                    logger.critical(
+                        f"  L-C3: cancel of unfilled order {stale_order_id} on "
+                        f"{leg_description} FAILED and fill is unconfirmed — the "
+                        f"order may still be working. Aborting leg (no re-place); "
+                        f"flagging for reconciliation to avoid a double-fill."
+                    )
+                    self._add_orphaned_order(stale_order_id)
+                    return None
 
             # Delay before the next retry level.
             if attempt < len(PROGRESSIVE_RETRY_SEQUENCE) - 1:
@@ -3797,7 +3859,28 @@ class MEICStrategy(abc.ABC):
             attempt_num = attempt + 1
             try:
                 # Already gone? The broker shows no open quantity at the conid.
-                if attempt > 0 and not self._position_is_open(uic):
+                # L-H2: read positions STRICTLY. _read_open_positions() swallows
+                # a fetch failure and returns [] — which _position_is_open reads
+                # as "flat", so a transient read failure would END the close as
+                # SUCCESS and abandon a possibly-still-open, breached short
+                # (untracked naked 0DTE leg). With strict=True an inconclusive
+                # read RAISES; we then do NOT assume closed — fall through and
+                # retry the close. Only a positive qty-0 read ends it as closed.
+                already_gone = False
+                if attempt > 0:
+                    try:
+                        _positions = self._read_open_positions(strict=True)
+                        already_gone = not self._position_is_open(
+                            uic, positions=_positions
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"EMERGENCY-001: strict positions read failed for "
+                            f"{leg_name} (conid {uic}): {exc} — NOT assuming "
+                            f"closed; retrying the close"
+                        )
+                        already_gone = False
+                if already_gone:
                     logger.info(
                         f"EMERGENCY-001: {leg_name} (conid {uic}) already "
                         f"closed — skipping retry"
@@ -5546,6 +5629,14 @@ class MEICStrategy(abc.ABC):
     # ORDER-004: PRE-ENTRY MARGIN CHECK
     # =========================================================================
 
+    def _min_buying_power_per_unit(self) -> float:
+        """Per-contract margin floor used by the ORDER-004 buying-power gate.
+
+        Defined-risk default = the IC floor. A naked strategy (strangle)
+        overrides this (S2) to a much larger naked-margin floor.
+        """
+        return self.min_buying_power_per_ic
+
     def _check_buying_power(self) -> Tuple[bool, str]:
         """
         ORDER-004: Check if we have sufficient buying power for a new IC entry.
@@ -5629,11 +5720,15 @@ class MEICStrategy(abc.ABC):
                 "total_value": total_value,
             }
 
-            # Calculate required margin for next entry
+            # Calculate required margin for next entry.
             # Each IC needs max(call_spread, put_spread) × $100 × contracts.
-            # `min_buying_power_per_ic` is the per-contract floor, configurable
-            # so narrow-spread variants don't trip the wide-baseline default.
-            required = self.min_buying_power_per_ic * self.contracts_per_entry
+            # The per-unit floor is overridable (S2): a defined-risk IC uses
+            # `min_buying_power_per_ic`; a NAKED strategy (strangle) overrides
+            # `_min_buying_power_per_unit` to a much larger naked-margin floor,
+            # because the IC floor (~$5k/contract) grossly underestimates an
+            # undefined-risk short.
+            per_unit_floor = self._min_buying_power_per_unit()
+            required = per_unit_floor * self.contracts_per_entry
 
             if available < required:
                 # In dry-run, log the would-be rejection for diagnostics but
@@ -5646,7 +5741,7 @@ class MEICStrategy(abc.ABC):
                     logger.info(
                         f"ORDER-004 (dry-run): would-be insufficient BP — "
                         f"Available ${available:,.2f} < Required ${required:,.2f} "
-                        f"({self.contracts_per_entry}c × ${self.min_buying_power_per_ic:,.0f}). "
+                        f"({self.contracts_per_entry}c × ${per_unit_floor:,.0f}). "
                         f"Bypassing margin gate for data collection."
                     )
                     return True, (
@@ -5656,7 +5751,7 @@ class MEICStrategy(abc.ABC):
                 logger.warning(
                     f"ORDER-004: Insufficient buying power. "
                     f"Available: ${available:,.2f}, Required: ${required:,.2f} "
-                    f"({self.contracts_per_entry}c × ${self.min_buying_power_per_ic:,.0f}), "
+                    f"({self.contracts_per_entry}c × ${per_unit_floor:,.0f}), "
                     f"Utilization: {_util_str}"
                 )
                 return False, (
@@ -6126,16 +6221,21 @@ class MEICStrategy(abc.ABC):
             )
             return False, f"P&L too high: ${pnl:.2f}"
 
-        # Min loss bound scales with contracts (15c × 5pt = $7,500 max loss
-        # blows past the -$3,000 baseline). Multiply by contracts so per-IC
-        # floor stays meaningful at any size.
+        # L-H3: a loss MORE negative than the floor must NEVER suppress the
+        # stop. The DATA-004 zero-price gate above already catches the real
+        # data-corruption case ($0 prices → false stop); a large loss with
+        # NON-zero prices is a genuine fast/deep loss and is EXACTLY when the
+        # stop must fire. The old `return False` here made a deeper/faster loss
+        # LESS likely to stop (the confirming MKT-046 tick never completes once
+        # pnl dips below the floor). Log the anomaly for investigation but let
+        # the stop check PROCEED. The min-loss floor scales with contracts.
         min_loss_floor = self.min_pnl_per_ic * max(1, getattr(entry, "contracts", self.contracts_per_entry))
         if pnl < min_loss_floor:
-            logger.error(
-                f"DATA-003: Impossible P&L detected for Entry #{entry.entry_number}: "
-                f"${pnl:.2f} < min ${min_loss_floor:.2f}"
+            logger.warning(
+                f"DATA-003: Entry #{entry.entry_number} P&L ${pnl:.2f} is below "
+                f"the min-loss floor ${min_loss_floor:.2f} — PROCEEDING with the "
+                f"stop check (a large loss must stop faster, not be suppressed)"
             )
-            return False, f"P&L too low: ${pnl:.2f}"
 
         # Check for NaN or infinity
         if not isinstance(pnl, (int, float)) or pnl != pnl:  # NaN check

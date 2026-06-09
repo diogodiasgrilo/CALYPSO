@@ -381,7 +381,17 @@ class HydraStrategy(MEICStrategy):
         # Vigilant mode is intentionally NOT scaled — when a stop is near, we
         # need fast detection on every variant (still cheap because vigilant
         # only kicks in for one entry at a time).
-        self.api_pacing_multiplier = float(strategy_cfg.get("api_pacing_multiplier", 1.0))
+        # L-M11: read from the strategy block first, then fall back to the
+        # config ROOT. B/C configs historically placed api_pacing_multiplier at
+        # the root, so a strategy-block-only read silently left them at 1.0x
+        # (full 10s cadence) instead of the intended 2.0x — extra IBKR request
+        # pressure that the pacing design exists to avoid.
+        self.api_pacing_multiplier = float(
+            strategy_cfg.get(
+                "api_pacing_multiplier",
+                config.get("api_pacing_multiplier", 1.0),
+            )
+        )
         if self.api_pacing_multiplier != 1.0:
             logger.info(f"  API pacing multiplier: {self.api_pacing_multiplier}x (variant={HYDRA_VARIANT_ID or 'a'})")
 
@@ -1782,7 +1792,11 @@ class HydraStrategy(MEICStrategy):
         if mid is not None:
             return mid
         bid, ask = quote.get("bid"), quote.get("ask")
-        if bid is not None and ask is not None:
+        if bid is not None and ask is not None and bid <= ask:
+            # L-M7: only average a SANE (uncrossed) book. During fast moves a
+            # quote can be crossed (bid > ask); (bid+ask)/2 on a crossed market
+            # is nonsense and can drive a false stop or mask a real one. Mirror
+            # the L9 guard in _parse_quote_row — fall through to last/mark.
             return (bid + ask) / 2
         return quote.get("last") or quote.get("mark") or 0.0
 
@@ -2046,6 +2060,7 @@ class HydraStrategy(MEICStrategy):
         order_type: str = "LMT",
         limit_price: Optional[float] = None,
         coid: Optional[str] = None,
+        ambiguous_on_timeout: bool = False,
     ) -> Dict[str, Any]:
         """Place ONE option leg on IBKR; place→poll-to-fill in one call.
 
@@ -2097,6 +2112,36 @@ class HydraStrategy(MEICStrategy):
                 "raw": None,
             }
         except Exception as e:
+            # L-H1: on an ENTRY place (ambiguous_on_timeout=True), a TRANSPORT /
+            # timeout failure means the order MAY have landed server-side — the
+            # broker runs place_and_wait_for_fill in a threadpool the client
+            # timeout does NOT cancel, so the POST can fill late. Re-placing
+            # under a new cOID would double-fill, so surface as AMBIGUOUS (the
+            # caller aborts the leg + reconciles) instead of a clean failure.
+            # We match transport-level signatures only ("unreachable",
+            # "transport failed", "timeout/timed out") so a legitimate broker
+            # REJECTION (e.g. insufficient margin — order never landed) still
+            # returns a clean, retry-safe failure. Closes/flattens pass
+            # ambiguous_on_timeout=False (they WANT a retry, not an abort).
+            msg_l = str(e).lower()
+            is_transport_ambiguous = (
+                "timeout" in msg_l
+                or "timed out" in msg_l
+                or "unreachable" in msg_l
+                or "transport failed" in msg_l
+            )
+            if ambiguous_on_timeout and is_transport_ambiguous:
+                logger.critical(
+                    f"_place_leg_order({instrument_id} {side} x{quantity} "
+                    f"{ib_type}) TRANSPORT FAILURE on entry place — order may be "
+                    f"LIVE but unconfirmed (coid={coid}): {type(e).__name__}: {e}. "
+                    f"Treating as AMBIGUOUS; aborting leg, NOT resubmitting."
+                )
+                return {
+                    "success": False, "filled": False, "ambiguous": True,
+                    "order_id": None, "fill_price": None, "position_id": None,
+                    "raw": None,
+                }
             logger.warning(
                 f"_place_leg_order({instrument_id} {side} x{quantity} "
                 f"{ib_type}) failed ({type(e).__name__}: {e})"
@@ -2736,6 +2781,10 @@ class HydraStrategy(MEICStrategy):
         for side_name, legs in sides_to_close:
             side_close_cost = 0.0
             side_legs_closed = 0
+            # L-M2: leg_names ACTUALLY closed at the broker (qty→0). Worthless
+            # longs skipped via Fix #81 are NOT added here — they stay open to
+            # 0DTE expiry, so their uic must remain set for reconciliation.
+            closed_leg_names: set = set()
 
             for leg_name, pos_id, uic in legs:
                 # Gate on uic OR pos_id: pos_id is always None on the live IBKR
@@ -2773,6 +2822,7 @@ class HydraStrategy(MEICStrategy):
                 if success:
                     legs_closed += 1
                     side_legs_closed += 1
+                    closed_leg_names.add(leg_name)  # L-M2: closed at broker
                     if fill_price and fill_price > 0:
                         cost = fill_price * 100 * entry.contracts
                         if leg_name.startswith("short"):
@@ -2795,6 +2845,16 @@ class HydraStrategy(MEICStrategy):
                 credit = getattr(entry, f"{side_name}_spread_credit", 0)
                 setattr(entry, f"{side_name}_side_expired", True)
                 entry.early_closed = True
+                # L-M2: clear the uics of legs ACTUALLY closed at the broker so
+                # they drop out of _expected_position_quantities. Otherwise a
+                # normally-closed Brandon TP/breach side lingers in the expected
+                # set and reconciliation raises a spurious POS-003 "manual
+                # review" mismatch every tick (broker shows qty 0 for a leg we
+                # still 'expect'). Worthless longs skipped via Fix #81 are NOT
+                # in closed_leg_names, so their uic stays set (they remain open
+                # at the broker until 0DTE expiry → expected == actual).
+                for closed_leg in closed_leg_names:
+                    setattr(entry, f"{closed_leg}_uic", None)
                 # Record the actual close moment so capital-deployed
                 # sweep-line and any other timing-aware metric can pick it
                 # up. HYDRA stop paths set call_stop_time / put_stop_time;
@@ -4797,7 +4857,14 @@ class HydraStrategy(MEICStrategy):
                 "vix_at_entry": self.current_vix,
                 "expected_move": getattr(self, '_last_expected_move', None),
                 "trend_signal": entry.trend_signal.value if entry.trend_signal else None,
-                "entry_type": "call_only" if entry.call_only else ("put_only" if entry.put_only else "full_ic"),
+                # Item 6: a structure discriminator distinguishes a naked
+                # strangle from the IC population so analytics (HERMES/HOMER)
+                # don't fold a deep-ITM naked loss into the "clean Expired" IC
+                # bucket. Falls through to the IC labels when unset.
+                "entry_type": (
+                    getattr(entry, "structure", None)
+                    or ("call_only" if entry.call_only else ("put_only" if entry.put_only else "full_ic"))
+                ),
                 "override_reason": getattr(entry, 'override_reason', None),
                 "short_call_strike": entry.short_call_strike,
                 "long_call_strike": entry.long_call_strike,
@@ -4922,6 +4989,18 @@ class HydraStrategy(MEICStrategy):
             if actual_close_cost and quoted_mid:
                 slippage = actual_close_cost - quoted_mid
 
+            # I-M2: when the synchronous close cost is missing (a leg fill wasn't
+            # captured), actual_debit=0 and net_pnl would be NULL forever (the
+            # async-correction hooks are IBKR no-ops). Fall back to the trigger-
+            # level estimate -(stop_level - credit) so per-stop analytics aren't
+            # permanently corrupted. The daily total stays driven by realized P&L.
+            if actual_close_cost and credit:
+                net_pnl = -(actual_close_cost - credit)
+            elif stop_level and credit:
+                net_pnl = -(stop_level - credit)
+            else:
+                net_pnl = None
+
             self._data_recorder.record_stop({
                 "date": date_str,
                 "entry_number": entry.entry_number,
@@ -4930,7 +5009,7 @@ class HydraStrategy(MEICStrategy):
                 "spx_at_stop": self.current_price,
                 "trigger_level": stop_level,
                 "actual_debit": actual_close_cost,
-                "net_pnl": -(actual_close_cost - credit) if actual_close_cost and credit else None,
+                "net_pnl": net_pnl,
                 "quoted_mid_at_stop": quoted_mid,
                 "slippage_on_close": slippage,
                 "spx_move_since_entry": spx_move,
@@ -5093,6 +5172,28 @@ class HydraStrategy(MEICStrategy):
         """
         entry_num = self._next_entry_index + 1
         logger.info(f"HYDRA: Initiating Entry #{entry_num} of {self._effective_total_entry_count()}")
+
+        # L-M8: VIX freshness gate. VIX drives spread width, the VIX-regime
+        # credit floors, AND the stop buffer for THIS entry; a frozen VIX
+        # silently mis-sizes all of them. is_vix_stale() existed but had zero
+        # callers. Warn + attempt a refresh so a stale VIX is visible rather
+        # than silent. We warn (not skip) — a missed entry is worse than a
+        # slightly-stale VIX, and the refresh usually recovers it.
+        try:
+            if self.market_data.is_vix_stale():
+                logger.warning(
+                    f"L-M8: VIX appears STALE at Entry #{entry_num} sizing "
+                    f"(VIX={self.current_vix:.1f}); refreshing market data first"
+                )
+                self._update_market_data()
+                if self.market_data.is_vix_stale():
+                    logger.warning(
+                        f"L-M8: VIX STILL stale after refresh "
+                        f"(VIX={self.current_vix:.1f}) — entry sizing may be off; "
+                        f"proceeding"
+                    )
+        except Exception as exc:
+            logger.debug(f"L-M8: VIX staleness check failed (non-fatal): {exc}")
 
         # Directional pivot pre-entry gate (directional_pivot, introduced 2026-05-01).
         # Before any other filters run (including the calm-entry delay), check
@@ -7365,6 +7466,25 @@ class HydraStrategy(MEICStrategy):
         MKT046_MIN_CONFIRM_SECONDS = 10
 
         if spread_value >= stop_level:
+            # L-M6: severity bypass. MKT-046's 10s confirmation exists to filter
+            # momentary bid/ask spikes — but a breach FAR beyond the stop is a
+            # real fast move, not a spike. Waiting 10s lets the loss balloon (and
+            # compounds L-H3). Execute IMMEDIATELY when the spread is at least
+            # MKT046_SEVERITY_MULT × the stop level. 2.0× (spread value DOUBLE the
+            # stop) is deliberately conservative: a 2× breach is unambiguously a
+            # real adverse move, not a momentary spike, so this preserves MKT-046's
+            # spike-filtering for the common 1–2× breach band (re-audit money-path).
+            MKT046_SEVERITY_MULT = 2.0
+            if stop_level > 0 and spread_value >= MKT046_SEVERITY_MULT * stop_level:
+                self._log_stop_detail(entry, side, spread_value, stop_level, "SEVERITY_BYPASS")
+                logger.warning(
+                    f"MKT-046: E#{entry.entry_number} {side} SEVERITY BYPASS — "
+                    f"SV ${spread_value:.0f} >= {MKT046_SEVERITY_MULT}x trigger "
+                    f"${stop_level:.0f}; executing immediately (no 10s confirm)"
+                )
+                setattr(entry, f'{side}_breach_time', None)
+                return self._execute_stop_loss(entry, side)
+
             breach_time = getattr(entry, f'{side}_breach_time', None)
             now = datetime.now()
 
@@ -8952,7 +9072,9 @@ class HydraStrategy(MEICStrategy):
 
         # Trend and type
         trend = entry.trend_signal.value.upper() if hasattr(entry, 'trend_signal') and entry.trend_signal else "N/A"
-        if getattr(entry, 'call_only', False):
+        if getattr(entry, 'structure', None) == "strangle":
+            entry_type = "Strangle"  # item 6: don't mislabel a naked strangle as an IC
+        elif getattr(entry, 'call_only', False):
             entry_type = "Call Only"
         elif getattr(entry, 'put_only', False):
             entry_type = "Put Only"
@@ -9944,6 +10066,12 @@ class HydraStrategy(MEICStrategy):
                     "put_side_expired": entry.put_side_expired,
                     "call_side_skipped": entry.call_side_skipped,
                     "put_side_skipped": entry.put_side_skipped,
+                    # L-H5: persist pivot-closed flags so a mid-day restart does
+                    # NOT re-book a directional-pivot-closed side's credit at
+                    # settlement (the re-book guard skips pivot-closed sides; the
+                    # recovery path already restores these flags).
+                    "call_side_pivot_closed": getattr(entry, "call_side_pivot_closed", False),
+                    "put_side_pivot_closed": getattr(entry, "put_side_pivot_closed", False),
                     # Fix #61: Position merge tracking
                     "call_side_merged": entry.call_side_merged,
                     "put_side_merged": entry.put_side_merged,
@@ -10273,10 +10401,53 @@ class HydraStrategy(MEICStrategy):
                 f"missing on the broker — clearing it and marking it closed"
             )
             setattr(entry, f"{leg}_uic", None)
-            if leg == "short_call":
-                entry.call_side_stopped = True
-            elif leg == "short_put":
-                entry.put_side_stopped = True
+            if leg in ("short_call", "short_put"):
+                side = "call" if leg == "short_call" else "put"
+                setattr(entry, f"{side}_side_stopped", True)
+                # L-M3: a short that vanished from the broker (closed externally
+                # or while the bot was down) was marked stopped but its close
+                # DEBIT was never booked — settlement then treats it as a genuine
+                # stop and SKIPS re-booking, so the loss is silently dropped and
+                # realized P&L is OVERSTATED. Book the side's realized P&L now
+                # from the actual closing execution (closing a short = a BUY) and
+                # tag close_reason so settlement leaves it alone. If the close
+                # price can't be read, alert for manual review rather than
+                # silently dropping it.
+                if not getattr(entry, f"{side}_side_pnl_booked_external", False):
+                    closed = self._read_closed_position_price(conid, buy_or_sell="Buy")
+                    close_px_raw = (closed or {}).get("closing_price")
+                    try:
+                        close_px = float(close_px_raw) if close_px_raw is not None else None
+                    except (TypeError, ValueError):
+                        close_px = None
+                    side_credit = getattr(entry, f"{side}_spread_credit", 0) or 0
+                    contracts = (
+                        getattr(entry, "contracts", None)
+                        or getattr(self, "contracts_per_entry", 1)
+                        or 1
+                    )
+                    if close_px is not None and close_px > 0:
+                        close_debit = float(close_px) * 100 * contracts
+                        realized = side_credit - close_debit
+                        self.daily_state.total_realized_pnl += realized
+                        setattr(entry, f"{side}_side_pnl_booked_external", True)
+                        if not getattr(entry, "close_reason", ""):
+                            entry.close_reason = "EXTERNAL"
+                        logger.warning(
+                            f"L-M3: booked external close of E#{entry.entry_number} "
+                            f"{side} short — credit ${side_credit:.2f} − debit "
+                            f"${close_debit:.2f} = ${realized:.2f} realized"
+                        )
+                    else:
+                        # Close price unreadable → leave P&L unbooked but loud in
+                        # the log. We do NOT fire a separate alert here: the
+                        # reconciliation path already alerts about the vanished
+                        # position, so this would only double-notify.
+                        logger.critical(
+                            f"L-M3: E#{entry.entry_number} {side} short vanished "
+                            f"but its close price is unreadable — P&L for this side "
+                            f"is UNBOOKED; manual review recommended."
+                        )
 
     def _check_hourly_reconciliation(self):
         """
@@ -10766,8 +10937,15 @@ class HydraStrategy(MEICStrategy):
         if settlement_level is None or short_k <= 0 or itm_points <= 0:
             return credit, True
 
-        width = abs(long_k - short_k)
-        intrinsic_pts = min(itm_points, width) if width > 0 else itm_points
+        # Item 7: a NAKED side (no long wing) has UNBOUNDED intrinsic — do NOT
+        # cap it at the (nonexistent) spread width. long_k=0 would otherwise make
+        # width=short_k and silently cap an extreme ITM naked call. Only
+        # defined-risk verticals cap intrinsic at their width.
+        if not getattr(self, "requires_protective_wings", True):
+            intrinsic_pts = itm_points
+        else:
+            width = abs(long_k - short_k)
+            intrinsic_pts = min(itm_points, width) if width > 0 else itm_points
         settle_value = intrinsic_pts * 100 * max(int(getattr(entry, "contracts", 1)), 1)
         booked = credit - settle_value
         logger.warning(
@@ -10813,9 +10991,16 @@ class HydraStrategy(MEICStrategy):
         # would otherwise be mis-booked as worthless profit. Only read on the
         # real IBKR path — None in dry-run / Saxo, where the booked-PnL helper
         # falls back to the legacy full-credit assumption.
+        # S-HIGH-2: for a NAKED strategy (requires_protective_wings=False, e.g.
+        # the strangle) we MUST compute the settlement level even in dry-run —
+        # otherwise an ITM-finishing naked short is booked as full-credit PROFIT,
+        # poisoning the very dry-run dataset the strangle exists to produce.
+        # _settlement_spx_level only READS the index (no order), so it is safe in
+        # dry-run. Defined-risk IC dry-run behavior is unchanged.
+        _naked = not getattr(self, "requires_protective_wings", True)
         settlement_level = (
             self._settlement_spx_level()
-            if (self.broker is not None and not self.dry_run)
+            if (self.broker is not None and (not self.dry_run or _naked))
             else None
         )
 
@@ -10835,7 +11020,12 @@ class HydraStrategy(MEICStrategy):
                 # *_side_expired (skipped just below), so this re-books ONLY the
                 # spurious never-booked case — no double-count.
                 call_genuine_stop = entry.call_side_stopped and getattr(entry, "close_reason", "") not in ("TP", "BREACH")
-                if not call_genuine_stop and not entry.call_side_expired and not entry.call_side_skipped:
+                # L-H5: a directional-pivot-closed side already booked its P&L in
+                # _execute_pivot_side_close; re-booking the full credit here would
+                # double-count it. Skip pivot-closed sides.
+                if (not call_genuine_stop and not entry.call_side_expired
+                        and not entry.call_side_skipped
+                        and not getattr(entry, "call_side_pivot_closed", False)):
                     entry.call_side_expired = True
                     # IBKR-audit #5: book actual settlement P&L (full credit if
                     # OTM/unverifiable; credit - intrinsic if ITM-settled).
@@ -10870,7 +11060,11 @@ class HydraStrategy(MEICStrategy):
                 # 06-04 audit (fix #5): see the call-side rationale above — re-book
                 # a side spuriously flagged stopped by a 0-leg Brandon TP/BREACH.
                 put_genuine_stop = entry.put_side_stopped and getattr(entry, "close_reason", "") not in ("TP", "BREACH")
-                if not put_genuine_stop and not entry.put_side_expired and not entry.put_side_skipped:
+                # L-H5: skip pivot-closed sides (P&L already booked in
+                # _execute_pivot_side_close) to avoid double-counting the credit.
+                if (not put_genuine_stop and not entry.put_side_expired
+                        and not entry.put_side_skipped
+                        and not getattr(entry, "put_side_pivot_closed", False)):
                     entry.put_side_expired = True
                     # IBKR-audit #5: book actual settlement P&L (full credit if
                     # OTM/unverifiable; credit - intrinsic if ITM-settled).

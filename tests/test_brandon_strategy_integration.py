@@ -1015,3 +1015,143 @@ class TestSubclassRelationship:
 
     def test_overrides_reset_for_new_day(self):
         assert "_reset_for_new_day" in BrandonHydraStrategy.__dict__
+
+
+class TestOverlayReconciliation:
+    """L-H6: live overlay hedge legs (real conid) must appear in
+    _expected_position_quantities so reconciliation is not blind to them;
+    dry-run DRY_OVERLAY placeholders (conid=None) must NOT appear."""
+
+    def _leg(self, *, side, qty, conid, position_id):
+        from bots.hydra.brandon.hedge_position import HedgeLeg
+        return HedgeLeg(
+            entry_number=1, side=side, contract_type="put", strike=6800.0,
+            quantity=qty, fill_price=1.5, position_id=position_id,
+            structure="debit_spread", threatened_side="put",
+            placed_at=datetime.now(timezone.utc), conid=conid,
+        )
+
+    def test_live_hedge_conid_in_expected(self):
+        inst = _make_instance()
+        inst.daily_state = MagicMock()
+        inst.daily_state.entries = []  # no IC legs → base returns {}
+        inst._brandon_hedge_legs = {
+            1: [
+                self._leg(side="long", qty=2, conid=123456, position_id="123456"),
+                self._leg(side="short", qty=2, conid=654321, position_id="654321"),
+            ]
+        }
+        expected = inst._expected_position_quantities()
+        assert expected.get(123456) == 2    # long → +qty
+        assert expected.get(654321) == -2   # short → -qty
+
+    def test_dry_overlay_placeholder_excluded(self):
+        inst = _make_instance()
+        inst.daily_state = MagicMock()
+        inst.daily_state.entries = []
+        inst._brandon_hedge_legs = {
+            1: [self._leg(side="long", qty=2, conid=None,
+                          position_id="DRY_OVERLAY_1_put_0")]
+        }
+        expected = inst._expected_position_quantities()
+        assert expected == {}  # conid=None → skipped entirely
+
+    def test_partial_overlay_alert_fires_critical(self):
+        inst = _make_instance()
+        sent = []
+        inst._brandon_send_telegram = lambda *a, **k: sent.append(k.get("priority_name"))
+        proposal = MagicMock()
+        proposal.threatened_side = "put"
+        inst._brandon_alert_overlay_partial(MagicMock(entry_number=1), proposal,
+                                            placed=1, expected=2)
+        assert sent == ["CRITICAL"]
+
+
+class TestGexFallbackStop:
+    """L-C1: when GEX/Polygon is unavailable, Brandon's primary breach stop can
+    never fire — so HYDRA's credit+buffer stop must be PROMOTED from shadow to
+    the live-acting fallback (super()._check_stop_losses), never leaving an open
+    IC unstopped. Per tick the GEX stop and the fallback are mutually exclusive.
+    """
+
+    def _active_entry(self):
+        e = MagicMock()
+        e.entry_number = 1
+        e.call_side_stopped = False
+        e.put_side_stopped = False
+        return e
+
+    def test_fallback_delegates_to_parent_stop_when_gex_unavailable(self, monkeypatch):
+        # GEX disabled (e.g. no Polygon key) → gex_stop_armed is False → the
+        # parent HYDRA stop must be invoked and its action returned.
+        inst = _make_instance(brandon_gex_enabled=False, brandon_hydra_shadow_enabled=True)
+        inst._batch_update_entry_prices = MagicMock()
+        inst.daily_state = MagicMock()
+        inst.daily_state.active_entries = [self._active_entry()]
+        inst._brandon_today_date = lambda: "2026-06-09"
+        inst._brandon_send_telegram = MagicMock()
+
+        called = {"parent": 0}
+        parent = BrandonHydraStrategy.__mro__[1]  # HydraStrategy
+
+        def fake_parent_stop(self_):
+            called["parent"] += 1
+            return "STOP E#1 call"
+
+        monkeypatch.setattr(parent, "_check_stop_losses", fake_parent_stop)
+        result = inst._check_stop_losses()
+
+        assert called["parent"] == 1, "fallback must delegate to HYDRA's stop"
+        assert result == "STOP E#1 call"
+
+    def test_gex_armed_keeps_hydra_stop_in_shadow(self, monkeypatch):
+        # GEX armed (profile present) + no breach this tick → parent stop must
+        # NOT act; the HYDRA stop stays shadow-only.
+        from datetime import date
+        from bots.hydra.brandon.gex_provider import GEXProfile
+        prof = GEXProfile(
+            spot=6800, expiry=date(2026, 5, 5),
+            fetched_at=datetime.now(timezone.utc), strikes=(),
+        )
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_breach_exit_enabled=True,
+            brandon_hydra_shadow_enabled=True,
+        )
+        inst._batch_update_entry_prices = MagicMock()
+        inst.daily_state = MagicMock()
+        inst.daily_state.active_entries = [self._active_entry()]
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
+        inst._brandon_check_breach_exit = lambda e: None  # no breach this tick
+        inst._brandon_check_hydra_shadow_stop = MagicMock()
+
+        called = {"parent": 0}
+        parent = BrandonHydraStrategy.__mro__[1]
+        monkeypatch.setattr(
+            parent, "_check_stop_losses",
+            lambda self_: called.__setitem__("parent", called["parent"] + 1) or "NOPE",
+        )
+        result = inst._check_stop_losses()
+
+        assert called["parent"] == 0, "GEX armed → HYDRA stop must NOT act"
+        assert result is None
+        inst._brandon_check_hydra_shadow_stop.assert_called()
+
+    def test_fallback_alert_fires_once_per_day(self):
+        inst = _make_instance(brandon_gex_enabled=False)
+        inst._brandon_today_date = lambda: "2026-06-09"
+        sent = []
+        inst._brandon_send_telegram = lambda *a, **k: sent.append(k.get("title", ""))
+        inst._brandon_alert_gex_fallback()
+        inst._brandon_alert_gex_fallback()  # same day → suppressed
+        assert len(sent) == 1
+        assert "GEX DOWN" in sent[0]
+
+    def test_fallback_alert_refires_on_new_day(self):
+        inst = _make_instance(brandon_gex_enabled=False)
+        sent = []
+        inst._brandon_send_telegram = lambda *a, **k: sent.append(k.get("title", ""))
+        inst._brandon_today_date = lambda: "2026-06-09"
+        inst._brandon_alert_gex_fallback()
+        inst._brandon_today_date = lambda: "2026-06-10"  # new ET day
+        inst._brandon_alert_gex_fallback()
+        assert len(sent) == 2

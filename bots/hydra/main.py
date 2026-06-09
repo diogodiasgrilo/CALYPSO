@@ -342,6 +342,48 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     except Exception as e:
         trade_logger.log_error(f"Failed to log startup dashboard metrics: {e}")
 
+    # L-M10: post-connect instrument resolvability probe. _assert_instrument_
+    # parameterized only checks truthiness; a stale-but-non-empty symbol (e.g. a
+    # leftover Saxo ticker like "US500.I") passes it and then silently fails at
+    # IBKR resolution — the bot then runs BLIND and skips every trade. If the
+    # underlying price is still 0/None after the startup market-data fetch
+    # DURING market hours, treat it as an unresolvable-instrument signal: alert
+    # CRITICAL and refuse to enter the trading loop (loud startup failure beats a
+    # silent runtime blind-spot). Outside market hours a 0 is normal → warn only.
+    try:
+        from shared.market_hours import is_market_open as _mkt_open
+        _px = getattr(strategy, "current_price", 0) or 0
+        _sym = getattr(strategy, "underlying_symbol", "?")
+        _exch = getattr(strategy, "exchange", "?")
+        if _px <= 0:
+            if _mkt_open():
+                msg = (
+                    f"Underlying {_sym} returned NO price at startup during market "
+                    f"hours — the symbol may be stale/unresolvable at the broker "
+                    f"(exchange={_exch}). Refusing to trade blind."
+                )
+                logger.critical(f"L-M10: {msg}")
+                try:
+                    strategy.alert_service.send_alert(
+                        alert_type=AlertType.DATA_QUALITY,
+                        title="HYDRA refusing to start — underlying unresolvable",
+                        message=msg,
+                        priority=AlertPriority.CRITICAL,
+                    )
+                except Exception:
+                    pass
+                trade_logger.shutdown()
+                return
+            else:
+                logger.warning(
+                    f"L-M10: underlying {_sym} has no price at startup (market "
+                    f"closed — normal); will re-verify once the session opens."
+                )
+        else:
+            logger.info(f"L-M10: instrument probe OK — {_sym} priced at {_px:.2f}")
+    except Exception as _probe_exc:
+        logger.warning(f"L-M10 instrument probe skipped (non-fatal): {_probe_exc}")
+
     # Send BOT_STARTED alert. The contracts= kwarg auto-prefixes title with
     # [{N}c] when > 1, so the manual prefix used in Phase 1 T-3 is removed —
     # single source of truth at the service layer (avoids double-prefixing).
@@ -926,38 +968,70 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 if active > 0:
                     spy_price = status.get('underlying_price', 0)
                     vix = status.get('vix', 0)
-                    if getattr(strategy, 'dry_run', False):
-                        # Dry-run: the "active" positions are SIMULATED — a
-                        # restart leaves no real risk. INFO, no CRITICAL/alert,
-                        # so planned dry-run restarts don't cry wolf.
+                    # L-M9: the discriminator for "is this a real safety event" is
+                    # PLANNED (SIGTERM → shutdown_requested) vs UNEXPECTED (crash/
+                    # OOM-kill), NOT dry_run alone. A planned `systemctl restart`
+                    # with open positions is normal operation — systemd
+                    # (Restart=always) brings the bot back and recovery re-adopts
+                    # the positions — so it must not trip the CRITICAL/safety_event
+                    # cascade every time (the old code did, on every routine
+                    # restart of the live-order paper variant). Only an UNEXPECTED
+                    # shutdown of a non-dry-run variant is a genuine safety event.
+                    planned = bool(shutdown_requested)
+                    is_dry = getattr(strategy, 'dry_run', False)
+                    if is_dry:
+                        # Dry-run: the "active" positions are SIMULATED — no real
+                        # risk regardless of how we stopped. INFO only.
                         logger.info(
                             f"Shutdown with {active} active SIMULATED positions "
                             f"(dry-run, no real risk). P&L: "
                             f"${realized + unrealized:.2f}"
                         )
-                    else:
-                        # LIVE: real positions left open on shutdown is a genuine
-                        # safety event — keep it CRITICAL + safety-event/alert.
-                        logger.critical(
-                            f"CRITICAL: Bot shutting down with {active} ACTIVE positions! "
+                    elif planned:
+                        # Real positions but a PLANNED restart: systemd restarts +
+                        # recovery re-adopts them. Expected — WARNING, no CRITICAL
+                        # safety_event, so routine restarts don't cry wolf.
+                        logger.warning(
+                            f"Planned shutdown with {active} active positions; "
+                            f"systemd will restart and recovery will re-adopt them. "
                             f"P&L: ${realized + unrealized:.2f}"
                         )
                         trade_logger.log_event(
-                            f"WARNING: Bot shutting down with {active} ACTIVE positions! "
+                            f"Planned shutdown with {active} active positions "
+                            "(systemd restart + recovery expected)."
+                        )
+                    else:
+                        # UNEXPECTED shutdown (crash/kill, no SIGTERM) with real
+                        # positions — a genuine safety event: CRITICAL + safety_event.
+                        logger.critical(
+                            f"CRITICAL: Unexpected shutdown with {active} ACTIVE positions! "
+                            f"P&L: ${realized + unrealized:.2f}"
+                        )
+                        trade_logger.log_event(
+                            f"WARNING: Unexpected shutdown with {active} ACTIVE positions! "
                             "Manual intervention may be required."
                         )
                         trade_logger.log_safety_event({
                             "event_type": "HYDRA_SHUTDOWN_WITH_POSITION",
                             "spy_price": spy_price,
                             "vix": vix,
-                            "description": f"Bot shutdown with {active} active positions",
+                            "description": f"Unexpected shutdown with {active} active positions",
                             "result": "Positions left open - MANUAL INTERVENTION REQUIRED"
                         })
 
                 # Send BOT_STOPPED alert
                 try:
                     reason = "Signal received" if shutdown_requested else "Unexpected shutdown"
-                    priority = AlertPriority.HIGH if active > 0 else AlertPriority.LOW
+                    # L-M9: escalate to HIGH only on an UNEXPECTED shutdown of a
+                    # non-dry-run variant with positions open. A planned restart
+                    # recovers, and dry-run positions are simulated → LOW (so
+                    # routine A/B/C restarts don't fire a HIGH on every stop).
+                    escalate = (
+                        active > 0
+                        and not getattr(strategy, 'dry_run', False)
+                        and not bool(shutdown_requested)
+                    )
+                    priority = AlertPriority.HIGH if escalate else AlertPriority.LOW
                     msg = f"HYDRA stopped. Reason: {reason}\nState: {state}, Entries: {entries}, P&L: ${realized + unrealized:.2f}"
                     if active > 0:
                         msg += f"\n⚠️ {active} ACTIVE positions remaining!"

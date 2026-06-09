@@ -42,6 +42,11 @@ HEALTH_LOG="${CALYPSO_DIR}/intel/argus/health_log.jsonl"
 INCIDENT_DIR="${CALYPSO_DIR}/intel/argus/incidents"
 NOTIFY_SCRIPT="${CALYPSO_DIR}/services/argus/notify.py"
 STATE_FILE="${CALYPSO_DIR}/data/hydra_state.json"
+# I-H1: per-variant state files. Variant C (hydra_variant_c) is the LIVE
+# real-paper-order process and previously had ZERO ARGUS coverage — a crash/
+# freeze/stale-state on C reported PASS. CHECK 9 below now watches it (and B).
+VARIANT_B_STATE_FILE="${CALYPSO_DIR}/data/variant_b/hydra_state.json"
+VARIANT_C_STATE_FILE="${CALYPSO_DIR}/data/variant_c/hydra_state.json"
 GCS_BACKUPS="gs://calypso-backups"
 # Circuit breakers live in the calypso-broker process (P5a/commit 13776d6), not
 # in hydra, and the broker logs to a rotating FILE (not journald). Check 3 scans
@@ -124,6 +129,85 @@ try:
 except Exception:
     sys.exit(1)
 " 2>/dev/null
+}
+
+# ─── Helper: per-variant health (process + heartbeat + state + log) ──────
+# I-H1: ARGUS originally watched ONLY variant A (the inline CHECKs 1/2/6/7
+# below). Variant C is the live real-paper-order process and had NO watchdog,
+# so a crash/freeze/stale-state on C went unobserved (compounded by the C
+# alerts gap). This function adds process + heartbeat-freshness + state JSON
+# integrity + log-staleness for an arbitrary variant unit, appending to the
+# global FAILURES/WARNINGS arrays prefixed with the unit name. A's proven
+# inline checks are left untouched (this is purely additive). The
+# heartbeat-missing case is intentionally SILENT (no WARN) to avoid a recurring
+# false positive if a variant doesn't populate the field — log-staleness +
+# process liveness still catch a frozen variant either way.
+check_variant_health() {
+    local unit="$1"
+    local vstate="$2"
+
+    # Process liveness. If the variant is down, skip the downstream state/log
+    # checks (they'd be redundant noise) — the process FAIL is the signal.
+    if ! systemctl is-active --quiet "${unit}" 2>/dev/null; then
+        FAILURES+=("${unit} service is not running")
+        return
+    fi
+
+    # Heartbeat freshness — only during the tight trading session + non-holiday,
+    # mirroring CHECK 2's gating. FAIL only if the field exists and is stale.
+    if is_trading_session && ! is_market_holiday; then
+        if [[ -f "${vstate}" ]]; then
+            local v_hb
+            v_hb=$("${VENV_PYTHON}" -c "
+import json, sys
+try:
+    with open('${vstate}') as f:
+        s = json.load(f)
+    v = s.get('last_heartbeat_at') or s.get('daily_state', {}).get('last_heartbeat_at')
+    print(v or '')
+except Exception:
+    print('')
+" 2>/dev/null)
+            if [[ -n "${v_hb}" ]]; then
+                local v_hb_epoch
+                v_hb_epoch=$("${VENV_PYTHON}" -c "
+from datetime import datetime
+try:
+    s = '${v_hb}'.replace('Z', '+00:00')
+    print(int(datetime.fromisoformat(s).timestamp()))
+except Exception:
+    print(0)
+" 2>/dev/null)
+                if [[ "${v_hb_epoch}" -gt 0 ]]; then
+                    local v_age_min=$(( ( $(date +%s) - v_hb_epoch ) / 60 ))
+                    if [[ "${v_age_min}" -gt "${STATE_HEARTBEAT_MAX_AGE_MIN}" ]]; then
+                        FAILURES+=("${unit} state-file heartbeat is ${v_age_min}m old (max ${STATE_HEARTBEAT_MAX_AGE_MIN}m)")
+                    fi
+                fi
+            fi
+        else
+            WARNINGS+=("${unit} state file not found: ${vstate}")
+        fi
+    fi
+
+    # State-file JSON integrity (any time the file exists).
+    if [[ -f "${vstate}" ]]; then
+        if ! "${VENV_PYTHON}" -c "import json; json.load(open('${vstate}'))" 2>/dev/null; then
+            FAILURES+=("${unit} state file is not valid JSON: ${vstate}")
+        fi
+    fi
+
+    # Log staleness — broad market-hours window + non-holiday, mirroring CHECK 6.
+    if is_market_hours && ! is_market_holiday; then
+        local v_log_epoch
+        v_log_epoch=$(journalctl -u "${unit}" -n 1 --no-pager -o short-unix 2>/dev/null | awk '{print int($1)}' || echo "0")
+        if [[ "${v_log_epoch}" -gt 0 ]]; then
+            local v_log_age_min=$(( ( $(date +%s) - v_log_epoch ) / 60 ))
+            if [[ "${v_log_age_min}" -gt "${LOG_STALE_MIN}" ]]; then
+                FAILURES+=("${unit} log stale: last entry ${v_log_age_min}m ago (max ${LOG_STALE_MIN}m)")
+            fi
+        fi
+    fi
 }
 
 # =========================================================================
@@ -366,6 +450,30 @@ elif ! command -v gsutil >/dev/null 2>&1; then
 fi
 
 # =========================================================================
+# CHECK 9: Variant coverage (I-H1) — variant C is the LIVE real-paper-order
+# process and MUST be watched; variant B is a dry-run sibling we watch too.
+# Uses check_variant_health() (process + heartbeat + state integrity + log
+# staleness). Only runs if the unit is installed on this host (a single-bot
+# host without the variant units shouldn't false-FAIL).
+# =========================================================================
+variant_c_status="ok"
+variant_b_status="ok"
+if systemctl list-unit-files hydra_variant_c.service >/dev/null 2>&1; then
+    pre_c=${#FAILURES[@]}
+    check_variant_health "hydra_variant_c" "${VARIANT_C_STATE_FILE}"
+    [[ ${#FAILURES[@]} -gt ${pre_c} ]] && variant_c_status="fail"
+else
+    variant_c_status="not_installed"
+fi
+if systemctl list-unit-files hydra_variant_b.service >/dev/null 2>&1; then
+    pre_b=${#FAILURES[@]}
+    check_variant_health "hydra_variant_b" "${VARIANT_B_STATE_FILE}"
+    [[ ${#FAILURES[@]} -gt ${pre_b} ]] && variant_b_status="fail"
+else
+    variant_b_status="not_installed"
+fi
+
+# =========================================================================
 # BUILD RESULT
 # =========================================================================
 overall="PASS"
@@ -377,7 +485,7 @@ fi
 # token_cache, token_age_min) with IBKR-era keys (heartbeat,
 # heartbeat_age_min, breaker, breaker_opens_today, backup).
 log_entry=$(cat <<JSONEOF
-{"timestamp":"${TIMESTAMP}","status":"${overall}","hydra":"${hydra_status}","heartbeat":"${heartbeat_status}","heartbeat_age_min":"${heartbeat_age_min}","breaker":"${breaker_status}","breaker_opens_today":"${breaker_opens_today}","disk_pct":"${disk_pct}","disk":"${disk_status}","memory_pct":"${memory_pct}","memory":"${memory_status}","log":"${log_status}","log_age_min":"${log_age_min}","state_file":"${state_status}","backup":"${backup_status}","failures":${#FAILURES[@]},"warnings":${#WARNINGS[@]}}
+{"timestamp":"${TIMESTAMP}","status":"${overall}","hydra":"${hydra_status}","heartbeat":"${heartbeat_status}","heartbeat_age_min":"${heartbeat_age_min}","breaker":"${breaker_status}","breaker_opens_today":"${breaker_opens_today}","disk_pct":"${disk_pct}","disk":"${disk_status}","memory_pct":"${memory_pct}","memory":"${memory_status}","log":"${log_status}","log_age_min":"${log_age_min}","state_file":"${state_status}","backup":"${backup_status}","variant_c":"${variant_c_status}","variant_b":"${variant_b_status}","failures":${#FAILURES[@]},"warnings":${#WARNINGS[@]}}
 JSONEOF
 )
 

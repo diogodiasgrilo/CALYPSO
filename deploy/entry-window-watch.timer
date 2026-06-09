@@ -2,12 +2,17 @@
 Description=Run the HYDRA entry-window watchdog just after each entry window (ET)
 
 [Timer]
-# HYDRA entry windows are 10:15 / 10:45 / 11:15 ET — check a few minutes after
-# each, plus a settle check at 11:30. systemd >= 252 supports a timezone suffix.
+# HYDRA entry windows are 10:45 / 11:15 ET (base) + a 14:00 ET E6 conditional —
+# check a few minutes after each, plus a settle check at 11:35. systemd >= 252
+# supports a timezone suffix.
+# (10:20 retained as a harmless early check; variant C's 10:15 window lands in it.)
 OnCalendar=Mon-Fri *-*-* 10:20:00 America/New_York
 OnCalendar=Mon-Fri *-*-* 10:50:00 America/New_York
 OnCalendar=Mon-Fri *-*-* 11:20:00 America/New_York
 OnCalendar=Mon-Fri *-*-* 11:35:00 America/New_York
+# I-M8: the 14:00 E6 conditional entry (put-only up-day / call-only down-day)
+# was unobserved — a 14:00 failure on C's real order went unwatched. Check at 14:05.
+OnCalendar=Mon-Fri *-*-* 14:05:00 America/New_York
 Persistent=false
 
 [Install]

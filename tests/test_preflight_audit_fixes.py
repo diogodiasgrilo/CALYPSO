@@ -143,7 +143,7 @@ class TestProgressiveRetryCoid:
         calls = []
 
         def fake_leg(*, instrument_id, side, quantity,
-                     order_type="LMT", limit_price=None, coid=None):
+                     order_type="LMT", limit_price=None, coid=None, **_kw):
             calls.append(coid)
             return {"success": True, "filled": False, "filled_quantity": 0,
                     "requested_quantity": quantity, "order_id": f"O{len(calls)}",
@@ -170,7 +170,7 @@ class TestProgressiveRetryCoid:
         seen = []
 
         def fake_leg(*, instrument_id, side, quantity,
-                     order_type="LMT", limit_price=None, coid=None):
+                     order_type="LMT", limit_price=None, coid=None, **_kw):
             seen.append(coid)
             return {"success": True, "filled": False, "filled_quantity": 0,
                     "requested_quantity": quantity, "order_id": "O",
@@ -202,7 +202,7 @@ class TestPartialFillHandling:
         calls = []
 
         def fake_leg(*, instrument_id, side, quantity,
-                     order_type="LMT", limit_price=None, coid=None):
+                     order_type="LMT", limit_price=None, coid=None, **_kw):
             calls.append({"side": side, "quantity": quantity,
                           "order_type": order_type, "coid": coid})
             if len(calls) == 1:
@@ -239,7 +239,7 @@ class TestPartialFillHandling:
         calls = []
 
         def fake_leg(*, instrument_id, side, quantity,
-                     order_type="LMT", limit_price=None, coid=None):
+                     order_type="LMT", limit_price=None, coid=None, **_kw):
             calls.append(coid)
             if len(calls) == 1:
                 return {"success": True, "filled": False, "filled_quantity": 3,
@@ -387,3 +387,131 @@ class TestDashboardApiKeyAuth:
             asyncio.run(dash_auth.require_api_key(x_api_key=None, api_key="sekret"))
         finally:
             dash_settings.api_key = original
+
+
+class TestOrderWriteDoubleFillGuards:
+    """L-C3 + L-H1: the entry-retry / broker-timeout double-fill paths.
+
+    A timed-out place that secretly filled, or a transport timeout that drops
+    the order_id, must NEVER lead to a SECOND order under a new cOID on the
+    live account.
+    """
+
+    def test_transport_timeout_on_entry_place_is_ambiguous(self):
+        # L-H1: a broker transport timeout on an ENTRY place → ambiguous (the
+        # order may have landed server-side), so the caller aborts not re-places.
+        from shared.broker_client import BrokerError
+        s = _make_strategy()
+        s.broker.place_and_wait_for_fill = MagicMock(
+            side_effect=BrokerError(
+                "broker unreachable for place_and_wait_for_fill: ReadTimeout: timed out"
+            )
+        )
+        res = s._place_leg_order(
+            instrument_id=12345, side="SELL", quantity=10,
+            order_type="LMT", limit_price=1.0, coid="c1",
+            ambiguous_on_timeout=True,
+        )
+        assert res.get("ambiguous") is True
+        assert res.get("filled") is False
+
+    def test_transport_timeout_on_close_is_clean_failure(self):
+        # A CLOSE (ambiguous_on_timeout defaults False) must stay retry-safe.
+        from shared.broker_client import BrokerError
+        s = _make_strategy()
+        s.broker.place_and_wait_for_fill = MagicMock(
+            side_effect=BrokerError("broker unreachable for ...: ReadTimeout: timed out")
+        )
+        res = s._place_leg_order(
+            instrument_id=12345, side="BUY", quantity=10, order_type="MKT", coid="c1",
+        )
+        assert res.get("ambiguous") is None  # NOT ambiguous → caller may retry the close
+        assert res.get("success") is False
+
+    def test_broker_rejection_is_not_ambiguous(self):
+        # A genuine broker REJECTION (order never landed) must stay retry-safe
+        # even on an entry place — only transport-level failures are ambiguous.
+        from shared.broker_client import BrokerError
+        s = _make_strategy()
+        s.broker.place_and_wait_for_fill = MagicMock(
+            side_effect=BrokerError(
+                "broker place_and_wait_for_fill: MarginError: insufficient margin"
+            )
+        )
+        res = s._place_leg_order(
+            instrument_id=12345, side="SELL", quantity=10,
+            order_type="LMT", limit_price=1.0, coid="c1",
+            ambiguous_on_timeout=True,
+        )
+        assert res.get("ambiguous") is None
+        assert res.get("success") is False
+
+    def test_ambiguous_place_aborts_entry_without_replace(self):
+        # L-H1 end-to-end: the progressive loop must NOT advance to a new cOID
+        # after an ambiguous place.
+        from shared.broker_client import BrokerError
+        s = _make_strategy()
+        s.broker.place_and_wait_for_fill = MagicMock(
+            side_effect=BrokerError("broker unreachable for place: ReadTimeout: timed out")
+        )
+        with patch("bots.hydra.base_strategy.time.sleep"):
+            result = s._place_option_order_ib(
+                strike=5000.0, put_call="Call", buy_sell=BuySell.SELL,
+                expiry="20260528", external_ref="hydra_20260528_entry1_SC")
+        assert result is None
+        # Exactly ONE place attempt — the loop aborted, did not re-place.
+        assert s.broker.place_and_wait_for_fill.call_count == 1
+
+    def test_lc3_race_fill_after_cancel_is_flattened_not_replaced(self):
+        # L-C3 mode 1: a timed-out place that actually filled (race vs cancel)
+        # is flattened, NOT re-placed under a new cOID.
+        s = _make_strategy()
+        place_calls, flatten_calls = [], []
+
+        def fake_leg(*, instrument_id, side, quantity, order_type="LMT",
+                     limit_price=None, coid=None, **_kw):
+            if side == "SELL":  # the entry place — never fills
+                place_calls.append(coid)
+                return {"success": True, "filled": False, "filled_quantity": 0,
+                        "requested_quantity": quantity, "order_id": "OENTRY",
+                        "fill_price": None, "position_id": None, "raw": {}}
+            flatten_calls.append(coid)  # the BUY flatten — fills
+            return {"success": True, "filled": True, "filled_quantity": quantity,
+                    "requested_quantity": quantity, "order_id": "OFLAT",
+                    "fill_price": 1.0, "position_id": None, "raw": {}}
+
+        s._place_leg_order = fake_leg
+        # Post-cancel status shows the entry actually filled.
+        s._get_order_status = MagicMock(return_value={"filled_quantity": 10})
+        with patch("bots.hydra.base_strategy.time.sleep"):
+            result = s._place_option_order_ib(
+                strike=5000.0, put_call="Call", buy_sell=BuySell.SELL,
+                expiry="20260528", external_ref="hydra_20260528_entry1_SC")
+        assert result is None
+        assert len(place_calls) == 1   # ONE entry place — no re-place
+        assert len(flatten_calls) == 1  # the race fill was flattened
+
+    def test_lc3_failed_cancel_aborts_without_replace(self):
+        # L-C3 mode 2: a failed cancel (order may still be working) with no
+        # confirmed fill must abort the leg, not advance to a new cOID.
+        s = _make_strategy()
+        s.alert_service = MagicMock()  # _add_orphaned_order emits a HIGH alert
+        s._cancel_order = MagicMock(return_value=False)
+        s._get_order_status = MagicMock(return_value={})  # no confirmed fill
+        place_calls = []
+
+        def fake_leg(*, instrument_id, side, quantity, order_type="LMT",
+                     limit_price=None, coid=None, **_kw):
+            place_calls.append(coid)
+            return {"success": True, "filled": False, "filled_quantity": 0,
+                    "requested_quantity": quantity, "order_id": "OENTRY",
+                    "fill_price": None, "position_id": None, "raw": {}}
+
+        s._place_leg_order = fake_leg
+        with patch("bots.hydra.base_strategy.time.sleep"):
+            result = s._place_option_order_ib(
+                strike=5000.0, put_call="Call", buy_sell=BuySell.SELL,
+                expiry="20260528", external_ref="hydra_20260528_entry1_SC")
+        assert result is None
+        assert len(place_calls) == 1   # aborted after first attempt — no re-place
+        assert "OENTRY" in s._orphaned_orders
