@@ -22,6 +22,14 @@ function getEntryStatus(e: HydraEntry): {
   if (!e.entry_time) return { status: "pending" };
   if (e.call_side_skipped && e.put_side_skipped) return { status: "skipped" };
 
+  // Prefer the explicit close_reason set at close time. The Brandon TP / breach
+  // close path flips *_side_stopped AND *_side_expired (a generic "side closed"
+  // marker), so flag-inference alone mislabels a PROFITABLE take-profit as a
+  // "double stop". Mirror the backend _entry_disposition (routers/variants.py).
+  const reason = (e.close_reason || "").toUpperCase();
+  if (reason === "TP") return { status: "take_profit" };
+  if (reason === "BREACH") return { status: "breach" };
+
   const callStopped = e.call_side_stopped;
   const putStopped = e.put_side_stopped;
   const bothStopped = callStopped && putStopped;
@@ -47,18 +55,38 @@ function computeCushion(spreadValue: number, stopLevel: number): number {
 
 // Compute current + max P&L for an entry using theoretical values
 function computeEntryPnl(e: HydraEntry) {
+  // A Brandon TP / GEX-breach early-close flips BOTH *_side_expired AND
+  // *_side_stopped (a generic "side closed" marker). Running both the expired
+  // (+credit) and stopped (-loss) branches double-counts — for E#1's
+  // negative-credit call this produced a wrong +$128.10 (true +$390.60). An
+  // early-closed side has a SINGLE realized P&L = credit - close_cost; we use
+  // actual_*_stop_debit as the close-cost mark (the exact fill-based cost lives
+  // in the backend/DB trade_stops). The stopped/expired branches below are
+  // gated on !earlyClosed so a TP runs ONLY the single early-closed term.
+  const earlyClosed = !!e.early_closed || !!e.close_reason;
+
   const callActive = !e.call_side_stopped && !e.call_side_skipped && !e.call_side_expired;
   const putActive = !e.put_side_stopped && !e.put_side_skipped && !e.put_side_expired;
-  const callStopped = e.call_side_stopped;
-  const putStopped = e.put_side_stopped;
+  const callStopped = e.call_side_stopped && !earlyClosed;
+  const putStopped = e.put_side_stopped && !earlyClosed;
+  const callExpired = e.call_side_expired && !earlyClosed;
+  const putExpired = e.put_side_expired && !earlyClosed;
+  const callClosed = earlyClosed && (e.call_side_stopped || e.call_side_expired);
+  const putClosed = earlyClosed && (e.put_side_stopped || e.put_side_expired);
+  // Realized for an early-closed side: credit kept minus the cost to close.
+  const callRealized = e.call_spread_credit - (e.actual_call_stop_debit ?? 0);
+  const putRealized = e.put_spread_credit - (e.actual_put_stop_debit ?? 0);
 
   // Max profit = credit from sides that can still expire worthless
   let maxProfit = 0;
   if (callActive) maxProfit += e.call_spread_credit;
   if (putActive) maxProfit += e.put_spread_credit;
   // Expired sides already earned their credit
-  if (e.call_side_expired) maxProfit += e.call_spread_credit;
-  if (e.put_side_expired) maxProfit += e.put_spread_credit;
+  if (callExpired) maxProfit += e.call_spread_credit;
+  if (putExpired) maxProfit += e.put_spread_credit;
+  // Early-closed (TP/breach) sides: single realized term.
+  if (callClosed) maxProfit += callRealized;
+  if (putClosed) maxProfit += putRealized;
 
   // Stopped sides: actual loss (or theoretical fallback) + surviving long value + salvage revenue
   if (callStopped) {
@@ -84,8 +112,11 @@ function computeEntryPnl(e: HydraEntry) {
   if (callActive) currentPnl += e.call_spread_credit - (e.call_spread_value ?? 0);
   if (putActive) currentPnl += e.put_spread_credit - (e.put_spread_value ?? 0);
   // Expired sides: full credit kept
-  if (e.call_side_expired) currentPnl += e.call_spread_credit;
-  if (e.put_side_expired) currentPnl += e.put_spread_credit;
+  if (callExpired) currentPnl += e.call_spread_credit;
+  if (putExpired) currentPnl += e.put_spread_credit;
+  // Early-closed (TP/breach) sides: single realized term (no double-count).
+  if (callClosed) currentPnl += callRealized;
+  if (putClosed) currentPnl += putRealized;
   // Stopped sides: actual loss (or theoretical fallback) + long leg recovery
   if (callStopped) {
     const actualDebit = e.actual_call_stop_debit ?? 0;

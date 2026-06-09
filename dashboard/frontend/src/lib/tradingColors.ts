@@ -51,7 +51,7 @@ export function cushionColor(pct: number): string {
 
 /** Entry status badge colors. */
 export function statusColor(
-  status: "active" | "expired" | "stopped" | "stopped_single" | "skipped" | "pending" | "placing"
+  status: "active" | "expired" | "stopped" | "stopped_single" | "skipped" | "pending" | "placing" | "take_profit" | "breach"
 ): string {
   switch (status) {
     case "active":
@@ -60,6 +60,10 @@ export function statusColor(
       return colors.warning;
     case "expired":
       return colors.profit;
+    case "take_profit":
+      return colors.profit; // Brandon TP = profitable close = green (NOT a stop)
+    case "breach":
+      return colors.warning; // Brandon GEX-breach exit = defensive close = amber
     case "stopped":
       return colors.loss; // double stop = red
     case "stopped_single":

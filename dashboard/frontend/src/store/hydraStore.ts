@@ -31,6 +31,13 @@ export interface HydraEntry {
   put_side_expired: boolean;
   call_side_skipped: boolean;
   put_side_skipped: boolean;
+  // close_reason / early_closed: set when an entry is CLOSED early (Brandon TP
+  // / GEX-breach / MKT-018), not stopped. The TP path also flips the *_stopped
+  // flags as a generic "side closed" marker, so close_reason is the only
+  // reliable way to tell a take-profit from a real stop (mirrors backend
+  // _entry_disposition). "TP" | "BREACH" | "STOP" | "EXPIRED" | ...
+  close_reason?: string | null;
+  early_closed?: boolean;
   call_only: boolean;
   put_only: boolean;
   trend_signal: string | null;
