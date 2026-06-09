@@ -359,3 +359,93 @@ class TestSettlement:
         assert booked == 300.0           # full credit kept (both legs OTM at expiry)
         # long legs were never touched (no wings)
         assert e.long_call_uic in (None, 0) and e.long_put_uic in (None, 0)
+
+
+class TestStrangleStopFires:
+    """S-CRIT-1: the strangle's stop MUST fire. The base full-IC sanity guard
+    rejected every tick (long_*_price permanently 0); the override validates the
+    short legs only, so _check_stop_losses reaches _execute_stop_loss."""
+
+    def _entry(self, *, sc_price, sp_price, call_stop, put_stop):
+        e = HydraIronCondorEntry(entry_number=1)
+        e.contracts = 1
+        e.short_call_strike, e.short_put_strike = 7600.0, 7300.0
+        e.long_call_strike = e.long_put_strike = 0.0
+        e.short_call_price, e.short_put_price = sc_price, sp_price
+        e.long_call_price = e.long_put_price = 0.0
+        e.call_side_stop, e.put_side_stop = call_stop, put_stop
+        e.call_only = e.put_only = False
+        e.call_side_stopped = e.put_side_stopped = False
+        e.call_side_expired = e.put_side_expired = False
+        e.call_side_skipped = e.put_side_skipped = False
+        return e
+
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s.dry_run = True
+        s.price_based_stop_points = None
+        s.buffer_decay_start_mult = None
+        s.buffer_decay_hours = None
+        s.stop_confirmation_enabled = False
+        s._batch_update_entry_prices = MagicMock()
+        s._execute_stop_loss = MagicMock(return_value="STOPPED")
+        s._check_cushion_recovery = MagicMock(return_value=None)
+        s._log_safety_event = MagicMock()
+        return s
+
+    def test_validate_pnl_sanity_passes_with_priced_shorts(self):
+        s = self._strat()
+        e = self._entry(sc_price=10, sp_price=5, call_stop=500, put_stop=500)
+        ok, _ = s._validate_pnl_sanity(e)
+        assert ok is True  # base would return False at long_*_price == 0
+
+    def test_validate_pnl_sanity_rejects_zero_short(self):
+        s = self._strat()
+        e = self._entry(sc_price=0, sp_price=5, call_stop=500, put_stop=500)
+        ok, _ = s._validate_pnl_sanity(e)
+        assert ok is False  # DATA-004 still protects against a zero short price
+
+    def test_stop_fires_through_check_stop_losses(self):
+        s = self._strat()
+        # call_spread_value = 10 * 100 * 1 = 1000 >= 1.5 * 500 → MKT-046 severity
+        # bypass fires immediately and reaches _execute_stop_loss.
+        e = self._entry(sc_price=10, sp_price=1, call_stop=500, put_stop=100000)
+        s.daily_state = SimpleNamespace(active_entries=[e])
+        result = s._check_stop_losses()
+        assert result == "STOPPED"
+        s._execute_stop_loss.assert_called_once()
+        assert s._execute_stop_loss.call_args[0][1] == "call"
+
+
+class TestNakedSettlement:
+    """S-HIGH-2 + item 7: a naked short finishing ITM books a LOSS (credit −
+    intrinsic), not a full-credit profit, and intrinsic is not capped at a
+    nonexistent spread width."""
+
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s.dry_run = True
+        return s
+
+    def test_itm_naked_call_books_loss(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.contracts = 1
+        e.short_call_strike = 6800.0
+        e.long_call_strike = 0.0
+        e.call_spread_credit = 2000.0
+        # SPX settles 100pt above the short → 100pt intrinsic = $10,000.
+        booked, worthless = s._settlement_booked_pnl(e, "call", settlement_level=6900.0)
+        assert worthless is False
+        assert booked == pytest.approx(-8000.0)  # 2000 credit − 10000 intrinsic
+
+    def test_otm_naked_call_books_full_credit(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.contracts = 1
+        e.short_call_strike = 6800.0
+        e.long_call_strike = 0.0
+        e.call_spread_credit = 2000.0
+        booked, worthless = s._settlement_booked_pnl(e, "call", settlement_level=6700.0)
+        assert worthless is True
+        assert booked == pytest.approx(2000.0)  # OTM → full credit kept

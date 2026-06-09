@@ -12,22 +12,29 @@ What makes it different from the iron-condor family:
   - **Undefined risk** — sized by broker margin, not the defined-risk floor
     (wired in a later step, S2).
 
-Build status: registered and dry-run-RUNNABLE, NOT hardened for live. It IS
-registered in ``bots/hydra/registry.py`` ("strangle") and selectable via
-``strategy.name="strangle"``, so it is **gated DRY-RUN ONLY in __init__** — a
-non-dry-run construction raises ``ConfigError``. Two pre-live gates remain open:
-  - audit **S-CRIT-1**: the naked-short stop is not yet wired through
-    ``_validate_pnl_sanity`` (the full-IC P&L-sanity guard rejects every tick at
-    long=0), so the stop would NOT fire — undefined risk with no working stop.
-  - **S2**: margin sizing still uses the defined-risk IC floor, not broker margin.
-Going live requires both fixed + paper verification + an explicit operator flip.
+Build status: registered, dry-run-RUNNABLE, and HARDENED in code — but still
+**gated DRY-RUN ONLY in __init__** (a non-dry-run construction raises
+``ConfigError``) pending paper verification + an explicit operator flip.
+The §3 hardening is in place:
+  - **S-CRIT-1**: ``_validate_pnl_sanity`` is overridden to validate the SHORT
+    legs only, so the stop now fires (the base full-IC guard rejected every
+    tick at long=0). Pinned by a stop-FIRES test.
+  - **S-HIGH-2**: dry-run settlement now applies ITM intrinsic for a naked
+    short (no more full-credit-profit mis-booking). Pinned by an ITM test.
+  - **S2**: margin sizing uses a conservative naked floor
+    (``min_buying_power_per_strangle``), not the defined-risk IC floor.
+  - strikes are snapped to the chain; dry-run prices simulate shorts only;
+    entries are labelled ``strangle`` (not Iron Condor).
+Remaining LIVE-enable gate (operator-owned): a precise per-order
+``what_if_order`` margin check (needs resolved conids), paper verification, and
+the deliberate dry_run→false flip.
 """
 
 from __future__ import annotations
 
 import logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, Tuple
 
 from bots.hydra.base_strategy import ConfigError, MEICState
 from bots.hydra.order_types import BuySell
@@ -51,23 +58,53 @@ class StrangleStrategy(HydraStrategy):
     requires_protective_wings = False  # undefined-risk: naked shorts by design
 
     def __init__(self, *args, **kwargs):
-        """Construct, then enforce the dry-run-only gate (audit S-HIGH-3).
+        """Construct, then enforce the dry-run-only gate.
 
-        The strangle is registered + selectable, but two pre-live gates are still
-        open: its naked-short stop is not yet wired (S-CRIT-1 — it would NOT stop)
-        and margin sizing is the defined-risk IC floor, not broker margin (S2).
-        Until those land + paper verification, refuse any non-dry-run construction
-        so a stray ``strategy.name="strangle"`` on a ``dry_run=false`` variant
-        cannot silently arm real, un-stopped, undefined-risk naked-short trading.
+        The naked-short stop (S-CRIT-1) and broker-margin sizing (S2) are now
+        wired, but the strangle stays dry-run-LOCKED pending an explicit
+        operator flip after paper verification (the user owns that gate). Item
+        10: read dry_run from kwargs and raise BEFORE super().__init__ so an
+        illegal live construction never runs the base init's broker I/O.
+        ``build_strategy`` always passes dry_run as a kwarg.
         """
+        if not kwargs.get("dry_run", False):
+            raise ConfigError(
+                "StrangleStrategy is dry-run-LOCKED pending paper verification + "
+                "an explicit operator flip (the naked-short stop and broker-margin "
+                "sizing are wired, but live arming is a deliberate manual step). "
+                "Set dry_run=true, or do not select strategy.name='strangle'."
+            )
         super().__init__(*args, **kwargs)
+        # Defense-in-depth: re-check after super in case dry_run is derived
+        # differently downstream (it should equal the kwarg).
         if not getattr(self, "dry_run", False):
             raise ConfigError(
-                "StrangleStrategy is dry-run-only until hardened: the naked-short "
-                "stop is not yet wired (audit S-CRIT-1) and sizing uses the "
-                "defined-risk IC margin floor (S2). Set dry_run=true, or do not "
-                "select strategy.name='strangle'."
+                "StrangleStrategy resolved to dry_run=false after init — refusing "
+                "to arm live naked-short trading without an explicit operator flip."
             )
+
+    # ------------------------------------------------------------------
+    # S-CRIT-1: naked-short stop — validate ONLY the shorts
+    # ------------------------------------------------------------------
+
+    def _validate_pnl_sanity(self, entry) -> Tuple[bool, str]:
+        """A strangle has NO long wings, so the base full-IC sanity guard
+        (which demands both legs of a side be non-zero) returns False every tick
+        (``long_*_price`` is permanently 0.0) — and ``_check_stop_losses`` then
+        ``continue``s, so the stop NEVER fires (undefined risk, no working stop).
+
+        S-CRIT-1 fix: validate only the SHORT legs. A side is data-valid iff its
+        short price is > 0 (the long is intentionally absent, not a data error).
+        We deliberately keep NO min-loss-floor suppression here (mirrors L-H3): a
+        large naked loss must stop FASTER, never be suppressed.
+        """
+        if not getattr(entry, "call_side_stopped", False) and entry.short_call_strike:
+            if not entry.short_call_price:
+                return False, "Strangle call short price is zero (skip stop this tick)"
+        if not getattr(entry, "put_side_stopped", False) and entry.short_put_strike:
+            if not entry.short_put_price:
+                return False, "Strangle put short price is zero (skip stop this tick)"
+        return True, "ok (strangle short-only sanity)"
 
     def _calculate_strikes(self, entry: HydraIronCondorEntry) -> bool:
         """Select the two short strikes — a short call and a short put at a
@@ -100,24 +137,77 @@ class StrangleStrategy(HydraStrategy):
         entry.long_call_strike = 0.0
         entry.long_put_strike = 0.0
 
+        # MKT-045 (item 4): snap the two SHORTS to actual chain strikes so they
+        # resolve to real conids. Off-grid strikes (the wider-spacing far-OTM
+        # zone) resolve to conid=None → $0 dry credit / a live unwind. We snap
+        # ONLY the shorts via the shared _snap_to_chain_strike primitive — the
+        # full IC _snap_entry_strikes_to_chain re-derives a long from the spread
+        # width, which would corrupt a naked strangle.
+        self._snap_strangle_shorts_to_chain(entry)
+
         logger.info(
             f"STRANGLE strikes: SC {entry.short_call_strike:.0f} / "
             f"SP {entry.short_put_strike:.0f} (±{otm_distance:.0f}pt OTM, VIX {vix:.1f})"
         )
         return True
 
+    def _snap_strangle_shorts_to_chain(self, entry: HydraIronCondorEntry) -> None:
+        """Snap the two naked short strikes to the nearest actual chain strike
+        (≤25pt). Shorts only — no long wings exist on a strangle."""
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            return
+        candidates = []
+        for base in (entry.short_call_strike, entry.short_put_strike):
+            if base and base > 0:
+                candidates.extend(float(base + d) for d in range(-15, 20, 5))
+        try:
+            call_map, put_map = self._read_option_chain(expiry, candidates)
+        except Exception as exc:
+            logger.warning(f"STRANGLE: chain snap read failed (non-fatal): {exc}")
+            return
+        if call_map and entry.short_call_strike:
+            snap, _ = self._snap_to_chain_strike(entry.short_call_strike, call_map, max_snap=25)
+            if snap and snap != entry.short_call_strike:
+                logger.info(f"STRANGLE: snapped short call {entry.short_call_strike:.0f} → {snap:.0f}")
+                entry.short_call_strike = snap
+        if put_map and entry.short_put_strike:
+            snap, _ = self._snap_to_chain_strike(entry.short_put_strike, put_map, max_snap=25)
+            if snap and snap != entry.short_put_strike:
+                logger.info(f"STRANGLE: snapped short put {entry.short_put_strike:.0f} → {snap:.0f}")
+                entry.short_put_strike = snap
+
     def _estimate_short_premium(self, uic) -> float:
-        """Per-contract premium (option points) of a short leg — mid, then last,
-        then mark. 0.0 if the leg has no uic or no usable quote. Reuses the base
-        normalized-quote reader (`_read_option_quote`)."""
+        """Per-contract premium (option points) of a short leg. 0.0 if the leg
+        has no uic or no usable quote. Item 9: route through `_quote_mid`, which
+        carries the L-M7 crossed-quote guard (never averages a bid>ask book) and
+        the mid → last → mark fallback — so a crossed naked-short quote can't
+        book a nonsense credit."""
         if not uic:
             return 0.0
         quote = self._read_option_quote(uic) or {}
-        for key in ("mid", "last", "mark"):
-            value = quote.get(key)
-            if value is not None:
-                return float(value)
-        return 0.0
+        return float(self._quote_mid(quote) or 0.0)
+
+    def _simulate_hydra_entry_prices(self, entry):
+        """Item 8: dry-run price simulation for the two NAKED shorts ONLY. The
+        base sim stamps a phantom non-zero ``long_*_price`` (×0.3) for the
+        strangle's nonexistent long wings, understating the buy-back cost ~30%
+        and corrupting the dry-run dataset. Simulate each short from its OWN
+        credit; leave ``long_*_price`` at 0.0."""
+        if not entry.entry_time:
+            return
+        try:
+            hold_minutes = (get_us_market_time() - entry.entry_time).total_seconds() / 60
+        except (TypeError, AttributeError):
+            return
+        decay_factor = max(0.1, 1 - (hold_minutes / 360))
+        n = max(1, int(getattr(entry, "contracts", self.contracts_per_entry) or 1))
+        if entry.short_call_strike:
+            entry.short_call_price = (entry.call_spread_credit / (100 * n)) * decay_factor
+            entry.long_call_price = 0.0
+        if entry.short_put_strike:
+            entry.short_put_price = (entry.put_spread_credit / (100 * n)) * decay_factor
+            entry.long_put_price = 0.0
 
     def _simulate_entry(self, entry: HydraIronCondorEntry) -> bool:
         """Dry-run entry: resolve the two short conids, book the premium collected,
@@ -160,6 +250,18 @@ class StrangleStrategy(HydraStrategy):
             f"total ${entry.total_credit:.2f}"
         )
         return True
+
+    def _min_buying_power_per_unit(self) -> float:
+        """S2: an SPX 0DTE naked strangle's SPAN/Reg-T margin is FAR larger than
+        the defined-risk IC floor (~$5k/contract). Use a conservative naked
+        floor (config ``min_buying_power_per_strangle``, default $30,000/contract)
+        so the gate errs HIGH and never opens a strangle the account can't
+        margin. (A precise per-order ``what_if_order`` gate is the remaining
+        live-enable refinement — it needs the resolved conids, which aren't
+        known at this pre-strike gate; tracked on the pre-enable checklist.)
+        """
+        cfg = getattr(self, "strategy_config", {}) or {}
+        return float(cfg.get("min_buying_power_per_strangle", 30000.0))
 
     def _calculate_stop_levels_hydra(self, entry: HydraIronCondorEntry) -> None:
         """Strangle stop policy: each naked short stops on ITS OWN credit + buffer.
@@ -322,6 +424,9 @@ class StrangleStrategy(HydraStrategy):
         self.state = MEICState.ENTRY_IN_PROGRESS
         try:
             entry = HydraIronCondorEntry(entry_number=entry_num)
+            # Item 6: structure discriminator so logging/DB/analytics label this a
+            # 'strangle', not an Iron Condor with phantom 0.0 long wings.
+            entry.structure = "strangle"
             # Audit S-HIGH-1: stamp contracts (the IC path does this) — credits,
             # commission, stops, spread_value and reconciliation all scale by it.
             entry.contracts = self.contracts_per_entry

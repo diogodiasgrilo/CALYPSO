@@ -5629,6 +5629,14 @@ class MEICStrategy(abc.ABC):
     # ORDER-004: PRE-ENTRY MARGIN CHECK
     # =========================================================================
 
+    def _min_buying_power_per_unit(self) -> float:
+        """Per-contract margin floor used by the ORDER-004 buying-power gate.
+
+        Defined-risk default = the IC floor. A naked strategy (strangle)
+        overrides this (S2) to a much larger naked-margin floor.
+        """
+        return self.min_buying_power_per_ic
+
     def _check_buying_power(self) -> Tuple[bool, str]:
         """
         ORDER-004: Check if we have sufficient buying power for a new IC entry.
@@ -5712,11 +5720,14 @@ class MEICStrategy(abc.ABC):
                 "total_value": total_value,
             }
 
-            # Calculate required margin for next entry
+            # Calculate required margin for next entry.
             # Each IC needs max(call_spread, put_spread) × $100 × contracts.
-            # `min_buying_power_per_ic` is the per-contract floor, configurable
-            # so narrow-spread variants don't trip the wide-baseline default.
-            required = self.min_buying_power_per_ic * self.contracts_per_entry
+            # The per-unit floor is overridable (S2): a defined-risk IC uses
+            # `min_buying_power_per_ic`; a NAKED strategy (strangle) overrides
+            # `_min_buying_power_per_unit` to a much larger naked-margin floor,
+            # because the IC floor (~$5k/contract) grossly underestimates an
+            # undefined-risk short.
+            required = self._min_buying_power_per_unit() * self.contracts_per_entry
 
             if available < required:
                 # In dry-run, log the would-be rejection for diagnostics but

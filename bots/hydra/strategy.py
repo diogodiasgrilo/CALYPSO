@@ -4857,7 +4857,14 @@ class HydraStrategy(MEICStrategy):
                 "vix_at_entry": self.current_vix,
                 "expected_move": getattr(self, '_last_expected_move', None),
                 "trend_signal": entry.trend_signal.value if entry.trend_signal else None,
-                "entry_type": "call_only" if entry.call_only else ("put_only" if entry.put_only else "full_ic"),
+                # Item 6: a structure discriminator distinguishes a naked
+                # strangle from the IC population so analytics (HERMES/HOMER)
+                # don't fold a deep-ITM naked loss into the "clean Expired" IC
+                # bucket. Falls through to the IC labels when unset.
+                "entry_type": (
+                    getattr(entry, "structure", None)
+                    or ("call_only" if entry.call_only else ("put_only" if entry.put_only else "full_ic"))
+                ),
                 "override_reason": getattr(entry, 'override_reason', None),
                 "short_call_strike": entry.short_call_strike,
                 "long_call_strike": entry.long_call_strike,
@@ -9050,7 +9057,9 @@ class HydraStrategy(MEICStrategy):
 
         # Trend and type
         trend = entry.trend_signal.value.upper() if hasattr(entry, 'trend_signal') and entry.trend_signal else "N/A"
-        if getattr(entry, 'call_only', False):
+        if getattr(entry, 'structure', None) == "strangle":
+            entry_type = "Strangle"  # item 6: don't mislabel a naked strangle as an IC
+        elif getattr(entry, 'call_only', False):
             entry_type = "Call Only"
         elif getattr(entry, 'put_only', False):
             entry_type = "Put Only"
@@ -10913,8 +10922,15 @@ class HydraStrategy(MEICStrategy):
         if settlement_level is None or short_k <= 0 or itm_points <= 0:
             return credit, True
 
-        width = abs(long_k - short_k)
-        intrinsic_pts = min(itm_points, width) if width > 0 else itm_points
+        # Item 7: a NAKED side (no long wing) has UNBOUNDED intrinsic — do NOT
+        # cap it at the (nonexistent) spread width. long_k=0 would otherwise make
+        # width=short_k and silently cap an extreme ITM naked call. Only
+        # defined-risk verticals cap intrinsic at their width.
+        if not getattr(self, "requires_protective_wings", True):
+            intrinsic_pts = itm_points
+        else:
+            width = abs(long_k - short_k)
+            intrinsic_pts = min(itm_points, width) if width > 0 else itm_points
         settle_value = intrinsic_pts * 100 * max(int(getattr(entry, "contracts", 1)), 1)
         booked = credit - settle_value
         logger.warning(
@@ -10960,9 +10976,16 @@ class HydraStrategy(MEICStrategy):
         # would otherwise be mis-booked as worthless profit. Only read on the
         # real IBKR path — None in dry-run / Saxo, where the booked-PnL helper
         # falls back to the legacy full-credit assumption.
+        # S-HIGH-2: for a NAKED strategy (requires_protective_wings=False, e.g.
+        # the strangle) we MUST compute the settlement level even in dry-run —
+        # otherwise an ITM-finishing naked short is booked as full-credit PROFIT,
+        # poisoning the very dry-run dataset the strangle exists to produce.
+        # _settlement_spx_level only READS the index (no order), so it is safe in
+        # dry-run. Defined-risk IC dry-run behavior is unchanged.
+        _naked = not getattr(self, "requires_protective_wings", True)
         settlement_level = (
             self._settlement_spx_level()
-            if (self.broker is not None and not self.dry_run)
+            if (self.broker is not None and (not self.dry_run or _naked))
             else None
         )
 
