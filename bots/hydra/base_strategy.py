@@ -5340,6 +5340,36 @@ class MEICStrategy(abc.ABC):
             self.trade_logger.log_daily_summary(sheets_summary)
             logger.info(f"Daily summary logged to Google Sheets (Net P&L: ${net_pnl:.2f}, Commission: ${commission:.2f})")
 
+        # Apply this day's results to the LIFETIME cumulative metrics + persist.
+        # Idempotent by date — see _book_daily_cumulative.
+        self._book_daily_cumulative(summary, net_pnl, capital_deployed)
+
+    def _book_daily_cumulative(self, summary: dict, net_pnl: float,
+                               capital_deployed: float) -> None:
+        """Apply one trading day's results to the cumulative metrics + persist.
+
+        IDEMPOTENT BY DATE (2026-06-08): if this date was already booked (its
+        row is present in ``daily_returns``), DO NOT re-apply. A re-trigger of
+        ``log_daily_summary`` for the same day — e.g. a restart that reset
+        main.py's ``daily_summary_sent_date`` local (the Fix #82 scenario) —
+        would otherwise double-count net P&L + entries into the lifetime totals
+        AND append a duplicate ``daily_returns`` row. Observed: 2026-06-02 was
+        booked twice on both A and C, inflating ``cumulative_pnl`` by that day's
+        net P&L. The guard reads the in-memory ``cumulative_metrics`` (reloaded
+        from disk at startup), so it catches both a same-process double-call and
+        a restart re-run. (A 0-capital day appends no daily_returns row, but its
+        increments are ~0 entries / ~0 P&L, so the edge is benign.)
+        """
+        date = summary["date"]
+        if any(d.get("date") == date
+               for d in self.cumulative_metrics.get("daily_returns", [])):
+            logger.warning(
+                f"Cumulative metrics already booked for {date} — skipping "
+                f"re-apply (idempotent; avoids double-count). Expected no-op on "
+                f"a same-day restart re-run of log_daily_summary."
+            )
+            return
+
         # Update cumulative metrics (using net P&L)
         self.cumulative_metrics["cumulative_pnl"] += net_pnl
         self.cumulative_metrics["total_entries"] += summary["entries_completed"]
@@ -5357,7 +5387,7 @@ class MEICStrategy(abc.ABC):
             self.cumulative_metrics["daily_returns"] = []
         if capital_deployed > 0:
             self.cumulative_metrics["daily_returns"].append({
-                "date": summary["date"],
+                "date": date,
                 "net_pnl": net_pnl,
                 "capital_deployed": capital_deployed,
                 "return_pct": net_pnl / capital_deployed,
@@ -5367,7 +5397,7 @@ class MEICStrategy(abc.ABC):
                 "contracts_per_entry": self.contracts_per_entry,
             })
 
-        self._save_cumulative_metrics(trading_date=summary["date"])
+        self._save_cumulative_metrics(trading_date=date)
 
     def update_market_data(self):
         """Public method to update market data (called by main.py)."""
