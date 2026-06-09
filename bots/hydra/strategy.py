@@ -116,6 +116,14 @@ DEFAULT_SCOUT_SCORE_THRESHOLD = 65
 # "window expired" and never placed.
 CALM_PLACEMENT_HEADROOM_SEC = 60
 
+# Fix #6 (2026-06-08 forensic): after this many CONSECUTIVE strict broker-read
+# failures in the after-hours settlement loop, emit a CRITICAL alert (operator
+# must reconcile manually). We never auto-complete / clear UICs on a failed
+# read — that would falsely book unconfirmed P&L — but we MUST alert instead of
+# silently retrying "settlement pending" forever. At ~15-min heartbeats this is
+# ~75 min of failed reads before the operator is paged.
+SETTLEMENT_MAX_STRICT_READ_FAILURES = 5
+
 # MKT-034: VIX-scaled entry time shifting (DISABLED since v1.10.3 — code preserved)
 # When enabled via vix_time_shift.enabled, these slots replace config entry_times.
 ALL_ENTRY_SLOTS = [
@@ -10811,6 +10819,10 @@ class HydraStrategy(MEICStrategy):
 
         # POS-004: Reset settlement reconciliation flag for new day
         self._settlement_reconciliation_complete = False
+        # Reset the strict-read failure tracking so a prior day's blocked
+        # settlement doesn't suppress today's CRITICAL alert (fix #6).
+        self._settlement_strict_read_failures = 0
+        self._settlement_halt_alerted = False
 
         # Skip weekdays: if today is a skip day, go straight to DAILY_COMPLETE
         today_dow = get_us_market_time().weekday()
@@ -11483,6 +11495,15 @@ class HydraStrategy(MEICStrategy):
             # settlement the whole conid expires at once, so a merged
             # position settles cleanly (net quantity → 0).
             open_positions = self._read_open_positions(strict=True)
+            # Strict read succeeded — broker is responding. Clear any prior
+            # failure streak + re-arm the halt alert (fix #6).
+            if getattr(self, "_settlement_strict_read_failures", 0):
+                logger.info(
+                    "POS-004: broker read recovered after "
+                    f"{self._settlement_strict_read_failures} failed attempt(s)"
+                )
+            self._settlement_strict_read_failures = 0
+            self._settlement_halt_alerted = False
             actual = self._actual_position_quantities(open_positions)
             expected = self._expected_position_quantities()
 
@@ -11562,7 +11583,63 @@ class HydraStrategy(MEICStrategy):
             return True
 
         except Exception as e:
-            logger.error(f"POS-004: Settlement check failed: {e}")
+            # Fix #6 (2026-06-08 forensic): a strict-read failure here returns
+            # False so the heartbeat retries next pass (correct — never mistake
+            # a broker outage for "all settled"). But if the broker stays
+            # unreadable, that loops "settlement pending" forever: the daily
+            # summary is never recorded AND no one is told. Count the streak and
+            # PAGE the operator (CRITICAL) once past the threshold. We do NOT
+            # clear UICs / auto-complete — that would falsely book unconfirmed
+            # settlement P&L (the naive "fix" the forensic flagged as unsafe);
+            # the positions stay tracked for manual reconciliation, and a later
+            # successful read still completes settlement normally.
+            self._settlement_strict_read_failures = (
+                getattr(self, "_settlement_strict_read_failures", 0) + 1
+            )
+            logger.error(
+                f"POS-004: Settlement check failed "
+                f"(attempt {self._settlement_strict_read_failures}): {e}"
+            )
+            if (self._settlement_strict_read_failures
+                    >= SETTLEMENT_MAX_STRICT_READ_FAILURES
+                    and not getattr(self, "_settlement_halt_alerted", False)):
+                self._settlement_halt_alerted = True
+                n_tracked = sum(
+                    1 for entry in self.daily_state.entries
+                    for leg_name in LEG_NAMES
+                    if getattr(entry, f"{leg_name}_uic", None)
+                )
+                logger.critical(
+                    "POS-004: settlement BLOCKED — "
+                    f"{self._settlement_strict_read_failures} consecutive broker "
+                    f"reads failed; {n_tracked} leg(s) still tracked. Daily "
+                    "summary is held until a read succeeds. MANUAL reconciliation "
+                    "may be required (positions left tracked — NOT auto-cleared)."
+                )
+                try:
+                    self.alert_service.send_alert(
+                        alert_type=AlertType.CRITICAL_INTERVENTION,
+                        title="Settlement reconciliation BLOCKED",
+                        message=(
+                            f"{self._settlement_strict_read_failures} consecutive "
+                            "broker reads failed during after-hours settlement. "
+                            f"{n_tracked} leg(s) remain tracked and were NOT "
+                            "auto-cleared (avoids falsely booking unconfirmed "
+                            "P&L). The daily summary is held until a read "
+                            "succeeds; check the broker session / restart "
+                            "calypso-broker if the outage persists."
+                        ),
+                        priority=AlertPriority.CRITICAL,
+                        details={
+                            "consecutive_failures": self._settlement_strict_read_failures,
+                            "tracked_legs": n_tracked,
+                            "last_error": str(e),
+                        },
+                    )
+                except Exception as alert_exc:
+                    logger.error(
+                        f"POS-004: failed to send settlement-blocked alert: {alert_exc}"
+                    )
             return False
 
     def _log_safety_event(self, event_type: str, details: str, result: str = "Acknowledged"):
