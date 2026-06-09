@@ -109,6 +109,13 @@ HYDRA_VERSION = "1.26.0"
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
 DEFAULT_SCOUT_SCORE_THRESHOLD = 65
 
+# MKT-043 forensic fix (2026-06-08): the calm-entry wait must leave at least
+# this many seconds of the entry window for the actual order placement (+ a
+# retry). Without it the wait (max calm_entry_max_delay_min, default 5min)
+# could consume the whole 5-min window, so an entry that needed a retry hit
+# "window expired" and never placed.
+CALM_PLACEMENT_HEADROOM_SEC = 60
+
 # MKT-034: VIX-scaled entry time shifting (DISABLED since v1.10.3 — code preserved)
 # When enabled via vix_time_shift.enabled, these slots replace config entry_times.
 ALL_ENTRY_SLOTS = [
@@ -1311,6 +1318,25 @@ class HydraStrategy(MEICStrategy):
         scout_start = scheduled_dt - timedelta(minutes=self.scout_window_minutes)
         window_end = scheduled_dt + timedelta(minutes=ENTRY_WINDOW_MINUTES)
         return scout_start <= now <= window_end
+
+    def _entry_window_remaining_sec(self) -> Optional[float]:
+        """Seconds left in the CURRENT entry's PLACEMENT window
+        (scheduled_time + ENTRY_WINDOW_MINUTES), or None when there is no
+        current entry index. Used to cap the MKT-043 calm wait so it leaves
+        headroom to actually place the order (forensic: the calm wait could
+        otherwise consume the whole window → entry never placed). Negative when
+        the window has already closed.
+        """
+        if self._next_entry_index >= len(self.entry_times):
+            return None
+        now = get_us_market_time()
+        scheduled_time = self.entry_times[self._next_entry_index]
+        scheduled_dt = now.replace(
+            hour=scheduled_time.hour, minute=scheduled_time.minute,
+            second=scheduled_time.second, microsecond=0,
+        )
+        window_end = scheduled_dt + timedelta(minutes=ENTRY_WINDOW_MINUTES)
+        return (window_end - now).total_seconds()
 
     def _is_daily_loss_limit_reached(self) -> bool:
         """Disabled for HYDRA — bot always attempts all entries."""
@@ -5233,10 +5259,29 @@ class HydraStrategy(MEICStrategy):
                 and self.calm_entry_threshold_pts is not None
                 and self.calm_entry_max_delay_min is not None):
             import time as _time
+            # MKT-043 forensic fix: cap the calm wait so it can't consume the
+            # whole entry window — leave CALM_PLACEMENT_HEADROOM_SEC for the
+            # actual order placement (+ a retry). The wait previously equalled
+            # the 5-min window, so an entry that needed a retry hit "window
+            # expired" and never placed.
             max_delay_sec = self.calm_entry_max_delay_min * 60
+            _win_left = self._entry_window_remaining_sec()
+            if _win_left is not None:
+                max_delay_sec = min(
+                    max_delay_sec,
+                    max(0.0, _win_left - CALM_PLACEMENT_HEADROOM_SEC),
+                )
+            if max_delay_sec < 10:
+                _left_disp = (
+                    f"{_win_left:.0f}s left" if _win_left is not None else "n/a"
+                )
+                logger.info(
+                    f"MKT-043 E#{entry_num}: window headroom too low "
+                    f"({_left_disp}) for a calm wait — placing now"
+                )
             waited = 0
             _first_log = True
-            while waited <= max_delay_sec:
+            while waited < max_delay_sec:
                 # Refresh prices so current_price and price_history stay fresh
                 self._update_market_data()
                 spx_now = self.current_price

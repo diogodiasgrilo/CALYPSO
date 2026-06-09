@@ -82,7 +82,15 @@ MAX_FAILED_ENTRIES_BEFORE_HALT = 4  # Stop trying if 4+ entries fail in a day
 # CONN-001: Entry window retry settings
 ENTRY_MAX_RETRIES = 3  # Retry entry this many times
 ENTRY_RETRY_DELAY_SECONDS = 15  # Delay between retries (reduced from 30s with batch quote headroom)
-ENTRY_WINDOW_MINUTES = 5  # How long after scheduled time to attempt entry
+# How long after scheduled time to attempt entry. Widened 5→8 (2026-06-08
+# forensic finding D): a legitimate 4-leg IC at 7-10 contracts, with the
+# fill-the-remainder loop completing partials + the size-scaled fill timeout,
+# can take ~3-4min — the old 5-min window let an entry that needed a retry hit
+# "window expired" mid-build. 8min stays well clear of the 30-min entry spacing
+# (no slot overlap) and a 0DTE entry a few min late is acceptable. Pairs with
+# the MKT-043 calm-wait cap (CALM_PLACEMENT_HEADROOM_SEC) so the calm delay
+# can't consume the window.
+ENTRY_WINDOW_MINUTES = 8
 
 # ORDER-002: Naked position safety - CRITICAL
 NAKED_POSITION_MAX_AGE_SECONDS = 30  # Must hedge/close within 30 seconds
