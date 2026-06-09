@@ -523,6 +523,82 @@ class TestGEXProfileFetch:
         assert inst._brandon_get_gex_profile(date(2026, 5, 4)) is None
         assert calls["n"] == 1
 
+    def test_force_refresh_reuses_recent_sibling_write(self, monkeypatch):
+        # 2026-06-08 forensic H (multi-variant contention): even a force_refresh,
+        # once it holds the cross-variant lock, must REUSE a sibling's just-
+        # written profile (≤ _GEX_FORCE_REFRESH_SIBLING_WINDOW_S old) instead of
+        # issuing its own serial Polygon fetch.
+        import contextlib
+        from datetime import date
+        from bots.hydra.brandon.gex_provider import GEXProfile
+        from bots.hydra.brandon import strategy as bstrat
+
+        monkeypatch.setenv("POLYGON_API_KEY", "test-key")
+        inst = _make_instance(brandon_gex_enabled=True, current_price=6800.0)
+        sibling = GEXProfile(
+            spot=6800.0, expiry=date(2026, 5, 4),
+            fetched_at=datetime.now(timezone.utc), strikes=(),
+        )
+
+        seen = {}
+
+        def fake_load(**kwargs):
+            seen["max_age"] = kwargs.get("max_age_seconds")
+            return sibling
+
+        monkeypatch.setattr(bstrat.gex_shared_cache, "load_shared_profile", fake_load)
+        monkeypatch.setattr(
+            bstrat.gex_shared_cache, "fetch_lock",
+            lambda *a, **k: contextlib.nullcontext(),
+        )
+
+        def must_not_fetch(*a, **k):
+            raise AssertionError("force_refresh must reuse the fresh sibling write")
+
+        monkeypatch.setattr(
+            bstrat.gex_provider, "fetch_polygon_chain_with_greeks", must_not_fetch
+        )
+
+        result = inst._brandon_get_gex_profile(date(2026, 5, 4), force_refresh=True)
+        assert result is sibling
+        # The post-lock recheck used the TIGHT force_refresh window — NOT the
+        # full background TTL (which would over-reuse stale data).
+        assert seen["max_age"] == bstrat._GEX_FORCE_REFRESH_SIBLING_WINDOW_S
+
+    def test_force_refresh_fetches_when_no_recent_sibling(self, monkeypatch):
+        # No sibling within the tight window → force_refresh does fetch fresh.
+        import contextlib
+        from datetime import date
+        from bots.hydra.brandon.gex_provider import GEXProfile
+        from bots.hydra.brandon import strategy as bstrat
+
+        monkeypatch.setenv("POLYGON_API_KEY", "test-key")
+        inst = _make_instance(brandon_gex_enabled=True, current_price=6800.0)
+
+        monkeypatch.setattr(
+            bstrat.gex_shared_cache, "load_shared_profile", lambda **k: None
+        )
+        monkeypatch.setattr(
+            bstrat.gex_shared_cache, "fetch_lock",
+            lambda *a, **k: contextlib.nullcontext(),
+        )
+        monkeypatch.setattr(
+            bstrat.gex_shared_cache, "save_shared_profile", lambda *a, **k: None
+        )
+
+        fetched = {"n": 0}
+
+        def fake_fetch(*a, **k):
+            fetched["n"] += 1
+            return [{"details": {"strike_price": 6800, "contract_type": "call"},
+                     "open_interest": 100, "greeks": {"gamma": 0.001}}]
+
+        monkeypatch.setattr(
+            bstrat.gex_provider, "fetch_polygon_chain_with_greeks", fake_fetch
+        )
+        inst._brandon_get_gex_profile(date(2026, 5, 4), force_refresh=True)
+        assert fetched["n"] == 1
+
 
 
 class TestStrikeAdjusterLive:

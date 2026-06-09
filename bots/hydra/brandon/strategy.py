@@ -59,6 +59,14 @@ logger = logging.getLogger(__name__)
 
 _GEX_REFRESH_SECONDS = 3 * 60    # 2026-05-13: cut 15min → 3min after divergence audit. With force_refresh at entry time, the background TTL only governs breach-exit / overlay ticks, where freshness matters less and Polygon's underlying snapshot only updates every ~15 min anyway. 3 min strikes the balance between staleness on the strike-adjuster re-check path and avoiding wasted fetches between entries.
 _GEX_FAILURE_COOLDOWN = 60       # don't hammer a flaky API
+# 2026-06-08 forensic (multi-variant contention): even a force_refresh, once it
+# holds the cross-variant fetch_lock, will REUSE a sibling's just-written
+# profile if it's at most this fresh — instead of issuing its own serial
+# Polygon fetch. Without it, 3 variants entering the same slot each force a
+# fetch UNDER the lock (~10s each → ~30s of GEX latency for the last variant,
+# burning entry-window time). A sibling fetch a few seconds old is plenty fresh
+# for an entry decision (Polygon's underlying snapshot only updates ~15 min).
+_GEX_FORCE_REFRESH_SIBLING_WINDOW_S = 30
 
 
 class BrandonHydraStrategy(HydraStrategy):
@@ -1193,21 +1201,34 @@ class BrandonHydraStrategy(HydraStrategy):
         # strike decisions can't diverge from chain-snapshot noise.
         with gex_shared_cache.fetch_lock():
             # After acquiring the lock, check the shared cache once more — a
-            # sibling variant may have just refreshed it. Skip this on
-            # force_refresh: caller explicitly wants a brand-new fetch.
-            if not force_refresh:
-                shared = gex_shared_cache.load_shared_profile(
-                    underlying=self.brandon_polygon_underlying,
-                    expiry=expiry_date,
-                    max_age_seconds=_GEX_REFRESH_SECONDS,
+            # sibling variant may have just refreshed it.
+            #  • default path: accept anything within the normal TTL.
+            #  • force_refresh path: accept ONLY a VERY-recent sibling write
+            #    (≤ _GEX_FORCE_REFRESH_SIBLING_WINDOW_S). This is the
+            #    multi-variant contention fix (2026-06-08 forensic H): without
+            #    it each variant entering the same slot ran its own serial
+            #    Polygon fetch under the lock (~10s each). A sibling's fetch a
+            #    few seconds old is plenty fresh for an entry decision, so reuse
+            #    it instead of re-fetching — collapsing N serial fetches into 1
+            #    fetch + (N-1) cache reads.
+            recheck_max_age = (
+                _GEX_FORCE_REFRESH_SIBLING_WINDOW_S if force_refresh
+                else _GEX_REFRESH_SECONDS
+            )
+            shared = gex_shared_cache.load_shared_profile(
+                underlying=self.brandon_polygon_underlying,
+                expiry=expiry_date,
+                max_age_seconds=recheck_max_age,
+            )
+            if shared is not None:
+                self._brandon_gex_profile = shared
+                self._brandon_gex_profile_fetched_at = now
+                logger.info(
+                    "Brandon GEX: reusing sibling variant's just-fetched "
+                    "profile from shared cache (force_refresh=%s, age<=%ds)",
+                    force_refresh, recheck_max_age,
                 )
-                if shared is not None:
-                    self._brandon_gex_profile = shared
-                    self._brandon_gex_profile_fetched_at = now
-                    logger.info(
-                        "Brandon GEX: reusing sibling variant's just-fetched profile from shared cache"
-                    )
-                    return shared
+                return shared
 
             try:
                 # 2-pass fetch: chain endpoint for OI (Greeks-stripped on

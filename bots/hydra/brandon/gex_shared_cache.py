@@ -162,7 +162,7 @@ def save_shared_profile(profile: GEXProfile, *, underlying: str) -> None:
 
 
 @contextlib.contextmanager
-def fetch_lock(timeout_seconds: float = 30.0, poll_interval_seconds: float = 0.25):
+def fetch_lock(timeout_seconds: float = 20.0, poll_interval_seconds: float = 0.25):
     """Exclusive lock serializing GEX fetches across variant processes.
 
     Two B/C processes hitting the same scheduled slot would otherwise both
@@ -176,9 +176,12 @@ def fetch_lock(timeout_seconds: float = 30.0, poll_interval_seconds: float = 0.2
     (sibling hanging, crashed mid-fetch, or kernel quirk), the contextmanager
     yields WITHOUT holding the lock so the caller's fetch path proceeds
     unlocked. That keeps the bot's monitor loop alive — better to do a
-    parallel double-fetch than freeze waiting on a sibling. Default 30s
-    cap is well above a normal Polygon round-trip (~5-10s) but well below
-    any user-visible monitor-loop stall threshold.
+    parallel double-fetch than freeze waiting on a sibling. Default 20s
+    cap (cut from 30s on 2026-06-08 to save entry-window time when a sibling
+    hangs) is still above a normal Polygon round-trip (~5-10s) but well below
+    any user-visible monitor-loop stall threshold. The common case never
+    waits this long — the waiter acquires the instant the holder releases,
+    and a force_refresh waiter reuses the holder's just-written profile.
 
     The lock is best-effort: if filesystem isn't writable or fcntl isn't
     available (non-POSIX), it falls through to a no-op contextmanager.
