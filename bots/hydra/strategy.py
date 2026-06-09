@@ -381,7 +381,17 @@ class HydraStrategy(MEICStrategy):
         # Vigilant mode is intentionally NOT scaled — when a stop is near, we
         # need fast detection on every variant (still cheap because vigilant
         # only kicks in for one entry at a time).
-        self.api_pacing_multiplier = float(strategy_cfg.get("api_pacing_multiplier", 1.0))
+        # L-M11: read from the strategy block first, then fall back to the
+        # config ROOT. B/C configs historically placed api_pacing_multiplier at
+        # the root, so a strategy-block-only read silently left them at 1.0x
+        # (full 10s cadence) instead of the intended 2.0x — extra IBKR request
+        # pressure that the pacing design exists to avoid.
+        self.api_pacing_multiplier = float(
+            strategy_cfg.get(
+                "api_pacing_multiplier",
+                config.get("api_pacing_multiplier", 1.0),
+            )
+        )
         if self.api_pacing_multiplier != 1.0:
             logger.info(f"  API pacing multiplier: {self.api_pacing_multiplier}x (variant={HYDRA_VARIANT_ID or 'a'})")
 
@@ -10367,10 +10377,53 @@ class HydraStrategy(MEICStrategy):
                 f"missing on the broker — clearing it and marking it closed"
             )
             setattr(entry, f"{leg}_uic", None)
-            if leg == "short_call":
-                entry.call_side_stopped = True
-            elif leg == "short_put":
-                entry.put_side_stopped = True
+            if leg in ("short_call", "short_put"):
+                side = "call" if leg == "short_call" else "put"
+                setattr(entry, f"{side}_side_stopped", True)
+                # L-M3: a short that vanished from the broker (closed externally
+                # or while the bot was down) was marked stopped but its close
+                # DEBIT was never booked — settlement then treats it as a genuine
+                # stop and SKIPS re-booking, so the loss is silently dropped and
+                # realized P&L is OVERSTATED. Book the side's realized P&L now
+                # from the actual closing execution (closing a short = a BUY) and
+                # tag close_reason so settlement leaves it alone. If the close
+                # price can't be read, alert for manual review rather than
+                # silently dropping it.
+                if not getattr(entry, f"{side}_side_pnl_booked_external", False):
+                    closed = self._read_closed_position_price(conid, buy_or_sell="Buy")
+                    close_px_raw = (closed or {}).get("closing_price")
+                    try:
+                        close_px = float(close_px_raw) if close_px_raw is not None else None
+                    except (TypeError, ValueError):
+                        close_px = None
+                    side_credit = getattr(entry, f"{side}_spread_credit", 0) or 0
+                    contracts = (
+                        getattr(entry, "contracts", None)
+                        or getattr(self, "contracts_per_entry", 1)
+                        or 1
+                    )
+                    if close_px is not None and close_px > 0:
+                        close_debit = float(close_px) * 100 * contracts
+                        realized = side_credit - close_debit
+                        self.daily_state.total_realized_pnl += realized
+                        setattr(entry, f"{side}_side_pnl_booked_external", True)
+                        if not getattr(entry, "close_reason", ""):
+                            entry.close_reason = "EXTERNAL"
+                        logger.warning(
+                            f"L-M3: booked external close of E#{entry.entry_number} "
+                            f"{side} short — credit ${side_credit:.2f} − debit "
+                            f"${close_debit:.2f} = ${realized:.2f} realized"
+                        )
+                    else:
+                        # Close price unreadable → leave P&L unbooked but loud in
+                        # the log. We do NOT fire a separate alert here: the
+                        # reconciliation path already alerts about the vanished
+                        # position, so this would only double-notify.
+                        logger.critical(
+                            f"L-M3: E#{entry.entry_number} {side} short vanished "
+                            f"but its close price is unreadable — P&L for this side "
+                            f"is UNBOOKED; manual review recommended."
+                        )
 
     def _check_hourly_reconciliation(self):
         """

@@ -342,6 +342,48 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     except Exception as e:
         trade_logger.log_error(f"Failed to log startup dashboard metrics: {e}")
 
+    # L-M10: post-connect instrument resolvability probe. _assert_instrument_
+    # parameterized only checks truthiness; a stale-but-non-empty symbol (e.g. a
+    # leftover Saxo ticker like "US500.I") passes it and then silently fails at
+    # IBKR resolution — the bot then runs BLIND and skips every trade. If the
+    # underlying price is still 0/None after the startup market-data fetch
+    # DURING market hours, treat it as an unresolvable-instrument signal: alert
+    # CRITICAL and refuse to enter the trading loop (loud startup failure beats a
+    # silent runtime blind-spot). Outside market hours a 0 is normal → warn only.
+    try:
+        from shared.market_hours import is_market_open as _mkt_open
+        _px = getattr(strategy, "current_price", 0) or 0
+        _sym = getattr(strategy, "underlying_symbol", "?")
+        _exch = getattr(strategy, "exchange", "?")
+        if _px <= 0:
+            if _mkt_open():
+                msg = (
+                    f"Underlying {_sym} returned NO price at startup during market "
+                    f"hours — the symbol may be stale/unresolvable at the broker "
+                    f"(exchange={_exch}). Refusing to trade blind."
+                )
+                logger.critical(f"L-M10: {msg}")
+                try:
+                    strategy.alert_service.send_alert(
+                        alert_type=AlertType.DATA_QUALITY,
+                        title="HYDRA refusing to start — underlying unresolvable",
+                        message=msg,
+                        priority=AlertPriority.CRITICAL,
+                    )
+                except Exception:
+                    pass
+                trade_logger.shutdown()
+                return
+            else:
+                logger.warning(
+                    f"L-M10: underlying {_sym} has no price at startup (market "
+                    f"closed — normal); will re-verify once the session opens."
+                )
+        else:
+            logger.info(f"L-M10: instrument probe OK — {_sym} priced at {_px:.2f}")
+    except Exception as _probe_exc:
+        logger.warning(f"L-M10 instrument probe skipped (non-fatal): {_probe_exc}")
+
     # Send BOT_STARTED alert. The contracts= kwarg auto-prefixes title with
     # [{N}c] when > 1, so the manual prefix used in Phase 1 T-3 is removed —
     # single source of truth at the service layer (avoids double-prefixing).
