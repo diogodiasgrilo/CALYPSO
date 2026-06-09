@@ -926,38 +926,70 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 if active > 0:
                     spy_price = status.get('underlying_price', 0)
                     vix = status.get('vix', 0)
-                    if getattr(strategy, 'dry_run', False):
-                        # Dry-run: the "active" positions are SIMULATED — a
-                        # restart leaves no real risk. INFO, no CRITICAL/alert,
-                        # so planned dry-run restarts don't cry wolf.
+                    # L-M9: the discriminator for "is this a real safety event" is
+                    # PLANNED (SIGTERM → shutdown_requested) vs UNEXPECTED (crash/
+                    # OOM-kill), NOT dry_run alone. A planned `systemctl restart`
+                    # with open positions is normal operation — systemd
+                    # (Restart=always) brings the bot back and recovery re-adopts
+                    # the positions — so it must not trip the CRITICAL/safety_event
+                    # cascade every time (the old code did, on every routine
+                    # restart of the live-order paper variant). Only an UNEXPECTED
+                    # shutdown of a non-dry-run variant is a genuine safety event.
+                    planned = bool(shutdown_requested)
+                    is_dry = getattr(strategy, 'dry_run', False)
+                    if is_dry:
+                        # Dry-run: the "active" positions are SIMULATED — no real
+                        # risk regardless of how we stopped. INFO only.
                         logger.info(
                             f"Shutdown with {active} active SIMULATED positions "
                             f"(dry-run, no real risk). P&L: "
                             f"${realized + unrealized:.2f}"
                         )
-                    else:
-                        # LIVE: real positions left open on shutdown is a genuine
-                        # safety event — keep it CRITICAL + safety-event/alert.
-                        logger.critical(
-                            f"CRITICAL: Bot shutting down with {active} ACTIVE positions! "
+                    elif planned:
+                        # Real positions but a PLANNED restart: systemd restarts +
+                        # recovery re-adopts them. Expected — WARNING, no CRITICAL
+                        # safety_event, so routine restarts don't cry wolf.
+                        logger.warning(
+                            f"Planned shutdown with {active} active positions; "
+                            f"systemd will restart and recovery will re-adopt them. "
                             f"P&L: ${realized + unrealized:.2f}"
                         )
                         trade_logger.log_event(
-                            f"WARNING: Bot shutting down with {active} ACTIVE positions! "
+                            f"Planned shutdown with {active} active positions "
+                            "(systemd restart + recovery expected)."
+                        )
+                    else:
+                        # UNEXPECTED shutdown (crash/kill, no SIGTERM) with real
+                        # positions — a genuine safety event: CRITICAL + safety_event.
+                        logger.critical(
+                            f"CRITICAL: Unexpected shutdown with {active} ACTIVE positions! "
+                            f"P&L: ${realized + unrealized:.2f}"
+                        )
+                        trade_logger.log_event(
+                            f"WARNING: Unexpected shutdown with {active} ACTIVE positions! "
                             "Manual intervention may be required."
                         )
                         trade_logger.log_safety_event({
                             "event_type": "HYDRA_SHUTDOWN_WITH_POSITION",
                             "spy_price": spy_price,
                             "vix": vix,
-                            "description": f"Bot shutdown with {active} active positions",
+                            "description": f"Unexpected shutdown with {active} active positions",
                             "result": "Positions left open - MANUAL INTERVENTION REQUIRED"
                         })
 
                 # Send BOT_STOPPED alert
                 try:
                     reason = "Signal received" if shutdown_requested else "Unexpected shutdown"
-                    priority = AlertPriority.HIGH if active > 0 else AlertPriority.LOW
+                    # L-M9: escalate to HIGH only on an UNEXPECTED shutdown of a
+                    # non-dry-run variant with positions open. A planned restart
+                    # recovers, and dry-run positions are simulated → LOW (so
+                    # routine A/B/C restarts don't fire a HIGH on every stop).
+                    escalate = (
+                        active > 0
+                        and not getattr(strategy, 'dry_run', False)
+                        and not bool(shutdown_requested)
+                    )
+                    priority = AlertPriority.HIGH if escalate else AlertPriority.LOW
                     msg = f"HYDRA stopped. Reason: {reason}\nState: {state}, Entries: {entries}, P&L: ${realized + unrealized:.2f}"
                     if active > 0:
                         msg += f"\n⚠️ {active} ACTIVE positions remaining!"
