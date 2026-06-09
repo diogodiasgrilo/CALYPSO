@@ -7470,8 +7470,11 @@ class HydraStrategy(MEICStrategy):
             # momentary bid/ask spikes — but a breach FAR beyond the stop is a
             # real fast move, not a spike. Waiting 10s lets the loss balloon (and
             # compounds L-H3). Execute IMMEDIATELY when the spread is at least
-            # MKT046_SEVERITY_MULT × the stop level.
-            MKT046_SEVERITY_MULT = 1.5
+            # MKT046_SEVERITY_MULT × the stop level. 2.0× (spread value DOUBLE the
+            # stop) is deliberately conservative: a 2× breach is unambiguously a
+            # real adverse move, not a momentary spike, so this preserves MKT-046's
+            # spike-filtering for the common 1–2× breach band (re-audit money-path).
+            MKT046_SEVERITY_MULT = 2.0
             if stop_level > 0 and spread_value >= MKT046_SEVERITY_MULT * stop_level:
                 self._log_stop_detail(entry, side, spread_value, stop_level, "SEVERITY_BYPASS")
                 logger.warning(

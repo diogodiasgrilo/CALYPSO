@@ -5727,7 +5727,8 @@ class MEICStrategy(abc.ABC):
             # `_min_buying_power_per_unit` to a much larger naked-margin floor,
             # because the IC floor (~$5k/contract) grossly underestimates an
             # undefined-risk short.
-            required = self._min_buying_power_per_unit() * self.contracts_per_entry
+            per_unit_floor = self._min_buying_power_per_unit()
+            required = per_unit_floor * self.contracts_per_entry
 
             if available < required:
                 # In dry-run, log the would-be rejection for diagnostics but
@@ -5740,7 +5741,7 @@ class MEICStrategy(abc.ABC):
                     logger.info(
                         f"ORDER-004 (dry-run): would-be insufficient BP — "
                         f"Available ${available:,.2f} < Required ${required:,.2f} "
-                        f"({self.contracts_per_entry}c × ${self.min_buying_power_per_ic:,.0f}). "
+                        f"({self.contracts_per_entry}c × ${per_unit_floor:,.0f}). "
                         f"Bypassing margin gate for data collection."
                     )
                     return True, (
@@ -5750,7 +5751,7 @@ class MEICStrategy(abc.ABC):
                 logger.warning(
                     f"ORDER-004: Insufficient buying power. "
                     f"Available: ${available:,.2f}, Required: ${required:,.2f} "
-                    f"({self.contracts_per_entry}c × ${self.min_buying_power_per_ic:,.0f}), "
+                    f"({self.contracts_per_entry}c × ${per_unit_floor:,.0f}), "
                     f"Utilization: {_util_str}"
                 )
                 return False, (
