@@ -25,9 +25,10 @@ The §3 hardening is in place:
     (``min_buying_power_per_strangle``), not the defined-risk IC floor.
   - strikes are snapped to the chain; dry-run prices simulate shorts only;
     entries are labelled ``strangle`` (not Iron Condor).
-Remaining LIVE-enable gate (operator-owned): a precise per-order
-``what_if_order`` margin check (needs resolved conids), paper verification, and
-the deliberate dry_run→false flip.
+A broker-authoritative ``what_if_naked_margin`` gate is also wired into
+``_execute_entry`` as a precise secondary check on top of the conservative
+floor. Remaining LIVE-enable gate (operator-owned): paper verification of the
+naked path end-to-end and the deliberate dry_run→false flip.
 """
 
 from __future__ import annotations
@@ -311,6 +312,39 @@ class StrangleStrategy(HydraStrategy):
                 f"required (SC {entry.short_call_strike} / SP {entry.short_put_strike})"
             )
             return False
+
+        # S2 precise margin gate: a broker-authoritative what_if on the two naked
+        # shorts. This is a SECONDARY check on top of the conservative naked floor
+        # (_min_buying_power_per_unit) that already passed in _check_buying_power —
+        # it can ONLY add a rejection, so any what_if failure (None) falls back
+        # safely to that floor. Resolve the short conids first (placement resolves
+        # them too; this pre-resolve is cheap and chain-cached).
+        try:
+            if hasattr(self.broker, "what_if_naked_margin"):
+                call_conid = self._get_option_uic(entry.short_call_strike, "Call", expiry)
+                put_conid = self._get_option_uic(entry.short_put_strike, "Put", expiry)
+                if call_conid and put_conid:
+                    req_margin = self.broker.what_if_naked_margin([
+                        {"conid": call_conid, "side": "SELL", "quantity": self.contracts_per_entry},
+                        {"conid": put_conid, "side": "SELL", "quantity": self.contracts_per_entry},
+                    ])
+                    if req_margin is not None:
+                        bal = self._read_account_balance() or {}
+                        avail = bal.get("MarginAvailableForTrading")
+                        if avail is not None and req_margin > float(avail):
+                            logger.error(
+                                "STRANGLE S2: broker what_if initial margin $%.2f > "
+                                "available $%.2f — aborting entry #%s (precise naked-"
+                                "margin gate)",
+                                req_margin, float(avail), entry.entry_number,
+                            )
+                            return False
+                        logger.info(
+                            "STRANGLE S2: what_if initial margin $%.2f within available "
+                            "— OK", req_margin,
+                        )
+        except Exception as exc:
+            logger.warning("STRANGLE S2 what_if gate skipped (non-fatal): %s", exc)
 
         filled_legs = []
         try:

@@ -339,6 +339,15 @@ class RetryPolicy:
             "timeout", "timed out",
             "connection reset", "connection refused", "connection aborted",
             "broken pipe", "remote end closed",
+            # I-Low: transient DNS resolution failures (socket.gaierror — NOT a
+            # ConnectionError subclass, so the isinstance check below misses it).
+            # A DNS blip should retry, not fail the call outright.
+            "name or service not known", "temporary failure in name resolution",
+            "nodename nor servname", "getaddrinfo failed", "name resolution failed",
+            # Transient TLS/SSL handshake drops (a dropped handshake is retryable;
+            # a genuinely-bad cert is rare and benign to retry — it just exhausts).
+            "ssl handshake", "tls handshake", "handshake failed",
+            "eof occurred in violation of protocol",
         )):
             return True
         # ConnectionError / TimeoutError subclasses

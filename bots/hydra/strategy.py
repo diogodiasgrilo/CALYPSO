@@ -3477,7 +3477,7 @@ class HydraStrategy(MEICStrategy):
         """
         Check 20/40 EMA crossover for trend direction.
 
-        Uses SPX 1-minute bars from Saxo Chart API.
+        Uses SPX 1-minute bars from the IBKR chart-data API.
 
         Returns:
             TrendSignal indicating market direction
@@ -9544,9 +9544,12 @@ class HydraStrategy(MEICStrategy):
     # OVERRIDE: Logging for trend-following entries
     # =========================================================================
 
-    def log_account_summary(self):
+    def log_account_summary(self, force: bool = False):
         """
         Log HYDRA account summary to Google Sheets dashboard.
+
+        ``force`` (I-M1): settlement passes True to bypass the intraday write
+        throttle so the final settled-state snapshot is never silently dropped.
 
         Overrides parent to include EMA values in the Account Summary tab.
         Fix #62: EMA 20/40 values were showing as N/A because parent's
@@ -9593,7 +9596,7 @@ class HydraStrategy(MEICStrategy):
                     getattr(e, 'put_long_sold_revenue', 0.0)
                     for e in self.daily_state.entries
                 ),
-            })
+            }, force=force)
         except Exception as e:
             logger.error(f"Failed to log HYDRA account summary: {e}")
 
@@ -9686,9 +9689,12 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             logger.error(f"Failed to log HYDRA performance metrics: {e}")
 
-    def log_position_snapshot(self):
+    def log_position_snapshot(self, force: bool = False):
         """
         Log current position snapshot to the Positions tab in Google Sheets.
+
+        ``force`` (I-M1): settlement passes True to bypass the intraday write
+        throttle so the final post-settlement snapshot is never silently dropped.
 
         Fix #69: Positions tab was created with correct headers but never populated.
         Writes one row per SIDE (call/put) for each entry, showing:
@@ -9795,7 +9801,7 @@ class HydraStrategy(MEICStrategy):
                         "status": status
                     })
 
-            self.trade_logger.log_position_snapshot(positions)
+            self.trade_logger.log_position_snapshot(positions, force=force)
         except Exception as e:
             logger.error(f"Failed to log HYDRA position snapshot: {e}")
 
@@ -10489,22 +10495,30 @@ class HydraStrategy(MEICStrategy):
             # same-conid merge across entries is NOT a discrepancy — the
             # contributions sum to the broker's net.
             expected = self._expected_position_quantities()
-            if not expected:
-                return  # no tracked legs — nothing to reconcile
 
             actual_positions = self._read_open_positions()
             if not actual_positions:
-                # Empty during market hours while we expect open legs is
-                # a fetch failure, not a mass close — never alert/clean
-                # on it (would false-flag every leg as vanished).
-                logger.warning(
-                    "POS-003: broker returned no positions but HYDRA "
-                    "expects open legs — treating as a fetch failure, "
-                    "skipping this cycle"
-                )
+                # Empty during market hours while we expect open legs is a fetch
+                # failure, not a mass close — never alert/clean on it (would
+                # false-flag every leg as vanished). With nothing expected AND
+                # nothing actual, there is simply nothing to reconcile or sweep.
+                if expected:
+                    logger.warning(
+                        "POS-003: broker returned no positions but HYDRA "
+                        "expects open legs — treating as a fetch failure, "
+                        "skipping this cycle"
+                    )
                 return
 
             actual = self._actual_position_quantities(actual_positions)
+            # I-M4: read positions even when `expected` is empty so the orphan
+            # sweep below covers the WORST case — a crash that left live broker
+            # positions but ZERO tracked entries. (Gated by is_market_open at the
+            # top, so the post-4PM settlement window can't produce a false orphan.)
+            if not expected:
+                self._reconcile_orphan_sweep(expected, actual)
+                self._save_state_to_disk()
+                return
             discrepant = {
                 conid: (exp_qty, actual.get(conid, 0))
                 for conid, exp_qty in expected.items()
@@ -10540,16 +10554,66 @@ class HydraStrategy(MEICStrategy):
                 )
                 self._handle_position_discrepancies(discrepant)
 
+            # I-M4 orphan sweep (see method docstring).
+            n_orphans = self._reconcile_orphan_sweep(expected, actual)
+
             # Persist state after reconciliation
             self._save_state_to_disk()
 
             logger.info(
                 f"POS-003: Reconciliation complete — {len(expected)} "
-                f"conid(s) expected, {len(discrepant)} mismatched"
+                f"conid(s) expected, {len(discrepant)} mismatched, "
+                f"{n_orphans} orphan(s)"
             )
 
         except Exception as e:
             logger.error(f"POS-003: Reconciliation failed: {e}")
+
+    def _reconcile_orphan_sweep(self, expected: Dict[Any, int], actual: Dict[Any, int]) -> int:
+        """I-M4: detect + alert on ORPHAN broker positions (untracked conids).
+
+        The hourly discrepancy check iterates only EXPECTED conids, so a broker
+        position at a conid HYDRA does NOT track — an orphan from a hard crash
+        after a leg filled but before the post-loop state save — is invisible to
+        it ("reconciled by nothing"). An untracked live short can ride to max
+        loss. We raise a CRITICAL alert but do NOT auto-flatten: a conid we don't
+        recognize could be a legitimate manual position, so manual review is the
+        safe action (same philosophy as the ambiguous-discrepancy path). Called
+        from the hourly reconciliation, which also runs on the FIRST tick after
+        startup (the hourly gate is skipped when _last_reconciliation_time was
+        None) — so this doubles as a post-crash startup sweep. Returns the count.
+        """
+        orphans = {
+            conid: qty for conid, qty in actual.items()
+            if qty and conid not in expected
+        }
+        if not orphans:
+            return 0
+        detail = ", ".join(
+            f"conid {c} qty {q} ({'SHORT' if q < 0 else 'LONG'})"
+            for c, q in orphans.items()
+        )
+        logger.critical(
+            f"POS-003/I-M4: {len(orphans)} ORPHAN broker position(s) at "
+            f"untracked conid(s) — {detail}. Possible crash-orphaned leg; "
+            f"NOT auto-closing (could be a manual position). MANUAL REVIEW."
+        )
+        try:
+            self.alert_service.send_alert(
+                alert_type=AlertType.CRITICAL_INTERVENTION,
+                title="Orphan position — untracked broker leg",
+                message=(
+                    f"{len(orphans)} {self.BOT_NAME} broker position(s) at conid(s) "
+                    f"HYDRA does not track ({detail}). Likely a crash-orphaned leg; "
+                    f"manual review / flatten recommended."
+                ),
+                priority=AlertPriority.CRITICAL,
+                details={"orphans": {str(c): q for c, q in orphans.items()}},
+                contracts=getattr(self, "contracts_per_entry", 1),
+            )
+        except Exception as exc:
+            logger.debug(f"orphan-sweep alert send failed (non-fatal): {exc}")
+        return len(orphans)
 
     def _reset_for_new_day(self):
         """

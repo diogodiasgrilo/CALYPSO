@@ -3474,6 +3474,63 @@ class IBClient:
             account_id=self.account_id,
         ) or {}
 
+    @staticmethod
+    def _parse_whatif_initial_margin(blocks: dict) -> Optional[float]:
+        """Extract the after-trade INITIAL margin number (account base currency)
+        from IBKR's whatif response. IBKR returns an ``initial`` block with
+        ``current``/``change``/``after`` values as strings like ``"+4,500.00"``.
+        Returns the ``after`` value as a float, or None if absent/unparseable
+        (the caller then falls back to its conservative floor)."""
+        if not isinstance(blocks, dict):
+            return None
+        init = blocks.get("initial")
+        val = None
+        if isinstance(init, dict):
+            val = init.get("after", init.get("current"))
+        if val is None:
+            return None
+        try:
+            return abs(float(str(val).replace(",", "").replace("+", "").strip()))
+        except (TypeError, ValueError):
+            return None
+
+    def what_if_naked_margin(self, legs: list) -> Optional[float]:
+        """Broker-authoritative INITIAL margin (account currency) for a naked
+        multi-leg order — the S2 strangle gate.
+
+        ``legs`` is a list of ``{conid, side, quantity}`` dicts. We what_if each
+        leg independently (a single-leg whatif is the documented IBKR path); a
+        naked strangle's true *combined* SPAN margin is ``<=`` the per-leg sum,
+        so SUMMING errs HIGH — safe for a gate that only needs an upper bound.
+        Returns the summed after-trade initial margin, or None on ANY failure /
+        unparseable block (the caller then relies on its conservative floor —
+        this method can only ever ADD a rejection, never remove the floor)."""
+        if not legs:
+            return None
+        total = 0.0
+        for leg in legs:
+            conid = leg.get("conid")
+            side = str(leg.get("side", "")).upper()
+            qty = leg.get("quantity")
+            if not conid or side not in ("BUY", "SELL") or not qty:
+                return None
+            order = OrderRequest(
+                conid=int(conid), side=side, quantity=float(qty),
+                order_type="MKT", acct_id=self.account_id,
+            )
+            try:
+                blocks = self.what_if_order(order)
+            except Exception as exc:
+                logger.warning(
+                    "what_if_naked_margin: whatif failed for conid %s (%s)", conid, exc
+                )
+                return None
+            init = self._parse_whatif_initial_margin(blocks)
+            if init is None:
+                return None
+            total += init
+        return total
+
     def _find_order_by_coid(self, coid: str) -> Optional[dict]:
         """Return the live_orders envelope whose cOID matches `coid`, or None.
 

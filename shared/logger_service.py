@@ -1438,7 +1438,7 @@ class GoogleSheetsLogger:
             logger.error(f"Failed to log recovered position: {e}")
             return False
 
-    def log_position_snapshot(self, positions: List[Dict[str, Any]]) -> bool:
+    def log_position_snapshot(self, positions: List[Dict[str, Any]], force: bool = False) -> bool:
         """
         Update the Positions worksheet with current position snapshot.
 
@@ -1446,6 +1446,10 @@ class GoogleSheetsLogger:
 
         Args:
             positions: List of position dictionaries
+            force: I-M1 — settlement callers pass True to bypass the intraday
+                write throttle so the final post-settlement snapshot is never
+                silently dropped (the Sheets daily record would otherwise be
+                permanently absent for the day).
 
         Returns:
             bool: True if logged successfully
@@ -1458,10 +1462,11 @@ class GoogleSheetsLogger:
         # A skipped snapshot is benign (the next one rewrites the full current
         # state), so return True — not an error.
         import time as _time
-        _now = _time.monotonic()
-        if _now - self._last_pos_snapshot_at < self._pos_snapshot_min_interval:
-            return True
-        self._last_pos_snapshot_at = _now
+        if not force:  # I-M1: settlement bypasses the throttle
+            _now = _time.monotonic()
+            if _now - self._last_pos_snapshot_at < self._pos_snapshot_min_interval:
+                return True
+            self._last_pos_snapshot_at = _now
 
         try:
             # Clear existing data (keep headers)
@@ -2878,7 +2883,8 @@ class GoogleSheetsLogger:
         self,
         strategy_data: Dict[str, Any],
         exchange_rate: float = None,
-        environment: str = "LIVE"
+        environment: str = "LIVE",
+        force: bool = False,
     ) -> bool:
         """
         Log strategy account summary for Looker dashboard.
@@ -2889,6 +2895,9 @@ class GoogleSheetsLogger:
             strategy_data: Strategy-specific data (varies by strategy_type)
             exchange_rate: Optional USD/EUR exchange rate
             environment: Trading environment (LIVE/SIM)
+            force: I-M1 — settlement callers pass True to bypass the intraday
+                write throttle so the final settled-state snapshot is never
+                silently dropped.
 
         Returns:
             bool: True if logged successfully
@@ -2901,10 +2910,11 @@ class GoogleSheetsLogger:
         # the last write before EOD still reflects final state. Returns True when
         # throttled (benign — next snapshot rewrites current state).
         import time as _time
-        _now = _time.monotonic()
-        if _now - self._last_summary_write_at < self._dashboard_write_min_interval:
-            return True
-        self._last_summary_write_at = _now
+        if not force:  # I-M1: settlement bypasses the throttle
+            _now = _time.monotonic()
+            if _now - self._last_summary_write_at < self._dashboard_write_min_interval:
+                return True
+            self._last_summary_write_at = _now
 
         try:
             worksheet = self.worksheets["Account Summary"]
@@ -4258,15 +4268,16 @@ class TradeLoggerService:
         logger.info(f"  Roll Count: {status.get('roll_count', 0)}")
         logger.info("=" * 60)
 
-    def log_position_snapshot(self, positions: List[Dict[str, Any]]):
+    def log_position_snapshot(self, positions: List[Dict[str, Any]], force: bool = False):
         """
         Log current position snapshot to Google Sheets.
 
         Args:
             positions: List of position dictionaries with all details
+            force: I-M1 — settlement callers pass True to bypass the write throttle.
         """
         if self.google_logger.enabled:
-            self.google_logger.log_position_snapshot(positions)
+            self.google_logger.log_position_snapshot(positions, force=force)
 
     def add_position(self, position: Dict[str, Any]):
         """
@@ -4702,7 +4713,8 @@ class TradeLoggerService:
         self,
         strategy_data: Dict[str, Any],
         saxo_client=None,
-        environment: str = "LIVE"
+        environment: str = "LIVE",
+        force: bool = False,
     ):
         """
         Log SPY strategy account summary for the dashboard.
@@ -4743,7 +4755,8 @@ class TradeLoggerService:
             self.google_logger.log_account_summary(
                 strategy_data=strategy_data,
                 exchange_rate=exchange_rate,
-                environment=environment
+                environment=environment,
+                force=force,
             )
         except Exception as e:
             logger.error(f"Failed to log account summary: {e}")

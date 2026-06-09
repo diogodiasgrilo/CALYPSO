@@ -526,11 +526,22 @@ def main():
     # and during a dry-run experiment those will all be dry-run too).
     dry_run_active = False
     try:
-        state_path = os.path.join(_project_root, "data", "hydra_state.json")
+        # I-M10: the [DRY-RUN] marker must reflect the variant whose trades are
+        # actually journaled. The default path is variant A's state file, but
+        # after the 2026-06-02 pivot the canonical record can be a LIVE variant
+        # (C, dry_run=false) — reading A's (sim) dry_run would then mislabel C's
+        # REAL trades as [DRY-RUN]. The operator points HOMER at the canonical
+        # variant's state file via HOMER_DRY_RUN_STATE_FILE (default = A, so
+        # this is a no-op until set — no regression).
+        state_path = os.environ.get(
+            "HOMER_DRY_RUN_STATE_FILE",
+            os.path.join(_project_root, "data", "hydra_state.json"),
+        )
         if os.path.exists(state_path):
             with open(state_path) as f:
                 state_blob = json.load(f)
             dry_run_active = bool(state_blob.get("dry_run", False))
+            logger.info(f"HOMER dry_run detection: {state_path} → dry_run={dry_run_active}")
     except Exception as e:
         logger.warning(f"Could not read state file for dry_run detection: {e}")
     if dry_run_active:

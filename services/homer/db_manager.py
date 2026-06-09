@@ -561,14 +561,24 @@ class BacktestingDB:
 
     def insert_daily_summary(self, summary: Dict[str, Any]) -> int:
         """Insert a daily summary record. Returns 1 if inserted, 0 if duplicate."""
+        # I-M5: the bot's DataRecorder writes the daily_summaries row first
+        # (live P&L / entries are authoritative). HOMER's enrichment was
+        # previously dropped by INSERT OR IGNORE — so day_type and
+        # realized_volatility stayed permanently NULL. Use ON CONFLICT(date) DO
+        # UPDATE to fill ONLY the enrichment columns, and only when currently
+        # NULL (COALESCE), so the bot's authoritative numbers are never clobbered.
         sql = """
-            INSERT OR IGNORE INTO daily_summaries
+            INSERT INTO daily_summaries
             (date, spx_open, spx_close, spx_high, spx_low, day_range,
              vix_open, vix_close,
              entries_placed, entries_stopped, entries_expired,
              gross_pnl, net_pnl, commission, long_salvage_revenue,
-             day_type, day_of_week, contracts_per_entry)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             day_type, day_of_week, contracts_per_entry, realized_volatility)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                day_type = COALESCE(daily_summaries.day_type, excluded.day_type),
+                realized_volatility = COALESCE(
+                    daily_summaries.realized_volatility, excluded.realized_volatility)
         """
         row = (
             summary["date"],
@@ -589,6 +599,7 @@ class BacktestingDB:
             summary.get("day_type"),
             summary.get("day_of_week"),
             summary.get("contracts_per_entry", 1),  # v8
+            summary.get("realized_volatility"),     # I-M5 enrichment
         )
         with self._connect() as conn:
             cursor = conn.execute(sql, row)

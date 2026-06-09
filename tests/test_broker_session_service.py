@@ -80,6 +80,10 @@ CASES = [
                                      "order_type": "LMT", "limit_price": 1.0, "coid": "x"},
      {"order_id": "O1", "status": "filled", "filled_quantity": 1, "avg_fill_price": 1.0, "raw": {}}),
     ("cancel_order", ("O1",), {}, True),
+    # S2 strangle margin gate — primitive leg list in, float (or None) out.
+    ("what_if_naked_margin",
+     ([{"conid": 55813670, "side": "SELL", "quantity": 1},
+       {"conid": 55813671, "side": "SELL", "quantity": 1}],), {}, 31250.0),
     # operator override — returns seconds that were left on the penalty box
     ("clear_rate_penalty", (), {}, 0.0),
 ]

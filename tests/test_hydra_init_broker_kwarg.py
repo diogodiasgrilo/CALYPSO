@@ -1478,6 +1478,43 @@ class TestHourlyReconciliationBody:
         self._run(s)
         s.alert_service.send_alert.assert_not_called()
 
+    def test_orphan_untracked_broker_position_alerts(self):
+        """I-M4: a broker position at a conid NOT in any tracked entry (a crash
+        mid-entry orphan) must fire a CRITICAL alert — the discrepant check
+        iterates only EXPECTED conids and would miss it."""
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        s = self._strategy([entry], open_positions=[
+            {"instrument_id": 101, "quantity": -1},
+            {"instrument_id": 102, "quantity": 1},
+            {"instrument_id": 103, "quantity": -1},
+            {"instrument_id": 104, "quantity": 1},
+            {"instrument_id": 999, "quantity": -1},  # ORPHAN — untracked short
+        ])
+        self._run(s)
+        titles = [c.kwargs.get("title", "") for c in s.alert_service.send_alert.call_args_list]
+        assert any("Orphan" in t for t in titles), titles
+
+    def test_orphan_sweep_runs_with_zero_tracked_entries(self):
+        """I-M4 worst case: zero tracked entries but a live broker position
+        (a crash before the first entry's save) must still be swept + alerted."""
+        s = self._strategy([], open_positions=[
+            {"instrument_id": 999, "quantity": -1},
+        ])
+        self._run(s)
+        titles = [c.kwargs.get("title", "") for c in s.alert_service.send_alert.call_args_list]
+        assert any("Orphan" in t for t in titles), titles
+
+    def test_no_orphan_when_all_positions_tracked(self):
+        entry = _FakeReconcileEntry(sc=101, lc=102, sp=103, lp=104)
+        s = self._strategy([entry], open_positions=[
+            {"instrument_id": 101, "quantity": -1},
+            {"instrument_id": 102, "quantity": 1},
+            {"instrument_id": 103, "quantity": -1},
+            {"instrument_id": 104, "quantity": 1},
+        ])
+        self._run(s)
+        s.alert_service.send_alert.assert_not_called()
+
 
 class TestReadOpenPositionsStrict:
     """F4.5 — _read_open_positions(strict=True) re-raises on a fetch

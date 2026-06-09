@@ -716,10 +716,16 @@ class MarketData:
                 # the last price for display but do NOT refresh the freshness
                 # clock — DATA-001 then trips so entries fail closed instead of
                 # trading on a frozen/unentitled feed.
-                logger.warning(
-                    "DATA-001: SPX quote is NOT real-time (6509=%r); not "
-                    "refreshing freshness timestamp", avail
-                )
+                # I-Low: dedup — this would otherwise flood every ~10s tick during
+                # a long frozen window. Log once, then at most every 5 min.
+                import time as _t
+                _now = _t.monotonic()
+                if _now - getattr(self, "_last_spx_notrt_warn_at", 0.0) >= 300:
+                    self._last_spx_notrt_warn_at = _now
+                    logger.warning(
+                        "DATA-001: SPX quote is NOT real-time (6509=%r); not "
+                        "refreshing freshness timestamp", avail
+                    )
                 return
             if first == "D":
                 logger.warning(
@@ -765,10 +771,15 @@ class MarketData:
             # IBKR-audit #2/#4: first char only (R/D/Z/Y/N + secondary chars).
             first = avail[:1] if avail else None
             if first in ("Z", "Y", "N"):
-                logger.warning(
-                    "DATA-001: VIX quote is NOT real-time (6509=%r); not "
-                    "refreshing freshness timestamp", avail
-                )
+                # I-Low: dedup (see update_spx) — at most one warning per 5 min.
+                import time as _t
+                _now = _t.monotonic()
+                if _now - getattr(self, "_last_vix_notrt_warn_at", 0.0) >= 300:
+                    self._last_vix_notrt_warn_at = _now
+                    logger.warning(
+                        "DATA-001: VIX quote is NOT real-time (6509=%r); not "
+                        "refreshing freshness timestamp", avail
+                    )
                 return
             if first == "D":
                 logger.warning("DATA: VIX quote is DELAYED (6509=%r)", avail)
@@ -2138,7 +2149,7 @@ class MEICStrategy(abc.ABC):
         Simulate an iron condor entry (dry-run mode).
 
         Path-B realism (2026-04-27): use REAL credits from MKT-011 estimator and
-        REAL UICs from the Saxo chain, so heartbeat price updates fetch real
+        REAL conids from the IBKR chain, so heartbeat price updates fetch real
         bid/ask. Only the actual order placement is skipped.
         """
         expiry = self._get_todays_expiry()
