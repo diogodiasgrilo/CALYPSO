@@ -775,6 +775,61 @@ class TestGetQuote:
         )
 
 
+class TestSnapshotAccountsPreflightSelfHeal:
+    """2026-06-08 forensic fix #5: after the IBKR 01:00 ET daily session reset,
+    the server-side /iserver/accounts priming is wiped while OAuth stays
+    authenticated (no disconnect → _iserver_primed still True), so the snapshot
+    500s 'please query /accounts'. The path must force a re-prime + retry ONCE
+    (mirrors the secdef-search self-heal), not go blind all day."""
+
+    def test_snapshot_self_heals_on_please_query_accounts(self, connected_client):
+        client, mock_ibkr = connected_client
+        # _ensure_iserver_primed already ran once during the first get_quote
+        # below; simulate the lost-priming 500 on the FIRST snapshot call, then
+        # recover on the retry after the forced re-prime.
+        calls = {"n": 0}
+        good = _mk_result([{"conid": 12345, FIELD_LAST: "5.30"}])
+
+        def _snap(**kwargs):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise Exception("Bad Request: please query /accounts first")
+            return good
+
+        mock_ibkr.live_marketdata_snapshot.side_effect = _snap
+        with patch("shared.ib_client.time.sleep"):
+            q = client.get_quote(12345)
+
+        assert q["last"] == 5.30  # recovered after the self-heal
+        # Primed twice: the initial once-per-session prime + the forced re-prime.
+        assert mock_ibkr.receive_brokerage_accounts.call_count == 2
+        # The market breaker must NOT be open — 'please query /accounts' is
+        # non-retryable + must not count as a broker-degraded failure.
+        assert client.circuit_breakers["market"].state.value != "open"
+
+    def test_snapshot_does_not_reprime_on_unrelated_error(self, connected_client):
+        client, mock_ibkr = connected_client
+        # Prime once via a successful first quote.
+        mock_ibkr.live_marketdata_snapshot.return_value = _mk_result(
+            [{"conid": 12345, FIELD_LAST: "5.30"}]
+        )
+        client.get_quote(12345)
+        assert mock_ibkr.receive_brokerage_accounts.call_count == 1
+
+        # A different, genuinely-retryable 5xx must NOT trigger the re-prime
+        # self-heal (it surfaces through the normal retry/breaker path).
+        mock_ibkr.live_marketdata_snapshot.side_effect = Exception(
+            "503 Service Unavailable"
+        )
+        with patch("shared.ib_client.time.sleep"):
+            try:
+                client.get_quote(12345)
+            except Exception:
+                pass
+        # Still only the original one-per-session prime — no forced re-prime.
+        assert mock_ibkr.receive_brokerage_accounts.call_count == 1
+
+
 class TestGetQuotesBatch:
     def test_batches_up_to_100(self, connected_client):
         client, mock_ibkr = connected_client

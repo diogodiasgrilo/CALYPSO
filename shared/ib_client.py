@@ -144,6 +144,19 @@ def _snapshot_row_has_data(row) -> bool:
     return False
 
 
+def _is_accounts_preflight_error(exc: BaseException) -> bool:
+    """True when an exception is IBKR's 'please query /accounts first' 500 —
+    the signal that the server-side /iserver/accounts priming was lost (e.g.
+    the 01:00 ET daily session reset) while OAuth stayed authenticated. The
+    snapshot path uses this to force a one-shot re-prime + retry (daily-reset
+    self-heal), mirroring the secdef-search 'No Contracts retrieved' self-heal.
+    """
+    msg = str(exc).lower()
+    return "query /accounts" in msg or (
+        "please query" in msg and "account" in msg
+    )
+
+
 def _snapshot_has_data(payload) -> bool:
     """True if the snapshot payload has at least one row with at least one
     non-metadata field. Used to decide whether to continue warmup polling.
@@ -1924,7 +1937,9 @@ class IBClient:
 
     # ─── Quotes (read methods) ────────────────────────────────────────────
 
-    def _ensure_iserver_primed(self, _risk_critical: bool = False) -> None:
+    def _ensure_iserver_primed(
+        self, _risk_critical: bool = False, *, force: bool = False
+    ) -> None:
         """Prime the /iserver brokerage session, once per session.
 
         IBKR requires `/iserver/accounts` to be called before
@@ -1937,6 +1952,15 @@ class IBClient:
         namespace — and does NOT satisfy this. `receive_brokerage_accounts()`
         is the `/iserver/accounts` call. Idempotent: primed once per
         session, reset on `disconnect()`.
+
+        ``force=True`` re-issues the prime even if `_iserver_primed` is already
+        set. This is the self-heal for the daily-reset case (mirrors
+        `_ensure_secdef_search_primed(force=True)`): the IBKR 01:00 ET session
+        reset wipes the SERVER-side /iserver/accounts priming, but OAuth 1.0a
+        stays authenticated (no `disconnect()` → `_iserver_primed` is NOT
+        cleared), so the snapshot 500s 'please query /accounts' all day. The
+        snapshot path detects that 500 and calls this with force=True to
+        re-prime + retry.
         """
         # Audit #12: check-and-set under _call_lock so a disconnect()
         # racing in between the read and the prime call can't leave
@@ -1944,7 +1968,7 @@ class IBClient:
         # an RLock, so the nested _ib_call acquisition on this thread is
         # free. The actual /iserver/accounts call is cheap + idempotent.
         with self._call_lock:
-            if self._iserver_primed:
+            if self._iserver_primed and not force:
                 return
             # Inherit risk-criticality from the caller: a risk-critical snapshot
             # (stop-loss read) reaching here after a reconnect-during-box must
@@ -2038,7 +2062,35 @@ class IBClient:
         # risk-criticality so a stop-loss read's mandatory preflight survives a
         # reconnect-during-box (else the snapshot fails and stop reads go dark).
         self._ensure_iserver_primed(_risk_critical=_risk_critical)
+        try:
+            return self._snapshot_poll(conids, fields, _risk_critical)
+        except Exception as exc:
+            # Daily-reset self-heal: the IBKR 01:00 ET session reset wipes the
+            # server-side /iserver/accounts priming while OAuth stays
+            # authenticated (no disconnect → _iserver_primed still True), so the
+            # snapshot 500s 'please query /accounts'. Force a re-prime + retry
+            # ONCE (mirrors the secdef-search 'No Contracts retrieved' heal).
+            if not _is_accounts_preflight_error(exc):
+                raise
+            logger.warning(
+                "snapshot 500 'please query /accounts' for conids=%s — "
+                "re-priming /iserver/accounts (daily-reset self-heal) + retry",
+                conids,
+            )
+            self._ensure_iserver_primed(
+                _risk_critical=_risk_critical, force=True
+            )
+            return self._snapshot_poll(conids, fields, _risk_critical)
 
+    def _snapshot_poll(self, conids: str, fields: list[str],
+                       _risk_critical: bool = False):
+        """ibind snapshot priming + warmup poll.
+
+        The /iserver/accounts preflight AND the daily-reset self-heal are owned
+        by the caller, :meth:`_snapshot_with_preflight`; this method does the
+        prime-call + warmup-poll mechanics and may raise the 'please query
+        /accounts' 500 that triggers the self-heal.
+        """
         # Pre-flight 2: ibind's snapshot priming — first call arms the
         # conid's snapshot cache, it returns no data itself.
         self._ib_call(

@@ -309,6 +309,12 @@ class RetryPolicy:
             "already filled",        # cancel on filled order
             "already cancel",        # cancel on cancelled order ("canceled" too)
             "order is filled or canceled",  # exact ibind/IBKR phrasing
+            # /iserver/* data endpoint hit before /iserver/accounts was primed
+            # (e.g. after the 01:00 ET daily session reset). Served as a 500 but
+            # blindly retrying won't help — the SESSION needs re-priming. Fail
+            # fast (don't trip the market breaker) so the snapshot path's
+            # force-reprime self-heal fires immediately (_snapshot_with_preflight).
+            "query /accounts",
         ):
             if permanent_pattern in msg:
                 return False

@@ -88,6 +88,18 @@ class TestIsRetryableTokenMatch:
         assert not self.pol.is_retryable(Exception("401 Unauthorized"))
         assert not self.pol.is_retryable(ValueError("bad input"))
 
+    def test_please_query_accounts_is_not_retryable(self):
+        # 2026-06-08 fix #5: a 500 'please query /accounts first' (lost session
+        # priming after the daily reset) must fail FAST — retrying without a
+        # re-prime won't help and would trip the market breaker. The snapshot
+        # path's force-reprime self-heal handles recovery.
+        assert not self.pol.is_retryable(
+            Exception("Bad Request: please query /accounts first")
+        )
+        assert not self.pol.is_retryable(
+            Exception('500 :: {"error":"please query /accounts first"}')
+        )
+
 
 # ─────────────────────────────────────────────────────────────────────────
 # #2 / M4 — snapshot warmup must treat 6509/server_id/6119 as metadata
