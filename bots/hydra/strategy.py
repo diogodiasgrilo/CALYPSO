@@ -2784,6 +2784,39 @@ class HydraStrategy(MEICStrategy):
             f"all positions closed at {now.strftime('%I:%M %p ET')}"
         )
 
+    def _book_early_close_side_pnl(self, entry, side_name: str, credit: float,
+                                   side_close_cost: float) -> None:
+        """Book ONE early-closed side's realized P&L (Brandon TP / GEX-breach /
+        MKT-018) into ``total_realized_pnl``. Net for the side = credit −
+        side_close_cost, for ANY credit sign.
+
+        2026-06-09 fix (10-agent verification): the old ``credit > 0`` gate
+        silently DROPPED a NEGATIVE-credit side — a spread sold at a net DEBIT,
+        e.g. a down-day legged call spread whose long cost more than the short
+        collected (E#1 today: call_spread_credit = −$385) — from
+        total_realized_pnl, OVERSTATING the day's P&L by the omitted loss
+        ($525 today). The DB recorder (`_record_stop_to_db`) always booked it
+        unconditionally, so the DB + broker were correct and only the in-memory
+        realized total drifted. Book every closed side regardless of sign.
+        """
+        if side_close_cost != 0:
+            # side_close_cost is positive when we spent more buying back the
+            # short than we received selling the long (net outflow to close).
+            self.daily_state.total_realized_pnl += credit - side_close_cost
+            logger.info(
+                f"  Entry #{entry.entry_number} {side_name} side early-closed: "
+                f"credit=${credit:.2f}, close_cost=${side_close_cost:.2f}, "
+                f"net=${credit - side_close_cost:.2f}"
+            )
+        else:
+            # No close fill yet — book the credit (any sign); the deferred fill
+            # lookup corrects the close cost later.
+            self.daily_state.total_realized_pnl += credit
+            logger.info(
+                f"  Entry #{entry.entry_number} {side_name} side early-closed: "
+                f"credit=${credit:.2f} (fill prices deferred)"
+            )
+
     def _close_entry_early(self, entry) -> Tuple[int, int, list]:
         """
         Close all open legs of an entry for MKT-018 early close.
@@ -2911,24 +2944,9 @@ class HydraStrategy(MEICStrategy):
                 if not getattr(entry, "close_time", ""):
                     entry.close_time = get_us_market_time().isoformat()
 
-                if credit > 0 and side_close_cost != 0:
-                    # Net P&L for this side = credit - net_close_cost
-                    # side_close_cost is positive when we spent more buying back short than
-                    # we received from selling long (net outflow)
-                    self.daily_state.total_realized_pnl += credit
-                    self.daily_state.total_realized_pnl -= side_close_cost
-                    logger.info(
-                        f"  Entry #{entry.entry_number} {side_name} side early-closed: "
-                        f"credit=${credit:.2f}, close_cost=${side_close_cost:.2f}, "
-                        f"net=${credit - side_close_cost:.2f}"
-                    )
-                elif credit > 0:
-                    # No fill prices yet — use credit only, deferred lookup will correct
-                    self.daily_state.total_realized_pnl += credit
-                    logger.info(
-                        f"  Entry #{entry.entry_number} {side_name} side early-closed: "
-                        f"credit=${credit:.2f} (fill prices deferred)"
-                    )
+                self._book_early_close_side_pnl(
+                    entry, side_name, credit, side_close_cost
+                )
 
                 # Record this early-close (Brandon TP / GEX-breach exit / MKT-018)
                 # to trade_stops with the REAL net close cost. Critical for B/C:
