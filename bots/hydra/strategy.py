@@ -2046,6 +2046,7 @@ class HydraStrategy(MEICStrategy):
         order_type: str = "LMT",
         limit_price: Optional[float] = None,
         coid: Optional[str] = None,
+        ambiguous_on_timeout: bool = False,
     ) -> Dict[str, Any]:
         """Place ONE option leg on IBKR; place→poll-to-fill in one call.
 
@@ -2097,6 +2098,36 @@ class HydraStrategy(MEICStrategy):
                 "raw": None,
             }
         except Exception as e:
+            # L-H1: on an ENTRY place (ambiguous_on_timeout=True), a TRANSPORT /
+            # timeout failure means the order MAY have landed server-side — the
+            # broker runs place_and_wait_for_fill in a threadpool the client
+            # timeout does NOT cancel, so the POST can fill late. Re-placing
+            # under a new cOID would double-fill, so surface as AMBIGUOUS (the
+            # caller aborts the leg + reconciles) instead of a clean failure.
+            # We match transport-level signatures only ("unreachable",
+            # "transport failed", "timeout/timed out") so a legitimate broker
+            # REJECTION (e.g. insufficient margin — order never landed) still
+            # returns a clean, retry-safe failure. Closes/flattens pass
+            # ambiguous_on_timeout=False (they WANT a retry, not an abort).
+            msg_l = str(e).lower()
+            is_transport_ambiguous = (
+                "timeout" in msg_l
+                or "timed out" in msg_l
+                or "unreachable" in msg_l
+                or "transport failed" in msg_l
+            )
+            if ambiguous_on_timeout and is_transport_ambiguous:
+                logger.critical(
+                    f"_place_leg_order({instrument_id} {side} x{quantity} "
+                    f"{ib_type}) TRANSPORT FAILURE on entry place — order may be "
+                    f"LIVE but unconfirmed (coid={coid}): {type(e).__name__}: {e}. "
+                    f"Treating as AMBIGUOUS; aborting leg, NOT resubmitting."
+                )
+                return {
+                    "success": False, "filled": False, "ambiguous": True,
+                    "order_id": None, "fill_price": None, "position_id": None,
+                    "raw": None,
+                }
             logger.warning(
                 f"_place_leg_order({instrument_id} {side} x{quantity} "
                 f"{ib_type}) failed ({type(e).__name__}: {e})"

@@ -2560,6 +2560,7 @@ class MEICStrategy(abc.ABC):
                     instrument_id=conid, side=side,
                     quantity=self.contracts_per_entry,
                     order_type="MKT", coid=attempt_coid,
+                    ambiguous_on_timeout=True,  # L-H1: entry place — abort on transport-timeout
                 )
             else:
                 if slippage_percent > 0:
@@ -2582,6 +2583,7 @@ class MEICStrategy(abc.ABC):
                     quantity=self.contracts_per_entry,
                     order_type="LMT", limit_price=limit_price,
                     coid=attempt_coid,
+                    ambiguous_on_timeout=True,  # L-H1: entry place — abort on transport-timeout
                 )
 
             # ORDER double-execution guard: a placement whose live state could
@@ -2703,15 +2705,57 @@ class MEICStrategy(abc.ABC):
                 return None
 
             # Not filled. The order may still be WORKING in IBKR's book
-            # (place_and_wait_for_fill leaves a timed-out order live) —
-            # cancel it before the next attempt, otherwise it could fill
-            # late and leave us with a stale / orphaned leg.
+            # (place_and_wait_for_fill leaves a timed-out order live) — cancel
+            # it before the next attempt, otherwise it could fill late. L-C3: we
+            # must (a) HONOR the cancel result — a failed cancel means the order
+            # may still be working, so advancing to a new cOID risks a
+            # double-fill; and (b) after cancelling, VERIFY the order didn't
+            # actually fill in the race between the last poll and the cancel
+            # taking effect (cancel is async; "already filled" reports success).
             if result and result.get("order_id"):
+                stale_order_id = result["order_id"]
                 logger.info(
-                    f"  Cancelling unfilled order {result['order_id']} "
-                    f"before retry"
+                    f"  Cancelling unfilled order {stale_order_id} before retry"
                 )
-                self._cancel_order(result["order_id"])
+                cancelled = self._cancel_order(stale_order_id)
+
+                # (b) Re-fetch terminal status post-cancel. If it actually
+                # filled (race fill), DO NOT place a second order — flatten the
+                # filled contracts and end this leg flat (mirrors ORDER-010).
+                post = self._get_order_status(stale_order_id)
+                filled_after = self._extract_filled_quantity(post) or 0
+                if filled_after > 0:
+                    logger.critical(
+                        f"  L-C3: order {stale_order_id} on {leg_description} "
+                        f"actually FILLED {filled_after} during/after cancel — "
+                        f"NOT re-placing; flattening to avoid a double position"
+                    )
+                    close_side = "SELL" if side == "BUY" else "BUY"
+                    flat = self._place_leg_order(
+                        instrument_id=conid, side=close_side,
+                        quantity=filled_after, order_type="MKT",
+                        coid=f"{external_ref}_{placement_nonce}lcflat{attempt}",
+                    )
+                    if not (flat and flat.get("filled")):
+                        logger.critical(
+                            "  L-C3: FAILED to flatten the late fill on "
+                            f"{leg_description} — MANUAL INTERVENTION REQUIRED"
+                        )
+                        self._add_orphaned_order(stale_order_id)
+                    return None
+
+                # (a) Cancel failed AND no confirmed fill — the order may still
+                # be working. Advancing to a new cOID could double-fill, so
+                # abort this leg for reconciliation instead of retrying.
+                if not cancelled:
+                    logger.critical(
+                        f"  L-C3: cancel of unfilled order {stale_order_id} on "
+                        f"{leg_description} FAILED and fill is unconfirmed — the "
+                        f"order may still be working. Aborting leg (no re-place); "
+                        f"flagging for reconciliation to avoid a double-fill."
+                    )
+                    self._add_orphaned_order(stale_order_id)
+                    return None
 
             # Delay before the next retry level.
             if attempt < len(PROGRESSIVE_RETRY_SEQUENCE) - 1:
