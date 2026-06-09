@@ -1864,6 +1864,18 @@ class TestQuoteMid:
             {"bid": 2.0, "ask": 2.2, "mid": None}
         ) == 2.1
 
+    def test_crossed_quote_does_not_average(self):
+        # L-M7: a crossed book (bid > ask) must NOT be averaged — (bid+ask)/2 on
+        # a crossed market is nonsense and can drive a false stop. Fall to last.
+        assert HydraStrategy._quote_mid(
+            {"bid": 5.0, "ask": 2.0, "mid": None, "last": 3.3}
+        ) == 3.3
+
+    def test_crossed_quote_with_no_last_returns_zero(self):
+        assert HydraStrategy._quote_mid(
+            {"bid": 5.0, "ask": 2.0, "mid": None}
+        ) == 0.0
+
     def test_falls_back_to_last(self):
         assert HydraStrategy._quote_mid(
             {"bid": None, "ask": None, "mid": None, "last": 1.7}

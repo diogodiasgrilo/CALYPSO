@@ -1782,7 +1782,11 @@ class HydraStrategy(MEICStrategy):
         if mid is not None:
             return mid
         bid, ask = quote.get("bid"), quote.get("ask")
-        if bid is not None and ask is not None:
+        if bid is not None and ask is not None and bid <= ask:
+            # L-M7: only average a SANE (uncrossed) book. During fast moves a
+            # quote can be crossed (bid > ask); (bid+ask)/2 on a crossed market
+            # is nonsense and can drive a false stop or mask a real one. Mirror
+            # the L9 guard in _parse_quote_row — fall through to last/mark.
             return (bid + ask) / 2
         return quote.get("last") or quote.get("mark") or 0.0
 
@@ -5140,6 +5144,28 @@ class HydraStrategy(MEICStrategy):
         entry_num = self._next_entry_index + 1
         logger.info(f"HYDRA: Initiating Entry #{entry_num} of {self._effective_total_entry_count()}")
 
+        # L-M8: VIX freshness gate. VIX drives spread width, the VIX-regime
+        # credit floors, AND the stop buffer for THIS entry; a frozen VIX
+        # silently mis-sizes all of them. is_vix_stale() existed but had zero
+        # callers. Warn + attempt a refresh so a stale VIX is visible rather
+        # than silent. We warn (not skip) — a missed entry is worse than a
+        # slightly-stale VIX, and the refresh usually recovers it.
+        try:
+            if self.market_data.is_vix_stale():
+                logger.warning(
+                    f"L-M8: VIX appears STALE at Entry #{entry_num} sizing "
+                    f"(VIX={self.current_vix:.1f}); refreshing market data first"
+                )
+                self._update_market_data()
+                if self.market_data.is_vix_stale():
+                    logger.warning(
+                        f"L-M8: VIX STILL stale after refresh "
+                        f"(VIX={self.current_vix:.1f}) — entry sizing may be off; "
+                        f"proceeding"
+                    )
+        except Exception as exc:
+            logger.debug(f"L-M8: VIX staleness check failed (non-fatal): {exc}")
+
         # Directional pivot pre-entry gate (directional_pivot, introduced 2026-05-01).
         # Before any other filters run (including the calm-entry delay), check
         # whether SPX has already moved >= threshold from session open. If so,
@@ -7411,6 +7437,22 @@ class HydraStrategy(MEICStrategy):
         MKT046_MIN_CONFIRM_SECONDS = 10
 
         if spread_value >= stop_level:
+            # L-M6: severity bypass. MKT-046's 10s confirmation exists to filter
+            # momentary bid/ask spikes — but a breach FAR beyond the stop is a
+            # real fast move, not a spike. Waiting 10s lets the loss balloon (and
+            # compounds L-H3). Execute IMMEDIATELY when the spread is at least
+            # MKT046_SEVERITY_MULT × the stop level.
+            MKT046_SEVERITY_MULT = 1.5
+            if stop_level > 0 and spread_value >= MKT046_SEVERITY_MULT * stop_level:
+                self._log_stop_detail(entry, side, spread_value, stop_level, "SEVERITY_BYPASS")
+                logger.warning(
+                    f"MKT-046: E#{entry.entry_number} {side} SEVERITY BYPASS — "
+                    f"SV ${spread_value:.0f} >= {MKT046_SEVERITY_MULT}x trigger "
+                    f"${stop_level:.0f}; executing immediately (no 10s confirm)"
+                )
+                setattr(entry, f'{side}_breach_time', None)
+                return self._execute_stop_loss(entry, side)
+
             breach_time = getattr(entry, f'{side}_breach_time', None)
             now = datetime.now()
 
@@ -9990,6 +10032,12 @@ class HydraStrategy(MEICStrategy):
                     "put_side_expired": entry.put_side_expired,
                     "call_side_skipped": entry.call_side_skipped,
                     "put_side_skipped": entry.put_side_skipped,
+                    # L-H5: persist pivot-closed flags so a mid-day restart does
+                    # NOT re-book a directional-pivot-closed side's credit at
+                    # settlement (the re-book guard skips pivot-closed sides; the
+                    # recovery path already restores these flags).
+                    "call_side_pivot_closed": getattr(entry, "call_side_pivot_closed", False),
+                    "put_side_pivot_closed": getattr(entry, "put_side_pivot_closed", False),
                     # Fix #61: Position merge tracking
                     "call_side_merged": entry.call_side_merged,
                     "put_side_merged": entry.put_side_merged,
@@ -10881,7 +10929,12 @@ class HydraStrategy(MEICStrategy):
                 # *_side_expired (skipped just below), so this re-books ONLY the
                 # spurious never-booked case — no double-count.
                 call_genuine_stop = entry.call_side_stopped and getattr(entry, "close_reason", "") not in ("TP", "BREACH")
-                if not call_genuine_stop and not entry.call_side_expired and not entry.call_side_skipped:
+                # L-H5: a directional-pivot-closed side already booked its P&L in
+                # _execute_pivot_side_close; re-booking the full credit here would
+                # double-count it. Skip pivot-closed sides.
+                if (not call_genuine_stop and not entry.call_side_expired
+                        and not entry.call_side_skipped
+                        and not getattr(entry, "call_side_pivot_closed", False)):
                     entry.call_side_expired = True
                     # IBKR-audit #5: book actual settlement P&L (full credit if
                     # OTM/unverifiable; credit - intrinsic if ITM-settled).
@@ -10916,7 +10969,11 @@ class HydraStrategy(MEICStrategy):
                 # 06-04 audit (fix #5): see the call-side rationale above — re-book
                 # a side spuriously flagged stopped by a 0-leg Brandon TP/BREACH.
                 put_genuine_stop = entry.put_side_stopped and getattr(entry, "close_reason", "") not in ("TP", "BREACH")
-                if not put_genuine_stop and not entry.put_side_expired and not entry.put_side_skipped:
+                # L-H5: skip pivot-closed sides (P&L already booked in
+                # _execute_pivot_side_close) to avoid double-counting the credit.
+                if (not put_genuine_stop and not entry.put_side_expired
+                        and not entry.put_side_skipped
+                        and not getattr(entry, "put_side_pivot_closed", False)):
                     entry.put_side_expired = True
                     # IBKR-audit #5: book actual settlement P&L (full credit if
                     # OTM/unverifiable; credit - intrinsic if ITM-settled).

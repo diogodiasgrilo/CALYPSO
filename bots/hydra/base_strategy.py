@@ -1243,9 +1243,27 @@ class MEICStrategy(abc.ABC):
         # Update market data
         self._update_market_data()
 
-        # DATA-001: Validate data freshness before trading
+        # DATA-001: Validate data freshness before trading.
         if self._is_data_stale_for_trading():
-            return "Skipping action - market data is stale"
+            # L-H4: a stale SPX INDEX snapshot must NOT disable stop monitoring
+            # on EXISTING positions. The default HYDRA stop is credit-based
+            # (driven by OPTION leg mids, which `_check_stop_losses` re-fetches
+            # itself and which can be fresh even when the SPX index snapshot is
+            # stale), so blanket-returning here left open positions UNMONITORED
+            # whenever SPX froze (fails-unmonitored, not fails-safe). Run the
+            # stop check (it carries its own per-leg DATA-004 zero-price guard)
+            # for any open positions before bailing — only NEW entries are gated
+            # on SPX freshness.
+            if self.daily_state.active_entries:
+                try:
+                    stop_result = self._check_stop_losses()
+                    if stop_result:
+                        return stop_result
+                except Exception as exc:
+                    logger.error(
+                        f"DATA-001: stop check during stale-SPX window failed: {exc}"
+                    )
+            return "Skipping new entries - market data is stale (stops still monitored)"
 
         # MKT-002: Check for flash crash conditions
         flash_crash, direction, pct_change = self.market_data.check_flash_crash_velocity()
@@ -3841,7 +3859,28 @@ class MEICStrategy(abc.ABC):
             attempt_num = attempt + 1
             try:
                 # Already gone? The broker shows no open quantity at the conid.
-                if attempt > 0 and not self._position_is_open(uic):
+                # L-H2: read positions STRICTLY. _read_open_positions() swallows
+                # a fetch failure and returns [] — which _position_is_open reads
+                # as "flat", so a transient read failure would END the close as
+                # SUCCESS and abandon a possibly-still-open, breached short
+                # (untracked naked 0DTE leg). With strict=True an inconclusive
+                # read RAISES; we then do NOT assume closed — fall through and
+                # retry the close. Only a positive qty-0 read ends it as closed.
+                already_gone = False
+                if attempt > 0:
+                    try:
+                        _positions = self._read_open_positions(strict=True)
+                        already_gone = not self._position_is_open(
+                            uic, positions=_positions
+                        )
+                    except Exception as exc:
+                        logger.warning(
+                            f"EMERGENCY-001: strict positions read failed for "
+                            f"{leg_name} (conid {uic}): {exc} — NOT assuming "
+                            f"closed; retrying the close"
+                        )
+                        already_gone = False
+                if already_gone:
                     logger.info(
                         f"EMERGENCY-001: {leg_name} (conid {uic}) already "
                         f"closed — skipping retry"
@@ -6170,16 +6209,21 @@ class MEICStrategy(abc.ABC):
             )
             return False, f"P&L too high: ${pnl:.2f}"
 
-        # Min loss bound scales with contracts (15c × 5pt = $7,500 max loss
-        # blows past the -$3,000 baseline). Multiply by contracts so per-IC
-        # floor stays meaningful at any size.
+        # L-H3: a loss MORE negative than the floor must NEVER suppress the
+        # stop. The DATA-004 zero-price gate above already catches the real
+        # data-corruption case ($0 prices → false stop); a large loss with
+        # NON-zero prices is a genuine fast/deep loss and is EXACTLY when the
+        # stop must fire. The old `return False` here made a deeper/faster loss
+        # LESS likely to stop (the confirming MKT-046 tick never completes once
+        # pnl dips below the floor). Log the anomaly for investigation but let
+        # the stop check PROCEED. The min-loss floor scales with contracts.
         min_loss_floor = self.min_pnl_per_ic * max(1, getattr(entry, "contracts", self.contracts_per_entry))
         if pnl < min_loss_floor:
-            logger.error(
-                f"DATA-003: Impossible P&L detected for Entry #{entry.entry_number}: "
-                f"${pnl:.2f} < min ${min_loss_floor:.2f}"
+            logger.warning(
+                f"DATA-003: Entry #{entry.entry_number} P&L ${pnl:.2f} is below "
+                f"the min-loss floor ${min_loss_floor:.2f} — PROCEEDING with the "
+                f"stop check (a large loss must stop faster, not be suppressed)"
             )
-            return False, f"P&L too low: ${pnl:.2f}"
 
         # Check for NaN or infinity
         if not isinstance(pnl, (int, float)) or pnl != pnl:  # NaN check
