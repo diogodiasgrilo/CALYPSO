@@ -202,6 +202,17 @@ SLIPPAGE_CRITICAL_THRESHOLD_PERCENT = 15.0  # Critical at 15% slippage
 EMERGENCY_CLOSE_MAX_ATTEMPTS = 5
 EMERGENCY_CLOSE_RETRY_DELAY_SECONDS = 2  # Reduced from 3s with batch quote headroom
 
+# CLOSE-LMT (2026-06-08 research): IBKR routes an OPTION "market" order as a
+# series of CAPPED marketable-limit orders with a documented non-fill
+# possibility, and Market-with-Protection is unavailable for OPT via the Client
+# Portal API. So the close-retry path CROSSES the spread with an aggressive
+# MARKETABLE LIMIT (price control + reliable fill — most reliable per the
+# research, esp. in the wide-NBBO window before the 4:00pm ET close), walking it
+# wider each attempt up to a sanity cap; a plain MARKET is only the no-quote
+# fallback. There is NO IBKR equivalent of Saxo's "market-only after 15:30 ET".
+CLOSE_LIMIT_CROSS_STEP = 0.50   # $ crossed THROUGH the touch per attempt (ask+ / bid-)
+CLOSE_LIMIT_CROSS_CAP = 3.00    # max cross-through — caps pay-up (never an uncapped sweep)
+
 # ORDER-008: SPX Option Tick Size Rules (CBOE Official)
 # Source: https://www.cboe.com/tradable_products/sp_500/spx_options/specifications/
 # - Options trading below $3.00: Minimum tick of $0.05
@@ -3818,6 +3829,56 @@ class MEICStrategy(abc.ABC):
             contracts=contracts,
         )
 
+    def _place_marketable_close(self, *, uic: int, side: str, quantity: int,
+                                attempt_num: int) -> dict:
+        """Place ONE close order, preferring an AGGRESSIVE MARKETABLE LIMIT that
+        crosses the spread; fall back to a plain MARKET only when no usable
+        quote is available.
+
+        CLOSE-LMT (2026-06-08 research): IBKR routes an OPTION "market" order as
+        a series of CAPPED marketable-limit orders with a documented "remote
+        possibility" of non-execution, and Market-with-Protection is NOT
+        available for OPT via the Client Portal API. An explicit marketable
+        limit walked through the spread is the most reliable close — especially
+        in the wide-NBBO window before the 4:00pm ET close, where a capped
+        market can stall. The caller re-reads the quote each attempt (the close
+        loop calls this per attempt), so the limit tracks the live touch; the
+        cross widens with ``attempt_num`` up to CLOSE_LIMIT_CROSS_CAP, so we
+        pay up to fill but never an uncapped sweep. A worthless long (no bid)
+        falls through to MARKET and simply expires if it can't sell — harmless.
+        Returns the same normalized dict as ``_close_leg_order``.
+        """
+        quote = self._read_option_quote(uic)
+        limit_price = None
+        if quote:
+            bid = quote.get("bid")
+            ask = quote.get("ask")
+            cross = min(CLOSE_LIMIT_CROSS_STEP * max(1, attempt_num),
+                        CLOSE_LIMIT_CROSS_CAP)
+            if side == "BUY" and ask and ask > 0:
+                # Cross UP through the offer — BUY ≥ ask is marketable.
+                limit_price = round_to_spx_tick(ask + cross, round_up=True)
+            elif side == "SELL" and bid and bid > 0:
+                # Cross DOWN through the bid — SELL ≤ bid is marketable.
+                limit_price = round_to_spx_tick(max(0.05, bid - cross),
+                                                round_up=False)
+        if limit_price is not None:
+            logger.info(
+                f"  Close via MARKETABLE LIMIT @ ${limit_price:.2f} "
+                f"({side} x{quantity}, cross attempt {attempt_num})"
+            )
+            return self._place_leg_order(
+                instrument_id=uic, side=side, quantity=quantity,
+                order_type="LMT", limit_price=limit_price,
+            )
+        logger.info(
+            f"  Close via MARKET — no usable quote to price a marketable limit "
+            f"({side} x{quantity})"
+        )
+        return self._close_leg_order(
+            instrument_id=uic, side=side, quantity=quantity,
+        )
+
     def _close_position_with_retry_ib(
         self, position_id: str, leg_name: str, uic: int = None,
         entry_number: int = None, contracts: Optional[int] = None,
@@ -3922,11 +3983,13 @@ class MEICStrategy(abc.ABC):
                     return True, out_price, last_order_id
 
                 logger.info(
-                    f"EMERGENCY-001: Closing {leg_name} via MARKET order "
-                    f"(conid={uic}, {side}, amount={qty_remaining})"
+                    f"EMERGENCY-001: Closing {leg_name} "
+                    f"(conid={uic}, {side}, amount={qty_remaining}, "
+                    f"attempt {attempt_num}) — marketable limit, MARKET fallback"
                 )
-                res = self._close_leg_order(
-                    instrument_id=uic, side=side, quantity=qty_remaining,
+                res = self._place_marketable_close(
+                    uic=uic, side=side, quantity=qty_remaining,
+                    attempt_num=attempt_num,
                 )
                 last_order_id = res.get("order_id") or last_order_id
                 if res.get("filled"):
