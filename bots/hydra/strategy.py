@@ -4989,6 +4989,18 @@ class HydraStrategy(MEICStrategy):
             if actual_close_cost and quoted_mid:
                 slippage = actual_close_cost - quoted_mid
 
+            # I-M2: when the synchronous close cost is missing (a leg fill wasn't
+            # captured), actual_debit=0 and net_pnl would be NULL forever (the
+            # async-correction hooks are IBKR no-ops). Fall back to the trigger-
+            # level estimate -(stop_level - credit) so per-stop analytics aren't
+            # permanently corrupted. The daily total stays driven by realized P&L.
+            if actual_close_cost and credit:
+                net_pnl = -(actual_close_cost - credit)
+            elif stop_level and credit:
+                net_pnl = -(stop_level - credit)
+            else:
+                net_pnl = None
+
             self._data_recorder.record_stop({
                 "date": date_str,
                 "entry_number": entry.entry_number,
@@ -4997,7 +5009,7 @@ class HydraStrategy(MEICStrategy):
                 "spx_at_stop": self.current_price,
                 "trigger_level": stop_level,
                 "actual_debit": actual_close_cost,
-                "net_pnl": -(actual_close_cost - credit) if actual_close_cost and credit else None,
+                "net_pnl": net_pnl,
                 "quoted_mid_at_stop": quoted_mid,
                 "slippage_on_close": slippage,
                 "spx_move_since_entry": spx_move,

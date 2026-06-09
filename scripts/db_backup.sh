@@ -28,11 +28,39 @@ if [[ -z "${DATE}" ]]; then
 fi
 
 # ── Gating: backtesting.db ───────────────────────────────────────────────
-if "${GSUTIL}" cp "${DATA}/backtesting.db" "${BUCKET}/backtesting_${DATE}.db"; then
-    echo "Backup complete: backtesting_${DATE}.db"
+# I-M6: the DB runs in WAL mode, so a plain `gsutil cp` of the main file
+# captures a consistent-but-STALE snapshot missing rows still in the -wal
+# sidecar (the recent day's data). Use sqlite3's online .backup (via the venv
+# python — always present) to a temp file that folds in the WAL, then upload
+# THAT. Falls back to a direct cp so a backup still lands if .backup fails.
+VENV_PY="/opt/calypso/.venv/bin/python"
+TMP_DB="/tmp/backtesting_backup_${DATE}.db"
+if [[ -x "${VENV_PY}" ]] && "${VENV_PY}" - "${DATA}/backtesting.db" "${TMP_DB}" <<'PY' 2>/dev/null
+import sqlite3, sys
+src = sqlite3.connect(sys.argv[1])
+dst = sqlite3.connect(sys.argv[2])
+with dst:
+    src.backup(dst)
+dst.close(); src.close()
+PY
+then
+    if "${GSUTIL}" cp "${TMP_DB}" "${BUCKET}/backtesting_${DATE}.db"; then
+        rm -f "${TMP_DB}"
+        echo "Backup complete: backtesting_${DATE}.db (WAL-consistent .backup)"
+    else
+        rm -f "${TMP_DB}"
+        echo "Backup FAILED: gsutil cp of .backup snapshot" >&2
+        exit 1
+    fi
 else
-    echo "Backup FAILED: backtesting.db" >&2
-    exit 1
+    rm -f "${TMP_DB}" 2>/dev/null || true
+    echo "db_backup: .backup unavailable/failed — falling back to direct cp" >&2
+    if "${GSUTIL}" cp "${DATA}/backtesting.db" "${BUCKET}/backtesting_${DATE}.db"; then
+        echo "Backup complete: backtesting_${DATE}.db (direct cp fallback)"
+    else
+        echo "Backup FAILED: backtesting.db" >&2
+        exit 1
+    fi
 fi
 
 # ── Best-effort: metrics + canonical state + per-variant state ───────────

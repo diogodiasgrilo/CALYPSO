@@ -186,9 +186,24 @@ def git_commit_and_push(journal_path: str, date_labels: list) -> bool:
                 logger.error(f"git commit failed: {result.stderr}")
                 return False
 
+        # I-H2: resolve the CHECKED-OUT branch and fetch/rebase/push against IT,
+        # not a hardcoded 'main'. The VM runs on a feature branch
+        # (hydra-ibkr-standalone); the old hardcoded 'origin main' would pull new
+        # main commits into the running tree as a side effect of the nightly
+        # journal write (no cache-clear/restart → source/bytecode divergence) and
+        # a push would target the wrong branch.
+        branch_proc = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=_project_root, capture_output=True, text=True, timeout=10,
+        )
+        branch = (branch_proc.stdout or "").strip() or "main"
+        if branch == "HEAD":
+            logger.warning("HOMER: detached HEAD — skipping fetch/rebase/push")
+            return True
+
         # Fetch remote to check if we're behind
         subprocess.run(
-            ["git", "fetch", "origin", "main"],
+            ["git", "fetch", "origin", branch],
             cwd=_project_root,
             capture_output=True,
             timeout=30,
@@ -196,7 +211,7 @@ def git_commit_and_push(journal_path: str, date_labels: list) -> bool:
 
         # Rebase our commit on top of any new remote commits
         rebase_result = subprocess.run(
-            ["git", "rebase", "origin/main"],
+            ["git", "rebase", f"origin/{branch}"],
             cwd=_project_root,
             capture_output=True,
             text=True,
@@ -212,9 +227,9 @@ def git_commit_and_push(journal_path: str, date_labels: list) -> bool:
             )
             return False
 
-        # Push
+        # Push (to the same branch we are on — see I-H2 above)
         result = subprocess.run(
-            ["git", "push", "origin", "main"],
+            ["git", "push", "origin", branch],
             cwd=_project_root,
             capture_output=True,
             text=True,

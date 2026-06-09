@@ -73,7 +73,10 @@ logger = logging.getLogger("calypso-broker")
 
 HOST = os.environ.get("CALYPSO_BROKER_HOST", "127.0.0.1")
 PORT = int(os.environ.get("CALYPSO_BROKER_PORT", "8788"))
-SESSION_CHECK_S = int(os.environ.get("CALYPSO_BROKER_SESSION_CHECK_S", "900"))
+# I-M3: default 180s (was 900s). A competing/lost IBKR session was recovering in
+# up to 900s — a long availability gap for the shared-session SPOF. 180s tightens
+# recovery while staying well clear of the rate ceiling. Override via env.
+SESSION_CHECK_S = int(os.environ.get("CALYPSO_BROKER_SESSION_CHECK_S", "180"))
 ALERT_POLL_S = int(os.environ.get("CALYPSO_BROKER_ALERT_POLL_S", "10"))
 
 
