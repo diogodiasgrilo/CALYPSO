@@ -3374,6 +3374,36 @@ class MEICStrategy(abc.ABC):
         except Exception as exc:  # pragma: no cover - alert is best-effort
             logger.debug(f"settlement-deferred alert send failed (non-fatal): {exc}")
 
+    def _alert_short_close_failed(self, entry, side_name: str) -> None:
+        """B2: alert (once per entry/side per ET day) that a side's SHORT buy-back
+        failed during an early close, so the long close was aborted to keep the
+        defined-risk spread intact. No naked short exists — the full spread is
+        still on and monitored — but the intended TP/breach close did not complete.
+        """
+        key = (getattr(entry, "entry_number", "?"), side_name)
+        seen = getattr(self, "_b2_short_fail_alerted", None)
+        if seen is None:
+            seen = set()
+            self._b2_short_fail_alerted = seen
+        if key in seen:
+            return
+        seen.add(key)
+        try:
+            self.alert_service.send_alert(
+                alert_type=AlertType.STOP_LOSS,
+                title=f"Short close FAILED (hedge preserved) — E#{getattr(entry, 'entry_number', '?')} {side_name}",
+                message=(
+                    f"The {side_name} short buy-back failed during an early close; the "
+                    f"long close was aborted to avoid a naked short. The full defined-risk "
+                    f"spread is still on and monitored, and the close will retry. Investigate "
+                    f"if it recurs."
+                ),
+                priority=AlertPriority.HIGH,
+                details={"bot": getattr(self, "BOT_NAME", "?"), "entry": getattr(entry, "entry_number", "?")},
+            )
+        except Exception as exc:  # pragma: no cover - best-effort
+            logger.debug(f"short-close-failed alert send failed (non-fatal): {exc}")
+
     def _handle_naked_short(self, naked_info: Tuple[str, str, int]):
         """
         Handle a naked short position - CRITICAL SAFETY.

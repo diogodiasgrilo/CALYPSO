@@ -112,3 +112,65 @@ class TestSettlementDeferOnUnreadableSpx:
         s._process_expired_credits()
         assert s._settlement_deferred is False   # None-by-design -> legacy worthless
         s._alert_settlement_deferred.assert_not_called()
+
+
+class TestB2NakedShortOnPartialClose:
+    """B2: in _close_entry_early, if the SHORT buy-back fails the long close must
+    be ABORTED so we keep the full defined-risk spread instead of a naked short,
+    and the side must NOT be marked expired (which would drop it from monitoring)."""
+
+    def _strat(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.commission_per_leg = 0.65
+        s.daily_state = SimpleNamespace(total_commission=0.0, entries=[])
+        s._alert_short_close_failed = MagicMock()
+        s._book_early_close_side_pnl = MagicMock()
+        s._record_stop_to_db = MagicMock()
+        s._read_option_quote = lambda uic: {"bid": 5.0}   # non-worthless long
+        return s
+
+    def _put_entry(self):
+        e = IronCondorEntry(entry_number=1)
+        e.contracts = 7
+        e.call_side_stopped = True            # exclude the call side from closing
+        e.short_put_strike = 7290.0
+        e.long_put_strike = 7285.0
+        e.short_put_uic = "SP"
+        e.long_put_uic = "LP"
+        e.put_spread_credit = 1190.0
+        return e
+
+    def test_short_fail_aborts_long_keeps_spread(self):
+        s = self._strat()
+        attempted = []
+
+        def fake_close(pos_id, leg_name, uic=None, entry_number=None, contracts=None):
+            attempted.append(leg_name)
+            if leg_name == "short_put":
+                return (False, 0.0, None)     # short buy-back FAILS
+            return (True, 1.0, "oid")          # long would have succeeded
+
+        s._close_position_with_retry = fake_close
+        e = self._put_entry()
+        s._close_entry_early(e)
+
+        assert "short_put" in attempted
+        assert "long_put" not in attempted, "long must NOT be closed after the short failed"
+        assert e.put_side_expired is False, "naked short avoided — side stays alive + monitored"
+        s._alert_short_close_failed.assert_called_once()
+
+    def test_short_success_closes_normally(self):
+        s = self._strat()
+        attempted = []
+
+        def fake_close(pos_id, leg_name, uic=None, entry_number=None, contracts=None):
+            attempted.append(leg_name)
+            return (True, 1.0, "oid")          # both legs close
+
+        s._close_position_with_retry = fake_close
+        e = self._put_entry()
+        s._close_entry_early(e)
+
+        assert "short_put" in attempted and "long_put" in attempted
+        assert e.put_side_expired is True       # normal full close
+        s._alert_short_close_failed.assert_not_called()

@@ -2862,12 +2862,30 @@ class HydraStrategy(MEICStrategy):
             # longs skipped via Fix #81 are NOT added here — they stay open to
             # 0DTE expiry, so their uic must remain set for reconciliation.
             closed_leg_names: set = set()
+            # B2 (2026-06-10): legs are ordered short-first. If the SHORT buy-back
+            # fails, we must NOT then sell the long — that would leave a NAKED short
+            # (unbounded risk) that the close path used to mark "expired" and drop
+            # from stop monitoring. Tracking this lets us abort the long close and
+            # keep the FULL defined-risk spread intact; the side stays alive and the
+            # TP / breach / credit+buffer stop retries it next tick.
+            short_close_failed = False
 
             for leg_name, pos_id, uic in legs:
                 # Gate on uic OR pos_id: pos_id is always None on the live IBKR
                 # path (close keys on uic via _close_position_with_retry_ib);
                 # pos_id is the truthy DRY_* fallback in dry-run.
                 if not (uic or pos_id):
+                    continue
+
+                # B2: short failed earlier this pass → do NOT close the long; keep
+                # the hedge so we never create a naked short. Alert once per side.
+                if leg_name.startswith("long") and short_close_failed:
+                    logger.critical(
+                        f"  B2: Entry #{entry.entry_number} {side_name} short close FAILED "
+                        f"— SKIPPING the long close to preserve the hedge (no naked short). "
+                        f"Side left intact + alive; will retry."
+                    )
+                    self._alert_short_close_failed(entry, side_name)
                     continue
 
                 # Fix #81: Skip closing long legs with $0 bid (worthless, expire naturally)
@@ -2915,6 +2933,8 @@ class HydraStrategy(MEICStrategy):
                     self.daily_state.total_commission += self.commission_per_leg * entry.contracts
                 else:
                     legs_failed += 1
+                    if leg_name.startswith("short"):
+                        short_close_failed = True  # B2: abort this side's long close
                     logger.error(f"MKT-018: Failed to close {leg_name} for Entry #{entry.entry_number}")
 
             # Mark side as early-closed (reuse expired flag for compatibility)
