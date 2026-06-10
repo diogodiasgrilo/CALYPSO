@@ -5689,6 +5689,12 @@ class HydraStrategy(MEICStrategy):
                 if not credit_gate_handled:
                     gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
 
+                    # Stash the MKT-011 per-contract estimates (in cents) so the
+                    # realized-credit guard can optionally compare realized-vs-estimate
+                    # (Rule 2). None when estimation failed → guard uses Rule 1 only.
+                    entry._mkt011_est_call = est_call if estimation_worked else None
+                    entry._mkt011_est_put = est_put if estimation_worked else None
+
                     if gate_result == "skip":
                         # Skip: both non-viable, or MKT-032 VIX too high for put-only
                         # Fix #79: Increment skip counters (was missing - all other skip paths have this)
@@ -6198,6 +6204,14 @@ class HydraStrategy(MEICStrategy):
             entry.short_call_price = 0
             entry.long_call_price = 0
 
+            # GUARD-INVERT: reject + unwind if the put vertical legged into a debit.
+            if not self._validate_realized_credit(
+                entry, filled_legs,
+                est_call_pc=None,
+                est_put_pc=getattr(entry, "_mkt011_est_put", None),
+            ):
+                return False
+
             logger.info(
                 f"Entry #{entry.entry_number} put-only complete: "
                 f"Put credit ${entry.put_spread_credit:.2f}"
@@ -6344,6 +6358,14 @@ class HydraStrategy(MEICStrategy):
             entry.long_call_price = entry.long_call_fill_price
             entry.short_put_price = 0
             entry.long_put_price = 0
+
+            # GUARD-INVERT: reject + unwind if the call vertical legged into a debit.
+            if not self._validate_realized_credit(
+                entry, filled_legs,
+                est_call_pc=getattr(entry, "_mkt011_est_call", None),
+                est_put_pc=None,
+            ):
+                return False
 
             logger.info(
                 f"Entry #{entry.entry_number} call-only complete: "

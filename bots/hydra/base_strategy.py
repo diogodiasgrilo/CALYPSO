@@ -2387,6 +2387,15 @@ class MEICStrategy(abc.ABC):
             entry.short_put_price = entry.short_put_fill_price
             entry.long_put_price = entry.long_put_fill_price
 
+            # GUARD-INVERT: reject + unwind a spread that legged into a net debit
+            # (e.g. 2026-06-10 Entry #2 put side −$0.80/ct). Runs BEFORE booking.
+            if not self._validate_realized_credit(
+                entry, filled_legs,
+                est_call_pc=getattr(entry, "_mkt011_est_call", None),
+                est_put_pc=getattr(entry, "_mkt011_est_put", None),
+            ):
+                return False
+
             logger.info(
                 f"Entry #{entry.entry_number} complete: "
                 f"Call credit ${entry.call_spread_credit:.2f}, "
@@ -3357,6 +3366,119 @@ class MEICStrategy(abc.ABC):
             logger.critical(f"Exception closing naked short: {e}")
             self._log_safety_event("NAKED_SHORT_EXCEPTION", f"{leg_name} position {pos_id} - {str(e)}", "Exception")
             self._trigger_critical_intervention(f"Exception closing naked short: {e}")
+
+    def _validate_realized_credit(
+        self,
+        entry: IronCondorEntry,
+        filled_legs: List[Tuple],
+        est_call_pc: Optional[float] = None,
+        est_put_pc: Optional[float] = None,
+    ) -> bool:
+        """GUARD-INVERT (2026-06-10): reject an entry whose REALIZED per-side
+        credit filled at a net DEBIT (or, optionally, collapsed far below the
+        MKT-011 estimate), then unwind the just-filled spread.
+
+        Entry legging places each leg as a separate order over several seconds;
+        on a fast move the sequential fills can INVERT a vertical. 2026-06-10
+        Entry #2 (variant C) sold its short put @$8.80 *after* buying the long
+        put @$9.60 (32s apart, falling tape) → net −$0.80/contract (−$560), a
+        debit IC the bot silently booked as a structural loser. This guard runs
+        after the last fill and BEFORE the entry is booked.
+
+        Rules (per ACTIVE side; a positive total can mask a one-sided inversion):
+          Rule 1 (always on): realized credit/contract < ``min_realized_credit_per_contract``
+                              (default $0.00 — a credit vertical must collect a credit).
+          Rule 2 (opt-in):    realized < ``credit_realized_fraction`` × MKT-011 estimate
+                              (default fraction 0.0 = OFF; needs a stashed estimate).
+
+        On a violation, ``action`` (config ``strategy.realized_credit_guard.action``,
+        default ``unwind``) decides: ``unwind`` closes the just-filled legs
+        (SHORTS first, to avoid a transient naked short while unwinding a fully
+        filled IC) via the existing :meth:`_unwind_partial_entry` and returns
+        False; ``alert_only`` books the entry but fires the CRITICAL alert;
+        ``off`` restores prior behavior. Forward-only + dry-run-safe: it never
+        touches an already-open prior entry and is a no-op in ``dry_run`` (sim
+        credit comes from the positive estimate and cannot invert).
+
+        Returns True to ACCEPT the entry, False to REJECT (unwound).
+        """
+        if self.dry_run:
+            return True
+        contracts = getattr(entry, "contracts", 0) or 0
+        if contracts <= 0:
+            return True
+
+        cfg = (getattr(self, "strategy_config", None) or {}).get("realized_credit_guard", {}) or {}
+        action = str(cfg.get("action", "unwind")).lower()
+        if action == "off":
+            return True
+        min_realized_pc = float(cfg.get("min_realized_credit_per_contract", 0.0))
+        # Rule 2 OFF by default (0.0) — Rule 1 alone catches the incident with
+        # zero false-positive risk. Raise this in config to enable Rule 2.
+        realized_fraction = float(cfg.get("credit_realized_fraction", 0.0))
+
+        EPS = 1e-9
+        violations = []  # (side, realized_pc, reason)
+
+        def _check(side: str, total_credit: float, est_pc: Optional[float]) -> None:
+            realized_pc = (total_credit or 0.0) / (100.0 * contracts)
+            if realized_pc < min_realized_pc - EPS:  # Rule 1 — hard inversion / non-credit
+                violations.append(
+                    (side, realized_pc,
+                     f"{side} realized ${realized_pc:.2f}/ct < floor ${min_realized_pc:.2f}/ct")
+                )
+                return
+            if realized_fraction > 0.0 and est_pc is not None:  # Rule 2 — estimate collapse
+                est_dollars_pc = est_pc / 100.0
+                if est_dollars_pc > 0 and realized_pc < (realized_fraction * est_dollars_pc) - EPS:
+                    violations.append(
+                        (side, realized_pc,
+                         f"{side} realized ${realized_pc:.2f}/ct < {realized_fraction:.0%} of "
+                         f"est ${est_dollars_pc:.2f}/ct")
+                    )
+
+        # Active side = its short leg actually filled (short_*_uic set) and not skipped.
+        if getattr(entry, "short_call_uic", None) and not getattr(entry, "call_side_skipped", False):
+            _check("call", getattr(entry, "call_spread_credit", 0) or 0, est_call_pc)
+        if getattr(entry, "short_put_uic", None) and not getattr(entry, "put_side_skipped", False):
+            _check("put", getattr(entry, "put_spread_credit", 0) or 0, est_put_pc)
+
+        if not violations:
+            return True
+
+        detail = "; ".join(r for _, _, r in violations)
+        logger.critical(
+            f"GUARD-INVERT: Entry #{getattr(entry, 'entry_number', '?')} realized-credit "
+            f"violation ({detail}); action={action}"
+        )
+        try:
+            self.alert_service.send_alert(
+                alert_type=AlertType.CIRCUIT_BREAKER,
+                title="ENTRY CREDIT INVERSION",
+                message=(
+                    f"Entry #{getattr(entry, 'entry_number', '?')} filled at a non-credit / "
+                    f"inverted price ({detail}). Action: {action}."
+                ),
+                priority=AlertPriority.CRITICAL,
+                contracts=contracts,
+            )
+        except Exception as alert_e:
+            logger.error(f"GUARD-INVERT alert failed: {alert_e}")
+        self._log_safety_event("ENTRY_CREDIT_INVERSION", detail)
+
+        if action == "alert_only":
+            return True  # operator chose to keep the position; flagged loudly above
+
+        # Default: unwind. Close SHORTS first (cover the risk) then longs — only
+        # reorders the unwind sequence; placement order (longs-first, ORDER-002)
+        # is unchanged.
+        ordered = sorted(filled_legs, key=lambda l: 0 if str(l[0]).startswith("short") else 1)
+        logger.critical(
+            f"GUARD-INVERT: unwinding {len(ordered)} filled legs (shorts-first) for "
+            f"Entry #{getattr(entry, 'entry_number', '?')}"
+        )
+        self._unwind_partial_entry(ordered, entry)
+        return False
 
     def _unwind_partial_entry(self, filled_legs: List[Tuple], entry: IronCondorEntry):
         """
