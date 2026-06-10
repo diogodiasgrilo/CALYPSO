@@ -1064,6 +1064,13 @@ class MEICStrategy(abc.ABC):
         # MKT-011: Minimum viable credit gate - entries with credit below this are SKIPPED (not just warned)
         # Default $0.50 per side = $50 total, matching MIN_STOP_LEVEL safety floor
         self.min_viable_credit_per_side = self.strategy_config.get("min_viable_credit_per_side", 0.50) * 100
+        # SELL-leg net-credit prevention floor (2026-06-10): a short vertical leg
+        # must never sell BELOW its paired long's fill + this minimum net credit,
+        # so the vertical cannot leg into a net DEBIT (the Entry #2 inversion).
+        # PER-SHARE dollars (compared against per-share limit prices), NOT ×100.
+        self.min_net_credit_per_contract = float(
+            self.strategy_config.get("min_net_credit_per_contract", 0.05)
+        )
         self.target_delta = self.strategy_config.get("target_delta", 8)
         self.min_delta = self.strategy_config.get("min_delta", 5)
         self.max_delta = self.strategy_config.get("max_delta", 15)
@@ -2337,7 +2344,9 @@ class MEICStrategy(abc.ABC):
                     put_call="Call",
                     buy_sell=BuySell.SELL,
                     expiry=expiry,
-                    external_ref=f"{entry.strategy_id}_SC"
+                    external_ref=f"{entry.strategy_id}_SC",
+                    # net-credit floor vs the already-filled long call
+                    paired_long_fill_per_share=entry.long_call_fill_price,
                 )
                 if not short_call_result:
                     raise Exception("Short Call order failed")
@@ -2360,7 +2369,9 @@ class MEICStrategy(abc.ABC):
                     put_call="Put",
                     buy_sell=BuySell.SELL,
                     expiry=expiry,
-                    external_ref=f"{entry.strategy_id}_SP"
+                    external_ref=f"{entry.strategy_id}_SP",
+                    # net-credit floor vs the already-filled long put
+                    paired_long_fill_per_share=entry.long_put_fill_price,
                 )
                 if not short_put_result:
                     raise Exception("Short Put order failed")
@@ -2430,6 +2441,22 @@ class MEICStrategy(abc.ABC):
 
             return False
 
+    def _sell_credit_floor_price(
+        self, buy_sell: BuySell, paired_long_fill_per_share: Optional[float]
+    ) -> Optional[float]:
+        """Per-share floor a SELL leg's limit must clear so the vertical stays a
+        net credit: ``paired_long_fill + min_net_credit_per_contract``, rounded
+        UP to the SPX tick (so a later round-DOWN of the limit can't dip under
+        it). Returns ``None`` for BUY legs and for naked shorts (no paired long)
+        — i.e. "no floor". Both inputs are PER-SHARE dollars.
+        """
+        if buy_sell != BuySell.SELL or paired_long_fill_per_share is None:
+            return None
+        return round_to_spx_tick(
+            float(paired_long_fill_per_share) + self.min_net_credit_per_contract,
+            round_up=True,
+        )
+
     def _place_option_order(
         self,
         strike: float,
@@ -2437,10 +2464,16 @@ class MEICStrategy(abc.ABC):
         buy_sell: BuySell,
         expiry: str,
         external_ref: str,
-        emergency_mode: bool = False
+        emergency_mode: bool = False,
+        paired_long_fill_per_share: Optional[float] = None,
     ) -> Optional[Dict]:
         """
         Place a single option order with progressive slippage retry.
+
+        paired_long_fill_per_share: for a SHORT leg whose protective long already
+        filled, the long's per-share fill price. Floors the SELL limit at
+        (long + min_net_credit_per_contract) so the vertical can't leg into a net
+        debit (2026-06-10 inversion fix). None for BUY legs and naked shorts.
 
         ORDER-007: Uses progressive retry sequence:
         1. Limit at mid price (0% slippage)
@@ -2481,7 +2514,7 @@ class MEICStrategy(abc.ABC):
         # F6.2 — places the leg via the IBClient write path.
         return self._place_option_order_ib(
             strike, put_call, buy_sell, expiry, external_ref,
-            emergency_mode,
+            emergency_mode, paired_long_fill_per_share=paired_long_fill_per_share,
         )
 
     def _place_option_order_ib(
@@ -2492,6 +2525,7 @@ class MEICStrategy(abc.ABC):
         expiry: str,
         external_ref: str,
         emergency_mode: bool = False,
+        paired_long_fill_per_share: Optional[float] = None,
     ) -> Optional[Dict]:
         """IBKR path of :meth:`_place_option_order` (F6.2).
 
@@ -2616,7 +2650,26 @@ class MEICStrategy(abc.ABC):
 
             mid_price = (bid + ask) / 2 if bid and ask else (ask or bid)
 
+            # SELL-leg net-credit floor: a short vertical leg must clear at least
+            # (paired long fill + min net credit), else the spread legs into a net
+            # DEBIT (the 2026-06-10 Entry #2 inversion). None ⇒ no floor.
+            sell_floor_ps = self._sell_credit_floor_price(
+                buy_sell, paired_long_fill_per_share
+            )
+
             if is_market:
+                # GUARD-FLOOR: never MARKET-fill a floored SELL — a market order
+                # can't honour the net-credit floor and could fill into a debit.
+                # Skip it: the leg fails and the already-filled protective long is
+                # unwound by the caller's except path. GUARD-INVERT is the
+                # post-fill backstop for anything that still slips through.
+                if sell_floor_ps is not None:
+                    logger.warning(
+                        f"  GUARD-FLOOR: skipping MARKET rung for SELL {leg_description} "
+                        f"— cannot honour net-credit floor ${sell_floor_ps:.2f}; "
+                        f"aborting leg (protective long will be unwound)"
+                    )
+                    continue
                 # ORDER-005: absolute-spread guard before a MARKET order.
                 if spread > self._max_absolute_slippage:
                     logger.critical(
@@ -2646,6 +2699,15 @@ class MEICStrategy(abc.ABC):
                 limit_price = round_to_spx_tick(
                     limit_price, round_up=(buy_sell == BuySell.BUY)
                 )
+                # GUARD-FLOOR: keep the SELL at/above the net-credit floor so the
+                # vertical stays a credit (the round above may have nudged it down).
+                if sell_floor_ps is not None and limit_price < sell_floor_ps:
+                    logger.info(
+                        f"  GUARD-FLOOR: SELL {leg_description} limit ${limit_price:.2f} "
+                        f"→ ${sell_floor_ps:.2f} (long ${paired_long_fill_per_share:.2f} "
+                        f"+ ${self.min_net_credit_per_contract:.2f}/sh min credit)"
+                    )
+                    limit_price = sell_floor_ps
                 expected_price = limit_price
                 logger.info(
                     f"  Attempt {attempt + 1}: LIMIT @ ${limit_price:.2f} "

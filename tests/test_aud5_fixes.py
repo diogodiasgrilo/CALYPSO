@@ -384,7 +384,8 @@ class TestOneSidedLiveEntry:
         s.dry_run = False
         placed: list = []
 
-        def _place(strike, put_call, buy_sell, expiry, external_ref, emergency_mode=False):
+        def _place(strike, put_call, buy_sell, expiry, external_ref,
+                   emergency_mode=False, paired_long_fill_per_share=None, **kwargs):
             placed.append((put_call, strike))
             return {"position_id": f"P_{external_ref}", "uic": 999,
                     "debit": 1.0, "credit": 2.0, "fill_price": 1.5, "mid_at_fill": 1.5}

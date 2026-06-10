@@ -36,12 +36,12 @@ ALLOWED_METHODS = frozenset({
     "get_order_status", "get_closed_position_price",
     # orders (writes)
     "place_and_wait_for_fill", "cancel_order",
-    # combo/BAG vertical (primitive args, RPC-friendly) — needed to empirically
-    # probe whether the IBKR PAPER account accepts + defined-risk-margins a
-    # bundled spread (combo-entry feasibility test, 2026-06-10), and the first
-    # building block of the atomic-combo entry path. Strategies do not call it
-    # today, so allowlisting it is inert for A/B/C.
-    "place_vertical_spread",
+    # NOTE (2026-06-10): place_vertical_spread was temporarily allowlisted to
+    # probe combo feasibility on paper. Result: the paper account ACCEPTS a BAG
+    # combo ticket + margins it defined-risk, but its combo ORDER LIFECYCLE is
+    # broken (orders stick in phantom PendingSubmit; IBKR returns "OrderID
+    # doesn't exist" on cancel) — combos are NOT operable on paper, only live.
+    # Reverted; re-add when building the live atomic-combo entry path.
     # margin pre-check (S2 strangle gate — primitive args, RPC-friendly)
     "what_if_naked_margin",
     # operator override — clear the rate-limit penalty box (no restart needed)
