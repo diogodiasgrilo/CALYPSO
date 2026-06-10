@@ -5440,11 +5440,6 @@ class MEICStrategy(abc.ABC):
         self.cumulative_metrics["total_stops"] += summary["call_stops"] + summary["put_stops"]
         self.cumulative_metrics["double_stops"] += summary["double_stops"]
 
-        if net_pnl >= 0:
-            self.cumulative_metrics["winning_days"] += 1
-        else:
-            self.cumulative_metrics["losing_days"] += 1
-
         # Store daily return for Sortino ratio calculation
         if "daily_returns" not in self.cumulative_metrics:
             self.cumulative_metrics["daily_returns"] = []
@@ -5459,6 +5454,20 @@ class MEICStrategy(abc.ABC):
                 # Readers that predate v8 should default to 1 via .get("contracts_per_entry", 1).
                 "contracts_per_entry": self.contracts_per_entry,
             })
+
+        # Derive winning/losing-day counts from daily_returns (the authoritative
+        # per-TRADING-day record) instead of blind-incrementing. The old
+        # `winning_days += 1` ran for EVERY day including 0-capital NO-TRADE days
+        # (net_pnl 0 >= 0 counted as a "win") AND — because the idempotency guard
+        # above keys on daily_returns, which a 0-capital day never appends to —
+        # re-counted that phantom win on every restart, inflating winning_days
+        # above the real daily_returns row count (observed 2026-06-10 on variant
+        # C: winning_days 18 vs 14 actual trading days). Deriving makes the
+        # counters self-healing + idempotent by construction, and correctly
+        # treats a no-trade day as neither a win nor a loss.
+        _dr = self.cumulative_metrics["daily_returns"]
+        self.cumulative_metrics["winning_days"] = sum(1 for d in _dr if d.get("net_pnl", 0) >= 0)
+        self.cumulative_metrics["losing_days"] = sum(1 for d in _dr if d.get("net_pnl", 0) < 0)
 
         self._save_cumulative_metrics(trading_date=date)
 

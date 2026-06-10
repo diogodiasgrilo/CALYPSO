@@ -475,7 +475,11 @@ class GoogleSheetsLogger:
                     headers = [
                         "Last Updated", "Entry #", "Leg Type", "Strike", "Expiry",
                         "Entry Credit", "Current Value", "P&L ($)", "P&L (EUR)",
-                        "Stop Level", "Distance to Stop ($)", "Stop Triggered",
+                        # "Stop Debit ($)" = the credit+buffer cost-to-close threshold (a
+                        # DOLLAR debit, not a price level). Renamed from "Stop Level" 2026-06-10:
+                        # sitting next to the price-level "Strike" column, "Stop Level" read as
+                        # a nonsensical price (e.g. 5619.96 vs a 7290 put strike).
+                        "Stop Debit ($)", "Distance to Stop ($)", "Stop Triggered",
                         "Side", "Spread Width", "Position ID", "Trend Signal", "Status"
                     ]
                 else:
@@ -1547,7 +1551,7 @@ class GoogleSheetsLogger:
                 # MEIC/HYDRA: Multiple iron condors - one row per side (call/put) per entry
                 # Columns: Last Updated, Entry #, Leg Type, Strike, Expiry,
                 #          Entry Credit, Current Value, P&L ($), P&L (EUR),
-                #          Stop Level, Distance to Stop ($), Stop Triggered,
+                #          Stop Debit ($), Distance to Stop ($), Stop Triggered,
                 #          Side, Spread Width, Position ID, Trend Signal, Status
                 all_rows = []
                 for pos in positions:

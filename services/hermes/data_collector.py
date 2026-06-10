@@ -149,6 +149,14 @@ def _read_journal_logs(lines: int = 200) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+# The live-track-record baseline. HERMES rebases its cumulative figures to this
+# date so they AGREE with the dashboard, which rebases every cumulative tile to
+# the same DASHBOARD_BASELINE_DATE (2026-06-09 — "the first clean day after
+# go-live debugging; prior history is mostly dry-run sim + phantom rows"). Keep
+# this in sync with deploy/.../dashboard.service.d/baseline.conf.
+LIVE_BASELINE_DATE = "2026-06-09"
+
+
 def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Pre-compute all counting and arithmetic for HERMES analysis.
@@ -318,18 +326,40 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
     if metrics and metrics.get("daily_returns"):
         daily_returns = metrics["daily_returns"]
 
-    win_streak, lose_streak = _compute_streak(daily_returns)
-    avg_win, avg_loss = _compute_averages(daily_returns)
+    # Rebase to LIVE_BASELINE_DATE so HERMES's cumulative AGREES with the
+    # dashboard (same baseline) and excludes the pre-go-live dry-run/sim era.
+    # Every cumulative figure is computed from daily_returns — the authoritative
+    # per-trading-day list — NOT the file's top-level winning_days/losing_days
+    # counters, which historically drifted (0-capital no-trade days were
+    # mis-counted as wins on restart; observed 18 vs 14 on variant C 2026-06-10).
+    rebased_returns = [d for d in daily_returns
+                       if str(d.get("date", "")) >= LIVE_BASELINE_DATE]
+
+    win_streak, lose_streak = _compute_streak(rebased_returns)
+    avg_win, avg_loss = _compute_averages(rebased_returns)
     # Phase 2 A-3: per-contract historical averages for mixed-count comparison.
     # Critical when today is 2c but history is all 1c — the raw avg_win is
     # misleading. Claude should use per-contract values for apples-to-apples.
-    avg_win_pc, avg_loss_pc = _compute_averages_per_contract(daily_returns)
+    avg_win_pc, avg_loss_pc = _compute_averages_per_contract(rebased_returns)
+
+    if rebased_returns:
+        cum_pnl = sum(d.get("net_pnl", 0) for d in rebased_returns)
+        wins = sum(1 for d in rebased_returns if d.get("net_pnl", 0) >= 0)
+        losses = sum(1 for d in rebased_returns if d.get("net_pnl", 0) < 0)
+        day_number = len(rebased_returns)
+    else:
+        # No booked days at/after the baseline yet — fall back to today's live P&L.
+        cum_pnl = net_pnl
+        wins = 1 if net_pnl >= 0 else 0
+        losses = 1 if net_pnl < 0 else 0
+        day_number = 1
 
     cumulative = {
-        "day_number": len(daily_returns) if daily_returns else 1,
-        "cumulative_pnl": metrics.get("cumulative_pnl", 0) if metrics else net_pnl,
-        "winning_days": metrics.get("winning_days", 0) if metrics else (1 if net_pnl >= 0 else 0),
-        "losing_days": metrics.get("losing_days", 0) if metrics else (1 if net_pnl < 0 else 0),
+        "day_number": day_number,
+        "cumulative_pnl": cum_pnl,
+        "winning_days": wins,
+        "losing_days": losses,
+        "baseline_date": LIVE_BASELINE_DATE,
         "win_streak": win_streak,
         "lose_streak": lose_streak,
         "avg_win_pnl": avg_win,
