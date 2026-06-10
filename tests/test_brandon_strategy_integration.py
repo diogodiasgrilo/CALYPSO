@@ -516,12 +516,14 @@ class TestGEXProfileFetch:
             raise ConnectionError("polygon down")
 
         monkeypatch.setattr(gp, "fetch_polygon_chain", boom)
-        # First call: fails, sets failure_at
+        monkeypatch.setattr(gp._time, "sleep", lambda *a, **k: None)  # skip retry backoff
+        # First call: the chain pull is retried GEX_CHAIN_FETCH_ATTEMPTS times
+        # (2026-06-10 reliability fix) before failing → sets failure_at.
         assert inst._brandon_get_gex_profile(date(2026, 5, 4)) is None
-        assert calls["n"] == 1
-        # Second call within cooldown: doesn't retry
+        assert calls["n"] == gp.GEX_CHAIN_FETCH_ATTEMPTS
+        # Second call within the 60s cooldown: doesn't fetch again at all.
         assert inst._brandon_get_gex_profile(date(2026, 5, 4)) is None
-        assert calls["n"] == 1
+        assert calls["n"] == gp.GEX_CHAIN_FETCH_ATTEMPTS
 
     def test_force_refresh_reuses_recent_sibling_write(self, monkeypatch):
         # 2026-06-08 forensic H (multi-variant contention): even a force_refresh,

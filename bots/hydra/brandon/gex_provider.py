@@ -32,13 +32,28 @@ provider falls back to BS-gamma when γ is missing.
 
 from __future__ import annotations
 
+import concurrent.futures
+import logging
 import math
+import time as _time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass, field
 from datetime import date, datetime, time, timezone
 from typing import Callable, Iterable, Optional
+
+logger = logging.getLogger(__name__)
+
+# Per-contract greek hydration is fanned out across a small thread pool — urllib
+# releases the GIL during socket I/O, so ~80 calls / 8 workers ≈ 1s vs the ~6-8s
+# serial loop that tripped the 5s read-timeout / 20s fetch_lock (2026-06-10).
+GEX_HYDRATE_WORKERS = 8
+# The chain pull is the single point whose failure aborts the WHOLE fetch (and
+# makes the caller fall back to a STALE profile). Retry it with backoff so a
+# transient Polygon read-timeout doesn't degrade strike selection.
+GEX_CHAIN_FETCH_ATTEMPTS = 3
+GEX_CHAIN_RETRY_BACKOFF_S = 0.5
 
 
 @dataclass(frozen=True)
@@ -485,10 +500,29 @@ def fetch_polygon_chain_with_greeks(
         merged greeks/implied_volatility; the rest carry only the chain
         payload (which build_profile will drop if greeks AND iv are absent).
     """
-    contracts = fetch_polygon_chain(
-        underlying=underlying, expiry=expiry, api_key=api_key,
-        http_fetch=http_fetch, max_pages=max_pages,
-    )
+    # Pass 1: the chain pull. This is the single point whose failure aborts the
+    # WHOLE fetch (the caller then returns a STALE profile → too-close strikes,
+    # the 2026-06-10 incident). Retry it with backoff; on final failure let the
+    # exception propagate so the caller's stale-fallback (now age-gated by the
+    # strike-selection guard) still applies.
+    contracts: list[dict] = []
+    for _attempt in range(GEX_CHAIN_FETCH_ATTEMPTS):
+        try:
+            contracts = fetch_polygon_chain(
+                underlying=underlying, expiry=expiry, api_key=api_key,
+                http_fetch=http_fetch, max_pages=max_pages,
+            )
+            if contracts:
+                break
+        except Exception as exc:
+            if _attempt == GEX_CHAIN_FETCH_ATTEMPTS - 1:
+                raise
+            logger.warning(
+                "Brandon GEX chain pull attempt %d/%d failed (%s) — retrying",
+                _attempt + 1, GEX_CHAIN_FETCH_ATTEMPTS, exc,
+            )
+        if _attempt < GEX_CHAIN_FETCH_ATTEMPTS - 1:
+            _time.sleep(GEX_CHAIN_RETRY_BACKOFF_S * (_attempt + 1))
     if not contracts:
         return contracts
 
@@ -508,21 +542,31 @@ def fetch_polygon_chain_with_greeks(
     candidates.sort(key=lambda c: int(c.get("open_interest") or 0), reverse=True)
     candidates = candidates[:max_contracts_to_hydrate]
 
-    for c in candidates:
+    # Pass 2: hydrate greeks/IV per-contract, PARALLELIZED. Serially this was
+    # ~80 round-trips ≈ 6-8s — enough to trip the 5s read-timeout and the 20s
+    # cross-variant fetch_lock, returning a stale profile (2026-06-10). Each
+    # fetch swallows its own errors (returns None) and the merge is per-contract
+    # / order-independent, so fanning out across a small thread pool is safe.
+    def _hydrate(c: dict) -> None:
         ticker = (c.get("details") or {}).get("ticker")
         if not ticker:
-            continue
+            return
         details = fetch_per_contract_snapshot(
             underlying=underlying, ticker=ticker,
             api_key=api_key, http_fetch=http_fetch,
         )
         if not details:
-            continue
+            return
         # Merge: greeks and implied_volatility live at the per-contract root
         if details.get("greeks"):
             c["greeks"] = details["greeks"]
         if details.get("implied_volatility") is not None:
             c["implied_volatility"] = details["implied_volatility"]
+
+    if candidates:
+        workers = min(GEX_HYDRATE_WORKERS, len(candidates))
+        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
+            list(pool.map(_hydrate, candidates))
     return contracts
 
 

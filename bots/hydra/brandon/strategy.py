@@ -67,6 +67,13 @@ _GEX_FAILURE_COOLDOWN = 60       # don't hammer a flaky API
 # burning entry-window time). A sibling fetch a few seconds old is plenty fresh
 # for an entry decision (Polygon's underlying snapshot only updates ~15 min).
 _GEX_FORCE_REFRESH_SIBLING_WINDOW_S = 30
+# Max age of a GEX profile usable for live STRIKE SELECTION. A force_refresh
+# that SUCCEEDED yields a profile seconds old; one that FAILED returns the stale
+# in-process profile (its fetched_at is NOT bumped on the failure paths), so a
+# profile older than this means the live fetch failed — do NOT compute an 8δ
+# short off it (the 2026-06-10 ~35δ put). Fall back to the conservative
+# OTM-multiplier instead, which can only place the short WIDER, never closer.
+_GEX_MAX_STRIKE_AGE_S = 45
 
 
 class BrandonHydraStrategy(HydraStrategy):
@@ -259,11 +266,38 @@ class BrandonHydraStrategy(HydraStrategy):
         profile = self._brandon_get_gex_profile(
             self._brandon_today_date(), force_refresh=True
         )
-        if profile is None or not profile.deltas:
-            logger.warning(
-                "BRANDON-DELTA-TARGET E#%s: no chain delta data — falling back to OTM-multiplier",
-                getattr(entry, "entry_number", "?"),
+        # STALE-GREEKS GUARD: never compute a delta-target short off a stale
+        # profile. A failed live fetch returns the last (unrefreshed) in-process
+        # profile, whose old fetched_at we age-reject here so the picker falls
+        # back to HYDRA's conservative OTM-multiplier (structurally WIDER) rather
+        # than placing a too-close short (2026-06-10 ~35δ put off a stale chain).
+        prof_age = None
+        if profile is not None and getattr(profile, "fetched_at", None) is not None:
+            prof_age = (datetime.now(timezone.utc) - profile.fetched_at).total_seconds()
+        stale = prof_age is not None and prof_age > _GEX_MAX_STRIKE_AGE_S
+        if profile is None or not profile.deltas or stale:
+            reason = (
+                f"stale GEX profile (age={prof_age:.0f}s > {_GEX_MAX_STRIKE_AGE_S}s — live fetch likely failed)"
+                if stale else "no chain delta data"
             )
+            logger.warning(
+                "BRANDON-DELTA-TARGET E#%s: %s — falling back to OTM-multiplier",
+                getattr(entry, "entry_number", "?"), reason,
+            )
+            if stale:
+                # Observability: a real entry's strike selection silently
+                # degraded to the conservative path — the operator should know
+                # GEX was unavailable for this entry.
+                self._brandon_send_telegram(
+                    message=(
+                        f"Entry #{getattr(entry, 'entry_number', '?')}: GEX profile stale "
+                        f"({prof_age:.0f}s) — used conservative OTM-multiplier instead of the "
+                        f"{self.brandon_delta_target_pct:.2f}δ delta-target. Polygon GEX fetch likely timed out."
+                    ),
+                    title="GEX stale — strike selection fell back",
+                    priority_name="MEDIUM",
+                    alert_type_name="SLIPPAGE_ALERT",
+                )
             return super()._calculate_strikes(entry)
 
         target = self.brandon_delta_target_pct
