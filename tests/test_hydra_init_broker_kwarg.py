@@ -2362,7 +2362,10 @@ class TestClosePositionWithRetryIb:
 
     def test_fills_first_attempt(self):
         s = self._make()
-        s._close_leg_order = MagicMock(return_value={
+        # The IBKR close path goes through _place_marketable_close (marketable
+        # limit → MARKET fallback), not _close_leg_order directly. Mock at that
+        # boundary so the retry-loop logic is exercised without a live quote read.
+        s._place_marketable_close = MagicMock(return_value={
             "filled": True, "fill_price": 0.40, "order_id": "c1",
         })
         ok, fill, oid = s._close_position_with_retry_ib(
@@ -2372,16 +2375,16 @@ class TestClosePositionWithRetryIb:
         assert fill == 0.40
         assert oid == "c1"
         # short leg closes with a BUY
-        assert s._close_leg_order.call_args.kwargs["side"] == "BUY"
-        assert s._close_leg_order.call_args.kwargs["instrument_id"] == 12345
+        assert s._place_marketable_close.call_args.kwargs["side"] == "BUY"
+        assert s._place_marketable_close.call_args.kwargs["uic"] == 12345
 
     def test_long_leg_closes_with_sell(self):
         s = self._make()
-        s._close_leg_order = MagicMock(return_value={
+        s._place_marketable_close = MagicMock(return_value={
             "filled": True, "fill_price": 1.0, "order_id": "c2",
         })
         s._close_position_with_retry_ib(None, "long_put", uic=999)
-        assert s._close_leg_order.call_args.kwargs["side"] == "SELL"
+        assert s._place_marketable_close.call_args.kwargs["side"] == "SELL"
 
     def test_no_uic_returns_failure(self):
         s = self._make()
@@ -2559,11 +2562,14 @@ class TestF6OrphanCancel:
 
     def test_close_cancels_unfilled_order_before_retry(self):
         s = self._close_strategy()
-        s._close_leg_order = MagicMock(side_effect=[
+        # Close path uses _place_marketable_close; the retry loop cancels its
+        # unfilled order_id before the next attempt.
+        s._place_marketable_close = MagicMock(side_effect=[
             {"filled": False, "order_id": "orphan-c"},  # attempt 1: working
             {"filled": True, "fill_price": 0.40, "order_id": "c2"},
         ])
         s._position_is_open = MagicMock(return_value=True)
+        s._read_open_positions = MagicMock(return_value=[])
         s._cancel_order = MagicMock(return_value=True)
         with patch("bots.hydra.base_strategy.time.sleep"):
             ok, fill, oid = s._close_position_with_retry_ib(
