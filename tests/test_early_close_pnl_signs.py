@@ -6,12 +6,14 @@ by the omitted loss. Reproduces the exact E#1/E#2 reconciliation."""
 from __future__ import annotations
 
 import sys
+from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
+import pytest  # noqa: E402
 from bots.hydra.strategy import HydraStrategy  # noqa: E402
 
 
@@ -58,3 +60,51 @@ class TestEarlyCloseSidePnlSigns:
         s._book_early_close_side_pnl(SimpleNamespace(entry_number=3),
                                      "call", credit=-200.0, side_close_cost=0.0)
         assert s.daily_state.total_realized_pnl == -200.0
+
+
+class TestCloseEntryEarlyWritesRealCost:
+    """2026-06-10: _close_entry_early must write the REAL fill-based net close
+    cost into actual_*_stop_debit (the dashboard's P&L input) — the Brandon TP
+    path used to overwrite it with the pre-close spread MARK, so live cards
+    overstated a take-profit's P&L (mark $87.50 vs real $140)."""
+
+    def _entry(self):
+        return SimpleNamespace(
+            entry_number=1, contracts=7,
+            short_call_uic=1, long_call_uic=2, short_put_uic=3, long_put_uic=4,
+            short_call_position_id=None, long_call_position_id=None,
+            short_put_position_id=None, long_put_position_id=None,
+            call_side_stopped=False, put_side_stopped=False,
+            call_side_expired=False, put_side_expired=False,
+            call_side_skipped=False, put_side_skipped=False,
+            call_only=False, put_only=False,
+            call_spread_credit=-385.0, put_spread_credit=1050.0,
+            call_spread_value=87.5, put_spread_value=17.5,   # the pre-close MARK
+            actual_call_stop_debit=0.0, actual_put_stop_debit=0.0,
+            close_commission=0.0, close_time="", early_closed=False,
+            is_complete=False,
+        )
+
+    def test_actual_debit_is_real_cost_not_mark(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.commission_per_leg = 0.65
+        s.daily_state = SimpleNamespace(total_commission=0.0, total_realized_pnl=0.0)
+        s._read_option_quote = MagicMock(return_value={"bid": 1.0, "ask": 1.1})
+        s._book_early_close_side_pnl = MagicMock()
+        s._record_stop_to_db = MagicMock()
+        # real fills → call: buy short 0.55, sell long 0.35 → 0.20*700 = $140
+        #               put : buy short 0.40, sell long 0.30 → 0.10*700 = $70
+        fills = {"short_call": 0.55, "long_call": 0.35, "short_put": 0.40, "long_put": 0.30}
+
+        def fake_close(pos_id, leg_name, uic=None, entry_number=None, contracts=None):
+            return (True, fills[leg_name], "O")
+
+        s._close_position_with_retry = fake_close
+        entry = self._entry()
+        with patch("bots.hydra.strategy.get_us_market_time",
+                   return_value=datetime(2026, 6, 9, 15, 11)):
+            s._close_entry_early(entry)
+
+        # REAL fill-based costs, NOT the marks (87.5 / 17.5).
+        assert entry.actual_call_stop_debit == pytest.approx(140.0)
+        assert entry.actual_put_stop_debit == pytest.approx(70.0)

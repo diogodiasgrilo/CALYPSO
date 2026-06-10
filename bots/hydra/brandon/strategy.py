@@ -544,7 +544,12 @@ class BrandonHydraStrategy(HydraStrategy):
         if call_did_close:
             entry.call_side_stopped = True
             close_cost_call = float(entry.call_spread_value) if entry.call_spread_value else 0.0
-            entry.actual_call_stop_debit = close_cost_call
+            # _close_entry_early already wrote the REAL fill-based close cost to
+            # actual_call_stop_debit in live mode; only fall back to the pre-close
+            # MARK (spread_value) when that's absent (dry-run / no real fills) so
+            # the dashboard P&L isn't overstated by the mark-vs-fill gap.
+            if not getattr(entry, "actual_call_stop_debit", 0):
+                entry.actual_call_stop_debit = close_cost_call
             if self.dry_run:
                 self.daily_state.total_realized_pnl -= close_cost_call
         elif call_alive:
@@ -557,7 +562,10 @@ class BrandonHydraStrategy(HydraStrategy):
         if put_did_close:
             entry.put_side_stopped = True
             close_cost_put = float(entry.put_spread_value) if entry.put_spread_value else 0.0
-            entry.actual_put_stop_debit = close_cost_put
+            # See call side: prefer the real fill cost _close_entry_early wrote;
+            # only fall back to the pre-close MARK when absent (dry-run).
+            if not getattr(entry, "actual_put_stop_debit", 0):
+                entry.actual_put_stop_debit = close_cost_put
             if self.dry_run:
                 self.daily_state.total_realized_pnl -= close_cost_put
         elif put_alive:

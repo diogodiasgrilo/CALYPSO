@@ -2944,6 +2944,16 @@ class HydraStrategy(MEICStrategy):
                 if not getattr(entry, "close_time", ""):
                     entry.close_time = get_us_market_time().isoformat()
 
+                # Persist the REAL fill-based net close cost so the dashboard's
+                # actual_*_stop_debit holds the actual debit, not the pre-close
+                # spread MARK. The Brandon TP path used to overwrite this field
+                # with entry.*_spread_value (the trigger mark) → live cards
+                # overstated a take-profit's P&L (e.g. mark $87.50 vs real $140).
+                # Only when a real fill cost is known (>0); a 0 (dry-run /
+                # fully-deferred) leaves the field for the Brandon mark estimate.
+                if side_close_cost > 0:
+                    setattr(entry, f"actual_{side_name}_stop_debit", side_close_cost)
+
                 self._book_early_close_side_pnl(
                     entry, side_name, credit, side_close_cost
                 )
