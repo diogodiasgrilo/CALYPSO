@@ -242,29 +242,51 @@ export function SPXChart() {
     // Build entry markers (exclude fully-skipped entries where both sides were never placed)
     const markers = entries
       .filter((e) => e.entry_time && !isNaN(new Date(e.entry_time).getTime()) && !(e.call_side_skipped && e.put_side_skipped))
-      .map((e) => ({
-        time: parseET(e.entry_time!) as Time,
-        position: "aboveBar" as const,
-        color:
-          e.call_side_stopped && e.put_side_stopped
-            ? colors.loss
-            : e.call_side_stopped || e.put_side_stopped
+      .map((e) => {
+        // Prefer close_reason: a Brandon TP/breach sets *_side_stopped as a
+        // generic "closed" marker, so flag-inference alone would paint a
+        // profitable take-profit red.
+        const reason = (e.close_reason || "").toUpperCase();
+        const color =
+          reason === "TP"
+            ? colors.profit
+            : reason === "BREACH"
               ? colors.warning
-              : colors.info,
-        shape: "arrowDown" as const,
-        text: `E${e.entry_number}`,
-      }));
+              : e.call_side_stopped && e.put_side_stopped
+                ? colors.loss
+                : e.call_side_stopped || e.put_side_stopped
+                  ? colors.warning
+                  : colors.info;
+        return {
+          time: parseET(e.entry_time!) as Time,
+          position: "aboveBar" as const,
+          color,
+          shape: "arrowDown" as const,
+          text: `E${e.entry_number}`,
+        };
+      });
 
     // Build stop markers (stop_time may be time-only "12:03:08" from DB)
     const stopMarkers = stopEvents
       .filter((s) => s.stop_time)
-      .map((s) => ({
-        time: parseET(s.stop_time, stateDate) as Time,
-        position: "belowBar" as const,
-        color: colors.loss,
-        shape: "circle" as const,
-        text: `S${s.entry_number}${s.side === "call" ? "C" : "P"}`,
-      }))
+      .map((s) => {
+        // A Brandon TP/breach also writes trade_stops rows, so color the close
+        // markers by the parent entry's close_reason — a take-profit's markers
+        // shouldn't be painted red like a real stop.
+        const parent = entries.find((e) => e.entry_number === s.entry_number);
+        const reason = (parent?.close_reason || "").toUpperCase();
+        const color =
+          reason === "TP" ? colors.profit
+            : reason === "BREACH" ? colors.warning
+              : colors.loss;
+        return {
+          time: parseET(s.stop_time, stateDate) as Time,
+          position: "belowBar" as const,
+          color,
+          shape: "circle" as const,
+          text: `S${s.entry_number}${s.side === "call" ? "C" : "P"}`,
+        };
+      })
       .filter((m) => (m.time as number) > 0);
 
     const allMarkers = [...markers, ...stopMarkers].sort(

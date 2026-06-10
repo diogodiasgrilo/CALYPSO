@@ -222,21 +222,29 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
     : entry.override_reason === "base-downday" ? "Base-Downday"
     : entry.trend_signal ?? "";
 
-  // Show live data for active entries AND single-stopped entries (surviving side still live)
+  // Show the P&L line for any entry with a meaningful realized/live P&L — active,
+  // stopped, AND the Brandon early-closes (take_profit / breach). Omitting
+  // take_profit here was the regression that left a TP card showing only its
+  // credit ($665) with no P&L.
   const showLiveData =
-    status === "active" || status === "stopped_single" || status === "stopped";
+    status === "active" || status === "stopped_single" || status === "stopped" ||
+    status === "take_profit" || status === "breach";
 
   // Determine border color
   const borderColor =
     status === "active"
       ? colors.info
-      : status === "stopped"
-        ? colors.loss
-        : status === "stopped_single"
-          ? colors.warning
-          : status === "expired"
-            ? colors.profit
-            : colors.textDim;
+      : status === "take_profit"
+        ? colors.profit // profitable close = green
+        : status === "breach"
+          ? colors.warning // defensive GEX-breach close = amber
+          : status === "stopped"
+            ? colors.loss
+            : status === "stopped_single"
+              ? colors.warning
+              : status === "expired"
+                ? colors.profit
+                : colors.textDim;
 
   // Determine which sides are still active (for cushion display on stopped entries)
   const callStillActive = !entry.call_side_stopped && !entry.call_side_skipped && !entry.call_side_expired;

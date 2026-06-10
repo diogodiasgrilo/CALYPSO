@@ -29,6 +29,12 @@ function getStatus(entry: HydraEntry | undefined): EntryStatus {
   if (!entry || !entry.entry_time) return "pending";
   if (entry.call_side_skipped && entry.put_side_skipped) return "skipped";
 
+  // Prefer close_reason: a Brandon TP/breach sets *_side_stopped as a generic
+  // "closed" marker, so flag-inference alone mislabels a take-profit as a stop.
+  const reason = (entry.close_reason || "").toUpperCase();
+  if (reason === "TP") return "take_profit";
+  if (reason === "BREACH") return "breach";
+
   const callStopped = entry.call_side_stopped;
   const putStopped = entry.put_side_stopped;
   if (callStopped && putStopped) return "stopped"; // double = red
