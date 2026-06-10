@@ -445,18 +445,31 @@ class IronCondorEntry:
         """Current value (cost to close) of call spread.
 
         Fix #52: Multiplies by contracts for multi-contract support.
+        L-C2b (2026-06-10): clamp to the spread's structural [0, width] range.
+        A short vertical's cost-to-close can never exceed its width (the
+        intrinsic cap) nor fall below 0, yet it is built from two independently
+        mid'd legs — a wide/crossed close-auction quote on ONE leg yields an
+        economically impossible value (live 2026-06-10: a put spread marked
+        $4270 on a 5pt/$3500-max structure). That phantom inflated the displayed
+        cushion + P&L AND fed noisy values into the MKT-046 stop confirmation
+        (oscillating across the trigger resets the 10s timer). Clamp to reality.
         """
-        # Buy back short, sell long
-        # Multiply by 100 (option multiplier) and contracts
-        return (self.short_call_price - self.long_call_price) * 100 * self.contracts
+        raw = (self.short_call_price - self.long_call_price) * 100 * self.contracts
+        width = self.long_call_strike - self.short_call_strike
+        if width and width > 0:
+            return min(max(raw, 0.0), width * 100 * self.contracts)
+        return raw
 
     @property
     def put_spread_value(self) -> float:
-        """Current value (cost to close) of put spread.
-
-        Fix #52: Multiplies by contracts for multi-contract support.
-        """
-        return (self.short_put_price - self.long_put_price) * 100 * self.contracts
+        """Current value (cost to close) of put spread. Fix #52: × contracts.
+        See call_spread_value for the L-C2b [0, width] clamp rationale (the
+        2026-06-10 wide-quote phantom that inflated cushion/P&L and the stop)."""
+        raw = (self.short_put_price - self.long_put_price) * 100 * self.contracts
+        width = self.short_put_strike - self.long_put_strike
+        if width and width > 0:
+            return min(max(raw, 0.0), width * 100 * self.contracts)
+        return raw
 
     @property
     def unrealized_pnl(self) -> float:
