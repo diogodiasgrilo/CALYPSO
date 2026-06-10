@@ -420,33 +420,42 @@ def _build_entries_for_day(
             if call_credit or put_credit:
                 entry["Total Credit"] = str(call_credit + put_credit)
 
-        # Determine outcome from accumulated stop data (from Trades tab stop rows)
-        # This catches entries whose Positions tab data was overwritten by bot restart
+        # Determine outcome. A Brandon take-profit / GEX-breach / MKT-018 close is
+        # an EARLY CLOSE, not a stop — but the early-close path reuses stop logging
+        # (writes "Stop #N" Trades rows + per-side stop times AND sets the per-side
+        # *_stopped flags), so naive stop inference mislabels a profitable
+        # take-profit as a "Double Stop" (the 2026-06-09 journal bug). Two
+        # authoritative signals override that:
+        #   (a) Positions Status == "EARLY_CLOSED" — the bot writes this for ANY
+        #       early close (TP / breach / MKT-018). This is the primary signal.
+        #   (b) A "both sides stopped" outcome whose net P&L is POSITIVE is
+        #       logically impossible for a real stop (stops cut losses) — it was a
+        #       take-profit whose Positions row was overwritten before HOMER read it.
+        # TP vs defensive-close is classified by P&L sign.
         if not entry.get("Outcome"):
-            has_call_stop = bool(entry.get("Call Stop Time"))
-            has_put_stop = bool(entry.get("Put Stop Time"))
-            if has_call_stop and has_put_stop:
-                entry["Outcome"] = "Double Stop"
+            call_status = str(entry.get("Call Status", "")).upper()
+            put_status = str(entry.get("Put Status", "")).upper()
+            early_closed = "EARLY_CLOSED" in call_status or "EARLY_CLOSED" in put_status
+
+            has_call_stop = bool(entry.get("Call Stop Time")) or \
+                str(entry.get("Call Stop Triggered", "No")).strip().lower() == "yes"
+            has_put_stop = bool(entry.get("Put Stop Time")) or \
+                str(entry.get("Put Stop Triggered", "No")).strip().lower() == "yes"
+            net = _safe_float(entry.get("P&L Impact", 0))
+
+            if early_closed:
+                # Authoritative early-close marker. Positive net = take-profit;
+                # negative net = a defensive (GEX-breach / loss-cut) early close.
+                entry["Outcome"] = "Take Profit" if net >= 0 else "Early Closed (Defensive)"
+            elif has_call_stop and has_put_stop:
+                # Both sides "stopped". A real double-stop is a loss; a positive
+                # net here means the EARLY_CLOSED status was lost (overwritten) and
+                # this was actually a take-profit.
+                entry["Outcome"] = "Double Stop" if net < 0 else "Take Profit"
             elif has_call_stop:
                 entry["Outcome"] = "Call Stopped"
             elif has_put_stop:
                 entry["Outcome"] = "Put Stopped"
-
-        # Determine outcome from Positions tab status (overwrites if available)
-        if not entry.get("Outcome"):
-            call_stopped = str(entry.get("Call Stop Triggered", "No")).strip().lower() == "yes"
-            put_stopped = str(entry.get("Put Stop Triggered", "No")).strip().lower() == "yes"
-            call_status = entry.get("Call Status", "")
-            put_status = entry.get("Put Status", "")
-
-            if call_stopped and put_stopped:
-                entry["Outcome"] = "Double Stop"
-            elif call_stopped:
-                entry["Outcome"] = "Call Stopped"
-            elif put_stopped:
-                entry["Outcome"] = "Put Stopped"
-            elif "EARLY_CLOSED" in call_status or "EARLY_CLOSED" in put_status:
-                entry["Outcome"] = "Early Closed"
             elif "EXPIRED" in call_status or "EXPIRED" in put_status:
                 entry["Outcome"] = "Expired"
 

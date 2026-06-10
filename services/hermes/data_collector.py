@@ -226,12 +226,19 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
     put_stops = state.get("put_stops_triggered", 0)
     double_stops_count = state.get("double_stops", 0)
 
-    clean_entries = sum(1 for eo in entry_outcomes if eo["outcome"] == "clean")
-    entries_with_stops = sum(1 for eo in entry_outcomes if eo["outcome"] != "clean")
+    # A take-profit / early close is NOT a stop. Count only real stop-loss
+    # outcomes toward "entries_with_stops"; everything else (clean expiry,
+    # take_profit, early_closed, breach_exit) is a non-stopped entry.
+    entries_with_stops = sum(1 for eo in entry_outcomes if eo["outcome"] in _STOP_OUTCOMES)
+    clean_entries = len(entry_outcomes) - entries_with_stops
 
     # --- Best / worst entry by outcome category ---
-    # clean > one-side-stop > double-stop; within same category, higher credit = better
-    outcome_rank = {"clean": 0, "call_stopped": 1, "put_stopped": 1, "double_stopped": 2}
+    # take-profit/clean > one-side-stop > double-stop; within a category, higher
+    # credit = better. Unknown outcomes default to mid-rank.
+    outcome_rank = {
+        "take_profit": 0, "clean": 0, "early_closed": 0, "breach_exit": 1,
+        "call_stopped": 1, "put_stopped": 1, "double_stopped": 2,
+    }
     best_entry = None
     worst_entry = None
     if entry_outcomes:
@@ -391,7 +398,25 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _classify_outcome(entry: Dict) -> str:
-    """Classify entry outcome: clean, call_stopped, put_stopped, or double_stopped."""
+    """Classify entry outcome: clean, take_profit, early_closed, call_stopped,
+    put_stopped, or double_stopped.
+
+    A Brandon take-profit / GEX-breach / MKT-018 close sets BOTH *_side_stopped
+    flags as a generic "closed" marker, so the flags alone mislabel a profitable
+    take-profit as a "double_stopped". The state entry's close_reason ("TP" /
+    "BREACH" / "STOP" / "EXPIRED") is the authoritative disposition — consult it
+    before any flag inference.
+    """
+    reason = str(entry.get("close_reason", "") or "").upper()
+    if reason == "TP":
+        return "take_profit"
+    if reason == "BREACH":
+        return "breach_exit"
+    if reason not in ("STOP", "") or entry.get("early_closed"):
+        # Any other early close (e.g. MKT-018) that is NOT a real stop.
+        if entry.get("early_closed"):
+            return "early_closed"
+
     call_stopped = entry.get("call_side_stopped", False)
     put_stopped = entry.get("put_side_stopped", False)
 
@@ -402,6 +427,11 @@ def _classify_outcome(entry: Dict) -> str:
     if put_stopped:
         return "put_stopped"
     return "clean"
+
+
+# Outcomes that represent a real stop-loss (loss-cut), as opposed to a clean
+# expiry or a profitable/defensive early close.
+_STOP_OUTCOMES = frozenset({"call_stopped", "put_stopped", "double_stopped"})
 
 
 def _detect_stop_pattern(entry_outcomes: List[Dict]) -> str:
