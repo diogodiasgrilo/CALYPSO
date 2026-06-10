@@ -50,8 +50,16 @@ export function EntryGrid() {
   // schedule, not the canonical schedule. So Entry #1 = first active base slot
   // (10:45 when 10:15 is dropped), Entry #2 = second, and conditional slots
   // continue the sequence.
-  const activeBaseTimes = canonicalBaseTimes.filter((t) => activeBaseSet.has(t));
-  const activeCondTimes = canonicalCondTimes.filter((t) => activeCondSet.has(t));
+  // Intersect the canonical (config) slots with the runtime schedule (which
+  // survived the VIX-regime cap). If the persisted runtime schedule
+  // (state.entry_schedule) DISAGREES with the current config — e.g. the
+  // config's entry_times changed since these entries were created — the
+  // intersection is empty, which would make existing entries VANISH. Fall back
+  // to the canonical config slots in that case so the cards still render.
+  const _intersectedBase = canonicalBaseTimes.filter((t) => activeBaseSet.has(t));
+  const _intersectedCond = canonicalCondTimes.filter((t) => activeCondSet.has(t));
+  const activeBaseTimes = _intersectedBase.length > 0 ? _intersectedBase : canonicalBaseTimes;
+  const activeCondTimes = _intersectedCond.length > 0 ? _intersectedCond : canonicalCondTimes;
   const effectiveBaseNum = (time: string) => activeBaseTimes.indexOf(time) + 1;
   const effectiveCondNum = (time: string) =>
     activeBaseTimes.length + activeCondTimes.indexOf(time) + 1;
