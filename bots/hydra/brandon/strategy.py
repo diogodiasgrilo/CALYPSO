@@ -498,33 +498,49 @@ class BrandonHydraStrategy(HydraStrategy):
                     self._brandon_check_hydra_shadow_stop(entry)
                     return action
 
-        # 3. HYDRA credit+buffer stop.
-        if not gex_stop_armed:
-            # FALLBACK (L-C1): GEX is unavailable → HYDRA's stop is the ONLY
-            # protection, so it ACTS (not shadow). A one-time-per-day alert
-            # announces the degraded mode; open positions ARE protected by the
-            # fallback. Restoring the GEX feed re-arms the primary next tick.
-            if list(self.daily_state.active_entries):
+        # 3. HYDRA credit+buffer stop — a LIVE backstop in BOTH GEX states.
+        #
+        #    FALLBACK (L-C1): GEX fully unavailable → the credit+buffer is the
+        #    ONLY protection; a one-time-per-day alert announces the degraded
+        #    mode.
+        #
+        #    BACKSTOP (L-C2, 2026-06-10): GEX is armed but the breach exit did
+        #    NOT fire this tick. The breach exit only fires when spot breaches a
+        #    decel-wall EDGE, which can sit far from the short — a wide/low wall,
+        #    or a strike placed off a stale-greeks profile. That left a
+        #    threatened short with NO acting stop while the credit+buffer ran
+        #    shadow-only: the 2026-06-10 variant-C Entry#1 gap — put deep ITM at
+        #    ~16% cushion, the only decel wall 340pt below the 7290 short so the
+        #    breach exit could never fire, credit+buffer shadowed → the short
+        #    rode unstopped toward max loss. Fix: the credit+buffer ACTS as the
+        #    backstop here too. The GEX breach already had first crack above (it
+        #    returns early when it fires), so super() only catches a side the
+        #    breach exit left open AND that has breached its MKT-046-confirmed
+        #    credit+buffer level. GEX breach stays the PRIMARY (fires earlier, at
+        #    the wall); the credit+buffer is the floor beneath it. The two are
+        #    mutually exclusive per tick → never a double-stop.
+        if list(self.daily_state.active_entries):
+            if not gex_stop_armed:
                 self._brandon_alert_gex_fallback()
-                action = super()._check_stop_losses()
-                if action:
-                    return action
-        elif self.brandon_hydra_shadow_enabled:
-            # GEX armed → HYDRA stop stays SHADOW (logs only; never closes), so
-            # the head-to-head comparison with Brandon's GEX breach is preserved.
-            for entry in list(self.daily_state.active_entries):
-                self._brandon_check_hydra_shadow_stop(entry)
+            elif self.brandon_hydra_shadow_enabled:
+                # Early-warning + head-to-head record: the FIRST tick a side
+                # breaches its credit+buffer level, log/alert it. super() below
+                # then ACTS once MKT-046 confirms (~10s later) — so this is a
+                # heads-up that the backstop is arming, not a never-acting shadow.
+                for entry in list(self.daily_state.active_entries):
+                    self._brandon_check_hydra_shadow_stop(entry)
+            action = super()._check_stop_losses()
+            if action:
+                return action
 
         # 4. Defensive overlay (LIVE) — places hedge orders when triggered
         if self.brandon_gex_enabled and self.brandon_overlay_enabled:
             for entry in list(self.daily_state.active_entries):
                 self._brandon_check_overlay(entry)
 
-        # 5. Standard parent stops are deliberately NOT called in B/C — Brandon's
-        #    GEX breach is the primary stop. Falling through to super would
-        #    fire HYDRA's credit+buffer stop in addition, which defeats the
-        #    head-to-head comparison. Variant A keeps super() because it
-        #    loads HydraStrategy directly, not this subclass.
+        # 5. GEX breach (step 2) is the PRIMARY stop; the credit+buffer (step 3)
+        #    is the LIVE backstop beneath it. Both stop paths have already run,
+        #    so there is nothing further to call.
         return None
 
     # ------------------------------------------------------------------
@@ -805,13 +821,16 @@ class BrandonHydraStrategy(HydraStrategy):
     # ------------------------------------------------------------------
 
     def _brandon_check_hydra_shadow_stop(self, entry) -> None:
-        """Record when HYDRA's credit+buffer stop WOULD fire, without closing.
+        """Early-warning that the HYDRA credit+buffer backstop is arming.
 
         The check mirrors HydraStrategy._check_stop_with_confirmation's core
-        condition (spread_value >= side_stop) but does not call any close
-        helper. First fire per side per day is announced via Telegram so the
-        head-to-head comparison with Brandon's GEX breach is observable in
-        real time. Subsequent ticks of the same side are silent.
+        condition (spread_value >= side_stop) but does not itself close — it is
+        the head-to-head comparison datapoint vs Brandon's GEX breach. First
+        fire per side per day is announced via Telegram; subsequent ticks of the
+        same side are silent. Since L-C2 (2026-06-10) the credit+buffer is no
+        longer a never-acting shadow: ~10s after this heads-up, once MKT-046
+        confirms, super()._check_stop_losses() (run in _check_stop_losses step 3)
+        ACTS as the backstop and closes the side.
         """
         for side in ("call", "put"):
             if not self._brandon_side_alive(entry, side):
@@ -827,15 +846,16 @@ class BrandonHydraStrategy(HydraStrategy):
             credit = entry.call_spread_credit if side == "call" else entry.put_spread_credit
             expected_loss = sv - credit
             msg = (
-                f"BRANDON-HYDRA-SHADOW E#{entry.entry_number} {side}: "
-                f"HYDRA credit+buffer stop WOULD fire now — "
+                f"BRANDON-HYDRA-BACKSTOP E#{entry.entry_number} {side}: "
+                f"credit+buffer level breached — "
                 f"SV ${sv:.0f} >= trigger ${stop:.0f}, expected loss ${expected_loss:.0f}. "
-                f"Brandon GEX breach is the live stop; this is shadow only."
+                f"GEX breach is primary; the credit+buffer backstop ACTS if this "
+                f"persists ~10s (MKT-046)."
             )
             logger.warning(msg)
             self._brandon_send_telegram(
                 msg,
-                title=f"HYDRA-shadow-stop E#{entry.entry_number} {side}",
+                title=f"HYDRA backstop arming E#{entry.entry_number} {side}",
                 priority_name="MEDIUM",
                 alert_type_name="STOP_LOSS",
             )

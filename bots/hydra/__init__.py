@@ -36,6 +36,24 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- L-C2 Brandon credit+buffer BACKSTOP (2026-06-10): on the Brandon variants
+  (B/C), HYDRA's credit+buffer stop now ACTS as a live backstop in BOTH GEX
+  states, not just when GEX is fully down (L-C1). Previously, when GEX was armed
+  the credit+buffer ran shadow-only and the GEX breach exit was the sole acting
+  stop — but the breach exit only fires when spot breaches a decel-wall EDGE,
+  which can sit far from the short (a wide/low wall, or a strike placed off a
+  stale-greeks profile). The 2026-06-10 variant-C Entry#1 put hit this gap: deep
+  ITM at ~16% cushion with the only decel wall 340pt below the 7290 short, so the
+  breach exit could never fire and the shadowed credit+buffer never acted — the
+  short rode unstopped toward max loss. Fix (brandon/strategy.py _check_stop_losses
+  step 3): the GEX breach still gets first crack (PRIMARY, returns early when it
+  fires); if it does not close a side, super()._check_stop_losses() runs as the
+  MKT-046-confirmed backstop. Mutually exclusive per tick → no double-stop. The
+  shadow check is retained as a ~10s early-warning (renamed BRANDON-HYDRA-BACKSTOP).
+  Pairs with the same-day stale-greeks guard (which prevents the mis-placement);
+  the backstop guarantees protection even if a short ends up far from the wall.
+  +1 test rewritten, +1 added (TestGexFallbackStop). Polygon-independent (the
+  credit+buffer reads broker quotes, not Polygon) — no subscription change needed.
 - 2.0.0-rc.1 modularity refactor — instrument parameterization (2026-06-08, NO
   behavior change): the hardcoded SPX / VIX / SPXW / CBOE / 5pt-grid / 0DTE-expiry
   literals are now config-driven via _load_instrument_params (underlying_symbol /

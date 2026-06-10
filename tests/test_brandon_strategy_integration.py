@@ -812,7 +812,9 @@ class TestBreachExitLive:
 
 
 class TestHydraShadowStop:
-    """Verify HYDRA's credit+buffer stop runs in shadow only — never closes."""
+    """Verify the credit+buffer early-warning: logs/alerts once per side per day
+    when the level is breached, and this method itself never closes (the actual
+    close is super()._check_stop_losses, run as the L-C2 backstop in step 3)."""
 
     def _entry(self):
         e = MagicMock()
@@ -1146,10 +1148,17 @@ class TestOverlayReconciliation:
 
 
 class TestGexFallbackStop:
-    """L-C1: when GEX/Polygon is unavailable, Brandon's primary breach stop can
-    never fire — so HYDRA's credit+buffer stop must be PROMOTED from shadow to
-    the live-acting fallback (super()._check_stop_losses), never leaving an open
-    IC unstopped. Per tick the GEX stop and the fallback are mutually exclusive.
+    """L-C1 + L-C2: HYDRA's credit+buffer stop is the LIVE protection beneath
+    Brandon's GEX breach in BOTH GEX states.
+
+    L-C1 — GEX fully unavailable: the breach exit can never fire, so the
+    credit+buffer is the only stop and ACTS (super()._check_stop_losses).
+
+    L-C2 (2026-06-10) — GEX armed but the breach exit can't protect a threatened
+    short (decel wall far from the short / strike off a stale profile): the
+    breach exit gets first crack, and if it does not close the side the
+    credit+buffer ACTS as the backstop. It is no longer shadow-only. Per tick
+    the GEX stop and the backstop are mutually exclusive → never a double-stop.
     """
 
     def _active_entry(self):
@@ -1182,9 +1191,12 @@ class TestGexFallbackStop:
         assert called["parent"] == 1, "fallback must delegate to HYDRA's stop"
         assert result == "STOP E#1 call"
 
-    def test_gex_armed_keeps_hydra_stop_in_shadow(self, monkeypatch):
-        # GEX armed (profile present) + no breach this tick → parent stop must
-        # NOT act; the HYDRA stop stays shadow-only.
+    def test_gex_armed_credit_buffer_acts_as_backstop(self, monkeypatch):
+        # L-C2: GEX armed (profile present) + breach exit did NOT fire this tick
+        # → the credit+buffer ACTS as the backstop (parent stop called, its
+        # action returned), AND the shadow early-warning runs first. This is the
+        # 2026-06-10 variant-C gap: a threatened short whose decel wall is far
+        # away must still be stopped by the credit+buffer, not ride unprotected.
         from datetime import date
         from bots.hydra.brandon.gex_provider import GEXProfile
         prof = GEXProfile(
@@ -1206,13 +1218,44 @@ class TestGexFallbackStop:
         parent = BrandonHydraStrategy.__mro__[1]
         monkeypatch.setattr(
             parent, "_check_stop_losses",
+            lambda self_: called.__setitem__("parent", called["parent"] + 1) or "STOP E#1 put",
+        )
+        result = inst._check_stop_losses()
+
+        assert called["parent"] == 1, "GEX armed but no breach → credit+buffer backstop must ACT"
+        assert result == "STOP E#1 put"
+        inst._brandon_check_hydra_shadow_stop.assert_called()  # early-warning still logged
+
+    def test_gex_armed_breach_fires_skips_backstop(self, monkeypatch):
+        # When the GEX breach exit DOES fire, it returns early — the credit+buffer
+        # backstop must NOT also run that tick (mutually exclusive → no double-stop).
+        from datetime import date
+        from bots.hydra.brandon.gex_provider import GEXProfile
+        prof = GEXProfile(
+            spot=6800, expiry=date(2026, 5, 5),
+            fetched_at=datetime.now(timezone.utc), strikes=(),
+        )
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_breach_exit_enabled=True,
+            brandon_hydra_shadow_enabled=True,
+        )
+        inst._batch_update_entry_prices = MagicMock()
+        inst.daily_state = MagicMock()
+        inst.daily_state.active_entries = [self._active_entry()]
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
+        inst._brandon_check_breach_exit = lambda e: "BRANDON-BREACH E#1 put"  # breach fires
+        inst._brandon_check_hydra_shadow_stop = MagicMock()
+
+        called = {"parent": 0}
+        parent = BrandonHydraStrategy.__mro__[1]
+        monkeypatch.setattr(
+            parent, "_check_stop_losses",
             lambda self_: called.__setitem__("parent", called["parent"] + 1) or "NOPE",
         )
         result = inst._check_stop_losses()
 
-        assert called["parent"] == 0, "GEX armed → HYDRA stop must NOT act"
-        assert result is None
-        inst._brandon_check_hydra_shadow_stop.assert_called()
+        assert result == "BRANDON-BREACH E#1 put", "GEX breach is primary and returns early"
+        assert called["parent"] == 0, "backstop must NOT run on the same tick the breach fired"
 
     def test_fallback_alert_fires_once_per_day(self):
         inst = _make_instance(brandon_gex_enabled=False)
