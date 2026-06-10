@@ -36,6 +36,12 @@ ALLOWED_METHODS = frozenset({
     "get_order_status", "get_closed_position_price",
     # orders (writes)
     "place_and_wait_for_fill", "cancel_order",
+    # combo/BAG vertical (primitive args, RPC-friendly) — needed to empirically
+    # probe whether the IBKR PAPER account accepts + defined-risk-margins a
+    # bundled spread (combo-entry feasibility test, 2026-06-10), and the first
+    # building block of the atomic-combo entry path. Strategies do not call it
+    # today, so allowlisting it is inert for A/B/C.
+    "place_vertical_spread",
     # margin pre-check (S2 strangle gate — primitive args, RPC-friendly)
     "what_if_naked_margin",
     # operator override — clear the rate-limit penalty box (no restart needed)
