@@ -80,6 +80,34 @@ class BrandonHydraStrategy(HydraStrategy):
         dry_run: bool = False,
         alert_service=None,
     ):
+        # Brandon STATE containers + hedge-state restore MUST be initialized
+        # BEFORE super().__init__(): the base constructor runs position recovery
+        # → _reconcile_recovered_entries_with_broker → _expected_position_quantities
+        # (a Brandon override) which reads self._brandon_hedge_legs. Same
+        # init-order rule as stop_buffer / short_only_stop (CLAUDE.md). 2026-06-10:
+        # a mid-day variant-C restart raised "AttributeError: 'BrandonHydraStrategy'
+        # object has no attribute '_brandon_hedge_legs'" here, so the startup
+        # broker-reconcile was skipped (recovered ~10s later by the hourly POS-003).
+        # Loading the sidecar pre-super() also lets the startup reconcile correctly
+        # include any restored hedge-leg conids. Safe pre-super:
+        # _brandon_resolve_hedge_state_path uses a module constant and
+        # _brandon_today_date is a staticmethod — neither depends on super() state.
+        self._brandon_gex_profile: Optional[GEXProfile] = None
+        self._brandon_gex_profile_fetched_at: Optional[datetime] = None
+        self._brandon_gex_failure_at: Optional[datetime] = None
+        self._brandon_breach_states: dict[tuple[int, str], gex_breach_exit.BreachState] = {}
+        self._brandon_overlay_placed: set[tuple[int, str]] = set()
+        self._brandon_hydra_shadow_fired: set[tuple[int, str]] = set()
+        # Hedge legs placed during the day, keyed by entry_number. List grows
+        # when an overlay fires; cleared in _reset_for_new_day. Persisted to
+        # a sidecar JSON next to the bot's state file so a mid-day restart
+        # doesn't lose hedge tracking. Settled against SPX_close in
+        # log_daily_summary.
+        self._brandon_hedge_legs: dict[int, list[HedgeLeg]] = {}
+        self._brandon_hedge_settlements: list[HedgeSettlement] = []
+        self._brandon_hedge_state_path = self._brandon_resolve_hedge_state_path()
+        self._brandon_load_hedge_state()
+
         super().__init__(
             broker,
             config,
@@ -160,21 +188,10 @@ class BrandonHydraStrategy(HydraStrategy):
         hs = bcfg.get("hydra_stop_shadow") or {}
         self.brandon_hydra_shadow_enabled = bool(hs.get("enabled", True))
 
-        self._brandon_gex_profile: Optional[GEXProfile] = None
-        self._brandon_gex_profile_fetched_at: Optional[datetime] = None
-        self._brandon_gex_failure_at: Optional[datetime] = None
-        self._brandon_breach_states: dict[tuple[int, str], gex_breach_exit.BreachState] = {}
-        self._brandon_overlay_placed: set[tuple[int, str]] = set()
-        self._brandon_hydra_shadow_fired: set[tuple[int, str]] = set()
-        # Hedge legs placed during the day, keyed by entry_number. List grows
-        # when an overlay fires; cleared in _reset_for_new_day. Persisted to
-        # a sidecar JSON next to the bot's state file so a mid-day restart
-        # doesn't lose hedge tracking. Settled against SPX_close in
-        # log_daily_summary.
-        self._brandon_hedge_legs: dict[int, list[HedgeLeg]] = {}
-        self._brandon_hedge_settlements: list[HedgeSettlement] = []
-        self._brandon_hedge_state_path = self._brandon_resolve_hedge_state_path()
-        self._brandon_load_hedge_state()
+        # NOTE: the _brandon_* STATE containers + hedge-state restore are
+        # initialized BEFORE super().__init__() above (recovery needs them) —
+        # do not re-initialize them here or a same-day restart would wipe the
+        # hedge legs just restored from the sidecar.
 
         logger.info(
             "Brandon features active: tp=%s (thr=%.2f) | narrow_spread=%s | "
