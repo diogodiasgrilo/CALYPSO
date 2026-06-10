@@ -7505,7 +7505,22 @@ class HydraStrategy(MEICStrategy):
                 # to match the contract count the entry was placed at (not current config).
                 buf = self.call_stop_buffer if side == "call" else self.put_stop_buffer
                 extra = buf * entry.contracts * (self.buffer_decay_start_mult - 1) * decay_factor
-                return base_stop + extra
+                effective = base_stop + extra
+                # L-C2c (2026-06-10): the decayed effective stop must stay BELOW the
+                # spread_value clamp ceiling (width×100×contracts), or the credit+buffer
+                # stop is physically UNFIRABLE — spread_value is clamped to that ceiling
+                # (base_strategy L-C2b), so a trigger above it can never be reached. On
+                # wide spreads the 2.5× buffer is a small fraction of width and this never
+                # bites; on Brandon's NARROW 5pt spreads the decayed trigger can exceed
+                # width, so cap at 0.9×ceiling to keep the stop reachable.
+                if side == "call":
+                    width = (getattr(entry, "long_call_strike", 0) or 0) - (getattr(entry, "short_call_strike", 0) or 0)
+                else:
+                    width = (getattr(entry, "short_put_strike", 0) or 0) - (getattr(entry, "long_put_strike", 0) or 0)
+                if width and width > 0:
+                    cap = 0.9 * width * 100 * max(int(getattr(entry, "contracts", 1)), 1)
+                    return min(effective, cap)
+                return effective
         return base_stop
 
     # MKT-036: Stop confirmation timer helper
@@ -11179,11 +11194,29 @@ class HydraStrategy(MEICStrategy):
         # _settlement_spx_level only READS the index (no order), so it is safe in
         # dry-run. Defined-risk IC dry-run behavior is unchanged.
         _naked = not getattr(self, "requires_protective_wings", True)
+        _should_read_settlement = self.broker is not None and (not self.dry_run or _naked)
         settlement_level = (
-            self._settlement_spx_level()
-            if (self.broker is not None and (not self.dry_run or _naked))
-            else None
+            self._settlement_spx_level() if _should_read_settlement else None
         )
+        # S-HIGH-3 (2026-06-10): on a path where we SHOULD have a settlement level
+        # but the read FAILED, do NOT book this pass — an ITM-settled short would be
+        # mis-booked as a full-credit worthless PROFIT (the IBKR analog of the Saxo
+        # settlement_pnl_bug; today's '8 conids awaiting settlement' + the +885.6
+        # pre-settlement artifact). DEFER: leave every side un-expired so the next
+        # heartbeat retries once SPX is readable, signal the caller via
+        # self._settlement_deferred so it does NOT mark reconciliation complete, and
+        # alert once. The SPX index almost always prints its close value after 4pm,
+        # so this clears within a heartbeat or two; a persistent failure escalates.
+        self._settlement_deferred = False
+        if _should_read_settlement and settlement_level is None:
+            self._settlement_deferred = True
+            logger.critical(
+                "POS-004: settlement SPX unreadable — DEFERRING credit booking to "
+                "avoid mis-booking an ITM-settled short as worthless profit; will "
+                "retry next heartbeat."
+            )
+            self._alert_settlement_deferred()
+            return 0.0
 
         for entry in self.daily_state.entries:
             # Check call side
@@ -11515,6 +11548,12 @@ class HydraStrategy(MEICStrategy):
             # the expired-credit processor so those get booked, then
             # mark complete.
             expired_credit = self._process_expired_credits()
+            if getattr(self, "_settlement_deferred", False):
+                logger.warning(
+                    "POS-004: settlement booking deferred (SPX unreadable) — not "
+                    "finalizing reconciliation; will retry next heartbeat."
+                )
+                return False
             if expired_credit > 0:
                 logger.info(
                     f"FIX #77: Processed ${expired_credit:.2f} expired credits "
@@ -11595,6 +11634,14 @@ class HydraStrategy(MEICStrategy):
             # P&L. Idempotent (guards on *_side_expired) — safe to call
             # every heartbeat.
             self._process_expired_credits()
+            if getattr(self, "_settlement_deferred", False):
+                logger.warning(
+                    "POS-004: settlement booking deferred (SPX unreadable) — not "
+                    "finalizing reconciliation; will retry next heartbeat."
+                )
+                if settled_conids:
+                    self._save_state_to_disk()
+                return False
             if settled_conids:
                 self._save_state_to_disk()
 

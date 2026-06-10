@@ -336,6 +336,7 @@ def find_strike_at_delta(
     spot_fallback: Optional[float] = None,
     recompute_t_years: Optional[float] = None,
     increment: float = SPX_STRIKE_GRID_PT,
+    max_delta_abs: Optional[float] = None,
 ) -> Optional[float]:
     """Find the strike whose `side` option delta is closest to ±target_delta_abs.
 
@@ -413,7 +414,21 @@ def find_strike_at_delta(
         return None
 
     # Closest by absolute delta distance to target.
-    best_d, _ = min(candidates, key=lambda item: abs(abs(item[1]) - target_delta_abs))
+    best_d, best_delta = min(candidates, key=lambda item: abs(abs(item[1]) - target_delta_abs))
+    # S-HIGH-1 (2026-06-10): a sparse / ATM-biased chain (Starter tier strips
+    # greeks; only near-money strikes get hydrated) can make the strike "closest
+    # to target" actually a 20-35delta short — far from the 8delta intent — even
+    # off a FRESH profile (the stale-greeks guard only catches STALE ones, not a
+    # thin chain). With no clamp this silently places a much-too-close short.
+    # Reject when the best match is well past target so the caller falls back to
+    # the conservative OTM-multiplier instead.
+    if max_delta_abs is not None and abs(best_delta) > max_delta_abs:
+        logger.warning(
+            "find_strike_at_delta(%s): closest match %.0f is %.3fdelta > max %.3f "
+            "(target %.3f) — chain too sparse near target; returning None for OTM fallback",
+            side, best_d.strike, abs(best_delta), max_delta_abs, target_delta_abs,
+        )
+        return None
     snapped = round(best_d.strike / increment) * increment
     return snapped
 

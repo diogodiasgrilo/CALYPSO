@@ -3343,6 +3343,37 @@ class MEICStrategy(abc.ABC):
                 added += 1
         return d.strftime("%Y-%m-%d")
 
+    def _alert_settlement_deferred(self) -> None:
+        """Once-per-ET-day CRITICAL alert that settlement booking is deferred
+        because the post-close SPX read failed (S-HIGH-3).
+
+        Positions are NOT mis-booked — they wait for a readable SPX and the next
+        heartbeat retries — but a persistent failure needs an operator to
+        reconcile against the IBKR Option Cash Settlements report (cash posts T+1).
+        """
+        try:
+            today = get_us_market_time().date()
+        except Exception:
+            today = None
+        if getattr(self, "_settlement_deferred_alert_date", None) == today:
+            return
+        self._settlement_deferred_alert_date = today
+        try:
+            self.alert_service.send_alert(
+                alert_type=AlertType.CRITICAL_INTERVENTION,
+                title="Settlement booking DEFERRED — SPX unreadable at settlement",
+                message=(
+                    "Post-close SPX read failed, so settlement P&L booking is "
+                    "deferred to avoid mis-booking an ITM-settled short as a "
+                    "full-credit profit. Retrying each heartbeat. If this persists, "
+                    "reconcile manually against the IBKR Option Cash Settlements report."
+                ),
+                priority=AlertPriority.CRITICAL,
+                details={"bot": getattr(self, "BOT_NAME", "?")},
+            )
+        except Exception as exc:  # pragma: no cover - alert is best-effort
+            logger.debug(f"settlement-deferred alert send failed (non-fatal): {exc}")
+
     def _handle_naked_short(self, naked_info: Tuple[str, str, int]):
         """
         Handle a naked short position - CRITICAL SAFETY.

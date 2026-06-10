@@ -309,13 +309,20 @@ class BrandonHydraStrategy(HydraStrategy):
         # 7366.61 → real delta = 14δ). Falls back to cached delta when IV
         # is missing for a strike.
         t_years = self._brandon_estimate_t_years_to_close()
+        # S-HIGH-1: reject a "closest" match more than 2x the target delta (8δ →
+        # 16δ ceiling). A sparse/ATM-biased chain can otherwise place the short
+        # at 20-35δ — far too close — even off a fresh profile; falling back to
+        # the OTM-multiplier is the safe outcome there.
+        max_delta = target * 2.0
         call_short = gex_provider.find_strike_at_delta(
             profile, side="call", target_delta_abs=target, spot_fallback=spot,
             recompute_t_years=t_years, increment=self.strike_increment,
+            max_delta_abs=max_delta,
         )
         put_short = gex_provider.find_strike_at_delta(
             profile, side="put", target_delta_abs=target, spot_fallback=spot,
             recompute_t_years=t_years, increment=self.strike_increment,
+            max_delta_abs=max_delta,
         )
         if call_short is None or put_short is None:
             logger.warning(
