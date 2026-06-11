@@ -146,12 +146,28 @@ class IBKRAlertHooks:
         """
         try:
             if will_restart:
-                title = "HYDRA — IBKR session lost"
+                # SELF-HEALING in the deployed (broker-mode) topology: the
+                # strategy's ensure_connected() is only a GET /health probe; on
+                # failure main.py break()s and systemd restarts it in 30s, then
+                # it re-probes. The REAL session is owned by calypso-broker, which
+                # recovers independently. So this is informational, NOT actionable
+                # for the operator — demote to LOW (Telegram-only via routing) so
+                # it never emails. A crash-loop is collapsed to ~1/hr by the
+                # send_alert dedup gate. (Before 2026-06-11 this was a HIGH email
+                # and spammed the inbox on every restart cycle.)
+                title = "HYDRA — IBKR session re-probe failed (auto-restarting)"
                 body = (
-                    "IBKR session lost mid-day — bot exiting for systemd "
-                    "restart — likely competing session or LST expiry."
+                    "Strategy ensure_connected() health-probe failed — exiting "
+                    "for an automatic systemd restart (back in ~30s). In broker "
+                    "mode the shared session is owned by calypso-broker and "
+                    "recovers on its own; this is informational. If the bot "
+                    "keeps cycling, check calypso-broker."
                 )
+                priority = _alert_priority("LOW")
             else:
+                # ACTIONABLE: calypso-broker's own re-auth has failed 2+ cycles —
+                # A/B/C cannot trade until the session is restored. Stays HIGH +
+                # emails (and is exempt from the LOW Telegram-only routing).
                 title = "calypso-broker — IBKR re-auth failing"
                 body = (
                     "Shared broker IBKR re-auth has FAILED for 2+ consecutive "
@@ -162,13 +178,14 @@ class IBKRAlertHooks:
                     "hours, investigate LST/consumer-key or a competing session "
                     "on the same IBKR username."
                 )
+                priority = _alert_priority("HIGH")
             if reason:
                 body = f"{body}\n\nReason: {reason}"
             self._alerts.send_alert(
                 alert_type=_alert_type("API_ERROR"),
                 title=title,
                 message=body,
-                priority=_alert_priority("HIGH"),
+                priority=priority,
             )
         except Exception as e:
             logger.exception("on_ensure_connected_failed alert failed: %s", e)

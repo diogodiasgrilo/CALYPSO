@@ -85,11 +85,17 @@ def test_medium_is_suppressed_when_disabled():
 
 def test_enabled_service_publishes_all_severities():
     svc = _enabled_service()
-    for prio in (AlertPriority.CRITICAL, AlertPriority.HIGH,
-                 AlertPriority.MEDIUM, AlertPriority.LOW):
-        assert svc.send_alert(
-            AlertType.BOT_STOPPED, "t", "t", priority=prio
-        ) is True
+    # Distinct TYPE per severity so neither the content-dedup gate (collapses
+    # identical repeats) nor the per-type token bucket (caps a same-type burst
+    # at 3) interferes — this test is about severity routing, not throttling.
+    cases = [
+        (AlertType.CIRCUIT_BREAKER, AlertPriority.CRITICAL),
+        (AlertType.STOP_LOSS, AlertPriority.HIGH),
+        (AlertType.POSITION_CLOSED, AlertPriority.MEDIUM),
+        (AlertType.BOT_STOPPED, AlertPriority.LOW),
+    ]
+    for atype, prio in cases:
+        assert svc.send_alert(atype, f"event {prio.value}", "t", priority=prio) is True
 
 
 def test_default_priority_critical_type_bypasses_when_disabled():

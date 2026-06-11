@@ -55,6 +55,9 @@ Usage:
 import json
 import logging
 import os
+import re
+import threading
+import time
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
@@ -232,6 +235,20 @@ class AlertService:
         self._phone_number = alert_config.get("phone_number", "")
         self._email = alert_config.get("email", "")
 
+        # ── Anti-spam gate state (see _apply_alert_gate) ──────────────────────
+        # The single chokepoint that makes the alert stream un-spammable by
+        # construction: identical alerts collapse within a per-priority window,
+        # each alert TYPE is rate-limited by a token bucket, and a global email
+        # ceiling caps any burst. Added 2026-06-11 after a retry-loop flooded
+        # the inbox with dozens of duplicate CRITICAL/HIGH emails. All state is
+        # in-process (per bot instance) and guarded by a lock because the
+        # Telegram daemon thread and the main loop both call send_alert.
+        self._gate_lock = threading.Lock()
+        self._dedup_last: Dict[str, float] = {}        # fingerprint -> last-send monotonic ts
+        self._dedup_suppressed: Dict[str, int] = {}    # fingerprint -> #suppressed since last send
+        self._type_buckets: Dict[Any, Dict[str, float]] = {}  # alert_type -> token bucket
+        self._email_times: list = []                   # monotonic ts of recent EMAILS (ceiling)
+
         self._initialize()
 
     def _initialize(self) -> None:
@@ -325,6 +342,25 @@ class AlertService:
 
         # Determine delivery channels based on priority and alert type
         send_email = self._should_send_email(alert_type, priority)
+
+        # ── Anti-spam gate (the single chokepoint every call site passes) ─────
+        # Collapses identical alerts within a per-priority window, rate-limits
+        # each alert TYPE via a token bucket, and caps total emails per window.
+        # No matter what loop or retry storm fires upstream, the inbox can never
+        # be flooded again. NEVER_SUPPRESS types (halt/naked/breaker/emergency)
+        # bypass this entirely. Uses the RAW details for the fingerprint so
+        # entry-number / side keep distinct real events distinct.
+        allow, send_email, gate_note = self._apply_alert_gate(
+            alert_type, priority, title, details, send_email
+        )
+        if not allow:
+            logger.info(
+                "Alert gated [%s] %s: %s", priority.value, title, gate_note
+            )
+            return False
+        if gate_note:
+            # Surviving alert tells the user how many similar ones it stands in for.
+            message = f"{message}\n\n{gate_note}"
 
         # Normalize contracts defensively — `or 1` handles None, 0, and missing
         # (same null-safe pattern adopted in Phase 1 recovery paths). Live entries
@@ -440,30 +476,193 @@ class AlertService:
         AlertType.VARIANT_COMPARISON_DAILY,  # End-of-day A vs B — Telegram glance
     }
 
+    # =========================================================================
+    # ANTI-SPAM GATE TUNABLES (see _apply_alert_gate)
+    # =========================================================================
+
+    # Alert TYPES that bypass content-dedup and the token bucket entirely — a
+    # halted bot, a naked short, a tripped breaker, an emergency exit, or an
+    # operator-intervention call must ALWAYS get through. They still count
+    # toward the email ceiling (so it reflects reality) but the ceiling never
+    # suppresses THEM.
+    _NEVER_SUPPRESS = {
+        AlertType.DAILY_HALT,
+        AlertType.NAKED_POSITION,
+        AlertType.CRITICAL_INTERVENTION,
+        AlertType.CIRCUIT_BREAKER,
+        AlertType.EMERGENCY_EXIT,
+    }
+
+    # Identical-alert suppression window per priority. The FIRST alert of a
+    # given fingerprint always sends; repeats inside the window are collapsed
+    # (counted, then rolled up on the next send). A genuinely new event
+    # (different entry / side / wording) has a different fingerprint and is
+    # never blocked by this.
+    _DEDUP_WINDOWS_S = {
+        AlertPriority.CRITICAL: 300,    # 5 min
+        AlertPriority.HIGH: 600,        # 10 min
+        AlertPriority.MEDIUM: 1800,     # 30 min
+        AlertPriority.LOW: 3600,        # 60 min
+    }
+
+    # Per-type token bucket: a burst of _BUCKET_CAPACITY, then one refill every
+    # _BUCKET_REFILL_S. Catches a storm of same-TYPE alerts whose titles differ
+    # just enough to dodge content-dedup (e.g. a loop that embeds a live price).
+    _BUCKET_CAPACITY = 3.0
+    _BUCKET_REFILL_S = 600.0            # +1 token / 10 min
+
+    # Hard global ceiling on EMAILS across a rolling window. Over the ceiling,
+    # non-NEVER_SUPPRESS alerts downgrade to Telegram-only (they still deliver,
+    # email is just capped). The backstop that bounds any conceivable burst.
+    _EMAIL_CEILING = 12
+    _EMAIL_CEILING_WINDOW_S = 900       # 15 min
+
+    # Volatile tokens stripped before fingerprinting so a looping alert whose
+    # only difference is a dollar amount / price / percentage collapses to one.
+    _VOLATILE_TOKEN_RE = re.compile(
+        r'\[\d+c\]'                       # [Nc] contract prefix
+        r'|\$\s?-?\d[\d,]*(?:\.\d+)?'     # $1,234.50 / $-1200
+        r'|-?\d+\.\d+%?'                  # 7190.0 / 12.5%
+        r'|\b\d+%'                        # 50%
+    )
+
     def _should_send_email(self, alert_type: AlertType, priority: AlertPriority) -> bool:
         """
         Determine if an alert should also be sent via email.
 
-        Routing logic:
-        - CRITICAL/HIGH priority: always both channels
-        - Alert types in _EMAIL_ALWAYS: always both channels
-        - Alert types in _TELEGRAM_ONLY: Telegram only
-        - Everything else (MEDIUM/LOW): both channels (safe default)
+        Routing logic (order matters — fixed 2026-06-11):
+        1. _EMAIL_ALWAYS types email no matter what (financial/safety paper
+           trail — wins over every other rule).
+        2. _TELEGRAM_ONLY types NEVER email, even at CRITICAL/HIGH. This is
+           what lets a noisy-but-high-severity alert (e.g. a self-healing
+           "session lost, restarting" notice sent at LOW) be demoted to
+           Telegram. Previously the CRITICAL/HIGH bypass ran first, so the
+           Telegram-only set was unreachable for HIGH alerts.
+        3. CRITICAL/HIGH otherwise email (severity bypass).
+        4. MEDIUM emails; LOW is Telegram-only (matches DEFAULT_PRIORITIES'
+           stated intent — LOW = Telegram-only except the explicit
+           _EMAIL_ALWAYS members like DAILY_SUMMARY).
         """
-        # CRITICAL and HIGH always get email
-        if priority in (AlertPriority.CRITICAL, AlertPriority.HIGH):
-            return True
-
-        # Explicit email-always types
+        # 1. Financial/safety paper-trail types — always email.
         if alert_type in self._EMAIL_ALWAYS:
             return True
 
-        # Explicit Telegram-only types
+        # 2. Explicit Telegram-only types — never email (beats severity bypass).
         if alert_type in self._TELEGRAM_ONLY:
             return False
 
-        # Default: send email (safe fallback for unknown alert types)
-        return True
+        # 3. Severity bypass for everything else.
+        if priority in (AlertPriority.CRITICAL, AlertPriority.HIGH):
+            return True
+
+        # 4. MEDIUM → email; LOW → Telegram-only.
+        return priority == AlertPriority.MEDIUM
+
+    # =========================================================================
+    # ANTI-SPAM GATE
+    # =========================================================================
+
+    def _alert_fingerprint(
+        self,
+        alert_type: AlertType,
+        title: str,
+        details: Optional[Dict[str, Any]],
+    ) -> str:
+        """Stable identity for an alert, ignoring volatile $/price/% tokens but
+        KEEPING the entry-number / side so distinct real events stay distinct.
+
+        Two stops on entry #1 and entry #2 fingerprint differently (kept). The
+        SAME stop re-fired by a loop fingerprints identically (collapsed).
+        """
+        norm = self._VOLATILE_TOKEN_RE.sub('#', (title or '').lower())
+        norm = re.sub(r'\s+', ' ', norm).strip()
+        tag = ''
+        if details:
+            en = details.get('entry_number')
+            if en is not None:
+                tag += f'|e{en}'
+            sd = details.get('side')
+            if sd is not None:
+                tag += f'|s{sd}'
+        return f'{self.bot_name}|{alert_type.value}|{norm}{tag}'
+
+    def _take_type_token(self, alert_type: AlertType, now: float) -> bool:
+        """Token-bucket admission for one alert TYPE (called under _gate_lock).
+        Returns True if a token was available, False if the type is bursting."""
+        b = self._type_buckets.get(alert_type)
+        if b is None:
+            b = {'tokens': self._BUCKET_CAPACITY, 'last': now}
+            self._type_buckets[alert_type] = b
+        b['tokens'] = min(
+            self._BUCKET_CAPACITY,
+            b['tokens'] + (now - b['last']) / self._BUCKET_REFILL_S,
+        )
+        b['last'] = now
+        if b['tokens'] >= 1.0:
+            b['tokens'] -= 1.0
+            return True
+        return False
+
+    def _apply_alert_gate(
+        self,
+        alert_type: AlertType,
+        priority: AlertPriority,
+        title: str,
+        details: Optional[Dict[str, Any]],
+        send_email: bool,
+    ):
+        """The single anti-spam chokepoint. Returns (allow, send_email, note).
+
+        allow=False  → drop the alert entirely (duplicate within the priority
+                       window, or the TYPE is over its token-bucket burst).
+        send_email   → possibly downgraded to False when the global email
+                       ceiling is hit (Telegram still delivers).
+        note         → roll-up string ("+N similar suppressed") to append to the
+                       surviving alert, or '' .
+
+        Design: content-dedup (layer 1) applies to EVERY alert, including
+        _NEVER_SUPPRESS, because it only collapses byte-identical repeats — the
+        FIRST occurrence always sends and a distinct event (different
+        entry/side/wording) fingerprints differently, so a real critical is
+        never dropped. This is what protects against a tight pre-halt loop of
+        CRITICAL_INTERVENTION / NAKED_POSITION re-firing identically every tick.
+        _NEVER_SUPPRESS only exempts a type from the per-type token bucket
+        (layer 2) and the global email ceiling (layer 3), so a halted bot /
+        naked short / breaker / emergency exit always emails even in a storm.
+        """
+        never = alert_type in self._NEVER_SUPPRESS
+        now = time.monotonic()
+        with self._gate_lock:
+            # ── Layer 1: content dedup (ALL alerts) ──────────────────────────
+            fp = self._alert_fingerprint(alert_type, title, details)
+            window = self._DEDUP_WINDOWS_S.get(priority, 600)
+            last = self._dedup_last.get(fp)
+            if last is not None and (now - last) < window:
+                self._dedup_suppressed[fp] = self._dedup_suppressed.get(fp, 0) + 1
+                return (False, send_email,
+                        f"duplicate within {window}s "
+                        f"(#{self._dedup_suppressed[fp]} suppressed)")
+            # New, or window expired: record send time + capture rollup count.
+            suppressed_rollup = self._dedup_suppressed.pop(fp, 0)
+            self._dedup_last[fp] = now
+
+            # ── Layer 2: per-type token bucket (skipped for never-suppress) ──
+            if not never and not self._take_type_token(alert_type, now):
+                return (False, send_email,
+                        f"type {alert_type.value} over burst rate")
+
+            # ── Layer 3: global email ceiling (never-suppress always emails) ─
+            if send_email:
+                cutoff = now - self._EMAIL_CEILING_WINDOW_S
+                self._email_times = [t for t in self._email_times if t >= cutoff]
+                if len(self._email_times) >= self._EMAIL_CEILING and not never:
+                    send_email = False  # downgrade to Telegram-only; email capped
+                else:
+                    self._email_times.append(now)
+
+            note = (f"(+{suppressed_rollup} similar suppressed since last)"
+                    if suppressed_rollup else '')
+            return (True, send_email, note)
 
     # =========================================================================
     # CONVENIENCE METHODS FOR COMMON ALERTS

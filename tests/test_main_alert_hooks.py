@@ -295,15 +295,21 @@ class TestSnapshotExhaustionAlerts:
 
 
 class TestEnsureConnectedFailed:
-    def test_fires_high_api_error_with_reason(self, broker, alert_svc):
+    def test_strategy_bot_path_is_low_api_error_with_reason(self, broker, alert_svc):
+        # will_restart=True (default, strategy bot) is SELF-HEALING in broker
+        # mode — main.py just break()s for a systemd restart while the real
+        # session (owned by calypso-broker) recovers on its own. So it is
+        # demoted to LOW (Telegram-only via routing) — informational, not an
+        # actionable email (changed 2026-06-11 after it spammed the inbox on
+        # every restart cycle). Still API_ERROR, still carries the reason.
         hook = IBKRAlertHooks(broker, alert_svc)
         hook.on_ensure_connected_failed(reason="competing session detected")
         alert_svc.send_alert.assert_called_once()
         kwargs = alert_svc.send_alert.call_args.kwargs
         assert "API_ERROR" in str(kwargs["alert_type"]) or \
                str(kwargs["alert_type"]) == "API_ERROR"
-        assert "HIGH" in str(kwargs["priority"]) or \
-               str(kwargs["priority"]) == "HIGH"
+        assert "LOW" in str(kwargs["priority"]) or \
+               str(kwargs["priority"]) == "LOW"
         assert "competing session detected" in kwargs["message"]
 
     def test_no_reason_still_sends(self, broker, alert_svc):
@@ -311,13 +317,15 @@ class TestEnsureConnectedFailed:
         hook.on_ensure_connected_failed()
         alert_svc.send_alert.assert_called_once()
 
-    def test_bot_variant_says_exiting(self, broker, alert_svc):
-        # Default (strategy bot) framing: the bot IS about to exit/restart.
+    def test_bot_variant_says_auto_restarting(self, broker, alert_svc):
+        # Default (strategy bot) framing: self-healing auto-restart, not an
+        # operator-actionable "session lost" emergency.
         hook = IBKRAlertHooks(broker, alert_svc)
         hook.on_ensure_connected_failed("competing session")
         kwargs = alert_svc.send_alert.call_args.kwargs
-        assert "HYDRA" in kwargs["title"] and "session lost" in kwargs["title"]
-        assert "bot exiting" in kwargs["message"]
+        assert "HYDRA" in kwargs["title"] and "auto-restarting" in kwargs["title"]
+        assert "automatic systemd restart" in kwargs["message"]
+        assert "LOW" in str(kwargs["priority"])
 
     def test_broker_variant_says_broker_stays_up(self, broker, alert_svc):
         # Broker framing (will_restart=False): broker does NOT exit; must not

@@ -105,6 +105,15 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_breach_states: dict[tuple[int, str], gex_breach_exit.BreachState] = {}
         self._brandon_overlay_placed: set[tuple[int, str]] = set()
         self._brandon_hydra_shadow_fired: set[tuple[int, str]] = set()
+        # Cooldown after a TP/BREACH close that transacted 0 legs (a doomed
+        # close — e.g. a worthless far-OTM leg the broker won't fill). Keyed by
+        # (entry_number, side); value is the ET timestamp of the last failed
+        # attempt. Without this the close re-fires (and re-alerts) every ~11s
+        # tick, which flooded the inbox on 2026-06-11. The side stays alive for
+        # monitoring; we just space the retries to _BRANDON_FAILED_CLOSE_COOLDOWN_S
+        # apart and the L-C2 credit+buffer backstop + end-of-day expiry still
+        # protect the position between retries.
+        self._brandon_failed_close_at: dict[tuple[int, str], datetime] = {}
         # Hedge legs placed during the day, keyed by entry_number. List grows
         # when an overlay fires; cleared in _reset_for_new_day. Persisted to
         # a sidecar JSON next to the bot's state file so a mid-day restart
@@ -585,6 +594,13 @@ class BrandonHydraStrategy(HydraStrategy):
         if not decision.should_close:
             return None
 
+        # Don't re-fire a doomed close every tick: if every still-alive side is
+        # cooling down from a recent 0-leg close, wait. The side(s) stay alive
+        # and monitored; the L-C2 credit+buffer backstop + expiry still protect.
+        tp_alive = [s for s in ("call", "put") if self._brandon_side_alive(entry, s)]
+        if tp_alive and all(self._brandon_close_in_cooldown(entry, s) for s in tp_alive):
+            return None
+
         logger.info("BRANDON-TP E#%s: %s — closing IC", entry.entry_number, decision.reason)
         try:
             legs_closed, legs_failed, _ = self._close_entry_early(entry)
@@ -622,6 +638,7 @@ class BrandonHydraStrategy(HydraStrategy):
         call_did_close = call_alive and getattr(entry, "call_side_expired", False)
         put_did_close = put_alive and getattr(entry, "put_side_expired", False)
         if call_did_close:
+            self._brandon_clear_close_failed(entry, "call")
             entry.call_side_stopped = True
             close_cost_call = float(entry.call_spread_value) if entry.call_spread_value else 0.0
             # _close_entry_early already wrote the REAL fill-based close cost to
@@ -640,6 +657,7 @@ class BrandonHydraStrategy(HydraStrategy):
             )
             self._brandon_alert_orphan_close(entry, "call", "TP")
         if put_did_close:
+            self._brandon_clear_close_failed(entry, "put")
             entry.put_side_stopped = True
             close_cost_put = float(entry.put_spread_value) if entry.put_spread_value else 0.0
             # See call side: prefer the real fill cost _close_entry_early wrote;
@@ -759,6 +777,12 @@ class BrandonHydraStrategy(HydraStrategy):
                         entry.entry_number, side, decision.reason,
                     )
                     continue
+                # Cooldown: a recent 0-leg close on this breached side means we
+                # already tried and it didn't transact — don't re-fire (and
+                # re-alert) the close every ~11s tick. The wing stays alive and
+                # monitored; the L-C2 credit+buffer backstop still covers it.
+                if self._brandon_close_in_cooldown(entry, side):
+                    continue
                 logger.warning(
                     "BRANDON-BREACH E#%s %s: confirmed breach — closing IC. %s",
                     entry.entry_number, side, decision.reason,
@@ -803,6 +827,7 @@ class BrandonHydraStrategy(HydraStrategy):
                 call_did_close = call_alive_pre and getattr(entry, "call_side_expired", False)
                 put_did_close = put_alive_pre and getattr(entry, "put_side_expired", False)
                 if call_did_close:
+                    self._brandon_clear_close_failed(entry, "call")
                     entry.call_side_stopped = True
                     entry.actual_call_stop_debit = close_cost_call_real
                     if self.dry_run:
@@ -816,6 +841,7 @@ class BrandonHydraStrategy(HydraStrategy):
                     )
                     self._brandon_alert_orphan_close(entry, "call", "BREACH")
                 if put_did_close:
+                    self._brandon_clear_close_failed(entry, "put")
                     entry.put_side_stopped = True
                     entry.actual_put_stop_debit = close_cost_put_real
                     if self.dry_run:
@@ -1544,22 +1570,76 @@ class BrandonHydraStrategy(HydraStrategy):
         except Exception:
             return datetime.now(timezone.utc)
 
+    # Space between retries of a TP/BREACH close that transacted 0 legs.
+    _BRANDON_FAILED_CLOSE_COOLDOWN_S = 90.0
+
+    def _brandon_failed_close_store(self) -> dict:
+        """The (entry, side) → last-failed-close timestamp map. Lazily created
+        so partial constructions (tests build via __new__, bypassing __init__)
+        and any pre-init call path are safe."""
+        store = getattr(self, "_brandon_failed_close_at", None)
+        if store is None:
+            store = {}
+            self._brandon_failed_close_at = store
+        return store
+
+    def _brandon_close_in_cooldown(self, entry, side: str) -> bool:
+        """True if a TP/BREACH close for (entry, side) transacted 0 legs within
+        the last _BRANDON_FAILED_CLOSE_COOLDOWN_S — caller should skip re-firing
+        the close this tick. The side stays alive and monitored; we only avoid
+        hammering the broker (and re-alerting) every ~11s on a doomed close."""
+        last = self._brandon_failed_close_store().get((getattr(entry, "entry_number", -1), side))
+        if last is None:
+            return False
+        try:
+            elapsed = (self._brandon_now_et() - last).total_seconds()
+        except Exception:
+            return False
+        return elapsed < self._BRANDON_FAILED_CLOSE_COOLDOWN_S
+
+    def _brandon_mark_close_failed(self, entry, side: str) -> None:
+        """Record that a TP/BREACH close for (entry, side) transacted 0 legs."""
+        self._brandon_failed_close_store()[
+            (getattr(entry, "entry_number", -1), side)
+        ] = self._brandon_now_et()
+
+    def _brandon_clear_close_failed(self, entry, side: str) -> None:
+        """A close for (entry, side) succeeded — drop any cooldown so a future
+        re-open of that key isn't spuriously throttled."""
+        self._brandon_failed_close_store().pop((getattr(entry, "entry_number", -1), side), None)
+
     def _brandon_alert_orphan_close(self, entry, side: str, close_kind: str) -> None:
-        """CRITICAL: a Brandon close (TP/BREACH) transacted 0 legs while the
-        side's legs are still OPEN at the broker — an orphaned live position the
-        bot must NOT mark flat. Alerts the operator; the side is kept alive to
-        retry on the next tick. Wrapped so an alert failure can't break the loop.
+        """A Brandon close (TP/BREACH) transacted 0 legs while the side's legs
+        are still OPEN at the broker — the side is kept alive to retry. Alerts
+        the operator and starts a retry cooldown so the close (and this alert)
+        do NOT re-fire every tick.
+
+        Alert type/priority (changed 2026-06-11): this is an "close moved 0
+        legs, retrying" OPERATIONAL warning, NOT a confirmed naked short (a true
+        naked short — one leg filled, the other didn't — is detected on the B2
+        path in base_strategy and stays CRITICAL/NAKED_POSITION). It was
+        previously typed NAKED_POSITION/CRITICAL, which is in the send_alert
+        gate's _NEVER_SUPPRESS set, so it bypassed dedup and — combined with the
+        every-tick retry — flooded the inbox with hundreds of identical emails.
+        Re-typed EMERGENCY_CLOSE/HIGH so it still emails the operator once, but
+        the gate collapses the repeats (≈1 per 10-min window). Wrapped so an
+        alert failure can't break the loop.
         """
+        # Start the retry cooldown regardless of whether the alert send works.
+        self._brandon_mark_close_failed(entry, side)
         try:
             self._brandon_send_telegram(
                 message=(
                     f"Entry #{getattr(entry, 'entry_number', '?')} {side} side {close_kind} close "
                     f"transacted 0 legs but the {side} legs are still OPEN at the broker. The bot "
-                    f"kept the side alive to retry — check for an orphaned/naked live position."
+                    f"kept the side alive and will retry in "
+                    f"~{int(self._BRANDON_FAILED_CLOSE_COOLDOWN_S)}s — check for an orphaned/naked "
+                    f"live position if this repeats."
                 ),
                 title=f"ORPHANED CLOSE — {close_kind} closed 0 legs",
-                priority_name="CRITICAL",
-                alert_type_name="NAKED_POSITION",
+                priority_name="HIGH",
+                alert_type_name="EMERGENCY_CLOSE",
+                details={"entry_number": getattr(entry, "entry_number", None), "side": side},
             )
         except Exception as exc:
             logger.debug("orphan-close alert failed (non-fatal): %s", exc)
@@ -1570,6 +1650,7 @@ class BrandonHydraStrategy(HydraStrategy):
         title: str = "Brandon stack",
         priority_name: str = "MEDIUM",
         alert_type_name: str = "STOP_LOSS",
+        details: Optional[dict] = None,
     ) -> None:
         """Fire an AlertService alert. Maps Brandon-stack events into the
         existing CALYPSO alert pipeline (Pub/Sub → Telegram + Email).
@@ -1578,6 +1659,10 @@ class BrandonHydraStrategy(HydraStrategy):
         priority=MEDIUM (Telegram only). Caller can override per call site —
         e.g., overlay placements use HIGH; a hypothetical critical breach
         would use CRITICAL.
+
+        ``details`` is passed through to send_alert; the anti-spam gate reads
+        ``entry_number`` / ``side`` from it to keep distinct real events distinct
+        in its content-dedup fingerprint.
         """
         alert = getattr(self, "alert_service", None)
         if alert is None:
@@ -1591,6 +1676,7 @@ class BrandonHydraStrategy(HydraStrategy):
                 title=title,
                 message=message,
                 priority=priority,
+                details=details,
             )
         except Exception as exc:
             logger.debug("BRANDON Telegram send failed (non-fatal): %s", exc)
@@ -1607,6 +1693,7 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_breach_states.clear()
         self._brandon_overlay_placed.clear()
         self._brandon_hydra_shadow_fired.clear()
+        self._brandon_failed_close_store().clear()
         self._brandon_hedge_legs.clear()
         self._brandon_hedge_settlements = []
         # Wipe yesterday's hedge sidecar so a new-day restart won't restore it.
