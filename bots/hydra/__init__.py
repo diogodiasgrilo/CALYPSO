@@ -36,6 +36,26 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Alert anti-spam gate + Brandon strike-veto + %-of-width shadow (2026-06-11):
+  Three changes after a variant-C retry-loop flooded the inbox and the same day's
+  Entry#2 mis-placed a short. (1) AlertService gained a single anti-spam GATE at
+  the send_alert chokepoint (shared/alert_service.py): content-dedup per priority
+  window + per-type token bucket + global email ceiling, fail-open, with a
+  _NEVER_SUPPRESS set for halt/naked/breaker/emergency. _should_send_email was
+  reordered so _TELEGRAM_ONLY beats the CRITICAL/HIGH bypass (LOW = Telegram-only).
+  The Brandon orphan-close alert was re-typed EMERGENCY_CLOSE/HIGH + a 90s
+  per-(entry,side) cooldown so a doomed 0-leg close stops re-firing every tick;
+  the "IBKR session lost (will restart)" notice was demoted to LOW (self-healing
+  in broker mode); ARGUS got file-based cross-run dedup. (2) Brandon delta-target
+  PRICE VETO (brandon/strategy.py _calculate_strikes): the 0DTE delta the picker
+  keys off under-states moneyness ~2x, so the max_delta clamp passed a ~30delta
+  short selected as "8delta" (Entry#2 7250 put). After selection we estimate the
+  spread credit and fall back to the conservative OTM-multiplier when a side's
+  credit exceeds max_credit_pct_of_width of its width (default 0.20); fail-safe on
+  a flaky/0 estimate. (3) %-of-width stop SHADOW (narrow_spread_stop.shadow): logs
+  the would-fire trigger vs the acting credit+buffer without acting, for a
+  zero-risk head-to-head on live C before flipping the decoupled stop on. +26
+  tests; full suite 1425 passed.
 - L-C2 Brandon credit+buffer BACKSTOP (2026-06-10): on the Brandon variants
   (B/C), HYDRA's credit+buffer stop now ACTS as a live backstop in BOTH GEX
   states, not just when GEX is fully down (L-C1). Previously, when GEX was armed
