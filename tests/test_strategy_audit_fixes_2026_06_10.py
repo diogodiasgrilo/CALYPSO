@@ -292,3 +292,50 @@ class TestBreachAdvisory:
             out = s._brandon_check_breach_exit(e)
         assert out is None                    # advisory: returns no action
         s._close_entry_early.assert_not_called()
+
+
+class TestDeltaUsesCachedMarketNotRecompute:
+    """2026-06-11 root-cause fix: find_strike_at_delta must use the cached MARKET
+    delta (matches option prices), NOT a calendar-BS re-level that under-deltas 0DTE
+    ~2x and picked a 33δ put as '8δ'. recompute_t_years is now a drift adjustment
+    (BS(live) - BS(profile.spot)), not a re-level."""
+
+    def _prof(self, spot):
+        ds = [StrikeDelta(7185.0, "put", -0.087, 0.34),
+              StrikeDelta(7200.0, "put", -0.110, 0.333),
+              StrikeDelta(7220.0, "put", -0.157, 0.314),
+              StrikeDelta(7250.0, "put", -0.281, 0.308)]
+        return GEXProfile(spot=spot, expiry=date(2026, 6, 11),
+                          fetched_at=datetime.now(timezone.utc), deltas=tuple(ds))
+
+    def test_picks_8delta_by_cached_even_with_recompute(self):
+        # profile.spot == live spot -> drift adj == 0 -> uses the cached delta ->
+        # picks 7185 (~9δ, the real 8δ band), NOT the too-close strike the old
+        # calendar-BS re-level would have landed on.
+        p = self._prof(7288.0)
+        out = find_strike_at_delta(p, side="put", target_delta_abs=0.08,
+                                   spot_fallback=7288.0, recompute_t_years=0.000542,
+                                   max_delta_abs=0.16)
+        assert out == 7185.0
+
+    def test_recompute_drift_zero_equals_no_recompute(self):
+        # passing recompute_t_years with profile.spot == live spot must equal the
+        # no-recompute (pure cached) result — proves it no longer re-levels.
+        p = self._prof(7288.0)
+        a = find_strike_at_delta(p, side="put", target_delta_abs=0.08, spot_fallback=7288.0,
+                                 recompute_t_years=0.000542, max_delta_abs=0.16)
+        b = find_strike_at_delta(p, side="put", target_delta_abs=0.08, spot_fallback=7288.0,
+                                 max_delta_abs=0.16)
+        assert a == b == 7185.0
+
+    def test_skips_strikes_without_cached_delta(self):
+        # a strike with delta=None is not a candidate; the only cached one (7250,
+        # 0.28) exceeds the 0.16 clamp -> None -> caller falls back to OTM-multiplier.
+        ds = [StrikeDelta(7185.0, "put", None, 0.34),
+              StrikeDelta(7250.0, "put", -0.281, 0.308)]
+        p = GEXProfile(spot=7288.0, expiry=date(2026, 6, 11),
+                       fetched_at=datetime.now(timezone.utc), deltas=tuple(ds))
+        out = find_strike_at_delta(p, side="put", target_delta_abs=0.08,
+                                   spot_fallback=7288.0, recompute_t_years=0.000542,
+                                   max_delta_abs=0.16)
+        assert out is None

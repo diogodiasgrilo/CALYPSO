@@ -358,12 +358,15 @@ def find_strike_at_delta(
         target_delta_abs: target absolute delta, e.g. 0.08 for 8 delta
         spot_fallback: spot price to gate strikes against (defaults to
             profile.spot if not provided)
-        recompute_t_years: when provided alongside `spot_fallback`, refresh
-            each candidate's delta via Black-Scholes using the cached IV +
-            live spot + current time-to-expiry. Fixes the stale-snapshot
-            problem on 0DTE chains where delta drifts fast between the
-            15-min refresh windows. Strikes whose cached `iv` is missing
-            keep their cached `delta` (mixed-mode fallback).
+        recompute_t_years: when provided alongside `spot_fallback`, apply a
+            spot-DRIFT adjustment to each candidate's cached market delta —
+            Black-Scholes delta at the live spot minus BS delta at the
+            profile's own spot (same iv/t). This corrects for spot moving since
+            the fetch WITHOUT replacing the market-correct level (BS's 0DTE
+            level-error cancels in the difference). NOTE: it must NOT be used to
+            re-level the delta outright — calendar-time BS systematically
+            under-deltas 0DTE options ~2x (2026-06-11 incident: a 33δ put picked
+            as "8δ"). Candidates without a cached `delta` are skipped.
 
     Returns:
         float strike price (snapped to 5pt grid) or None.
@@ -385,7 +388,7 @@ def find_strike_at_delta(
     )
 
     # Filter to the right side, on the right side of spot, with a usable
-    # delta source (cached snapshot OR cached IV for BS-recompute).
+    # cached (market) delta.
     candidates: list[tuple[StrikeDelta, float]] = []
     for d in profile.deltas:
         if d.contract_type != side:
@@ -395,19 +398,32 @@ def find_strike_at_delta(
         if side == "put" and d.strike >= spot:
             continue
 
-        effective_delta: Optional[float] = None
-        if recompute_enabled and d.iv is not None and d.iv > 0:
-            effective_delta = black_scholes_delta(
-                spot=spot,
-                strike=d.strike,
-                iv=d.iv,
-                t_years=float(recompute_t_years),
-                contract_type=side,
-            )
-        if effective_delta is None:
-            effective_delta = d.delta
-        if effective_delta is None:
+        # 2026-06-11 ROOT-CAUSE FIX: the cached delta IS the market delta — it
+        # matches the live option prices (verified against fills). The previous
+        # path REPLACED it with a calendar-time Black-Scholes delta, which
+        # systematically UNDER-deltas 0DTE options (~2x): on 2026-06-11 a 33δ put
+        # was selected as the "8δ" short because its recomputed delta read ~0.08.
+        # We now use the cached delta as the LEVEL and apply BS only as the
+        # spot-DRIFT adjustment — BS at the live spot minus BS at the profile's
+        # own spot, same iv/t. BS's absolute-level error cancels in that
+        # difference, so we keep the correct market level AND still correct for
+        # any spot move since the fetch. Strikes with no cached delta are skipped
+        # (we do not trust the bare recompute to invent one); a too-sparse chain
+        # then trips the max-delta clamp below and routes to the OTM-multiplier.
+        if d.delta is None:
             continue
+        effective_delta = d.delta
+        if recompute_enabled and d.iv is not None and d.iv > 0:
+            bs_live = black_scholes_delta(
+                spot=spot, strike=d.strike, iv=d.iv,
+                t_years=float(recompute_t_years), contract_type=side,
+            )
+            bs_ref = black_scholes_delta(
+                spot=float(profile.spot), strike=d.strike, iv=d.iv,
+                t_years=float(recompute_t_years), contract_type=side,
+            )
+            if bs_live is not None and bs_ref is not None:
+                effective_delta = d.delta + (bs_live - bs_ref)
         candidates.append((d, effective_delta))
 
     if not candidates:
