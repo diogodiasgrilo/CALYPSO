@@ -361,6 +361,28 @@ class HydraStrategy(MEICStrategy):
         if self.put_stop_buffer != self.call_stop_buffer:
             logger.info(f"  Asymmetric stop buffer: call=${self.call_stop_buffer/100:.2f}, put=${self.put_stop_buffer/100:.2f}")
 
+        # A2 (2026-06-10) %-of-width narrow-spread stop — config-gated, default OFF
+        # (A and un-migrated C keep the credit+buffer stop). When enabled, the stop
+        # TRIGGER becomes pct_of_width × width × 100 × contracts (a consistent
+        # %-of-max regardless of width) instead of the fixed-$ credit+buffer, which
+        # fires at 55-89% of max on 5pt spreads. Buffer decay is bypassed in this
+        # mode (it would re-widen the trigger). settlement_hold: on a defined-risk
+        # spread already deep ITM in the final minutes, prefer the 4pm cash
+        # settlement (intrinsic for $0) over a wide-quote marketable buy-back.
+        _nss = strategy_cfg.get("narrow_spread_stop", {}) or {}
+        self.narrow_spread_stop_enabled = bool(_nss.get("enabled", False))
+        self.narrow_spread_stop_pct = float(_nss.get("pct_of_width", 0.40))
+        _sh = _nss.get("settlement_hold", {}) or {}
+        self.settlement_hold_enabled = bool(_sh.get("enabled", True))
+        self.settlement_hold_itm_pct = float(_sh.get("itm_pct_of_width", 0.70))
+        self.settlement_hold_minutes = float(_sh.get("minutes_before_close", 20.0))
+        if self.narrow_spread_stop_enabled:
+            logger.info(
+                f"  A2 narrow-spread stop ENABLED: trigger at {self.narrow_spread_stop_pct:.0%} of width "
+                f"| settlement-hold {'on' if self.settlement_hold_enabled else 'off'} "
+                f"(>{self.settlement_hold_itm_pct:.0%} ITM within {self.settlement_hold_minutes:.0f}min of close)"
+            )
+
         # Price-based stop: trigger when SPX reaches within N points of the short strike.
         # When set, replaces the credit-based spread-value check for ALL entry types
         # (full IC, call-only, put-only). Set to None to use credit-based stop (default).
@@ -7238,6 +7260,31 @@ class HydraStrategy(MEICStrategy):
                     f"({self.buffer_decay_start_mult:.2f}× decaying to 1× over {self.buffer_decay_hours:.1f}h)"
                 )
 
+        # A2: %-of-width narrow-spread stop OVERRIDE — applied after all three
+        # branches set the credit+buffer stops, so it covers call-only / put-only /
+        # full-IC uniformly. Replaces each non-zero side's trigger with
+        # pct × width × 100 × contracts. Config-gated (default OFF → A and
+        # un-migrated C unchanged). Decay is bypassed for these stops in
+        # _get_effective_stop_level so the % trigger isn't re-widened early-day.
+        if getattr(self, "narrow_spread_stop_enabled", False):
+            pct = self.narrow_spread_stop_pct
+            for side in ("call", "put"):
+                cur = getattr(entry, f"{side}_side_stop", 0) or 0
+                if cur <= 0:
+                    continue  # side not placed
+                if side == "call":
+                    width = (entry.long_call_strike or 0) - (entry.short_call_strike or 0)
+                else:
+                    width = (entry.short_put_strike or 0) - (entry.long_put_strike or 0)
+                if width and width > 0:
+                    new_stop = pct * width * 100 * self.contracts_per_entry
+                    setattr(entry, f"{side}_side_stop", new_stop)
+                    logger.info(
+                        f"A2: Entry #{entry.entry_number} {side} %-of-width stop = "
+                        f"{pct:.0%} × {width:.0f}pt × {self.contracts_per_entry}c = ${new_stop:.2f} "
+                        f"(was credit+buffer ${cur:.2f})"
+                    )
+
     # =========================================================================
     # OVERRIDE: P&L sanity validation for one-sided entries (Fix #39)
     # =========================================================================
@@ -7509,6 +7556,11 @@ class HydraStrategy(MEICStrategy):
         """Return effective stop level with MKT-042 buffer decay applied.
         Used by heartbeat and Telegram for accurate cushion display."""
         base_stop = getattr(entry, f'{side}_side_stop', 0)
+        # A2: in %-of-width mode the stop IS the % trigger; MKT-042 buffer decay
+        # would re-widen it back toward max (the L-C2c trap), defeating the
+        # tightening — so skip decay entirely for these stops.
+        if getattr(self, "narrow_spread_stop_enabled", False):
+            return base_stop
         if (self.buffer_decay_start_mult is not None
                 and self.buffer_decay_hours is not None
                 and self.buffer_decay_hours > 0
@@ -7590,6 +7642,41 @@ class HydraStrategy(MEICStrategy):
             f"{detail}"
         )
 
+    def _settlement_hold_active(self, entry, side: str, spread_value: float) -> bool:
+        """A2: True when a defined-risk spread is already deep ITM within the final
+        minutes before the 4pm cash settlement, so we should HOLD rather than buy
+        it back through a wide late-day quote. Only active in the %-of-width regime
+        (config-gated) — A and un-migrated C are unaffected.
+        """
+        if not getattr(self, "settlement_hold_enabled", False):
+            return False
+        if not getattr(self, "narrow_spread_stop_enabled", False):
+            return False
+        if side == "call":
+            width = (getattr(entry, "long_call_strike", 0) or 0) - (getattr(entry, "short_call_strike", 0) or 0)
+        else:
+            width = (getattr(entry, "short_put_strike", 0) or 0) - (getattr(entry, "long_put_strike", 0) or 0)
+        if not width or width <= 0:
+            return False
+        max_val = width * 100 * max(int(getattr(entry, "contracts", 1)), 1)
+        if max_val <= 0 or spread_value < self.settlement_hold_itm_pct * max_val:
+            return False  # not deep ITM enough
+        try:
+            now = get_us_market_time()
+            close_dt = now.replace(hour=16, minute=0, second=0, microsecond=0)
+            mins_to_close = (close_dt - now).total_seconds() / 60.0
+        except Exception:
+            return False
+        if 0 <= mins_to_close <= self.settlement_hold_minutes:
+            logger.warning(
+                f"A2 SETTLEMENT-HOLD: E#{entry.entry_number} {side} deep ITM "
+                f"(SV ${spread_value:.0f} >= {self.settlement_hold_itm_pct:.0%} of ${max_val:.0f} max) "
+                f"with {mins_to_close:.0f}min to close — HOLDING to 4pm cash settlement "
+                f"(intrinsic for $0) instead of a wide-quote buy-back."
+            )
+            return True
+        return False
+
     def _check_stop_with_confirmation(self, entry, side: str, spread_value: float, stop_level: float) -> Optional[str]:
         """
         MKT-036: Check stop with confirmation timer (when enabled).
@@ -7614,6 +7701,14 @@ class HydraStrategy(MEICStrategy):
         MKT046_MIN_CONFIRM_SECONDS = 10
 
         if spread_value >= stop_level:
+            # A2 SETTLEMENT-HOLD: on a defined-risk spread already deep ITM in the
+            # final minutes before the 4pm close, prefer the cash settlement (pays
+            # intrinsic for $0) over a wide-quote marketable buy-back that can
+            # realize WORSE than intrinsic. The defined max loss already caps the
+            # risk. Checked BEFORE the severity bypass so even a 2× breach holds.
+            if self._settlement_hold_active(entry, side, spread_value):
+                setattr(entry, f'{side}_breach_time', None)
+                return None
             # L-M6: severity bypass. MKT-046's 10s confirmation exists to filter
             # momentary bid/ask spikes — but a breach FAR beyond the stop is a
             # real fast move, not a spike. Waiting 10s lets the loss balloon (and

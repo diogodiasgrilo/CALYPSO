@@ -15,7 +15,7 @@ import os
 import sys
 from datetime import date, datetime, timezone
 from types import SimpleNamespace
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), "..")))
 
@@ -174,3 +174,121 @@ class TestB2NakedShortOnPartialClose:
         assert "short_put" in attempted and "long_put" in attempted
         assert e.put_side_expired is True       # normal full close
         s._alert_short_close_failed.assert_not_called()
+
+
+# ============================ A2 / A1 stop redesign ============================
+
+def _nss_strat(pct=0.40, enabled=True):
+    s = HydraStrategy.__new__(HydraStrategy)
+    s.contracts_per_entry = 7
+    s.call_stop_buffer = 75.0
+    s.put_stop_buffer = 250.0
+    s.downday_theoretical_put_credit = 260.0
+    s.buffer_decay_start_mult = None       # skip MKT-042 init log
+    s.buffer_decay_hours = None
+    s.narrow_spread_stop_enabled = enabled
+    s.narrow_spread_stop_pct = pct
+    return s
+
+
+class TestPctOfWidthStop:
+    def _ic(self):
+        e = IronCondorEntry(entry_number=1)
+        e.contracts = 7
+        e.call_only = False
+        e.put_only = False
+        e.short_call_strike = 7425.0
+        e.long_call_strike = 7430.0      # 5pt
+        e.short_put_strike = 7290.0
+        e.long_put_strike = 7285.0       # 5pt
+        e.call_spread_credit = 190.0
+        e.put_spread_credit = 1190.0
+        return e
+
+    def test_full_ic_stops_become_pct_of_width(self):
+        s = _nss_strat(0.40)
+        e = self._ic()
+        s._calculate_stop_levels_hydra(e)
+        expected = 0.40 * 5 * 100 * 7   # 1400 — NOT the 1905/3130 credit+buffer
+        assert e.call_side_stop == expected
+        assert e.put_side_stop == expected
+
+    def test_disabled_keeps_credit_buffer(self):
+        s = _nss_strat(0.40, enabled=False)
+        e = self._ic()
+        s._calculate_stop_levels_hydra(e)
+        # credit+buffer: total_credit 1380 + put_buf 250*7=1750 -> 3130
+        assert e.put_side_stop == 1380.0 + 250.0 * 7
+
+    def test_decay_bypassed_in_pct_mode(self):
+        # Even with decay configured, the % stop is returned as-is (no widening).
+        s = _nss_strat(0.40)
+        s.buffer_decay_start_mult = 2.5
+        s.buffer_decay_hours = 4.0
+        e = self._ic()
+        e.put_side_stop = 1400.0
+        e.entry_time = get_us_market_time()
+        assert s._get_effective_stop_level(e, "put") == 1400.0
+
+
+class TestSettlementHold:
+    def _strat(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.settlement_hold_enabled = True
+        s.narrow_spread_stop_enabled = True
+        s.settlement_hold_itm_pct = 0.70
+        s.settlement_hold_minutes = 20.0
+        return s
+
+    def _put(self):
+        e = IronCondorEntry(entry_number=1)
+        e.contracts = 7                  # max = 5 * 100 * 7 = 3500; 70% = 2450
+        e.short_put_strike = 7290.0
+        e.long_put_strike = 7285.0
+        return e
+
+    def test_holds_deep_itm_near_close(self):
+        s, e = self._strat(), self._put()
+        with patch("bots.hydra.strategy.get_us_market_time",
+                   return_value=datetime(2026, 6, 10, 15, 50)):   # 10 min to close
+            assert s._settlement_hold_active(e, "put", 3000.0) is True
+            assert s._settlement_hold_active(e, "put", 1000.0) is False   # not deep ITM
+
+    def test_no_hold_when_far_from_close(self):
+        s, e = self._strat(), self._put()
+        with patch("bots.hydra.strategy.get_us_market_time",
+                   return_value=datetime(2026, 6, 10, 13, 0)):    # 3h to close
+            assert s._settlement_hold_active(e, "put", 3000.0) is False
+
+    def test_no_hold_when_mode_disabled(self):
+        s, e = self._strat(), self._put()
+        s.narrow_spread_stop_enabled = False
+        with patch("bots.hydra.strategy.get_us_market_time",
+                   return_value=datetime(2026, 6, 10, 15, 50)):
+            assert s._settlement_hold_active(e, "put", 3000.0) is False
+
+
+class TestBreachAdvisory:
+    def test_advisory_would_close_does_not_act(self):
+        from bots.hydra.brandon.strategy import BrandonHydraStrategy
+        from bots.hydra.brandon import gex_breach_exit
+        s = BrandonHydraStrategy.__new__(BrandonHydraStrategy)
+        s.brandon_breach_exit_advisory = True
+        s.brandon_breach_confirmation_seconds = 90
+        s.brandon_decel_min_pct = 0.05
+        s.current_price = 7270.0
+        s._brandon_today_date = lambda: date(2026, 6, 10)
+        s._brandon_now_et = lambda: datetime(2026, 6, 10, 15, 50)
+        s._brandon_breach_states = {}
+        s._close_entry_early = MagicMock()    # must NOT be called in advisory mode
+        wall = SimpleNamespace(strike_low=6950.0, strike_high=7395.0)
+        s._brandon_get_gex_profile = lambda d: SimpleNamespace(
+            positive_clusters=lambda min_strength_pct: (wall,))
+        s._brandon_side_alive = lambda e, side: side == "put"
+        e = SimpleNamespace(entry_number=1, short_call_strike=7425.0, short_put_strike=7290.0)
+        decision = SimpleNamespace(is_first_breach=False, would_close=True, reason="breach")
+        with patch.object(gex_breach_exit, "evaluate_breach",
+                          return_value=(decision, SimpleNamespace())):
+            out = s._brandon_check_breach_exit(e)
+        assert out is None                    # advisory: returns no action
+        s._close_entry_early.assert_not_called()

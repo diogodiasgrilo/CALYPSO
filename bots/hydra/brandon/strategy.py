@@ -135,6 +135,12 @@ class BrandonHydraStrategy(HydraStrategy):
         self.brandon_polygon_underlying = str(gex.get("polygon_underlying", "SPX"))
         self.brandon_strike_adjuster_enabled = bool(gex.get("strike_adjuster_enabled", False))
         self.brandon_breach_exit_enabled = bool(gex.get("breach_exit_enabled", False))
+        # A1 (2026-06-10): demote the GEX breach exit to ADVISORY — it still
+        # evaluates + logs "would-close", but does NOT act; the credit+buffer
+        # (with the L-C2 backstop) is the acting PRIMARY. The research is decisive
+        # that a 90s wall-breach is mostly noise (70-86% false; needs ~20min) and
+        # GEX adds little over VIX/IV — so this is the recommended B/C config.
+        self.brandon_breach_exit_advisory = bool(gex.get("breach_exit_advisory", False))
         self.brandon_breach_confirmation_seconds = int(gex.get("breach_confirmation_seconds", 90))
         self.brandon_decel_min_pct = float(gex.get("decel_min_pct", 0.05))
         self.brandon_accel_min_pct = float(gex.get("accel_min_pct", 0.10))
@@ -742,6 +748,17 @@ class BrandonHydraStrategy(HydraStrategy):
             if decision.is_first_breach:
                 logger.info("BRANDON-BREACH E#%s %s: first breach — %s", entry.entry_number, side, decision.reason)
             if decision.would_close:
+                # A1: advisory mode — log the would-close for the head-to-head
+                # record but do NOT act; the credit+buffer (L-C2 backstop) is the
+                # acting primary. Skip to the next side so this returns no action
+                # and _check_stop_losses falls through to super()._check_stop_losses().
+                if getattr(self, "brandon_breach_exit_advisory", False):
+                    logger.warning(
+                        "BRANDON-BREACH E#%s %s: ADVISORY would-close (breach confirmed) "
+                        "— NOT acting; credit+buffer stop is primary. %s",
+                        entry.entry_number, side, decision.reason,
+                    )
+                    continue
                 logger.warning(
                     "BRANDON-BREACH E#%s %s: confirmed breach — closing IC. %s",
                     entry.entry_number, side, decision.reason,
