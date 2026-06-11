@@ -292,6 +292,170 @@ class TestDeltaTargetStrikeSelection:
         assert entry.short_put_strike < 7330.0  # decisively below the wall
 
 
+class TestDeltaTargetPriceVeto:
+    """Price/credit sanity veto (2026-06-11): the 0DTE delta the picker keys off
+    systematically under-states moneyness, so a ~30delta short can be selected as
+    the '8delta' short and placed far too close. After selection we estimate the
+    spread credit; if a side collects more than max_credit_pct_of_width of its
+    width, we fall back to the conservative OTM-multiplier. E#2's *estimate* was
+    0.23 of width (>0.20) — caught pre-placement even though the fill was richer."""
+
+    def _profile(self, deltas):
+        from datetime import date, datetime, timezone
+        from bots.hydra.brandon.gex_provider import GEXProfile, StrikeDelta
+        return GEXProfile(
+            spot=7345.0, expiry=date(2026, 5, 8),
+            fetched_at=datetime.now(timezone.utc), strikes=tuple(),
+            deltas=tuple(StrikeDelta(strike=s, contract_type=t, delta=d) for s, t, d in deltas),
+        )
+
+    def _setup(self, *, pct, est_call, est_put, est_raises=False):
+        prof = self._profile([
+            (7280, "put", -0.08), (7320, "put", -0.20),
+            (7430, "call", +0.08), (7420, "call", +0.10),
+        ])
+        inst = _make_instance(
+            brandon_delta_target_enabled=True, brandon_delta_target_pct=0.08,
+            brandon_narrow_spread_enabled=True,  # 5pt at VIX 17
+            brandon_delta_target_max_credit_pct_of_width=pct,
+            current_price=7345.0, current_vix=17.0,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
+        inst._brandon_today_date = lambda: None
+        if est_raises:
+            def _boom(_e):
+                raise RuntimeError("quote feed down")
+            inst._estimate_entry_credit = _boom
+        else:
+            inst._estimate_entry_credit = lambda _e: (est_call, est_put)
+        entry = MagicMock(entry_number=2)
+        entry.short_put_strike = entry.long_put_strike = 0.0
+        entry.short_call_strike = entry.long_call_strike = 0.0
+        entry.spread_width = 0
+        return inst, entry
+
+    def test_vetoes_too_rich_short_falls_back_to_otm(self):
+        # est_put=150/contract on a 5pt width → 150/500 = 0.30 > 0.20 ceiling.
+        inst, entry = self._setup(pct=0.20, est_call=20.0, est_put=150.0)
+        with patch.object(
+            BrandonHydraStrategy.__mro__[1], "_calculate_strikes", return_value=True,
+        ) as parent:
+            result = inst._calculate_strikes(entry)
+        assert result is True
+        parent.assert_called_once_with(entry)  # fell back to OTM-multiplier
+
+    def test_no_veto_for_legitimate_cheap_short(self):
+        # Both sides ~0.04 of width → well under the 0.20 ceiling; keep the pick.
+        inst, entry = self._setup(pct=0.20, est_call=20.0, est_put=22.0)
+        with patch.object(
+            BrandonHydraStrategy.__mro__[1], "_calculate_strikes", return_value=True,
+        ) as parent:
+            result = inst._calculate_strikes(entry)
+        assert result is True
+        parent.assert_not_called()
+        assert entry.short_put_strike == 7280.0   # the delta-target pick stands
+        assert entry.short_call_strike == 7430.0
+
+    def test_fail_safe_estimate_exception_does_not_veto(self):
+        # A flaky quote must NEVER block/alter an entry — only a CONFIRMED
+        # too-rich short widens. Estimation raising → keep the delta-target pick.
+        inst, entry = self._setup(pct=0.20, est_call=0.0, est_put=0.0, est_raises=True)
+        with patch.object(
+            BrandonHydraStrategy.__mro__[1], "_calculate_strikes", return_value=True,
+        ) as parent:
+            result = inst._calculate_strikes(entry)
+        assert result is True
+        parent.assert_not_called()
+        assert entry.short_put_strike == 7280.0
+
+    def test_zero_estimate_does_not_veto(self):
+        # (0,0) = estimation unavailable, not "free" — never veto on it.
+        inst, entry = self._setup(pct=0.20, est_call=0.0, est_put=0.0)
+        with patch.object(
+            BrandonHydraStrategy.__mro__[1], "_calculate_strikes", return_value=True,
+        ) as parent:
+            inst._calculate_strikes(entry)
+        parent.assert_not_called()
+        assert entry.short_put_strike == 7280.0
+
+    def test_disabled_when_ceiling_zero(self):
+        # ceiling 0 disables the veto entirely even with an egregiously rich short.
+        inst, entry = self._setup(pct=0.0, est_call=400.0, est_put=400.0)
+        with patch.object(
+            BrandonHydraStrategy.__mro__[1], "_calculate_strikes", return_value=True,
+        ) as parent:
+            inst._calculate_strikes(entry)
+        parent.assert_not_called()
+        assert entry.short_put_strike == 7280.0
+
+
+class TestPctWidthShadowStop:
+    """%-of-width stop SHADOW (2026-06-11): computes the would-fire trigger and
+    LOGS it without acting, so C can run a zero-risk head-to-head vs the acting
+    credit+buffer stop before flipping %-of-width live. Trigger for a 5pt/7c side
+    at 40% = 0.40×5×100×7 = $1,400."""
+
+    def _inst(self, *, shadow=True, pct=0.40):
+        inst = _make_instance(
+            narrow_spread_stop_shadow=shadow,
+            narrow_spread_stop_pct=pct,
+            contracts_per_entry=7,
+            _brandon_pctwidth_shadow_fired=set(),
+        )
+        inst._brandon_side_alive = lambda e, s: True
+        return inst
+
+    def _entry(self, *, call_sv, put_sv):
+        e = MagicMock(entry_number=2)
+        e.short_call_strike, e.long_call_strike = 7350.0, 7355.0   # 5pt
+        e.short_put_strike, e.long_put_strike = 7250.0, 7245.0     # 5pt
+        e.call_spread_value, e.put_spread_value = call_sv, put_sv
+        e.call_side_stop, e.put_side_stop = 2940.0, 3640.0          # acting credit+buffer
+        e.call_spread_credit, e.put_spread_credit = 140.0, 1750.0
+        return e
+
+    def test_would_fire_logged_when_sv_crosses_trigger(self, caplog):
+        inst = self._inst()
+        entry = self._entry(call_sv=1500.0, put_sv=500.0)  # call >$1400, put <$1400
+        import logging as _logging
+        with caplog.at_level(_logging.INFO):
+            inst._brandon_check_pctwidth_shadow_stop(entry)
+        assert (2, "call") in inst._brandon_pctwidth_shadow_fired
+        assert (2, "put") not in inst._brandon_pctwidth_shadow_fired
+        a2 = [r for r in caplog.records if "A2-SHADOW" in r.getMessage()]
+        assert len(a2) == 1 and "WOULD fire" in a2[0].getMessage()
+
+    def test_no_fire_when_below_trigger(self):
+        inst = self._inst()
+        entry = self._entry(call_sv=1000.0, put_sv=500.0)  # both <$1400
+        inst._brandon_check_pctwidth_shadow_stop(entry)
+        assert inst._brandon_pctwidth_shadow_fired == set()
+
+    def test_dedup_once_per_side_per_day(self, caplog):
+        inst = self._inst()
+        entry = self._entry(call_sv=1500.0, put_sv=500.0)
+        import logging as _logging
+        with caplog.at_level(_logging.INFO):
+            inst._brandon_check_pctwidth_shadow_stop(entry)
+            inst._brandon_check_pctwidth_shadow_stop(entry)  # second tick — silent
+        a2 = [r for r in caplog.records if "A2-SHADOW" in r.getMessage()]
+        assert len(a2) == 1
+
+    def test_disabled_is_noop(self):
+        inst = self._inst(shadow=False)
+        entry = self._entry(call_sv=9999.0, put_sv=9999.0)  # both way over
+        inst._brandon_check_pctwidth_shadow_stop(entry)
+        assert inst._brandon_pctwidth_shadow_fired == set()
+
+    def test_does_not_act_no_close_called(self):
+        # The shadow must NEVER touch the position — only log.
+        inst = self._inst()
+        inst._close_entry_early = MagicMock(side_effect=AssertionError("shadow must not close"))
+        entry = self._entry(call_sv=1500.0, put_sv=1500.0)
+        inst._brandon_check_pctwidth_shadow_stop(entry)  # must not raise
+        inst._close_entry_early.assert_not_called()
+
+
 class TestNarrowSpreadOverride:
     def test_uses_narrow_when_enabled(self):
         inst = _make_instance(brandon_narrow_spread_enabled=True)

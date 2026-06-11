@@ -372,6 +372,12 @@ class HydraStrategy(MEICStrategy):
         _nss = strategy_cfg.get("narrow_spread_stop", {}) or {}
         self.narrow_spread_stop_enabled = bool(_nss.get("enabled", False))
         self.narrow_spread_stop_pct = float(_nss.get("pct_of_width", 0.40))
+        # SHADOW (2026-06-11): compute the %-of-width trigger and LOG when it
+        # WOULD fire each tick, WITHOUT acting (the credit+buffer stop stays the
+        # acting stop). Set with enabled=false to run a zero-risk head-to-head on
+        # the LIVE variant C before flipping the %-of-width stop on. The
+        # Brandon monitoring loop calls _brandon_check_pctwidth_shadow_stop.
+        self.narrow_spread_stop_shadow = bool(_nss.get("shadow", False))
         _sh = _nss.get("settlement_hold", {}) or {}
         self.settlement_hold_enabled = bool(_sh.get("enabled", True))
         self.settlement_hold_itm_pct = float(_sh.get("itm_pct_of_width", 0.70))

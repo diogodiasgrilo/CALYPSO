@@ -105,6 +105,10 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_breach_states: dict[tuple[int, str], gex_breach_exit.BreachState] = {}
         self._brandon_overlay_placed: set[tuple[int, str]] = set()
         self._brandon_hydra_shadow_fired: set[tuple[int, str]] = set()
+        # %-of-width stop SHADOW: (entry_number, side) already logged a would-fire
+        # today (one head-to-head datapoint per side per day; see
+        # _brandon_check_pctwidth_shadow_stop). Cleared in _reset_for_new_day.
+        self._brandon_pctwidth_shadow_fired: set[tuple[int, str]] = set()
         # Cooldown after a TP/BREACH close that transacted 0 legs (a doomed
         # close — e.g. a worthless far-OTM leg the broker won't fill). Keyed by
         # (entry_number, side); value is the ET timestamp of the last failed
@@ -206,6 +210,24 @@ class BrandonHydraStrategy(HydraStrategy):
             _td_strategy = self.strategy_config.get("target_delta", 8)
             _td_pct = float(_td_strategy) / 100.0  # 8 → 0.08
         self.brandon_delta_target_pct = float(_td_pct)
+        # PRICE SANITY VETO (2026-06-11): the delta-target picker keys off the
+        # cached/recomputed delta, which on 0DTE carries a calendar-time ~2x
+        # under-delta bias (Polygon's greeks AND our BS both understate). A short
+        # truly at ~30delta can read ~0.12-0.16delta and pass the 0.16 clamp, so
+        # the picker places it far too close (E#2 2026-06-11: 7250 put, 38pt OTM,
+        # filled $2.50/share). The clamp validates a suspect delta against itself.
+        # Price is the market's own, bias-immune statement of moneyness: a true
+        # 8delta short collects a TINY fraction of its width; a too-close short
+        # collects a large one. After the picker chooses strikes we estimate the
+        # spread credit and REJECT (fall back to the conservative OTM-multiplier,
+        # which can only place WIDER) when credit/width exceeds this ceiling.
+        # E#2's *estimate* was $1.15/share on a 5pt width = 0.23 — already over a
+        # 0.20 ceiling — so this catches it pre-placement even though the fill came
+        # in richer. Default 0.20 ≈ the existing "2x target delta" (0.16) intent,
+        # enforced on price instead of the biased delta. 0 disables the veto.
+        self.brandon_delta_target_max_credit_pct_of_width = float(
+            dts.get("max_credit_pct_of_width", 0.20)
+        )
 
         hs = bcfg.get("hydra_stop_shadow") or {}
         self.brandon_hydra_shadow_enabled = bool(hs.get("enabled", True))
@@ -365,6 +387,57 @@ class BrandonHydraStrategy(HydraStrategy):
             entry.short_put_strike, entry.long_put_strike, put_width,
             spot,
         )
+
+        # PRICE SANITY VETO (2026-06-11) — see __init__ comment. The picker keys
+        # off a 0DTE delta that systematically UNDER-states moneyness, so a short
+        # truly ~25-35delta can be selected as the "8delta" short and placed far
+        # too close (E#2 2026-06-11). Price is the bias-immune cross-check: a true
+        # 8delta short collects a tiny fraction of its width; a too-close one
+        # collects a large fraction. Estimate the spread credit for the chosen
+        # strikes and, if either side's credit exceeds max_credit_pct_of_width of
+        # its width, fall back to the conservative OTM-multiplier (which can only
+        # place WIDER). FAIL-SAFE: an estimation failure (0 credit / exception)
+        # never vetoes — we only widen on a CONFIRMED too-rich short, never block
+        # an entry on a flaky quote. est_* are per-contract dollars; a spread's
+        # max value per contract is width_pt * 100, so credit/width = est/(w*100).
+        ceiling = getattr(self, "brandon_delta_target_max_credit_pct_of_width", 0.0)
+        if ceiling and ceiling > 0:
+            try:
+                est_call, est_put = self._estimate_entry_credit(entry)
+            except Exception as exc:
+                est_call, est_put = 0.0, 0.0
+                logger.debug(
+                    "BRANDON-DELTA-TARGET E#%s: price-veto estimate failed (%s) — not vetoing",
+                    getattr(entry, "entry_number", "?"), exc,
+                )
+            too_rich = None
+            if est_call and call_width > 0 and est_call / (call_width * 100) > ceiling:
+                too_rich = ("call", est_call, call_width, est_call / (call_width * 100))
+            elif est_put and put_width > 0 and est_put / (put_width * 100) > ceiling:
+                too_rich = ("put", est_put, put_width, est_put / (put_width * 100))
+            if too_rich is not None:
+                side, est, w, ratio = too_rich
+                logger.warning(
+                    "BRANDON-DELTA-TARGET E#%s: %s short credit $%.2f/contract = %.0f%% of %dpt width "
+                    "(> %.0f%% ceiling) — the '%.3fδ' pick is really far closer than target "
+                    "(0DTE delta under-stated it); falling back to OTM-multiplier (wider).",
+                    getattr(entry, "entry_number", "?"), side, est / 100.0, ratio * 100, w,
+                    ceiling * 100, target,
+                )
+                self._brandon_send_telegram(
+                    message=(
+                        f"Entry #{getattr(entry, 'entry_number', '?')}: delta-target {side} short would "
+                        f"collect {ratio * 100:.0f}% of its {w}pt width (${est / 100:.2f}/contract) — too "
+                        f"close for a {target:.2f}δ target (likely under-stated 0DTE delta). Used the "
+                        f"conservative OTM-multiplier instead."
+                    ),
+                    title="Delta-target too close — used OTM-multiplier",
+                    priority_name="MEDIUM",
+                    alert_type_name="SLIPPAGE_ALERT",
+                    details={"entry_number": getattr(entry, "entry_number", None), "side": side},
+                )
+                return super()._calculate_strikes(entry)
+
         return True
 
     # ------------------------------------------------------------------
@@ -554,6 +627,18 @@ class BrandonHydraStrategy(HydraStrategy):
             action = super()._check_stop_losses()
             if action:
                 return action
+
+        # 3b. %-of-width stop SHADOW (logs only, never acts) — head-to-head data
+        #     for the shadow-first rollout decision on C. Runs only when no stop
+        #     fired this tick (i.e. credit+buffer did NOT act), which is exactly
+        #     when we want to know "would the tighter %-of-width have fired here?".
+        #     Defensive: a shadow bug must never break the trading loop.
+        if getattr(self, "narrow_spread_stop_shadow", False):
+            for entry in list(self.daily_state.active_entries):
+                try:
+                    self._brandon_check_pctwidth_shadow_stop(entry)
+                except Exception as exc:
+                    logger.debug("A2-SHADOW check failed (non-fatal): %s", exc)
 
         # 4. Defensive overlay (LIVE) — places hedge orders when triggered
         if self.brandon_gex_enabled and self.brandon_overlay_enabled:
@@ -908,6 +993,53 @@ class BrandonHydraStrategy(HydraStrategy):
                 title=f"HYDRA backstop arming E#{entry.entry_number} {side}",
                 priority_name="MEDIUM",
                 alert_type_name="STOP_LOSS",
+            )
+
+    def _brandon_check_pctwidth_shadow_stop(self, entry) -> None:
+        """SHADOW (logs only, never acts): what the %-of-width stop WOULD do.
+
+        Enabled via narrow_spread_stop.shadow=true (with .enabled=false so it
+        does NOT override the acting credit+buffer stop). The first tick a side's
+        live cost-to-close (spread_value) crosses pct×width×100×contracts, log a
+        head-to-head datapoint vs the acting credit+buffer trigger — so we can
+        measure, over a couple of weeks on the LIVE variant, whether %-of-width
+        would fire EARLIER (tighter cap) and how often those positions then
+        recover (whipsaw) before deciding to flip it live. LOG ONLY — no Telegram
+        (keeps the shadow out of the inbox); pull the 'A2-SHADOW' lines from the
+        bot log / the spread_snapshots table for the analysis. Dedup: once per
+        side per day (matches _brandon_check_hydra_shadow_stop)."""
+        if not getattr(self, "narrow_spread_stop_shadow", False):
+            return
+        pct = getattr(self, "narrow_spread_stop_pct", 0.40)
+        contracts = getattr(self, "contracts_per_entry", 1) or 1
+        for side in ("call", "put"):
+            if not self._brandon_side_alive(entry, side):
+                continue
+            if side == "call":
+                sv = entry.call_spread_value
+                width = (entry.long_call_strike or 0) - (entry.short_call_strike or 0)
+                acting = entry.call_side_stop
+            else:
+                sv = entry.put_spread_value
+                width = (entry.short_put_strike or 0) - (entry.long_put_strike or 0)
+                acting = entry.put_side_stop
+            if not width or width <= 0:
+                continue
+            shadow_trigger = pct * width * 100 * contracts
+            if shadow_trigger <= 0 or sv < shadow_trigger:
+                continue
+            key = (entry.entry_number, side)
+            if key in self._brandon_pctwidth_shadow_fired:
+                continue
+            self._brandon_pctwidth_shadow_fired.add(key)
+            earlier = acting and shadow_trigger < acting
+            logger.info(
+                "A2-SHADOW E#%s %s: %%-of-width stop WOULD fire — SV $%.0f >= "
+                "%.0f%%×%.0fpt×%dc trigger $%.0f (acting credit+buffer trigger $%.0f, "
+                "%s). SHADOW ONLY — not acting.",
+                entry.entry_number, side, sv, pct * 100, width, contracts, shadow_trigger,
+                acting or 0.0,
+                "%-width is TIGHTER" if earlier else "credit+buffer is tighter/equal",
             )
 
     def _brandon_alert_gex_fallback(self) -> None:
@@ -1693,6 +1825,7 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_breach_states.clear()
         self._brandon_overlay_placed.clear()
         self._brandon_hydra_shadow_fired.clear()
+        self._brandon_pctwidth_shadow_fired.clear()
         self._brandon_failed_close_store().clear()
         self._brandon_hedge_legs.clear()
         self._brandon_hedge_settlements = []
