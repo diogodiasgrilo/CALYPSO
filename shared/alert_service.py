@@ -350,9 +350,19 @@ class AlertService:
         # be flooded again. NEVER_SUPPRESS types (halt/naked/breaker/emergency)
         # bypass this entirely. Uses the RAW details for the fingerprint so
         # entry-number / side keep distinct real events distinct.
-        allow, send_email, gate_note = self._apply_alert_gate(
-            alert_type, priority, title, details, send_email
-        )
+        #
+        # FAIL-OPEN: a bug in the gate must never SILENCE a real alert. On any
+        # gate exception we let the alert through unchanged (risk a duplicate,
+        # never a missed emergency). The gate can only ever make us send LESS;
+        # this guarantees a gate fault degrades to the old behaviour, not to
+        # silence.
+        try:
+            allow, send_email, gate_note = self._apply_alert_gate(
+                alert_type, priority, title, details, send_email
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.error("Alert gate error (failing open, alert sent): %s", e)
+            allow, gate_note = True, ""
         if not allow:
             logger.info(
                 "Alert gated [%s] %s: %s", priority.value, title, gate_note
