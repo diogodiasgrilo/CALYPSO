@@ -10906,6 +10906,13 @@ class HydraStrategy(MEICStrategy):
 
         logger.info("Resetting for new trading day")
 
+        # Per-day alert dedup: clear the emergency-close once-per-conid set so a
+        # fresh day starts clean (conids differ day-to-day, so this is hygiene
+        # against unbounded growth, not correctness). See
+        # base_strategy._emergency_close_alert_once.
+        if hasattr(self, "_emergency_close_alerted"):
+            self._emergency_close_alerted.clear()
+
         # STATE-004: Check for overnight 0DTE positions (should NEVER happen).
         #
         # P7-audit M7: the prior Saxo design gated this on

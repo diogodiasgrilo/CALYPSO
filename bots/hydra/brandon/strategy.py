@@ -1753,12 +1753,26 @@ class BrandonHydraStrategy(HydraStrategy):
         previously typed NAKED_POSITION/CRITICAL, which is in the send_alert
         gate's _NEVER_SUPPRESS set, so it bypassed dedup and — combined with the
         every-tick retry — flooded the inbox with hundreds of identical emails.
-        Re-typed EMERGENCY_CLOSE/HIGH so it still emails the operator once, but
-        the gate collapses the repeats (≈1 per 10-min window). Wrapped so an
-        alert failure can't break the loop.
+        Re-typed EMERGENCY_CLOSE/HIGH so it still emails the operator. Deduped to
+        fire AT MOST ONCE per (entry, side, kind) per day (2026-06-12): the 90s
+        retry cooldown alone still let it re-alert ~28× across an afternoon when a
+        close couldn't transact (variant-C 2026-06-12), so a per-episode flag
+        keeps it to a single heads-up. Wrapped so an alert failure can't break
+        the loop.
         """
         # Start the retry cooldown regardless of whether the alert send works.
         self._brandon_mark_close_failed(entry, side)
+        # Alert ONCE per (entry, side, kind) per day — the cooldown gates the
+        # close RETRY; this gates the ALERT so a persistent 0-leg close is a
+        # single heads-up, not a re-ping every cooldown window.
+        key = (getattr(entry, "entry_number", "?"), side, close_kind)
+        seen = getattr(self, "_brandon_orphan_alerted", None)
+        if seen is None:
+            seen = set()
+            self._brandon_orphan_alerted = seen
+        if key in seen:
+            return
+        seen.add(key)
         try:
             self._brandon_send_telegram(
                 message=(
@@ -1827,6 +1841,8 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_hydra_shadow_fired.clear()
         self._brandon_pctwidth_shadow_fired.clear()
         self._brandon_failed_close_store().clear()
+        if hasattr(self, "_brandon_orphan_alerted"):
+            self._brandon_orphan_alerted.clear()
         self._brandon_hedge_legs.clear()
         self._brandon_hedge_settlements = []
         # Wipe yesterday's hedge sidecar so a new-day restart won't restore it.

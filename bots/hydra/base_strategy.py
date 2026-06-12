@@ -4147,6 +4147,38 @@ class MEICStrategy(abc.ABC):
             instrument_id=uic, side=side, quantity=quantity,
         )
 
+    def _emergency_close_alert_once(self, uic, *, alert_type, title, message,
+                                    priority) -> None:
+        """Fire an emergency-close-failure alert AT MOST ONCE per (conid, title)
+        per ET day.
+
+        The close-with-retry path is re-invoked on EVERY monitoring tick while a
+        position stays unclosed, so without this a stuck close fired the same
+        alert cluster ~84×/hr (2026-06-12: variant-C E#2's take-profit couldn't
+        execute and re-alerted all afternoon). Keying on the broker conid + the
+        alert title lets the full escalation story (IMMEDIATE → STRUGGLING →
+        FAILED) come through ONCE, then stay quiet until the position resolves /
+        the day resets. Mirrors the _b2_short_fail_alerted dedup. Wrapped so an
+        alert failure can't break the close loop.
+        """
+        seen = getattr(self, "_emergency_close_alerted", None)
+        if seen is None:
+            seen = set()
+            self._emergency_close_alerted = seen
+        key = (uic, title)
+        if key in seen:
+            return
+        seen.add(key)
+        if getattr(self, "alert_service", None) is None:
+            return
+        try:
+            self.alert_service.send_alert(
+                alert_type=alert_type, title=title, message=message,
+                priority=priority, details={"conid": uic},
+            )
+        except Exception as exc:
+            logger.debug("emergency-close alert failed (non-fatal): %s", exc)
+
     def _close_position_with_retry_ib(
         self, position_id: str, leg_name: str, uic: int = None,
         entry_number: int = None, contracts: Optional[int] = None,
@@ -4324,7 +4356,8 @@ class MEICStrategy(abc.ABC):
                 if res and res.get("order_id"):
                     self._cancel_order(res["order_id"])
                 if attempt_num == 1:
-                    self.alert_service.send_alert(
+                    self._emergency_close_alert_once(
+                        uic,
                         alert_type=AlertType.EMERGENCY_CLOSE,
                         title="STOP CLOSE FAILED - IMMEDIATE",
                         message=(
@@ -4341,7 +4374,8 @@ class MEICStrategy(abc.ABC):
                     f"failed: {e}"
                 )
                 if attempt_num == 1:
-                    self.alert_service.send_alert(
+                    self._emergency_close_alert_once(
+                        uic,
                         alert_type=AlertType.EMERGENCY_CLOSE,
                         title="STOP CLOSE EXCEPTION - IMMEDIATE",
                         message=(
@@ -4351,7 +4385,8 @@ class MEICStrategy(abc.ABC):
                         priority=AlertPriority.HIGH,
                     )
                 elif attempt_num >= 4:
-                    self.alert_service.send_alert(
+                    self._emergency_close_alert_once(
+                        uic,
                         alert_type=AlertType.EMERGENCY_CLOSE,
                         title="EMERGENCY CLOSE STRUGGLING",
                         message=(
@@ -4379,7 +4414,8 @@ class MEICStrategy(abc.ABC):
             f"{uic}) after {EMERGENCY_CLOSE_MAX_ATTEMPTS} attempts!{partial_note}"
         )
         logger.critical(error_msg)
-        self.alert_service.send_alert(
+        self._emergency_close_alert_once(
+            uic,
             alert_type=AlertType.CIRCUIT_BREAKER,
             title="EMERGENCY CLOSE FAILED",
             message=error_msg,

@@ -456,6 +456,43 @@ class TestPctWidthShadowStop:
         inst._close_entry_early.assert_not_called()
 
 
+class TestOrphanCloseAlertDedup:
+    """The Brandon orphan-close (a TP/BREACH that transacted 0 legs) is re-checked
+    every tick; the 90s retry cooldown alone still re-alerted ~28×/afternoon, so
+    it now alerts AT MOST ONCE per (entry, side, kind) per day (2026-06-12)."""
+
+    def _inst(self):
+        from unittest.mock import MagicMock
+        inst = _make_instance(
+            alert_service=MagicMock(),
+            _brandon_orphan_alerted=set(),
+            _brandon_failed_close_at={},
+        )
+        return inst
+
+    def test_alerts_once_per_episode(self):
+        inst = self._inst()
+        entry = MagicMock(entry_number=2)
+        for _ in range(10):  # 10 ticks of a stuck 0-leg close
+            inst._brandon_alert_orphan_close(entry, "call", "TP")
+        assert inst.alert_service.send_alert.call_count == 1
+
+    def test_distinct_sides_alert_separately(self):
+        inst = self._inst()
+        entry = MagicMock(entry_number=2)
+        inst._brandon_alert_orphan_close(entry, "call", "TP")
+        inst._brandon_alert_orphan_close(entry, "put", "TP")
+        assert inst.alert_service.send_alert.call_count == 2
+
+    def test_cooldown_still_marked_each_call(self):
+        # The retry cooldown must STILL be set every call (it gates the close
+        # retry); only the ALERT is deduped.
+        inst = self._inst()
+        entry = MagicMock(entry_number=2)
+        inst._brandon_alert_orphan_close(entry, "call", "TP")
+        assert (2, "call") in inst._brandon_failed_close_at
+
+
 class TestNarrowSpreadOverride:
     def test_uses_narrow_when_enabled(self):
         inst = _make_instance(brandon_narrow_spread_enabled=True)
