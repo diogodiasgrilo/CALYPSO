@@ -35,7 +35,7 @@ import {
   Bar,
   Cell,
 } from "recharts";
-import { colors, pnlColor } from "../lib/tradingColors";
+import { colors, pnlColor, cushionColor } from "../lib/tradingColors";
 import { formatPnL, isRegularSessionTime } from "../lib/formatters";
 
 const POLL_MS = 2000;
@@ -151,7 +151,7 @@ interface VariantPayload {
   summary?: VariantSummary;
   entries?: VariantEntry[];
   pnl_history?: PnLPoint[];
-  peak_buffer?: { call_pct: number; put_pct: number };
+  min_buffer_margin?: { call_pct: number; put_pct: number };
   spx_open?: number;
   spx_high?: number;
   spx_low?: number;
@@ -572,7 +572,7 @@ function VariantPanel({ v, accent }: { v: VariantPayload; accent: string }) {
 
   const summary = v.summary!;
   const entries = v.entries ?? [];
-  const peak = v.peak_buffer ?? { call_pct: 0, put_pct: 0 };
+  const margin = v.min_buffer_margin ?? { call_pct: 100, put_pct: 100 };
 
   return (
     <div className="rounded border border-border-dim bg-card p-4 space-y-3">
@@ -602,10 +602,12 @@ function VariantPanel({ v, accent }: { v: VariantPayload; accent: string }) {
       )}
 
       <div className="border-t border-border-dim pt-2">
-        <div className="text-xs text-text-secondary mb-1">Peak Buffer Use Today</div>
+        <div className="text-xs text-text-secondary mb-1">
+          Min Buffer Margin Today <span className="text-text-dim">(100% = safe · 0% = at stop)</span>
+        </div>
         <div className="flex gap-4 text-xs">
-          <BufferBar label="Call" pct={peak.call_pct} />
-          <BufferBar label="Put" pct={peak.put_pct} />
+          <BufferBar label="Call" pct={margin.call_pct} />
+          <BufferBar label="Put" pct={margin.put_pct} />
         </div>
       </div>
     </div>
@@ -642,6 +644,7 @@ function EntryRow({ entry, accent }: { entry: VariantEntry; accent: string }) {
     disposition === "EXPIRED" ? colors.profit :
     disposition === "BREACH" || disposition === "STOP" ? colors.loss :
     disposition === "SKIPPED" ? colors.warning :
+    disposition === "SETTLING" ? colors.textSecondary :
     accent;
 
   const buffer = entry.buffer ?? { call_pct: null, put_pct: null, call_value: null, put_value: null };
@@ -716,10 +719,11 @@ function BufferBar({
   label?: string;
   compact?: boolean;
 }) {
-  const v = pct ?? 0;
-  // Buffer usage color: green low, amber mid, red high (inverted vs cushion).
-  const color =
-    v >= 80 ? colors.loss : v >= 60 ? "#f0883e" : v >= 40 ? colors.warning : colors.profit;
+  const v = pct ?? 100;
+  // Buffer MARGIN color (matches the live cards' cushion): green = lots of
+  // cushion, red = near the stop. Fixed 2026-06-12 — this used to color
+  // utilization (inverted), so a safe day looked red and a near-stop day green.
+  const color = cushionColor(v);
   const height = compact ? "h-1" : "h-1.5";
 
   return (
@@ -735,9 +739,8 @@ function BufferBar({
       <div className={`${height} bg-bg-elevated rounded-full overflow-hidden`}>
         <div
           className={`${height} rounded-full transition-all duration-500`}
-          // Bar fill caps at 100% (a full/breached buffer); the numeric label
-          // above keeps the true value (e.g. 120% = breached by 20% of buffer).
-          style={{ width: `${Math.min(v, 100)}%`, backgroundColor: color }}
+          // Margin fill: a fuller bar = more cushion (safer). Clamped to [0,100].
+          style={{ width: `${Math.max(0, Math.min(v, 100))}%`, backgroundColor: color }}
         />
       </div>
     </div>
@@ -879,8 +882,8 @@ function EndOfDayStats({
     ["Realized P&L", (v) => formatPnL(v?.summary?.total_realized_pnl ?? 0), true],
     ["Commission", (v) => `$${(v?.summary?.total_commission ?? 0).toFixed(0)}`],
     ["Net P&L", (v) => formatPnL(v?.summary?.net_pnl ?? 0), true],
-    ["Peak call buffer used", (v) => `${(v?.peak_buffer?.call_pct ?? 0).toFixed(0)}%`],
-    ["Peak put buffer used", (v) => `${(v?.peak_buffer?.put_pct ?? 0).toFixed(0)}%`],
+    ["Min call buffer margin", (v) => `${(v?.min_buffer_margin?.call_pct ?? 100).toFixed(0)}%`],
+    ["Min put buffer margin", (v) => `${(v?.min_buffer_margin?.put_pct ?? 100).toFixed(0)}%`],
   ];
 
   return (

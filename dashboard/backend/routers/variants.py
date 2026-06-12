@@ -29,7 +29,7 @@ from dashboard.backend.config import settings
 from dashboard.backend.services.state_reader import StateFileReader
 from dashboard.backend.services.metrics_reader import MetricsFileReader
 from dashboard.backend.services.db_reader import BacktestingDBReader
-from dashboard.backend.services.market_status import get_today_et
+from dashboard.backend.services.market_status import get_today_et, is_after_market_close
 
 logger = logging.getLogger("dashboard.variants")
 
@@ -279,19 +279,26 @@ def _summary_from_state(state: dict) -> dict:
     }
 
 
-def _compute_buffer_utilization(entry: dict) -> dict:
-    """For a single entry, return per-side buffer utilization based on the
-    most recent cost-to-close vs the trigger level.
+def _compute_buffer_margin(entry: dict) -> dict:
+    """For a single entry, return per-side buffer MARGIN (cushion) remaining —
+    how far the cost-to-close is from the stop trigger, as a percentage.
+
+    This matches the MAIN dashboard's convention exactly (EntryCard.tsx:
+    ``cushion = (stop_level - spread_value) / stop_level * 100``), where
+    **100% = full cushion / safe** and **0% = at the stop (a loss/stop)**. The
+    comparison page previously showed the INVERSE (utilization: cost/stop, high =
+    near stop), which read backwards vs the live cards — fixed 2026-06-12.
 
     Cost-to-close for a side is the ``call_spread_value`` / ``put_spread_value``
     fields, written by the bot during heartbeat. ``call_side_stop`` /
-    ``put_side_stop`` is the trigger threshold. Utilization = cost / stop.
+    ``put_side_stop`` is the trigger threshold. ``*_value`` keeps the raw
+    cost-to-close (dollars) for the "$cost / stop $X" caption.
 
     Per-side gating uses the actual side-status flags (stopped/expired/skipped),
     NOT entry.is_complete — the latter goes True immediately after placement
     (meic/strategy.py:1808) and would suppress the bar for monitoring entries.
     A done side returns None so the UI renders a placeholder instead of a
-    misleading 0%.
+    misleading value.
     """
     out = {"call_pct": None, "put_pct": None, "call_value": None, "put_value": None}
 
@@ -301,7 +308,7 @@ def _compute_buffer_utilization(entry: dict) -> dict:
             out["call_value"] = csv
             css = entry.get("call_side_stop")
             if css and css > 0:
-                out["call_pct"] = round(min(100.0, max(0.0, csv / css * 100)), 1)
+                out["call_pct"] = round(min(100.0, max(0.0, (css - csv) / css * 100)), 1)
 
     if _side_active(entry, "put"):
         psv = entry.get("put_spread_value")
@@ -309,15 +316,21 @@ def _compute_buffer_utilization(entry: dict) -> dict:
             out["put_value"] = psv
             pss = entry.get("put_side_stop")
             if pss and pss > 0:
-                out["put_pct"] = round(min(100.0, max(0.0, psv / pss * 100)), 1)
+                out["put_pct"] = round(min(100.0, max(0.0, (pss - psv) / pss * 100)), 1)
 
     return out
 
 
-def _entry_disposition(entry: dict) -> str:
+def _entry_disposition(entry: dict, after_close: bool = False) -> str:
     """Compute a human-readable disposition tag for an entry.
 
-    Returns one of: TP, BREACH, STOP, EXPIRED, SKIPPED, LIVE.
+    Returns one of: TP, BREACH, STOP, EXPIRED, SKIPPED, SETTLING, LIVE.
+
+    ``after_close`` (market is past the 4 PM / early-close cash settlement):
+    an entry whose placed sides aren't finalized is shown as SETTLING rather
+    than LIVE — the 0DTE options have expired and the bot is awaiting IBKR's
+    (often hours-late) settlement confirmation, so "LIVE" read wrong post-close
+    (it's not a monitorable position anymore). During the session it stays LIVE.
 
     Prefers the explicit `close_reason` field set at close time. Falls back
     to flag-based inference for entries closed before close_reason was
@@ -353,7 +366,8 @@ def _entry_disposition(entry: dict) -> str:
         and (not put_placed or put_done)
     )
     if not placed_sides_done:
-        return "LIVE"
+        # 0DTE after the close = expired & awaiting (late) settlement, not LIVE.
+        return "SETTLING" if after_close else "LIVE"
     # All placed sides resolved. Pick a label.
     if call_stopped or put_stopped:
         return "STOP"  # legacy — Brandon TP also lands here without close_reason
@@ -405,11 +419,12 @@ def _enrich_entries(entries: list[dict]) -> list[dict]:
     so the comparison panel can show what actually happened to each entry
     instead of a bare "DONE" badge.
     """
+    after_close = is_after_market_close()
     out = []
     for e in entries:
         copy = dict(e)
-        copy["buffer"] = _compute_buffer_utilization(e)
-        copy["disposition"] = _entry_disposition(e)
+        copy["buffer"] = _compute_buffer_margin(e)
+        copy["disposition"] = _entry_disposition(e, after_close)
         copy["entry_realized_pnl"] = round(_entry_realized_pnl(e), 2)
         out.append(copy)
     return out
@@ -452,10 +467,16 @@ def _query_peak_spread_values(db_path, today: str) -> dict:
         return {}
 
 
-def _peak_buffer_pct(entries: list[dict], db_path=None) -> dict:
-    """Largest call/put buffer utilization across today's entries.
+def _min_buffer_margin_pct(entries: list[dict], db_path=None) -> dict:
+    """SMALLEST call/put buffer MARGIN (cushion) reached across today's entries —
+    the tightest the day got, in the SAME convention as the live cards
+    (100% = full cushion, 0% = at the stop). Returned as ``{call_pct, put_pct}``
+    margins (= 100 − peak utilization). Renamed + inverted 2026-06-12: the panel
+    used to show peak UTILIZATION (high = near stop), which read backwards
+    vs the main dashboard.
 
-    Per side, takes the MAX of two signals (whichever is highest):
+    Per side, the peak utilization takes the MAX of two signals (whichever is
+    highest), then the margin is 100 − that:
       1. **Historical peak from spread_snapshots** — the bot writes
          a snapshot every ~10s; MAX(call_spread_value)/stop_level is
          the true peak observed today even if it has since recovered.
@@ -522,7 +543,11 @@ def _peak_buffer_pct(entries: list[dict], db_path=None) -> dict:
                     pct = min(120.0, psv / pss * 100)
                     peak_put = max(peak_put, pct)
 
-    return {"call_pct": round(peak_call, 1), "put_pct": round(peak_put, 1)}
+    # Convert peak utilization → minimum margin (cushion) remaining, clamped
+    # to [0, 100]. 0% = the side reached its stop; 100% = never threatened.
+    call_margin = round(min(100.0, max(0.0, 100.0 - peak_call)), 1)
+    put_margin = round(min(100.0, max(0.0, 100.0 - peak_put)), 1)
+    return {"call_pct": call_margin, "put_pct": put_margin}
 
 
 def _variant_payload(vid: str) -> dict:
@@ -557,7 +582,7 @@ def _variant_payload(vid: str) -> dict:
         "summary": _summary_from_state(state),
         "entries": _enrich_entries(entries),
         "pnl_history": state.get("pnl_history", []),
-        "peak_buffer": _peak_buffer_pct(entries, db_path=paths["backtesting_db"]),
+        "min_buffer_margin": _min_buffer_margin_pct(entries, db_path=paths["backtesting_db"]),
         "spx_open": (state.get("market_data_ohlc") or {}).get("spx_open"),
         "vix_open": (state.get("market_data_ohlc") or {}).get("vix_open"),
         "spx_high": (state.get("market_data_ohlc") or {}).get("spx_high"),
@@ -632,7 +657,7 @@ async def get_variant_summary(variant_id: str):
     return {
         "id": variant_id.upper(),
         "summary": _summary_from_state(state),
-        "peak_buffer": _peak_buffer_pct(state.get("entries", []), db_path=db_path),
+        "min_buffer_margin": _min_buffer_margin_pct(state.get("entries", []), db_path=db_path),
     }
 
 
