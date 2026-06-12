@@ -370,6 +370,91 @@ class TestPhantomSummaryGuard:
         assert self._stale("", "2026-06-03", 7556.82) is False
 
 
+# ─── 2026-06-11: daily-summary close recovery (C's 06-05→11 recording gap) ────
+class TestDailySummaryCloseRecovery:
+    """0DTE settlement can complete HOURS after the 4 PM close (IBKR marked C's
+    2026-06-11 legs settled at 9:52 PM ET), by which point the live current_price
+    has decayed to 0. The phantom guard then mis-flagged a LEGITIMATE traded day
+    as stale (spx_close<=0) and silently skipped the whole summary+metrics write
+    — C recorded no daily_summaries from 06-05 on. Fix: _resolve_spx_close()
+    recovers the day's last recorded SPX tick (on disk, survives the late timing
+    + a mid-evening restart), so a real day gets a real close and writes."""
+
+    def _strategy(self, *, current_price, recorder=None):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.current_price = current_price
+        s._data_recorder = recorder
+        return s
+
+    def test_uses_current_price_when_positive(self):
+        s = self._strategy(current_price=7350.5,
+                            recorder=MagicMock(get_last_spx_for_date=MagicMock(side_effect=AssertionError("should not query"))))
+        assert s._resolve_spx_close() == 7350.5  # no DB query when live price is good
+
+    def test_recovers_last_tick_when_price_zero(self):
+        rec = MagicMock()
+        rec.get_last_spx_for_date.return_value = 7375.96
+        s = self._strategy(current_price=0.0, recorder=rec)
+        assert s._resolve_spx_close() == 7375.96
+        rec.get_last_spx_for_date.assert_called_once()
+
+    def test_returns_zero_when_no_tick_data(self):
+        rec = MagicMock()
+        rec.get_last_spx_for_date.return_value = None
+        s = self._strategy(current_price=0.0, recorder=rec)
+        assert s._resolve_spx_close() == 0.0  # genuine phantom → guard still skips
+
+    def test_returns_zero_when_no_recorder(self):
+        s = self._strategy(current_price=0.0, recorder=None)
+        assert s._resolve_spx_close() == 0.0
+
+    def test_legitimate_late_day_no_longer_stale_via_resolved_close(self):
+        # The exact 06-11 case: today's state + real trades + live price 0, but a
+        # recoverable last tick → resolved close > 0 → NOT stale → summary writes.
+        rec = MagicMock()
+        rec.get_last_spx_for_date.return_value = 7391.67
+        s = self._strategy(current_price=0.0, recorder=rec)
+        resolved = s._resolve_spx_close()
+        assert HydraStrategy._daily_summary_is_stale("2026-06-11", "2026-06-11", resolved) is False
+
+    def test_true_phantom_still_stale_even_with_recovered_close(self):
+        # A prior-day in-memory state is still a phantom regardless of any close.
+        rec = MagicMock()
+        rec.get_last_spx_for_date.return_value = 7391.67
+        s = self._strategy(current_price=0.0, recorder=rec)
+        resolved = s._resolve_spx_close()
+        assert HydraStrategy._daily_summary_is_stale("2026-06-10", "2026-06-11", resolved) is True
+
+
+class TestGetLastSpxForDate:
+    """DataRecorder.get_last_spx_for_date — the close-recovery query."""
+
+    def _recorder(self, tmp_path):
+        from shared.data_recorder import DataRecorder
+        rec = DataRecorder(str(tmp_path / "t.db"))
+        rec.ensure_schema()
+        return rec
+
+    def test_returns_last_positive_tick_for_date(self, tmp_path):
+        rec = self._recorder(tmp_path)
+        rec.record_tick("2026-06-11 10:00:00", 7300.0, 19.0, "NEUTRAL", "RUNNING", 0, 0)
+        rec.record_tick("2026-06-11 15:59:58", 7391.67, 19.5, "NEUTRAL", "RUNNING", 2, 0)
+        rec.record_tick("2026-06-12 09:31:00", 7410.0, 18.0, "NEUTRAL", "RUNNING", 0, 0)
+        assert rec.get_last_spx_for_date("2026-06-11") == 7391.67  # last of THAT day
+        assert rec.get_last_spx_for_date("2026-06-12") == 7410.0
+
+    def test_returns_none_for_date_with_no_ticks(self, tmp_path):
+        rec = self._recorder(tmp_path)
+        rec.record_tick("2026-06-11 10:00:00", 7300.0, 19.0, "NEUTRAL", "RUNNING", 0, 0)
+        assert rec.get_last_spx_for_date("2026-06-10") is None
+
+    def test_ignores_zero_price_ticks(self, tmp_path):
+        rec = self._recorder(tmp_path)
+        rec.record_tick("2026-06-11 10:00:00", 7300.0, 19.0, "NEUTRAL", "RUNNING", 0, 0)
+        rec.record_tick("2026-06-11 16:30:00", 0.0, 0.0, "NEUTRAL", "RUNNING", 0, 0)  # after-hours 0
+        assert rec.get_last_spx_for_date("2026-06-11") == 7300.0  # skips the 0
+
+
 # ─── 2026-06-04: one-sided LIVE entry execution (the 0.0-strike leg failure) ──
 class TestOneSidedLiveEntry:
     """The LIVE _execute_entry placed all 4 legs unconditionally, so any

@@ -5144,6 +5144,34 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             logger.debug(f"DataRecorder stop write failed: {e}")
 
+    def _resolve_spx_close(self) -> float:
+        """The SPX close to use for the daily summary.
+
+        Normally ``self.current_price``, but that decays to 0 after-hours — and
+        0DTE settlement can complete HOURS after the 4 PM close (IBKR marked
+        variant C's 2026-06-11 legs settled at 9:52 PM ET), by which point
+        ``current_price`` is 0. The phantom-summary guard then treats a
+        LEGITIMATE traded day as stale and skips it — the cause of C's
+        2026-06-05→11 daily-summary/metrics recording gap. Recover the day's
+        last recorded SPX tick (on disk in market_ticks, so it survives the late
+        timing AND a mid-evening restart). Returns 0.0 only when there is
+        genuinely no intraday data — a true phantom — in which case the guard
+        correctly still skips.
+        """
+        px = float(self.current_price or 0)
+        if px > 0:
+            return px
+        rec = getattr(self, "_data_recorder", None)
+        if rec is not None:
+            try:
+                today = get_us_market_time().strftime("%Y-%m-%d")
+                last = rec.get_last_spx_for_date(today)
+                if last and last > 0:
+                    return float(last)
+            except Exception:
+                pass
+        return px  # 0.0 — no intraday data → genuine phantom; guard skips
+
     @staticmethod
     def _daily_summary_is_stale(state_date: str, today: str, spx_close) -> bool:
         """True if a daily summary built from the current in-memory state would
@@ -5181,11 +5209,15 @@ class HydraStrategy(MEICStrategy):
             # PHANTOM-SUMMARY GUARD (06-03 incident): refuse to write a summary
             # assembled from a prior day's stale in-memory state. See
             # _daily_summary_is_stale. Prevents the duplicate/0-close phantom row.
-            if self._daily_summary_is_stale(self.daily_state.date or "", date_str, self.current_price):
+            # Use the RESOLVED close (recovers the day's last tick when the live
+            # current_price is 0 at a late after-hours write) so a legitimate
+            # traded day is not mis-flagged as a phantom (2026-06-11 C gap fix).
+            spx_close = self._resolve_spx_close()
+            if self._daily_summary_is_stale(self.daily_state.date or "", date_str, spx_close):
                 logger.warning(
                     "Skipping daily_summary DB write — stale/incomplete state "
                     f"(state_date={self.daily_state.date or 'unset'}, today={date_str}, "
-                    f"spx_close={self.current_price}). Prevents a phantom summary row; "
+                    f"spx_close={spx_close}). Prevents a phantom summary row; "
                     "a clean row records after the next new-day reset."
                 )
                 return
@@ -5231,7 +5263,7 @@ class HydraStrategy(MEICStrategy):
             self._data_recorder.record_daily_summary({
                 "date": date_str,
                 "spx_open": self.market_data.spx_open,
-                "spx_close": self.current_price,
+                "spx_close": spx_close,
                 "spx_high": self.market_data.spx_high,
                 "spx_low": spx_low,
                 "day_range": day_range,

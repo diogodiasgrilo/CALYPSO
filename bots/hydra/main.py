@@ -545,10 +545,19 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                             # in-memory state with no live price captured for today.
                             # A summary built from it records yesterday's entries/P&L
                             # under today's date (spx_close=0) — the phantom row.
+                            # Use the RESOLVED close (recovers the day's last
+                            # recorded tick when the live current_price has gone
+                            # to 0 at a late after-hours write — e.g. C's 0DTE
+                            # settlement completing ~6h after the close). Without
+                            # this, a legitimate traded day was mis-flagged as a
+                            # phantom and its summary+metrics silently skipped
+                            # (the 2026-06-05→11 C recording gap).
+                            _resolve = getattr(strategy, "_resolve_spx_close", None)
+                            _spx_close = _resolve() if callable(_resolve) else strategy.current_price
                             _summary_stale = strategy._daily_summary_is_stale(
                                 getattr(strategy.daily_state, "date", "") or "",
                                 now_et.strftime("%Y-%m-%d"),
-                                strategy.current_price,
+                                _spx_close,
                             )
 
                             if (had_trading_activity or is_after_market_close) and _summary_stale:

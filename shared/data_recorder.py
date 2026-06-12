@@ -777,3 +777,26 @@ class DataRecorder:
                 return row[0] if row else None
         except Exception:
             return None
+
+    def get_last_spx_for_date(self, date_str: str) -> Optional[float]:
+        """The last recorded intraday SPX price for ``date_str`` (a robust proxy
+        for the day's close).
+
+        Used to recover the daily-summary close when the live ``current_price``
+        has decayed to 0 by the time a LATE after-hours summary runs — 0DTE
+        settlement can complete hours after the 4 PM close (IBKR marked variant
+        C's 2026-06-11 legs settled at 9:52 PM ET), and a mid-evening restart
+        drops the in-memory close. ``market_ticks`` is on disk, so it survives
+        both. Returns None if no positive tick was recorded for the date.
+        """
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """SELECT spx_price FROM market_ticks
+                    WHERE timestamp LIKE ? AND spx_price > 0
+                    ORDER BY timestamp DESC LIMIT 1""",
+                    (date_str + "%",)
+                ).fetchone()
+                return row[0] if row else None
+        except Exception:
+            return None
