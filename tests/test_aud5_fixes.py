@@ -455,6 +455,93 @@ class TestGetLastSpxForDate:
         assert rec.get_last_spx_for_date("2026-06-11") == 7300.0  # skips the 0
 
 
+# ─── 2026-06-12: spread_snapshots first-class `date` column (schema v10) ──────
+class TestSpreadSnapshotsDateColumn:
+    """spread_snapshots was the only per-row table keyed off the full datetime
+    `timestamp` with no `date` column, so per-day queries/maintenance had to
+    LIKE/substr the timestamp ('no such column: date'). v10 adds a real date
+    column, backfilled from the timestamp prefix and indexed."""
+
+    def _cols(self, db_path):
+        import sqlite3
+        conn = sqlite3.connect(db_path)
+        try:
+            return [c[1] for c in conn.execute("PRAGMA table_info(spread_snapshots)").fetchall()]
+        finally:
+            conn.close()
+
+    def test_fresh_db_has_date_column_at_v10(self, tmp_path):
+        from shared.data_recorder import DataRecorder, SCHEMA_VERSION
+        import sqlite3
+        p = str(tmp_path / "fresh.db")
+        rec = DataRecorder(p)
+        rec.ensure_schema()
+        assert "date" in self._cols(p)
+        conn = sqlite3.connect(p)
+        try:
+            v = conn.execute("SELECT value FROM schema_info WHERE key='version'").fetchone()[0]
+        finally:
+            conn.close()
+        assert int(v) == SCHEMA_VERSION == 10
+
+    def test_record_writes_date_from_timestamp(self, tmp_path):
+        from shared.data_recorder import DataRecorder
+        import sqlite3
+        p = str(tmp_path / "w.db")
+        rec = DataRecorder(p)
+        rec.ensure_schema()
+        rec.record_spread_snapshots("2026-06-11 15:59:59", [
+            {"entry_number": 2, "call_spread_value": 100.0, "put_spread_value": 5.0},
+        ])
+        conn = sqlite3.connect(p)
+        try:
+            row = conn.execute(
+                "SELECT date, entry_number FROM spread_snapshots WHERE date=? AND entry_number=?",
+                ("2026-06-11", 2)).fetchone()
+        finally:
+            conn.close()
+        assert row == ("2026-06-11", 2)  # the query that used to fail now works
+
+    def test_migration_backfills_date_on_pre_v10_db(self, tmp_path):
+        # Simulate a pre-v10 DB: spread_snapshots WITHOUT date, version stamped 9,
+        # with an existing row — then ensure_schema must add + backfill date.
+        from shared.data_recorder import DataRecorder
+        import sqlite3
+        p = str(tmp_path / "old.db")
+        conn = sqlite3.connect(p)
+        conn.executescript(
+            """
+            CREATE TABLE schema_info (key TEXT PRIMARY KEY, value TEXT);
+            INSERT INTO schema_info VALUES ('version', '9');
+            CREATE TABLE spread_snapshots (
+                timestamp TEXT NOT NULL, entry_number INTEGER NOT NULL,
+                call_spread_value REAL, put_spread_value REAL,
+                contracts INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (timestamp, entry_number));
+            INSERT INTO spread_snapshots (timestamp, entry_number, call_spread_value)
+                VALUES ('2026-06-11 11:18:30', 2, 420.0);
+            """
+        )
+        conn.commit()
+        conn.close()
+
+        DataRecorder(p).ensure_schema()  # migrate to v10
+
+        assert "date" in self._cols(p)
+        conn = sqlite3.connect(p)
+        try:
+            row = conn.execute(
+                "SELECT date FROM spread_snapshots WHERE timestamp='2026-06-11 11:18:30'").fetchone()
+            # index exists
+            idx = conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='index' AND name='idx_spread_snapshots_date'"
+            ).fetchone()
+        finally:
+            conn.close()
+        assert row[0] == "2026-06-11"   # backfilled from the timestamp prefix
+        assert idx is not None
+
+
 # ─── 2026-06-04: one-sided LIVE entry execution (the 0.0-strike leg failure) ──
 class TestOneSidedLiveEntry:
     """The LIVE _execute_entry placed all 4 legs unconditionally, so any

@@ -29,7 +29,12 @@ Schema v9 (2026-06-02) adds: ground-truth per-leg execution capture on
 trade_entries for the live go-live — short/long call/put `*_fill_price` and
 `*_mid_at_fill` (real fill vs mid, for live slippage analysis).
 
-Current SCHEMA_VERSION = 9 (see the module constant).
+Schema v10 (2026-06-12) adds: a first-class `date` column on spread_snapshots
+(the only per-row table that keyed off the full `timestamp` and had no `date`),
+backfilled from the timestamp prefix, with an index — so per-day queries and
+per-day maintenance match every other table (date, entry_number).
+
+Current SCHEMA_VERSION = 10 (see the module constant).
 """
 
 import json
@@ -41,7 +46,7 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 9
+SCHEMA_VERSION = 10
 
 # ============================================================================
 # Schema Migration SQL
@@ -130,6 +135,16 @@ MIGRATION_V9_SQL = [
     "ALTER TABLE trade_entries ADD COLUMN long_call_mid_at_fill REAL",
     "ALTER TABLE trade_entries ADD COLUMN short_put_mid_at_fill REAL",
     "ALTER TABLE trade_entries ADD COLUMN long_put_mid_at_fill REAL",
+]
+
+# v10 (2026-06-12): spread_snapshots gains a first-class `date` column. It was
+# the only per-row table keyed off the full datetime `timestamp` with no `date`,
+# so per-day queries/maintenance had to LIKE/substr the timestamp. The ALTER is
+# additive (existing rows get NULL); ensure_schema backfills date from the
+# timestamp prefix and adds an index. Kept in sync with
+# services/homer/db_manager.py.
+MIGRATION_V10_SQL = [
+    "ALTER TABLE spread_snapshots ADD COLUMN date TEXT",
 ]
 
 # v7: shadow entries table — records what OTM-based selection WOULD have chosen
@@ -305,6 +320,7 @@ class DataRecorder:
                         contracts_per_entry INTEGER NOT NULL DEFAULT 1);
                     CREATE TABLE IF NOT EXISTS spread_snapshots (
                         timestamp TEXT NOT NULL, entry_number INTEGER NOT NULL,
+                        date TEXT,
                         call_spread_value REAL, put_spread_value REAL,
                         contracts INTEGER NOT NULL DEFAULT 1,
                         PRIMARY KEY (timestamp, entry_number));
@@ -348,6 +364,9 @@ class DataRecorder:
                 if current_version < 9:
                     # v9: per-leg fill prices + mid-at-fill (real execution capture)
                     migration_sql += MIGRATION_V9_SQL
+                if current_version < 10:
+                    # v10: first-class date column on spread_snapshots
+                    migration_sql += MIGRATION_V10_SQL
 
                 for sql in migration_sql:
                     try:
@@ -355,6 +374,23 @@ class DataRecorder:
                     except sqlite3.OperationalError as e:
                         if "duplicate column" not in str(e).lower():
                             logger.warning(f"Migration SQL failed: {sql} — {e}")
+
+                # v10 backfill + index: populate the new spread_snapshots.date
+                # from the existing timestamp prefix ("YYYY-MM-DD HH:MM:SS" →
+                # "YYYY-MM-DD") for all historical rows, then index it. Idempotent
+                # (only NULL/empty rows are touched). Guarded so it runs once.
+                if current_version < 10:
+                    try:
+                        conn.execute(
+                            "UPDATE spread_snapshots SET date = substr(timestamp, 1, 10) "
+                            "WHERE date IS NULL OR date = ''"
+                        )
+                        conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_spread_snapshots_date "
+                            "ON spread_snapshots(date)"
+                        )
+                    except sqlite3.OperationalError as e:
+                        logger.warning(f"v10 spread_snapshots.date backfill failed: {e}")
 
                 # Update version
                 conn.execute(
@@ -413,19 +449,24 @@ class DataRecorder:
         if not snapshots:
             return True
 
+        # v10: derive the date once from the shared timestamp prefix so every
+        # row this batch carries the first-class date column.
+        _date = timestamp[:10] if timestamp else None
+
         def _write():
             with self._connect() as conn:
                 conn.executemany(
                     """INSERT OR IGNORE INTO spread_snapshots
-                    (timestamp, entry_number, call_spread_value, put_spread_value,
+                    (timestamp, entry_number, date, call_spread_value, put_spread_value,
                      short_call_price, long_call_price, short_put_price, long_put_price,
                      short_call_bid, short_call_ask, long_call_bid, long_call_ask,
                      short_put_bid, short_put_ask, long_put_bid, long_put_ask, contracts)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     [
                         (
                             timestamp,
                             s["entry_number"],
+                            _date,
                             s.get("call_spread_value"),
                             s.get("put_spread_value"),
                             s.get("short_call_price"),

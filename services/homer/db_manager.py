@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS schema_info (
 CREATE TABLE IF NOT EXISTS spread_snapshots (
     timestamp TEXT NOT NULL,
     entry_number INTEGER NOT NULL,
+    date TEXT,  -- v10 (kept in sync with shared/data_recorder.py); writer backfills + indexes
     call_spread_value REAL,
     put_spread_value REAL,
     short_call_price REAL,
