@@ -205,13 +205,23 @@ EMERGENCY_CLOSE_RETRY_DELAY_SECONDS = 2  # Reduced from 3s with batch quote head
 # CLOSE-LMT (2026-06-08 research): IBKR routes an OPTION "market" order as a
 # series of CAPPED marketable-limit orders with a documented non-fill
 # possibility, and Market-with-Protection is unavailable for OPT via the Client
-# Portal API. So the close-retry path CROSSES the spread with an aggressive
-# MARKETABLE LIMIT (price control + reliable fill — most reliable per the
-# research, esp. in the wide-NBBO window before the 4:00pm ET close), walking it
-# wider each attempt up to a sanity cap; a plain MARKET is only the no-quote
+# Portal API. So the close-retry path CROSSES the spread with a MARKETABLE
+# LIMIT (a BUY-to-close ≥ ask, a SELL ≤ bid fills against the resting touch),
+# walking it a little wider each attempt; a plain MARKET is only the no-quote
 # fallback. There is NO IBKR equivalent of Saxo's "market-only after 15:30 ET".
-CLOSE_LIMIT_CROSS_STEP = 0.50   # $ crossed THROUGH the touch per attempt (ask+ / bid-)
-CLOSE_LIMIT_CROSS_CAP = 3.00    # max cross-through — caps pay-up (never an uncapped sweep)
+#
+# CLOSE-CROSS FIX (2026-06-12): the old cross (STEP $0.50, CAP $3.00) was an
+# ABSOLUTE pay-up — fine for a $5 option but absurd for a $0.45 0DTE wing, where
+# it bid ask+$3 ≈ 6× the option's value. IBKR HARD-REJECTS a limit that far from
+# the NBBO ("Limit price too far outside of NBBO" / "at or more aggressive") and
+# also raises an unmapped "Number of ticks constraint of 20" prompt, so EVERY
+# close attempt failed and the position rode to settlement (variant-C E#2
+# take-profit on 2026-06-12 retried 84× and never closed). A BUY at the ask is
+# ALREADY marketable; we only need a few ticks of headroom for a moving touch.
+# Cross is now small + tick-scaled so the limit stays inside IBKR's NBBO
+# tolerance. (The remaining precaution is also answered in ib_client.)
+CLOSE_LIMIT_CROSS_STEP = 0.05   # $ crossed THROUGH the touch per attempt (1 SPX tick)
+CLOSE_LIMIT_CROSS_CAP = 0.25    # max cross-through (≈5 ticks) — stays inside IBKR's NBBO cap
 
 # ORDER-008: SPX Option Tick Size Rules (CBOE Official)
 # Source: https://www.cboe.com/tradable_products/sp_500/spx_options/specifications/

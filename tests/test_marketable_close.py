@@ -34,11 +34,12 @@ class TestMarketableClose:
     def test_buy_crosses_up_through_ask(self):
         s = _strat({"bid": 1.80, "ask": 2.00})
         s._place_marketable_close(uic=123, side="BUY", quantity=7, attempt_num=1)
-        # attempt 1 cross = $0.50 → BUY limit = ask 2.00 + 0.50 = 2.50, LMT.
+        # 2026-06-12: cross is now 1 SPX tick/attempt (was $0.50). attempt 1 →
+        # BUY limit = ask 2.00 + 0.05 = 2.05, LMT, marketable (>= ask), near touch.
         kw = s._place_leg_order.call_args.kwargs
         assert kw["order_type"] == "LMT"
         assert kw["side"] == "BUY"
-        assert kw["limit_price"] == 2.50  # marketable (>= ask)
+        assert kw["limit_price"] == 2.05  # marketable (>= ask), 1 tick over
         s._close_leg_order.assert_not_called()
 
     def test_sell_crosses_down_through_bid(self):
@@ -47,13 +48,15 @@ class TestMarketableClose:
         kw = s._place_leg_order.call_args.kwargs
         assert kw["order_type"] == "LMT"
         assert kw["side"] == "SELL"
-        assert kw["limit_price"] == 3.50  # bid 4.00 - 0.50, marketable (<= bid)
+        # bid 4.00 - 0.05 = 3.95 → snaps to the $0.10 tick = 4.00 (= bid, still
+        # marketable: a SELL at the bid crosses to the resting buyer).
+        assert kw["limit_price"] == 4.00
 
     def test_walk_widens_with_attempt(self):
         s = _strat({"bid": 1.80, "ask": 2.00})
         s._place_marketable_close(uic=123, side="BUY", quantity=7, attempt_num=3)
-        # cross = 0.50 * 3 = 1.50 → 2.00 + 1.50 = 3.50.
-        assert s._place_leg_order.call_args.kwargs["limit_price"] == 3.50
+        # cross = 0.05 * 3 = 0.15 → 2.00 + 0.15 = 2.15 (still inside the cap).
+        assert s._place_leg_order.call_args.kwargs["limit_price"] == 2.15
 
     def test_cross_is_capped(self):
         s = _strat({"bid": 1.80, "ask": 2.00})

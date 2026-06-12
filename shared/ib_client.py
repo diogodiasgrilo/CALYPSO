@@ -518,6 +518,17 @@ DEFAULT_ORDER_ANSWERS = {
     QuestionType.SIZE_MODIFICATION_LIMIT: True,      # same, for stop/modify resizes at the intended size
     QuestionType.MULTIPLE_ACCOUNTS: False,           # we trade one account at a time
     QuestionType.CLOSE_POSITION: False,              # don't auto-close-all in response to anything
+    # 2026-06-12 close-order fix: IBKR's "...exceeds the Number of ticks
+    # constraint of N. Are you sure you want to submit this order?" precaution on
+    # an aggressive-but-INTENDED close matches NO QuestionType (its text differs
+    # from TICK_SIZE_LIMIT's "exceeds the Tick Size Limit of"), so ibind's
+    # find_answer RAISED "no answer found" and the close died — variant-C's
+    # 2026-06-12 E#2 take-profit retried 84× and never closed. find_answer
+    # matches `str(key) in question`, so a plain SUBSTRING key works alongside
+    # the QuestionType keys. We CONFIRM it (we want to close even paying a few
+    # ticks up); the cross is now small/tick-bounded in base_strategy, so this
+    # can never green-light a wild sweep. Plain string key by design.
+    "Number of ticks constraint of": True,
 }
 
 # IBKR-audit #6/#7: precautionary ORDER warnings to PRE-SUPPRESS at connect via
