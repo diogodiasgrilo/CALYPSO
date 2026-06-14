@@ -36,6 +36,31 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D "DC Time Machine" SCAFFOLD + Phase-0 coexistence safety (2026-06-14):
+  Adds Strategy D — a multi-day SPX double calendar that transforms into a
+  risk-free iron condor (Steve Burnich, video JtGW1wNFNIY) — as a dry-run-LOCKED
+  4th variant SCAFFOLD. New DoubleCalendarStrategy(HydraStrategy)
+  (bots/hydra/double_calendar_strategy.py): BOT_NAME="DCTM",
+  requires_protective_wings=False, a __init__ dry-run LOCK (ConfigError unless
+  dry_run=True, BEFORE super() — mirrors StrangleStrategy), a DCPhase enum
+  (CALENDAR/TRANSFORMED/CLOSED), multi-day lifecycle overrides (_reset_for_new_day
+  carries open positions across the daily reset instead of wiping; check_after_
+  hours_settlement treats a held position as normal, not "pending forever"), and
+  the three abstract hooks OVERRIDDEN to inert stubs so D never runs HYDRA's IC
+  logic. D opens NOTHING (stubbed entry) and cannot place a real order (lock +
+  stub). Registered in registry.py ("double_calendar"); config_variant_d.json +
+  deploy/hydra_variant_d.service added (HYDRA_VARIANT_ID=d, dry_run, alerts+sheets
+  OFF). Phase-0 safety so D can't disturb the live variants: (1) the Telegram
+  command poller is now gated to variant A ONLY (main.py) — getUpdates allows one
+  consumer per token, so B/C/D no longer each spin a poller; this also FIXES a
+  latent live B/C race. (2) print_banner is variant-aware (D gets a DCTM banner,
+  not "0DTE Iron Condors"). (3) /compare (strategy.py _discover_variant_ids)
+  excludes D — interim, until Phase 7 structure-aware rendering renders its
+  net-debit correctly instead of as a credit. (4) dashboard config pre-staged
+  (variant_d_* paths + accent) but 'd' deliberately NOT in _VARIANT_IDS yet. (5)
+  DCTM-* greppable log tags. Full build (entry/transformer/debit-P&L/two-expiry
+  sim/DB/dashboard) is planned (Phases 1-7, dry-run only) — NOT in this commit.
+  +14 tests (test_double_calendar_strategy.py + registry); full suite 1460 passed.
 - Alert anti-spam gate + Brandon strike-veto + %-of-width shadow (2026-06-11):
   Three changes after a variant-C retry-loop flooded the inbox and the same day's
   Entry#2 mis-placed a short. (1) AlertService gained a single anti-spam GATE at

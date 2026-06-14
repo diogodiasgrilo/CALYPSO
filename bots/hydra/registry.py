@@ -30,6 +30,11 @@ _REGISTRY: Dict[str, str] = {
     # 0DTE SPX short strangle (undefined-risk). Selected via strategy.name =
     # "strangle"; dry-run only until paper-verified + an explicit operator flip.
     "strangle": "bots.hydra.strangle_strategy:StrangleStrategy",
+    # Strategy D — "DC Time Machine" multi-day double calendar -> risk-free iron
+    # condor (SCAFFOLD). Selected via strategy.name = "double_calendar"; dry-run
+    # LOCKED — the entry/transformer/multi-day-settlement logic is stubbed and a
+    # real-order run requires the coexistence MUST-FIXes (see the module docstring).
+    "double_calendar": "bots.hydra.double_calendar_strategy:DoubleCalendarStrategy",
 }
 
 # Default when neither brandon.enabled nor strategy.name is set — preserves the

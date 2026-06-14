@@ -88,6 +88,18 @@ class Settings(BaseSettings):
     variant_c_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_c.json")
     variant_c_label: str = "C (LIVE · Brandon narrow 5/10pt)"
 
+    # ── Variant D — Strategy D "DC Time Machine" (PRE-STAGED, not yet active) ──
+    # Paths defined here so Phase 7 (D-aware rendering) is a small diff, but 'd'
+    # is intentionally NOT in _VARIANT_IDS (routers/variants.py) yet: D is a
+    # multi-day net-DEBIT double calendar that the current IC-shaped comparison
+    # would render as a credit + a fabricated width. Activate in Phase 7.
+    variant_d_state_file: Path = Path("/opt/calypso/data/variant_d/hydra_state.json")
+    variant_d_metrics_file: Path = Path("/opt/calypso/data/variant_d/hydra_metrics.json")
+    variant_d_backtesting_db: Path = Path("/opt/calypso/data/variant_d/backtesting.db")
+    variant_d_log_file: Path = Path("/opt/calypso/logs/hydra_variant_d/bot.log")
+    variant_d_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_d.json")
+    variant_d_label: str = "D (DC Time Machine · multi-day · dry-run scaffold)"
+
     # ── Cumulative track-record BASELINE (rebase the cumulative to a date) ────
     # 2026-06-04: every cumulative figure (the single P&L card + the Comparison
     # lifetime totals + the running-cumulative curves) is summed from each
@@ -107,6 +119,7 @@ class Settings(BaseSettings):
     variant_a_baseline_date: str = ""
     variant_b_baseline_date: str = ""
     variant_c_baseline_date: str = ""
+    variant_d_baseline_date: str = ""
 
     # Agent intel directories
     agent_intel_dir: Path = Path("/opt/calypso/intel")

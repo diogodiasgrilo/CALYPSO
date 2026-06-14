@@ -51,6 +51,11 @@ router = APIRouter(prefix="/api/variants", tags=["variants"])
 # variant_a_* fields. (Pre-2026-06-02, A was special-cased to the main paths
 # because the live bot WAS variant A; C is now primary.)
 
+# NOTE: variant "d" (Strategy D — DC Time Machine) is deliberately NOT listed
+# yet. Its config paths are pre-staged in config.py, but it is a multi-day
+# net-DEBIT double calendar that the IC-shaped comparison/aggregate math would
+# mis-render (debit shown as credit) — add "d" here in Phase 7 alongside the
+# D-aware (structure-tagged) rendering.
 _VARIANT_IDS: list[str] = ["a", "b", "c"]
 
 
@@ -95,7 +100,7 @@ _db_readers: dict[str, BacktestingDBReader] = {
 # Visualization accent colors per variant — lifted from the frontend palette
 # so backend-side aggregations could carry them through if ever needed. The
 # frontend currently picks its own accents but we keep the mapping centralized.
-_VARIANT_ACCENT = {"a": "info", "b": "warning", "c": "profit"}
+_VARIANT_ACCENT = {"a": "info", "b": "warning", "c": "profit", "d": "loss"}
 
 
 def _check_enabled() -> None:

@@ -197,8 +197,33 @@ def _variant_bot_name() -> str:
 
 
 def print_banner():
-    """Print the application banner."""
-    banner = """
+    """Print the application banner (variant-aware).
+
+    Variant D is the multi-day "DC Time Machine" double-calendar strategy —
+    NOT a 0DTE iron condor — so it gets its own banner to avoid misleading the
+    journalctl/stdout startup log. A/B/C keep the iron-condor banner.
+    """
+    variant = (os.environ.get("HYDRA_VARIANT_ID", "") or "").strip().lower() or None
+    if variant == "d":
+        banner = """
+    ╔═══════════════════════════════════════════════════════════════╗
+    ║                                                               ║
+    ║         STRATEGY D — DC TIME MACHINE (SCAFFOLD)               ║
+    ║         ════════════════════════════════════                ║
+    ║                                                               ║
+    ║         Double Calendar → Risk-Free Iron Condor (SPX)        ║
+    ║         MULTI-DAY · NET DEBIT · DRY-RUN ONLY                  ║
+    ║                                                               ║
+    ║         Entry/transformer logic STUBBED — opens nothing       ║
+    ║         dry-run LOCKED (no real orders, ever)                 ║
+    ║                                                               ║
+    ║         Version: 2.0.0-rc.1 (IBKR-standalone)                 ║
+    ║         Broker: Interactive Brokers (paper)                   ║
+    ║                                                               ║
+    ╚═══════════════════════════════════════════════════════════════╝
+    """
+    else:
+        banner = """
     ╔═══════════════════════════════════════════════════════════════╗
     ║                                                               ║
     ║         HYDRA 0DTE TRADING BOT                                ║
@@ -410,28 +435,42 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     except Exception as e:
         trade_logger.log_error(f"Failed to send BOT_STARTED alert: {e}")
 
-    # Initialize Telegram command handler (16 commands incl. /compare)
+    # Initialize the Telegram command handler (16 commands incl. /compare).
+    # POLLER OWNERSHIP (2026-06-14): Telegram getUpdates allows only ONE consumer
+    # per bot token — if every variant polled, the long-poll offset race would
+    # route a /status (etc.) to a RANDOM variant. So ONLY variant A
+    # (HYDRA_VARIANT_ID unset) owns the poller; B/C/D do NOT start their own.
+    # A's /compare aggregates the other variants from their state files. This
+    # also fixes a latent LIVE bug: previously every variant started its own
+    # poller, so B/C already raced A on the shared token.
     from bots.hydra.telegram_commands import TelegramCommandHandler
+    _tg_variant = (os.environ.get("HYDRA_VARIANT_ID", "") or "").strip().lower() or None
     telegram_cmd_handler = TelegramCommandHandler()
-    try:
-        telegram_cmd_handler.start(
-            snapshot_callback=strategy.build_telegram_snapshot,
-            lastday_callback=strategy.build_telegram_lastday,
-            account_callback=strategy.build_telegram_account,
-            status_callback=strategy.build_telegram_status,
-            hermes_callback=strategy.build_telegram_hermes,
-            apollo_callback=strategy.build_telegram_apollo,
-            clio_callback=strategy.build_telegram_clio,
-            week_callback=strategy.build_telegram_week,
-            entry_callback=strategy.build_telegram_entry,
-            stops_callback=strategy.build_telegram_stops,
-            config_callback=strategy.build_telegram_config,
-            compare_callback=strategy.build_telegram_compare,
-            config_path=config_path,
-            active_positions_callback=lambda: len(strategy.daily_state.active_entries),
+    if _tg_variant is not None:
+        trade_logger.log_event(
+            f"Telegram command poller NOT started for variant {_tg_variant.upper()} "
+            f"— only variant A owns the shared bot-token getUpdates poller."
         )
-    except Exception as e:
-        trade_logger.log_error(f"Failed to start Telegram command handler: {e}")
+    else:
+        try:
+            telegram_cmd_handler.start(
+                snapshot_callback=strategy.build_telegram_snapshot,
+                lastday_callback=strategy.build_telegram_lastday,
+                account_callback=strategy.build_telegram_account,
+                status_callback=strategy.build_telegram_status,
+                hermes_callback=strategy.build_telegram_hermes,
+                apollo_callback=strategy.build_telegram_apollo,
+                clio_callback=strategy.build_telegram_clio,
+                week_callback=strategy.build_telegram_week,
+                entry_callback=strategy.build_telegram_entry,
+                stops_callback=strategy.build_telegram_stops,
+                config_callback=strategy.build_telegram_config,
+                compare_callback=strategy.build_telegram_compare,
+                config_path=config_path,
+                active_positions_callback=lambda: len(strategy.daily_state.active_entries),
+            )
+        except Exception as e:
+            trade_logger.log_error(f"Failed to start Telegram command handler: {e}")
 
     # REST-only mode
     trade_logger.log_event("REST-only mode: WebSocket streaming disabled")

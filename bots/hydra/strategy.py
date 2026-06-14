@@ -8455,6 +8455,13 @@ class HydraStrategy(MEICStrategy):
                 vid = name[len("variant_"):]
                 if not vid or vid == "a":
                     continue
+                # INTERIM (Phase 0, 2026-06-14): exclude variant D from /compare.
+                # D is the multi-day "DC Time Machine" — a net-DEBIT double
+                # calendar. The IC-shaped variant summary (_build_variant_summary)
+                # would render its debit as a CREDIT and fabricate a spread width.
+                # Re-included in Phase 7 with structure-aware rendering.
+                if vid == "d":
+                    continue
                 state_path = os.path.join(variant_dir, name, "hydra_state.json")
                 if os.path.exists(state_path):
                     ids.append(vid)
