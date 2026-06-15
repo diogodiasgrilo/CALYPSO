@@ -472,6 +472,30 @@ def _query_peak_spread_values(db_path, today: str) -> dict:
         return {}
 
 
+def _latest_spx_from_db(db_path) -> float | None:
+    """Most-recent SPX spot from the variant's market_ticks table (the bot
+    writes a row ~every 11s). The state file only persists daily OHLC, not a
+    live spot, so this is the freshest SPX available — used for the comparison
+    card's distance-to-stop in index points. Read-only, 2s timeout; returns
+    None on any error / empty table.
+    """
+    import sqlite3
+    try:
+        if db_path is None or not db_path.exists():
+            return None
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        try:
+            row = conn.execute(
+                "SELECT spx_price FROM market_ticks ORDER BY timestamp DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        return float(row[0]) if row and row[0] is not None else None
+    except Exception as e:
+        logger.debug(f"Could not read latest spx: {e}")
+        return None
+
+
 def _min_buffer_margin_pct(entries: list[dict], db_path=None) -> dict:
     """SMALLEST call/put buffer MARGIN (cushion) reached across today's entries —
     the tightest the day got, in the SAME convention as the live cards
@@ -588,9 +612,9 @@ def _variant_payload(vid: str) -> dict:
         "entries": _enrich_entries(entries),
         "pnl_history": state.get("pnl_history", []),
         "min_buffer_margin": _min_buffer_margin_pct(entries, db_path=paths["backtesting_db"]),
-        # Live SPX (top-level state field) — lets the comparison card show
-        # distance-to-stop in SPX points, not just cost-to-close dollars.
-        "spx_price": state.get("spx_price"),
+        # Live SPX from market_ticks (the state file only persists daily OHLC) —
+        # lets the comparison card show distance-to-stop in SPX points.
+        "spx_price": _latest_spx_from_db(paths["backtesting_db"]),
         "spx_open": (state.get("market_data_ohlc") or {}).get("spx_open"),
         "vix_open": (state.get("market_data_ohlc") or {}).get("vix_open"),
         "spx_high": (state.get("market_data_ohlc") or {}).get("spx_high"),
