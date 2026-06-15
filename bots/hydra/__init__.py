@@ -47,22 +47,26 @@ Version History:
   resolve and the whole entry was discarded. A ~4-min broker burst would also
   saturate the ONE shared calypso-broker session and add latency to LIVE C. FIX
   (bounded delta-scan, user-chosen): _dc_pick_expiries is now PURE/fast (returns
-  (short, [long candidates]) — no broker calls); _dc_delta_target_strike centers a
-  small strike window on the VIX-expected-move estimate (em_1sd × delta_otm_fraction
-  ≈ 35Δ OTM distance), batch-resolves conids on BOTH expiries via _read_option_chain
-  (chain + batch qualify, DAY-granular), intersects to strikes listed on BOTH, and
-  reads greeks for only the capped nearest-estimate subset (delta_max_reads, default
-  10) — ~4 chain calls + ≤10 greeks reads/side instead of ~120 cold calls;
+  (short, [long candidates]) — no broker calls). _calculate_strikes centers a small
+  strike window on the VIX-expected-move estimate (em_1sd × delta_otm_fraction ≈ 35Δ
+  OTM distance), fetches each expiry's chain ONCE (one _read_option_chain per expiry
+  returns both call+put maps over a combined window) and hands the maps to
+  _dc_pick_delta_strike, which SEEDS at the both-expiry strike nearest the estimate
+  and STEP-SEARCHES toward target Δ — |delta| is monotonic in OTM distance, so it
+  reads ~1-4 cold greeks/side (capped at delta_max_reads, default 6) instead of the
+  ~40-cold-scan (~95s/side) or the first bounded pass that still read 10/side (~67s).
   _calculate_strikes iterates the long candidates so a thin long expiry falls back to
-  the next instead of skipping the entry. The both-expiry intersection is the real
-  gap-day guard (a strike unlisted on the long is now structurally excluded), making
-  the prior month-granular/ATM-only filter unnecessary (removed). New config knobs:
-  delta_otm_fraction (0.40), delta_window (8), delta_max_reads (10). Tests rewritten
-  for the new signatures (both-expiry intersection, long-candidate fallback); full
-  suite 1552 passed. D remains dry-run-LOCKED + STOPPED/undeployed pending a passing
-  live re-test (fast + all 4 legs resolve + net_debit>0). Lesson: a live entry-path
-  exercise is mandatory before trusting D — latency + real strike/expiry listing
-  can't be seen statically.
+  the next instead of skipping. The both-expiry intersection (short_map ∩ long_map)
+  is the real gap-day guard (a strike unlisted on the long is structurally excluded),
+  making the prior month-granular/ATM-only filter unnecessary (removed). New config
+  knobs: delta_otm_fraction (0.40), delta_window (8), delta_max_reads (6). Expected
+  broker work per long candidate: 2 chain reads + ~1-4 cold greeks/side (down from
+  ~4 chain + ~10-40 greeks). Tests rewritten for the new signatures (seeded step-
+  search, both-expiry intersection, long-candidate fallback); full suite 1553 passed.
+  D remains dry-run-LOCKED + STOPPED/undeployed pending the live VM entry-path re-test
+  (must confirm seconds-not-minutes + all 4 legs resolve + net_debit>0). Lesson: a
+  live entry-path exercise is mandatory before trusting D — latency + real strike/
+  expiry listing can't be seen statically.
 - Strategy D — post-audit re-review fixes (2026-06-15, dry-run-only, A/B/C
   byte-identical): a 14-agent independently-verified re-review of the 3 post-audit
   commits found 0 critical / 0 high / 2 medium / 8 low (deduped to 3 real issues).

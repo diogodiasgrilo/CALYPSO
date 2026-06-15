@@ -149,7 +149,7 @@ class DoubleCalendarStrategy(HydraStrategy):
         # a small window of strikes (capped), instead of scanning ~40 cold conids.
         self.dc_delta_otm_fraction = float(dc.get("delta_otm_fraction", 0.40))
         self.dc_delta_window = int(dc.get("delta_window", 8))
-        self.dc_delta_max_reads = int(dc.get("delta_max_reads", 10))
+        self.dc_delta_max_reads = int(dc.get("delta_max_reads", 6))
 
         logger.info(
             "DCTM initialized (DRY-RUN, LOCKED). Short DTE %d-%d, long +%d-%d, "
@@ -446,54 +446,81 @@ class DoubleCalendarStrategy(HydraStrategy):
         inc = getattr(self, "strike_increment", 5) or 5
         return max(inc, em_1sd * self.dc_delta_otm_fraction)
 
-    def _dc_delta_target_strike(
-        self, spx: float, right: str, short_expiry: str, long_expiry: str,
+    def _dc_pick_delta_strike(
+        self, right: str, base: float, window: List[float],
+        short_map: Dict[float, int], long_map: Dict[float, int],
     ) -> Optional[float]:
-        """Pick the ~dc_target_delta OTM strike that is LISTED ON BOTH expiries.
+        """Pick the ~dc_target_delta OTM strike LISTED ON BOTH expiries, reading as
+        FEW greeks as possible.
 
-        BOUNDED + BATCHED (fixes the ~95s/side scan): center a small strike window
-        on the VIX-EM estimate, batch-resolve conids on BOTH the short and long
-        expiry in ~4 broker calls (_read_option_chain = chain + batch qualify, which
-        is DAY-granular), intersect to the strikes listed on BOTH, then read greeks
-        (short expiry) for only those strikes nearest the estimate (capped). Returns
-        the in-band strike closest to target, or None. Reading the long-expiry chain
-        here is what guarantees _dc_resolve_calendar_legs won't fail on the long leg."""
-        inc = getattr(self, "strike_increment", 5) or 5
-        est = self._dc_em_otm_distance(spx, short_expiry)
-        base = round((spx + est if right == "Call" else spx - est) / inc) * inc
-        win = int(getattr(self, "dc_delta_window", 8))
-        window = [base + s * inc for s in range(-win, win + 1) if base + s * inc > 0]
-        idx = 0 if right == "Call" else 1
-        smap = self._read_option_chain(short_expiry, window)[idx]
-        lmap = self._read_option_chain(long_expiry, window)[idx]
-        both = [k for k in window if k in smap and k in lmap]  # listed on BOTH expiries
+        SEEDED MONOTONIC STEP-SEARCH (fixes the residual ~67s scan). Inputs are the
+        already-fetched conid maps for the short + long expiry (the caller batches
+        ONE chain read per expiry). |delta| is monotonic in OTM distance, and the EM
+        ``base`` is calibrated to ≈ target Δ, so we seed at the both-expiry strike
+        nearest ``base`` and step in the direction that moves delta toward target,
+        stopping the moment we cross the band. That's typically 1-4 cold greeks reads
+        per side instead of ~10-40 — the difference between a ~30s and a ~4-min entry
+        burst on the shared broker session. ``short_map`` supplies the conid we read
+        greeks on; requiring the strike in ``long_map`` too is the gap-day guard."""
+        both = sorted(k for k in window if k in short_map and k in long_map)
         if not both:
-            logger.info(
-                "[DCTM] no %s strike near %.0f listed on BOTH %s/%s (window=%dpt)",
-                right, base, short_expiry, long_expiry, win * inc,
-            )
+            logger.info("[DCTM] no %s strike near %.0f listed on BOTH expiries", right, base)
             return None
+        # OTM order: |delta| DECREASES along increasing index for both rights
+        # (calls -> higher strike; puts -> lower strike).
+        ordered = both if right == "Call" else list(reversed(both))
         lo, hi = self.dc_delta_band
-        cap = int(getattr(self, "dc_delta_max_reads", 10))
-        best = None  # (abs(delta-target), strike)
-        for k in sorted(both, key=lambda x: abs(x - base))[:cap]:  # nearest-estimate first, capped
+        target = self.dc_target_delta
+        cap = int(getattr(self, "dc_delta_max_reads", 6))
+        cache: Dict[float, Optional[float]] = {}
+
+        def delta_at(k: float) -> Optional[float]:
+            if k in cache:
+                return cache[k]
             try:
-                delta = abs(float((self.broker.get_option_greeks(smap[k]) or {}).get("delta")))
+                d = abs(float((self.broker.get_option_greeks(short_map[k]) or {}).get("delta")))
             except Exception:
+                d = None
+            cache[k] = d if (d and d > 0) else None
+            return cache[k]
+
+        # Seed at the both-expiry strike nearest the EM base (≈ target Δ).
+        i = min(range(len(ordered)), key=lambda j: abs(ordered[j] - base))
+        best = None  # (abs(delta-target), strike)
+        while 0 <= i < len(ordered) and len(cache) < cap:
+            k = ordered[i]
+            d = delta_at(k)
+            if d is None:
+                i += 1  # bad/empty read — march OTM, never revisit
                 continue
-            if delta <= 0:
-                continue
-            if lo <= delta <= hi:
-                score = abs(delta - self.dc_target_delta)
+            in_band = lo <= d <= hi
+            if in_band:
+                score = abs(d - target)
                 if best is None or score < best[0]:
                     best = (score, k)
+            nxt = i + 1 if d > target else i - 1  # delta decreases with index
+            if best is not None and not in_band:
+                break  # had an in-band hit, now stepped out the far side — done
+            if 0 <= nxt < len(ordered) and ordered[nxt] in cache:
+                break  # target sits between two read strikes — refined, done
+            i = nxt
+        if best is None:
+            logger.info(
+                "[DCTM] no %s strike in Δ band %s near %.0f (read %d)",
+                right, list(self.dc_delta_band), base, len(cache),
+            )
         return best[1] if best else None
 
     def _calculate_strikes(self, entry) -> bool:
         """Pick the two expiries and the 30-40delta short strikes (listed on BOTH
         expiries), and stamp them onto the calendar entry. Short+long of a side
         share a STRIKE but differ in EXPIRY. Tries the long candidates in order so
-        a thin long expiry doesn't skip the entry when another long works."""
+        a thin long expiry doesn't skip the entry when another long works.
+
+        Fetches each expiry's chain ONCE (one _read_option_chain per expiry returns
+        BOTH the call and put maps over a combined call+put window), so the broker
+        work per long candidate is 2 chain reads + the few greeks reads the seeded
+        step-search needs — not the old 4 chain reads + ~40 cold greeks."""
         spx = self.current_price
         if not spx or spx <= 0:
             logger.error("[DCTM] no SPX price — cannot calculate strikes")
@@ -502,9 +529,19 @@ class DoubleCalendarStrategy(HydraStrategy):
         if not picked:
             return False
         short_exp, longs = picked
+        inc = getattr(self, "strike_increment", 5) or 5
+        win = int(getattr(self, "dc_delta_window", 8))
+        est = self._dc_em_otm_distance(spx, short_exp)  # OTM distance depends on DTE, not side
+        call_base = round((spx + est) / inc) * inc
+        put_base = round((spx - est) / inc) * inc
+        call_win = [call_base + s * inc for s in range(-win, win + 1) if call_base + s * inc > 0]
+        put_win = [put_base + s * inc for s in range(-win, win + 1) if put_base + s * inc > 0]
+        combined = sorted(set(call_win) | set(put_win))  # one chain read covers both sides
         for long_exp in longs[:2]:  # try the nearest 2 long candidates
-            kc = self._dc_delta_target_strike(spx, "Call", short_exp, long_exp)
-            kp = self._dc_delta_target_strike(spx, "Put", short_exp, long_exp)
+            s_call, s_put = self._read_option_chain(short_exp, combined)
+            l_call, l_put = self._read_option_chain(long_exp, combined)
+            kc = self._dc_pick_delta_strike("Call", call_base, call_win, s_call, l_call)
+            kp = self._dc_pick_delta_strike("Put", put_base, put_win, s_put, l_put)
             if kc and kp:
                 entry.short_call_strike = entry.long_call_strike = kc
                 entry.short_put_strike = entry.long_put_strike = kp

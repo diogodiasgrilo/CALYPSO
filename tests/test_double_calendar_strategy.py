@@ -206,29 +206,17 @@ class TestMinBuyingPower:
         assert inst._min_buying_power_per_unit() == 2000.0
 
 
-class TestDeltaTargetStrike:
-    """Bounded, batched, BOTH-expiry strike selection (2026-06-15 latency fix):
-    center a small strike window on the VIX-EM estimate, batch-resolve conids on
-    the short AND long expiry via _read_option_chain, intersect to strikes listed
-    on BOTH, and read greeks for only the capped nearest-estimate subset."""
+class TestPickDeltaStrike:
+    """Seeded monotonic step-search picker (2026-06-15 latency fix): given the
+    pre-fetched short/long conid maps, seed at the both-expiry strike nearest the
+    EM base and step toward target Δ, reading as few cold greeks as possible. The
+    both-expiry intersection (short_map ∩ long_map) is the gap-day guard."""
 
-    def _inst(self, right, short_strikes=None, long_strikes=None):
+    def _inst(self, right, short_strikes=None, long_strikes=None, max_reads=6):
         inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
-        inst.strike_increment = 5
         inst.dc_target_delta = 0.35
         inst.dc_delta_band = (0.30, 0.40)
-        inst.current_vix = 16.0
-        inst.dc_delta_otm_fraction = 0.40
-        inst.dc_delta_window = 8
-        inst.dc_delta_max_reads = 20  # read the whole window in the test
-
-        def read_chain(expiry, strikes):
-            avail = short_strikes if expiry == "2026-06-26" else long_strikes
-            keep = strikes if avail is None else [k for k in strikes if k in avail]
-            m = {k: int(k) for k in keep}  # conid = int(strike)
-            return (m, m)  # (call_map, put_map) — identical for the test
-
-        inst._read_option_chain = read_chain
+        inst.dc_delta_max_reads = max_reads
         inst.broker = MagicMock()
 
         def delta_for(conid):
@@ -239,58 +227,75 @@ class TestDeltaTargetStrike:
         inst.broker.get_option_greeks.side_effect = delta_for
         return inst
 
-    def _mp(self, monkeypatch):
-        from datetime import datetime
-        monkeypatch.setattr(
-            "bots.hydra.double_calendar_strategy.get_us_market_time",
-            lambda: datetime(2026, 6, 15, 10, 0),  # 11 DTE to 2026-06-26
-        )
+    def _maps(self, window, short_strikes=None, long_strikes=None):
+        def m(avail):
+            keep = window if avail is None else [k for k in window if k in avail]
+            return {k: int(k) for k in keep}  # conid = int(strike)
+        return m(short_strikes), m(long_strikes)
 
-    def test_call_picks_closest_to_target_on_both(self, monkeypatch):
-        self._mp(monkeypatch)
-        # delta 0.35 at strike 5075; EM-centered window includes it on both expiries
-        got = self._inst("Call")._dc_delta_target_strike(5000.0, "Call", "2026-06-26", "2026-06-30")
-        assert got == 5075.0
+    def test_call_picks_closest_to_target_on_both(self):
+        inst = self._inst("Call")
+        window = [5000.0 + s * 5 for s in range(0, 21)]  # 5000..5100
+        smap, lmap = self._maps(window)
+        # delta 0.35 at strike 5075; base seeds there
+        assert inst._dc_pick_delta_strike("Call", 5075.0, window, smap, lmap) == 5075.0
 
-    def test_put_picks_closest_to_target_on_both(self, monkeypatch):
-        self._mp(monkeypatch)
-        got = self._inst("Put")._dc_delta_target_strike(5000.0, "Put", "2026-06-26", "2026-06-30")
-        assert got == 4925.0
+    def test_put_picks_closest_to_target_on_both(self):
+        inst = self._inst("Put")
+        window = [5000.0 - s * 5 for s in range(0, 21)]  # 5000..4900
+        smap, lmap = self._maps(window)
+        assert inst._dc_pick_delta_strike("Put", 4925.0, window, smap, lmap) == 4925.0
 
-    def test_excludes_strike_not_listed_on_long(self, monkeypatch):
-        self._mp(monkeypatch)
-        # long expiry lists everything EXCEPT the 0.35Δ target (5075) -> next-closest in band
-        long_strikes = set(range(4000, 6001, 5)) - {5075}
-        got = self._inst("Call", long_strikes=long_strikes)._dc_delta_target_strike(
-            5000.0, "Call", "2026-06-26", "2026-06-30")
-        assert got in (5070.0, 5080.0)  # both 0.36/0.34 — equidistant from 0.35
+    def test_seed_finds_target_in_few_reads(self):
+        inst = self._inst("Call")
+        window = [5000.0 + s * 5 for s in range(0, 21)]
+        smap, lmap = self._maps(window)
+        inst._dc_pick_delta_strike("Call", 5075.0, window, smap, lmap)
+        # seeded at 5075 (=target) — must NOT scan the whole 21-strike window
+        assert inst.broker.get_option_greeks.call_count <= 4
 
-    def test_none_when_no_strike_on_both(self, monkeypatch):
-        self._mp(monkeypatch)
-        # long expiry lists nothing -> empty intersection -> None (no greeks read)
-        inst = self._inst("Call", long_strikes=set())
-        assert inst._dc_delta_target_strike(5000.0, "Call", "2026-06-26", "2026-06-30") is None
-        inst.broker.get_option_greeks.assert_not_called()
+    def test_excludes_strike_not_listed_on_long(self):
+        inst = self._inst("Call")
+        window = [5000.0 + s * 5 for s in range(0, 21)]
+        smap, lmap = self._maps(window, long_strikes=set(range(4000, 6001, 5)) - {5075})
+        got = inst._dc_pick_delta_strike("Call", 5075.0, window, smap, lmap)
+        assert got in (5070.0, 5080.0)  # 0.36/0.34 — equidistant from 0.35, 5075 excluded
 
-    def test_none_when_band_unreachable(self, monkeypatch):
-        self._mp(monkeypatch)
+    def test_none_when_no_strike_on_both(self):
+        inst = self._inst("Call")
+        window = [5000.0 + s * 5 for s in range(0, 21)]
+        smap, lmap = self._maps(window, long_strikes=set())  # long lists nothing
+        assert inst._dc_pick_delta_strike("Call", 5075.0, window, smap, lmap) is None
+        inst.broker.get_option_greeks.assert_not_called()  # no intersection -> no reads
+
+    def test_none_when_band_unreachable(self):
         inst = self._inst("Call")
         inst.dc_delta_band = (0.01, 0.02)  # no window strike is this far OTM
-        assert inst._dc_delta_target_strike(5000.0, "Call", "2026-06-26", "2026-06-30") is None
+        window = [5000.0 + s * 5 for s in range(0, 21)]
+        smap, lmap = self._maps(window)
+        assert inst._dc_pick_delta_strike("Call", 5075.0, window, smap, lmap) is None
 
 
 class TestCalculateStrikes:
-    """_calculate_strikes now iterates the long candidates (short, [longs]) and
-    uses the first long that yields a ~target-delta strike on BOTH expiries."""
+    """_calculate_strikes now iterates the long candidates (short, [longs]),
+    fetches each expiry's chain ONCE, and uses the first long that yields a
+    ~target-delta strike on BOTH expiries via the seeded step-search picker."""
 
     def _inst(self, strike_by_long=None, expiries=("2026-06-26", ["2026-06-29", "2026-06-30"])):
         inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
         inst.current_price = 5000.0
         inst.dc_target_delta = 0.35
+        inst.strike_increment = 5
+        inst.dc_delta_window = 8
         inst._dc_pick_expiries = lambda: expiries
+        inst._dc_em_otm_distance = lambda spx, short_exp: 75.0  # fixed OTM distance (no broker)
+        # Tag each chain map with its expiry so the mocked picker knows which long
+        # candidate it's being asked about (the real picker reads conids, not tags).
+        inst._read_option_chain = lambda expiry, strikes: ({"_exp": expiry}, {"_exp": expiry})
 
         # strike_by_long None -> any long yields (5075, 4925); else map long_exp -> (kc, kp).
-        def dts(spx, right, short_exp, long_exp):
+        def pick(right, base, window, short_map, long_map):
+            long_exp = long_map.get("_exp")
             if strike_by_long is None:
                 return 5075.0 if right == "Call" else 4925.0
             pair = strike_by_long.get(long_exp)
@@ -298,7 +303,7 @@ class TestCalculateStrikes:
                 return None
             return pair[0] if right == "Call" else pair[1]
 
-        inst._dc_delta_target_strike = dts
+        inst._dc_pick_delta_strike = pick
         return inst
 
     def test_sets_strikes_and_expiries(self):
