@@ -162,7 +162,11 @@ class DoubleCalendarStrategy(HydraStrategy):
         self._dc_recorder = None
         try:
             from bots.hydra.dc_recorder import DCDataRecorder
-            dc_db = os.path.join(os.path.dirname(self.state_file), "backtesting.db")
+            # SEPARATE DB file (not the shared backtesting.db the base DataRecorder
+            # uses for market_ticks) so D's calendar tables never share a SQLite
+            # file/connection with the base recorder — full isolation, no
+            # two-connections-on-one-file concern.
+            dc_db = os.path.join(os.path.dirname(self.state_file), "dc_calendar.db")
             self._dc_recorder = DCDataRecorder(dc_db)
         except Exception as exc:  # noqa: BLE001
             logger.warning("DCDataRecorder init failed (non-critical): %s", exc)
@@ -243,6 +247,23 @@ class DoubleCalendarStrategy(HydraStrategy):
             len(open_md),
         )
         return True
+
+    def get_daily_summary(self) -> dict:
+        """Daily summary with the IC credit-vertical breakdown zeroed for D.
+
+        The base summary derives ``expired_credits`` from each entry's
+        call/put_spread_credit and ``stop_loss_debits`` from the credit-kept
+        identity — both meaningless for a net-DEBIT calendar (D books realized
+        P&L directly into total_realized_pnl at transform/stop/settlement). Left
+        as-is, a settled CalendarEntry's transform-time credit would surface as a
+        bogus expired-credit. Zero those two IC-specific fields and report D's
+        realized P&L from total_realized_pnl; net_pnl/total_pnl are already
+        debit-correct (they derive from total_realized_pnl + unrealized)."""
+        summary = super().get_daily_summary()
+        summary["expired_credits"] = 0.0
+        summary["stop_loss_debits"] = 0.0
+        summary["realized_pnl"] = self.daily_state.total_realized_pnl
+        return summary
 
     # ------------------------------------------------------------------
     # Two-expiry data layer (Phase 2) — pick expiries, resolve per-expiry
@@ -944,10 +965,17 @@ class DoubleCalendarStrategy(HydraStrategy):
         return max(lo, min(x, hi))
 
     def _dc_settlement_spx(self) -> Optional[float]:
-        """SPX level to settle against (the short expiry's PM close ≈ the latest
-        read at after-hours). None if unreadable (defer settlement)."""
-        spx = getattr(self, "current_price", 0) or 0
-        return spx if spx > 0 else None
+        """SPX level to settle against — HYDRA's close-resolution: current_price,
+        or the day's last recorded SPX tick after-hours (via _resolve_spx_close),
+        so a LATE settlement doesn't mark against a current_price that has decayed
+        to 0 post-close. None if genuinely unreadable (defer settlement). NOTE: this
+        is the recorded close, NOT the official SPXW SOQ/PM-settlement print (not
+        on this feed) — a documented dry-run fidelity limitation."""
+        try:
+            px = self._resolve_spx_close()
+        except Exception:
+            px = getattr(self, "current_price", 0) or 0
+        return px if px and px > 0 else None
 
     def _dc_settle_due(self, today: str) -> bool:
         """Settle every open position whose SHORT expiry has arrived (ISO compare).

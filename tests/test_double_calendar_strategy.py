@@ -525,6 +525,38 @@ class TestManageCalendar:
         assert self._closed == [("EOD no-transform", False)]
 
 
+class TestReviewFixLows:
+    """The 3 deferred LOW review findings, now fixed."""
+
+    def test_get_daily_summary_zeros_ic_credit_leak(self, monkeypatch):
+        # Base/HYDRA summary would surface a settled CalendarEntry's
+        # call/put_spread_credit as bogus expired_credits/stop_loss_debits.
+        from bots.hydra.base_strategy import MEICDailyState
+        from bots.hydra.strategy import HydraStrategy
+        monkeypatch.setattr(
+            HydraStrategy, "get_daily_summary",
+            lambda self: {"expired_credits": 999.0, "stop_loss_debits": 888.0,
+                          "realized_pnl": 1.0, "net_pnl": 1.0},
+        )
+        inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
+        inst.daily_state = MEICDailyState()
+        inst.daily_state.total_realized_pnl = 123.0
+        s = inst.get_daily_summary()
+        assert s["expired_credits"] == 0.0
+        assert s["stop_loss_debits"] == 0.0
+        assert s["realized_pnl"] == 123.0  # from total_realized_pnl, not the IC leak
+
+    def test_settlement_spx_uses_resolve_close(self):
+        inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
+        inst._resolve_spx_close = lambda: 5123.0  # HYDRA's close-resolution
+        assert inst._dc_settlement_spx() == 5123.0
+
+    def test_settlement_spx_none_when_unreadable(self):
+        inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
+        inst._resolve_spx_close = lambda: 0.0  # decayed/no data
+        assert inst._dc_settlement_spx() is None
+
+
 class TestSidecarLoadGuard:
     def test_save_is_noop_before_load(self, tmp_path):
         from bots.hydra.base_strategy import MEICDailyState

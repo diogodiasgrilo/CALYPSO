@@ -36,6 +36,19 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D — close the 3 deferred-LOW review findings (2026-06-15, dry-run-only,
+  A/B/C byte-identical): (1) get_daily_summary OVERRIDDEN in D to zero the
+  IC-credit-vertical breakdown (expired_credits/stop_loss_debits) and report
+  realized P&L from total_realized_pnl — a settled CalendarEntry's transform-time
+  call/put_spread_credit can no longer surface as a bogus expired-credit. (2)
+  _dc_settlement_spx now uses HYDRA's _resolve_spx_close (current_price, else the
+  day's last recorded SPX tick) so a LATE settlement doesn't mark against a
+  post-close current_price decayed to 0 (still the recorded close, not the
+  official SPXW SOQ — a documented dry-run fidelity limit). (3) D's calendar DB
+  tables moved to their OWN file (data/variant_d/dc_calendar.db), separate from
+  the shared backtesting.db the base DataRecorder uses — eliminates the
+  two-connections-on-one-file concern entirely (readers/Telegram/dashboard
+  repointed). +3 tests; full suite 1549 passed. D still dry-run-LOCKED, undeployed.
 - Strategy D — live two-expiry probe + expiry-gap fix (2026-06-15, market-hours
   VM probe): the gating market-hours check (two simultaneous SPXW expirations via
   the live calypso-broker session, read-only — no deploy, no A/B/C restart)

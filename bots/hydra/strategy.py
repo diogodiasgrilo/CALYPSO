@@ -8760,7 +8760,7 @@ class HydraStrategy(MEICStrategy):
         data_root = os.path.dirname(self.state_file)
         vd = os.path.join(data_root, "variant_d")
         sidecar = os.path.join(vd, "dc_open_trades.json")
-        db = os.path.join(vd, "backtesting.db")
+        db = os.path.join(vd, "dc_calendar.db")  # D's isolated calendar DB
         try:
             return format_calendars_telegram(dc_status(sidecar, db))
         except Exception as e:

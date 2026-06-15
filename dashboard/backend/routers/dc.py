@@ -15,12 +15,20 @@ from dashboard.backend.services.dc_reader import read_dc_status
 router = APIRouter(prefix="/api/dc", tags=["dc"])
 
 
-def _sidecar_path() -> str:
-    # dc_open_trades.json lives next to variant D's state file.
-    return os.path.join(os.path.dirname(str(settings.variant_d_state_file)), "dc_open_trades.json")
+def _vd_dir() -> str:
+    # Variant D's data dir (where the sidecar + isolated calendar DB live).
+    return os.path.dirname(str(settings.variant_d_state_file))
 
 
 @router.get("/status")
 def dc_status():
-    """Strategy D open calendars + recent outcomes + summary."""
-    return read_dc_status(_sidecar_path(), str(settings.variant_d_backtesting_db))
+    """Strategy D open calendars + recent outcomes + summary.
+
+    Reads D's isolated calendar DB (dc_calendar.db) — separate from the shared
+    backtesting.db — and the open-calendar sidecar.
+    """
+    vd = _vd_dir()
+    return read_dc_status(
+        os.path.join(vd, "dc_open_trades.json"),
+        os.path.join(vd, "dc_calendar.db"),
+    )
