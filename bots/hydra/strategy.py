@@ -10777,20 +10777,55 @@ class HydraStrategy(MEICStrategy):
                             f"is UNBOOKED; manual review recommended."
                         )
 
+    @staticmethod
+    def _recon_diff_quantities(expected: Dict[Any, int], actual: Dict[Any, int]) -> Dict[Any, tuple]:
+        """Conids whose broker net quantity != the SUMMED expected quantity.
+
+        `expected` already sums each entry's contribution per conid (see
+        _expected_position_quantities), so a same-conid cross-entry merge
+        (e.g. two entries both short the same strike) nets correctly and is
+        NOT flagged — only a true mismatch is.
+        """
+        return {
+            conid: (exp_qty, actual.get(conid, 0))
+            for conid, exp_qty in expected.items()
+            if actual.get(conid, 0) != exp_qty
+        }
+
+    @staticmethod
+    def _recon_detect_orphans(expected: Dict[Any, int], actual: Dict[Any, int]) -> Dict[Any, int]:
+        """Broker positions at conids HYDRA does not track (untracked legs)."""
+        return {conid: qty for conid, qty in actual.items() if qty and conid not in expected}
+
+    @staticmethod
+    def _recon_should_defer(has_findings: bool, is_confirm_pass: bool) -> bool:
+        """Confirm-before-alarm gate: defer the FIRST time a discrepancy is seen
+        (it is often IBKR's positions endpoint lagging a just-executed close /
+        assignment / expiry by ~20-40s); commit only on the confirmation pass."""
+        return has_findings and not is_confirm_pass
+
     def _check_hourly_reconciliation(self):
         """
-        POS-003: Perform hourly position reconciliation during market hours.
+        POS-003: hourly position reconciliation during market hours.
 
-        OVERRIDE: Uses BOT_NAME ("HYDRA") instead of hardcoded "MEIC" in parent class.
+        OVERRIDE: uses BOT_NAME ("HYDRA") instead of the parent's hardcoded "MEIC".
 
-        Rewritten for the IBKR-native conid→quantity model (F4.4): the
-        broker is reconciled by net contract quantity per conid, not by
-        Saxo per-leg PositionId set arithmetic. Detects early
-        assignment, manual intervention, and vanished legs. See
-        ``docs/migration/F4_POSITION_FLOW_DESIGN.md``.
+        IBKR-native conid→quantity model (F4.4): compare the net contract
+        quantity HYDRA expects open at each conid (SUMMED across entries, so a
+        same-conid cross-entry merge is not a discrepancy) against the broker's
+        actual net quantity. See ``docs/migration/F4_POSITION_FLOW_DESIGN.md``.
+
+        Confirm-before-alarm (2026-06-15): IBKR's positions endpoint lags fills
+        by ~20-40s, so a reconciliation that races a just-executed close reads
+        STALE quantities — and would both fire a false CRITICAL "orphan" / HIGH
+        "mismatch" AND let _handle_position_discrepancies mark a still-live leg
+        stopped off a stale qty=0. So the FIRST detection only schedules a
+        re-check one settle window later (non-blocking, on a later monitoring
+        tick); we alert/act ONLY on what still persists — same philosophy as
+        MKT-046's stop-confirmation.
         """
-        # Path-B dry-run skip (2026-04-27): DRY_* IDs never exist in Saxo by
-        # design — reconciliation would mark every dry leg as missing.
+        # Path-B dry-run skip (2026-04-27): DRY_* IDs never exist at the broker
+        # by design — reconciliation would mark every dry leg as missing.
         if self.dry_run:
             return
 
@@ -10799,31 +10834,36 @@ class HydraStrategy(MEICStrategy):
         if not is_market_open():
             return
 
+        RECON_CONFIRM_DELAY_S = 30  # settle window before alerting on a discrepancy
+
         now = get_us_market_time()
 
-        # Check if it's time for reconciliation
-        if self._last_reconciliation_time:
-            elapsed_minutes = (now - self._last_reconciliation_time).total_seconds() / 60
-            if elapsed_minutes < RECONCILIATION_INTERVAL_MINUTES:
-                return
-
-        logger.info("POS-003: Performing hourly position reconciliation")
-        self._last_reconciliation_time = now
+        # Two triggers: the normal hourly cadence, OR a pending settle-delay
+        # confirmation re-check scheduled by a prior discrepancy.
+        recheck_at = getattr(self, "_recon_recheck_at", None)
+        is_confirm_pass = recheck_at is not None and now >= recheck_at
+        if not is_confirm_pass:
+            if self._last_reconciliation_time:
+                elapsed_minutes = (now - self._last_reconciliation_time).total_seconds() / 60
+                if elapsed_minutes < RECONCILIATION_INTERVAL_MINUTES:
+                    return
+            logger.info("POS-003: Performing hourly position reconciliation")
+            self._last_reconciliation_time = now
+        else:
+            logger.info(
+                "POS-003: Settle-delay confirmation re-check (a prior cycle saw a "
+                "discrepancy; verifying it isn't IBKR position-feed lag)"
+            )
+            self._recon_recheck_at = None
 
         try:
-            # POS-003 in the IBKR-native conid→quantity model (F4.4):
-            # compare the net contract quantity HYDRA expects open at
-            # each conid against the broker's actual net quantity. A
-            # same-conid merge across entries is NOT a discrepancy — the
-            # contributions sum to the broker's net.
             expected = self._expected_position_quantities()
 
             actual_positions = self._read_open_positions()
             if not actual_positions:
                 # Empty during market hours while we expect open legs is a fetch
-                # failure, not a mass close — never alert/clean on it (would
-                # false-flag every leg as vanished). With nothing expected AND
-                # nothing actual, there is simply nothing to reconcile or sweep.
+                # failure, not a mass close — never alert/act on it (would
+                # false-flag every leg as vanished).
                 if expected:
                     logger.warning(
                         "POS-003: broker returned no positions but HYDRA "
@@ -10833,37 +10873,40 @@ class HydraStrategy(MEICStrategy):
                 return
 
             actual = self._actual_position_quantities(actual_positions)
-            # I-M4: read positions even when `expected` is empty so the orphan
-            # sweep below covers the WORST case — a crash that left live broker
-            # positions but ZERO tracked entries. (Gated by is_market_open at the
-            # top, so the post-4PM settlement window can't produce a false orphan.)
-            if not expected:
-                self._reconcile_orphan_sweep(expected, actual)
+            discrepant = self._recon_diff_quantities(expected, actual)
+            orphans = self._recon_detect_orphans(expected, actual)
+
+            # Confirm-before-alarm: defer the first detection one settle window.
+            if self._recon_should_defer(bool(discrepant or orphans), is_confirm_pass):
+                self._recon_recheck_at = now + timedelta(seconds=RECON_CONFIRM_DELAY_S)
+                logger.warning(
+                    f"POS-003: {len(discrepant)} mismatch(es) + {len(orphans)} "
+                    f"orphan(s) detected — confirming after a {RECON_CONFIRM_DELAY_S}s "
+                    f"settle window before alerting (IBKR position-feed lag guard)"
+                )
                 self._save_state_to_disk()
                 return
-            discrepant = {
-                conid: (exp_qty, actual.get(conid, 0))
-                for conid, exp_qty in expected.items()
-                if actual.get(conid, 0) != exp_qty
-            }
+
+            if is_confirm_pass and not discrepant and not orphans:
+                logger.info(
+                    "POS-003: prior discrepancy self-resolved after the settle "
+                    "delay (IBKR position-feed lag) — no alert"
+                )
 
             if discrepant:
                 logger.warning(
-                    f"POS-003: {len(discrepant)} conid(s) mismatch the "
-                    f"broker's quantity"
+                    f"POS-003: {len(discrepant)} conid(s) mismatch the broker's quantity"
                 )
                 for conid, (exp_qty, act_qty) in discrepant.items():
                     logger.warning(
-                        f"  conid {conid}: expected {exp_qty}, "
-                        f"broker shows {act_qty}"
+                        f"  conid {conid}: expected {exp_qty}, broker shows {act_qty}"
                     )
                 self.alert_service.send_alert(
                     alert_type=AlertType.CRITICAL_INTERVENTION,
                     title="Position Mismatch Detected",
                     message=(
-                        f"{len(discrepant)} {self.BOT_NAME} conid(s) "
-                        f"mismatch the broker's position quantity. Manual "
-                        f"intervention suspected."
+                        f"{len(discrepant)} {self.BOT_NAME} conid(s) mismatch the "
+                        f"broker's position quantity. Manual intervention suspected."
                     ),
                     priority=AlertPriority.HIGH,
                     details={
@@ -10876,16 +10919,15 @@ class HydraStrategy(MEICStrategy):
                 )
                 self._handle_position_discrepancies(discrepant)
 
-            # I-M4 orphan sweep (see method docstring).
+            # I-M4 orphan sweep (alerts on untracked broker positions).
             n_orphans = self._reconcile_orphan_sweep(expected, actual)
 
             # Persist state after reconciliation
             self._save_state_to_disk()
 
             logger.info(
-                f"POS-003: Reconciliation complete — {len(expected)} "
-                f"conid(s) expected, {len(discrepant)} mismatched, "
-                f"{n_orphans} orphan(s)"
+                f"POS-003: Reconciliation complete — {len(expected)} conid(s) "
+                f"expected, {len(discrepant)} mismatched, {n_orphans} orphan(s)"
             )
 
         except Exception as e:
@@ -10905,10 +10947,7 @@ class HydraStrategy(MEICStrategy):
         startup (the hourly gate is skipped when _last_reconciliation_time was
         None) — so this doubles as a post-crash startup sweep. Returns the count.
         """
-        orphans = {
-            conid: qty for conid, qty in actual.items()
-            if qty and conid not in expected
-        }
+        orphans = self._recon_detect_orphans(expected, actual)
         if not orphans:
             return 0
         detail = ", ".join(
@@ -11082,6 +11121,9 @@ class HydraStrategy(MEICStrategy):
 
         # Reset reconciliation timer
         self._last_reconciliation_time = None
+        # Confirm-before-alarm: when set, a settle-delay reconciliation re-check
+        # is pending (a prior cycle saw a discrepancy that may be IBKR feed lag).
+        self._recon_recheck_at = None
 
         # POS-004: Reset settlement reconciliation flag for new day
         self._settlement_reconciliation_complete = False
