@@ -57,24 +57,15 @@ so the account stays flat and NONE of those vectors touch C.
 from __future__ import annotations
 
 import logging
-from enum import Enum
 
 from bots.hydra.base_strategy import ConfigError
+# DCPhase + the two-expiry CalendarEntry model live in calendar_entry (Phase 1
+# foundation). Re-exported here so callers/tests can import them from the
+# strategy module. CalendarEntry is consumed by the entry logic in Phase 3.
+from bots.hydra.calendar_entry import CalendarEntry, DCPhase  # noqa: F401
 from bots.hydra.strategy import HydraStrategy
 
 logger = logging.getLogger(__name__)
-
-
-class DCPhase(Enum):
-    """Per-position lifecycle phase for the DC Time Machine.
-
-    Unlike the 0DTE iron-condor family (one phase, born-and-dies same session),
-    a DC position moves CALENDAR -> TRANSFORMED -> CLOSED across multiple days.
-    """
-
-    CALENDAR = "calendar"        # net-debit double calendar, pre-transformation
-    TRANSFORMED = "transformed"  # transformed into a (possibly risk-free) iron condor
-    CLOSED = "closed"            # liquidated (pre-transform stop / EOD) or settled
 
 
 class DoubleCalendarStrategy(HydraStrategy):

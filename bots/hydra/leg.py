@@ -44,6 +44,13 @@ class Leg:
     - ``price``        — current option price, refreshed every heartbeat (transient)
     - ``fill_price``   — execution price at entry (option points; ×100 for dollars)
     - ``mid_at_fill``  — (bid+ask)/2 at the filling attempt; slippage reference (transient)
+    - ``expiry``       — option expiry (ISO ``YYYY-MM-DD``). ``None`` for the 0DTE
+      iron-condor family (all legs share the single 0DTE expiry, resolved
+      externally at qualify time). ADDITIVE for the multi-day calendar family
+      (Strategy D), where the short and long legs of a side sit at the SAME
+      strike but DIFFERENT expiries — the one thing the flat strike/uic surface
+      cannot otherwise distinguish. Unused (stays ``None``) on every existing
+      strategy, so the iron-condor path is byte-identical.
     """
 
     side: str
@@ -54,6 +61,7 @@ class Leg:
     price: float = 0.0
     fill_price: float = 0.0
     mid_at_fill: float = 0.0
+    expiry: Optional[str] = None
 
     @property
     def name(self) -> str:

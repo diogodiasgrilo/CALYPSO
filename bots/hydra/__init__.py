@@ -36,6 +36,26 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D Phase 1 — CalendarEntry foundation (2026-06-14, model-only, NO
+  running-bot behavior change): the two-expiration / net-DEBIT position model
+  every other D surface depends on. (1) Leg gains an additive optional `expiry`
+  field (bots/hydra/leg.py) — None on the 0DTE iron-condor family (byte-identical),
+  set per-leg on a calendar where the short/long of a side share a strike but
+  differ in expiry. (2) New bots/hydra/calendar_entry.py: DCPhase (moved here) +
+  CalendarEntry(IronCondorEntry). It SUBCLASSES IronCondorEntry so it reuses the
+  Leg bridge, active_entries recognition, state save/load and (conid,quantity)
+  reconciliation UNCHANGED — a double calendar's 4 legs map onto the canonical
+  leg names, and post-transform the longs move to wing strikes so it becomes a
+  genuine same-expiry IC — and OVERRIDES every economic property (total_credit /
+  spread_width / call+put_spread_value / unrealized_pnl) with phase-aware,
+  debit-rooted math so the IC credit-vertical formulas (which degenerate at
+  width=0 on same-strike legs) NEVER run for a calendar. Adds net_debit /
+  transform_credit / wing_width / is_risk_free + the risk-free invariant
+  (transform_credit >= net_debit + wing*100*contracts). double_calendar_strategy
+  now imports DCPhase/CalendarEntry from calendar_entry. A/B/C construct no
+  CalendarEntry, so they are unaffected. +18 tests; full suite 1478 passed.
+  (Phase 2+: two-expiry chain/quote, entry+sim, transformer, multi-day
+  lifecycle/state, DB, Telegram, dashboard — still to come.)
 - Strategy D "DC Time Machine" SCAFFOLD + Phase-0 coexistence safety (2026-06-14):
   Adds Strategy D — a multi-day SPX double calendar that transforms into a
   risk-free iron condor (Steve Burnich, video JtGW1wNFNIY) — as a dry-run-LOCKED
