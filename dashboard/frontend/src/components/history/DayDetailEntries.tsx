@@ -1,4 +1,4 @@
-import { colors } from "../../lib/tradingColors";
+import { colors, pnlColor } from "../../lib/tradingColors";
 import { formatPnL } from "../../lib/formatters";
 import type { DayEntry, DayStop } from "./types";
 
@@ -56,10 +56,14 @@ function entryStatus(
       </span>
     );
   }
+  // Brandon variants record take-profit / GEX-breach exits in trade_stops too,
+  // with a POSITIVE net_pnl. Don't paint a profitable close as a red "Stopped".
   const sides = entryStops.map((s) => s.side).join("+");
+  const sumNet = entryStops.reduce((a, s) => a + (s.net_pnl || 0), 0);
+  const win = sumNet >= 0;
   return (
-    <span style={{ color: colors.loss }} className="font-semibold">
-      Stopped ({sides})
+    <span style={{ color: win ? colors.profit : colors.loss }} className="font-semibold">
+      {win ? "Closed" : "Stopped"} ({sides})
     </span>
   );
 }
@@ -107,7 +111,14 @@ export function DayDetailEntries({
             </tr>
           </thead>
           <tbody>
-            {entries.map((e) => (
+            {entries.map((e) => {
+              // entry_type is "call_only" / "put_only" / "full_ic" — a one-sided
+              // entry still stores the never-placed side's pre-gate strikes, so
+              // suppress them rather than show a spread that was never on.
+              const t = (e.entry_type || "").toLowerCase();
+              const putOnly = t.includes("put") && t.includes("only");
+              const callOnly = t.includes("call") && t.includes("only");
+              return (
               <tr
                 key={e.entry_number}
                 className="border-b border-border-dim/50 hover:bg-bg-elevated/20"
@@ -125,14 +136,14 @@ export function DayDetailEntries({
                   {e.override_reason || e.trend_signal || "\u2014"}
                 </td>
                 <td className="px-2 py-1.5 text-right font-mono text-text-secondary">
-                  {e.entry_type === "PUT"
+                  {putOnly
                     ? "\u2014"
                     : e.short_call_strike > 0
                     ? `${e.short_call_strike}/${e.long_call_strike}`
                     : "\u2014"}
                 </td>
                 <td className="px-2 py-1.5 text-right font-mono text-text-secondary">
-                  {e.entry_type === "CALL"
+                  {callOnly
                     ? "\u2014"
                     : e.short_put_strike > 0
                     ? `${e.short_put_strike}/${e.long_put_strike}`
@@ -150,7 +161,8 @@ export function DayDetailEntries({
                   {entryStatus(e, stopMap)}
                 </td>
               </tr>
-            ))}
+              );
+            })}
           </tbody>
         </table>
       </div>
@@ -186,10 +198,10 @@ export function DayDetailEntries({
                       <span
                         className="font-semibold"
                         style={{
-                          color: s.side === "call" ? colors.info : colors.warning,
+                          color: s.side === "call" ? colors.info : s.side === "put" ? colors.warning : colors.textSecondary,
                         }}
                       >
-                        {s.side === "call" ? "Call" : "Put"}
+                        {s.side === "call" ? "Call" : s.side === "put" ? "Put" : s.side}
                       </span>
                     </td>
                     <td className="px-2 py-1.5 font-mono text-text-primary">
@@ -203,7 +215,7 @@ export function DayDetailEntries({
                     </td>
                     <td
                       className="px-2 py-1.5 text-right font-mono font-semibold"
-                      style={{ color: colors.loss }}
+                      style={{ color: pnlColor(s.net_pnl || 0) }}
                     >
                       {formatPnL(s.net_pnl || 0)}
                     </td>

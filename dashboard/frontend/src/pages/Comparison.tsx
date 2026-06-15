@@ -122,6 +122,10 @@ interface VariantEntry {
   total_credit?: number;
   call_side_stop?: number;
   put_side_stop?: number;
+  // MKT-042 buffer-decay-adjusted live stop (the actual trigger). Falls back
+  // to the static *_side_stop when absent.
+  effective_call_stop?: number;
+  effective_put_stop?: number;
   call_side_stopped?: boolean;
   put_side_stopped?: boolean;
   call_side_expired?: boolean;
@@ -133,6 +137,16 @@ interface VariantEntry {
   disposition?: string;
   // Server-computed: net realized P&L for this entry's closed sides
   entry_realized_pnl?: number;
+  // Raw state passthrough (already in the payload via dict(e); now consumed by
+  // the per-side card so a half-stopped entry shows its stopped leg explicitly).
+  close_reason?: string;
+  skip_reason?: string;
+  call_side_pivot_closed?: boolean;
+  put_side_pivot_closed?: boolean;
+  actual_call_stop_debit?: number;
+  actual_put_stop_debit?: number;
+  call_stop_time?: string;
+  put_stop_time?: string;
   buffer?: BufferInfo;
 }
 
@@ -152,6 +166,7 @@ interface VariantPayload {
   entries?: VariantEntry[];
   pnl_history?: PnLPoint[];
   min_buffer_margin?: { call_pct: number; put_pct: number };
+  spx_price?: number;
   spx_open?: number;
   spx_high?: number;
   spx_low?: number;
@@ -411,16 +426,38 @@ function Leaderboard({
   const winnerColor =
     winner === "tie" || winner === "n/a" ? colors.textSecondary : accentFor(winner);
 
+  // Per-contract normalization — variants trade different contract counts
+  // (e.g. A=1c, B=10c, C=7c), so raw-$ leadership isn't a fair strategy
+  // comparison. Surface the per-contract leader alongside the raw-$ one.
+  const perContract: Record<string, number> = {};
+  variantIds.forEach((vid) => {
+    const v = variants[vid];
+    if (!v?.available) return;
+    const c = v.config?.contracts_per_entry ?? 1;
+    const s = scores?.[vid] ?? v.summary?.net_pnl ?? 0;
+    perContract[vid] = c > 0 ? s / c : s;
+  });
+  const pcEntries = Object.entries(perContract);
+  const pcLeader = pcEntries.length
+    ? pcEntries.reduce((a, b) => (b[1] > a[1] ? b : a))[0]
+    : null;
+  const pcLeaderLabel = pcLeader ? variants[pcLeader]?.label ?? pcLeader : null;
+
   return (
     <div className="rounded border border-border-dim bg-card p-4">
       <div className="flex items-baseline justify-between gap-4 max-md:flex-col max-md:items-start">
         <div>
           <div className="text-xs uppercase tracking-wide text-text-secondary">
-            Today's Leader
+            Today's Leader <span className="text-text-dim normal-case">(raw $)</span>
           </div>
           <div className="text-2xl font-semibold mt-1" style={{ color: winnerColor }}>
             {winnerLabel}
           </div>
+          {pcLeaderLabel && pcLeader !== winner && (
+            <div className="text-[11px] mt-1" style={{ color: accentFor(pcLeader!) }}>
+              Per-contract leader: {pcLeaderLabel}
+            </div>
+          )}
         </div>
         <div className="flex gap-6 max-md:gap-3 flex-wrap">
           {variantIds.map((vid) => {
@@ -432,6 +469,7 @@ function Leaderboard({
                 label={v?.label ?? vid}
                 value={value}
                 accent={accentFor(vid)}
+                contracts={v?.config?.contracts_per_entry}
               />
             );
           })}
@@ -441,7 +479,7 @@ function Leaderboard({
   );
 }
 
-function PnLBlock({ label, value, accent }: { label: string; value: number; accent: string }) {
+function PnLBlock({ label, value, accent, contracts }: { label: string; value: number; accent: string; contracts?: number }) {
   return (
     <div className="text-right max-md:text-left">
       <div className="text-[10px] uppercase tracking-wide" style={{ color: accent }}>
@@ -450,6 +488,14 @@ function PnLBlock({ label, value, accent }: { label: string; value: number; acce
       <div className="text-xl font-mono mt-0.5" style={{ color: pnlColor(value) }}>
         {formatPnL(value)}
       </div>
+      {contracts && contracts > 1 && (
+        <div
+          className="text-[10px] font-mono text-text-dim"
+          title={`Per-contract (${contracts}c) — comparable across variants`}
+        >
+          {formatPnL(value / contracts)}/c
+        </div>
+      )}
     </div>
   );
 }
@@ -574,14 +620,43 @@ function VariantPanel({ v, accent }: { v: VariantPayload; accent: string }) {
   const entries = v.entries ?? [];
   const margin = v.min_buffer_margin ?? { call_pct: 100, put_pct: 100 };
 
+  // SIM vs real paper money: A/B run dry (simulated), C places real paper
+  // orders. dry_run defaults to "simulated" unless the config explicitly says
+  // false, so an unknown mode never masquerades as live money.
+  const isSim = v.config?.dry_run !== false;
+
+  // Tightest LIVE cushion across all open sides right now — the panel-level
+  // "is anything about to stop?" signal that was previously buried inside each
+  // entry's thin bar. null when nothing is live.
+  const liveCushions = entries
+    .flatMap((e) => [e.buffer?.call_pct, e.buffer?.put_pct])
+    .filter((x): x is number => x != null);
+  const tightest = liveCushions.length ? Math.min(...liveCushions) : null;
+
   return (
     <div className="rounded border border-border-dim bg-card p-4 space-y-3">
-      <div className="flex items-baseline justify-between">
-        <div className="text-xs uppercase tracking-wide" style={{ color: accent }}>
-          {v.label}
+      <div className="flex items-baseline justify-between gap-2">
+        <div className="flex items-center gap-1.5 min-w-0">
+          <span
+            className="text-[9px] font-mono px-1 py-px rounded shrink-0"
+            style={
+              isSim
+                ? { color: colors.textDim, border: `1px solid ${colors.borderDim}` }
+                : { color: colors.warning, border: `1px solid ${colors.warning}` }
+            }
+            title={isSim ? "Simulated — no real orders" : "Real paper-account orders"}
+          >
+            {isSim ? "SIM" : "PAPER $"}
+          </span>
+          <div className="text-xs uppercase tracking-wide truncate" style={{ color: accent }}>
+            {v.label}
+          </div>
         </div>
-        <div className="text-xs text-text-secondary">
-          {summary.entries_completed} entries • {summary.total_stops} stops
+        <div className="text-xs text-text-secondary whitespace-nowrap">
+          {summary.entries_completed} {summary.entries_completed === 1 ? "entry" : "entries"}
+          {summary.total_stops > 0 && (
+            <span style={{ color: colors.loss }}> · {summary.total_stops} stopped</span>
+          )}
         </div>
       </div>
 
@@ -591,23 +666,33 @@ function VariantPanel({ v, accent }: { v: VariantPayload; accent: string }) {
         <Metric label="Commission" value={`$${summary.total_commission.toFixed(0)}`} />
       </div>
 
+      {tightest !== null && tightest < 25 && (
+        <div
+          className="text-[11px] font-mono rounded px-2 py-1"
+          style={{ backgroundColor: "rgba(248,81,73,0.08)", color: cushionColor(tightest) }}
+        >
+          ⚠ tightest live cushion {tightest.toFixed(0)}% — near a stop
+        </div>
+      )}
+
       {entries.length === 0 ? (
         <div className="text-sm text-text-dim italic">No entries yet today.</div>
       ) : (
         <div className="space-y-2">
           {entries.map((e, i) => (
-            <EntryRow key={i} entry={e} accent={accent} />
+            <EntryRow key={i} entry={e} accent={accent} spx={v.spx_price} />
           ))}
         </div>
       )}
 
       <div className="border-t border-border-dim pt-2">
         <div className="text-xs text-text-secondary mb-1">
-          Min Buffer Margin Today <span className="text-text-dim">(100% = safe · 0% = at stop)</span>
+          Worst cushion today{" "}
+          <span className="text-text-dim">(low-water — not live · 100% safe → 0% at stop)</span>
         </div>
         <div className="flex gap-4 text-xs">
-          <BufferBar label="Call" pct={margin.call_pct} />
-          <BufferBar label="Put" pct={margin.put_pct} />
+          <BufferBar label="Call" pct={margin.call_pct} muted />
+          <BufferBar label="Put" pct={margin.put_pct} muted />
         </div>
       </div>
     </div>
@@ -626,105 +711,290 @@ function Metric({ label, value, colored }: { label: string; value: string; color
   );
 }
 
-function EntryRow({ entry, accent }: { entry: VariantEntry; accent: string }) {
-  const num = entry.entry_number ?? "?";
-  const callDone = entry.call_side_stopped || entry.call_side_expired || entry.call_side_skipped;
-  const putDone = entry.put_side_stopped || entry.put_side_expired || entry.put_side_skipped;
-  // Status from server-computed disposition (TP / BREACH / STOP / EXPIRED /
-  // SKIPPED / LIVE). Falls back to flag-based inference if the server
-  // didn't enrich (older payload). We deliberately do NOT use is_complete
-  // here — it's True from placement, not from lifecycle end.
-  const disposition = entry.disposition ??
-    ((callDone && putDone) ? "DONE" : "LIVE");
-  const isLive = disposition === "LIVE";
-  // Color the badge by what happened: green for profit-style closes,
-  // red for stops/breaches, amber for partial/skipped, dim for live.
-  const statusColor =
-    disposition === "TP" ? colors.profit :
-    disposition === "EXPIRED" ? colors.profit :
-    disposition === "BREACH" || disposition === "STOP" ? colors.loss :
-    disposition === "SKIPPED" ? colors.warning :
-    disposition === "SETTLING" ? colors.textSecondary :
-    accent;
+// ── Per-side lifecycle resolution ───────────────────────────────────────────
+// An iron condor has TWO independent sides (call spread + put spread) that can
+// close on their own. The old card collapsed both into one badge ("LIVE if any
+// side still open"), so a half-stopped entry (call stopped, put still live)
+// rendered as a calm "LIVE" with the stopped leg silently dropped — which is
+// exactly what made variant A look wrong after its call side stopped. We now
+// resolve and render each side explicitly.
+type SideState = "live" | "stopped" | "breach" | "expired" | "skipped" | "absent";
 
-  const buffer = entry.buffer ?? { call_pct: null, put_pct: null, call_value: null, put_value: null };
-  const realized = entry.entry_realized_pnl ?? 0;
-  const realizedColor = realized > 0 ? colors.profit : realized < 0 ? colors.loss : colors.textDim;
+interface SideInfo {
+  state: SideState;
+  shortStrike?: number;
+  longStrike?: number;
+  credit?: number;
+  cushionPct: number | null; // live: % distance from the (effective) stop
+  cost: number | null;       // live: current cost-to-close ($)
+  stop?: number;             // live trigger level ($) — effective (MKT-042) when available
+  distancePt: number | null; // live: SPX points from spot to the short strike (+ = OTM)
+  unrealized: number | null; // live: mark-to-market P&L for this side ($)
+  realized: number | null;   // closed: this side's realized P&L ($), null if unknown
+  closeTime?: string;        // closed: HH:MM the side closed
+}
+
+function fmtClock(iso?: string): string | undefined {
+  if (!iso || iso.length < 16) return undefined;
+  return iso.slice(11, 16);
+}
+
+function resolveSide(entry: VariantEntry, side: "call" | "put", spx?: number): SideInfo {
+  const short = side === "call" ? entry.short_call_strike : entry.short_put_strike;
+  const long = side === "call" ? entry.long_call_strike : entry.long_put_strike;
+  const credit = side === "call" ? entry.call_spread_credit : entry.put_spread_credit;
+  const staticStop = side === "call" ? entry.call_side_stop : entry.put_side_stop;
+  // MKT-042 decays the stop over the day — the effective stop is the live
+  // trigger (matches the main dashboard). Fall back to the static stop.
+  const effStop = (side === "call" ? entry.effective_call_stop : entry.effective_put_stop) ?? staticStop;
+  const stopped = side === "call" ? entry.call_side_stopped : entry.put_side_stopped;
+  const expired = side === "call" ? entry.call_side_expired : entry.put_side_expired;
+  const skipped = side === "call" ? entry.call_side_skipped : entry.put_side_skipped;
+  const pivot = side === "call" ? entry.call_side_pivot_closed : entry.put_side_pivot_closed;
+  const debit = side === "call" ? entry.actual_call_stop_debit : entry.actual_put_stop_debit;
+  const stopTime = side === "call" ? entry.call_stop_time : entry.put_stop_time;
+  const cost = (side === "call" ? entry.buffer?.call_value : entry.buffer?.put_value) ?? null;
+  const backendPct = (side === "call" ? entry.buffer?.call_pct : entry.buffer?.put_pct) ?? null;
+
+  // Not placed (one-sided HYDRA entry, or a fully-skipped slot with 0 strikes).
+  if (!short || short <= 0) {
+    return { state: "absent", cushionPct: null, cost: null, distancePt: null, unrealized: null, realized: null };
+  }
+
+  // Cushion vs the EFFECTIVE stop so the bar matches the live trigger (not the
+  // static one the backend used); fall back to the backend pct if we can't.
+  let cushionPct = backendPct;
+  if (effStop && effStop > 0 && cost != null) {
+    cushionPct = Math.round(Math.max(0, Math.min(100, ((effStop - cost) / effStop) * 100)) * 10) / 10;
+  }
+  // SPX points from spot to the short strike (+ = still OTM/safe, − = ITM).
+  const distancePt = spx && spx > 0 ? (side === "call" ? short - spx : spx - short) : null;
+  // Live mark-to-market for this side = credit kept − current cost to close.
+  const unrealized = cost != null && credit != null ? credit - cost : null;
+
+  // Realized only when we actually have the close debit — otherwise showing
+  // "credit only" would mislabel a stop (a loss) as a gain.
+  const haveDebit = debit != null && debit > 0;
+  const closedPnl = haveDebit ? (credit ?? 0) - (debit ?? 0) : null;
+  // close_reason is entry-level; we only use it to rescue a Brandon take-profit
+  // (which sets both *_stopped and *_expired) from being mislabeled a loss.
+  const tp = entry.close_reason === "TP";
+
+  let state: SideState = "live";
+  let realized: number | null = null;
+  let closeTime: string | undefined;
+  if (skipped) {
+    state = "skipped";
+  } else if (tp && (stopped || expired)) {
+    state = "expired"; // profitable close → show as a win, not a stop
+    realized = closedPnl;
+    closeTime = fmtClock(stopTime);
+  } else if (pivot) {
+    state = "breach";
+    realized = closedPnl;
+    closeTime = fmtClock(stopTime);
+  } else if (stopped) {
+    state = "stopped";
+    realized = closedPnl;
+    closeTime = fmtClock(stopTime);
+  } else if (expired) {
+    state = "expired";
+    realized = credit ?? null; // expired worthless = kept the full credit
+  }
+
+  const live = state === "live";
+  return {
+    state, shortStrike: short, longStrike: long, credit,
+    cushionPct: live ? cushionPct : null,
+    cost, stop: effStop,
+    distancePt: live ? distancePt : null,
+    unrealized: live ? unrealized : null,
+    realized, closeTime,
+  };
+}
+
+/** One side (call or put) of an entry — strikes + a state-specific second line. */
+function SideLine({ tag, info }: { tag: "C" | "P"; info: SideInfo }) {
+  if (info.state === "absent") {
+    return (
+      <div className="text-text-dim">
+        <span className="text-text-dim">{tag}:</span> —
+      </div>
+    );
+  }
+  const live = info.state === "live";
+  const strikeColor = live ? colors.textPrimary : colors.textSecondary;
+  const realizedStr =
+    info.realized !== null ? `${info.realized > 0 ? "+" : ""}$${info.realized.toFixed(0)}` : "";
+
+  return (
+    <div>
+      <div>
+        <span className="text-text-dim">{tag}:</span>{" "}
+        <span style={{ color: strikeColor }}>
+          {info.shortStrike}/{info.longStrike}
+        </span>
+        <span className="text-text-dim ml-1.5">cr ${info.credit?.toFixed(0)}</span>
+      </div>
+
+      {live && info.cushionPct !== null && (
+        <div
+          className="mt-0.5"
+          title={`close $${info.cost?.toFixed(0)} → stop $${info.stop?.toFixed(0)} (effective)`}
+        >
+          <div className="flex justify-between text-[10px] leading-none mb-0.5">
+            <span className="text-text-dim">
+              {info.distancePt != null
+                ? info.distancePt >= 0
+                  ? `${info.distancePt.toFixed(0)}pt OTM`
+                  : `ITM ${Math.abs(info.distancePt).toFixed(0)}pt`
+                : `close $${info.cost?.toFixed(0)} → $${info.stop?.toFixed(0)}`}
+            </span>
+            <span className="font-mono" style={{ color: cushionColor(info.cushionPct) }}>
+              {info.cushionPct < 15 ? "⚠ " : ""}
+              {info.cushionPct.toFixed(0)}%
+            </span>
+          </div>
+          <BufferBar pct={info.cushionPct} compact />
+        </div>
+      )}
+
+      {(info.state === "stopped" || info.state === "breach") && (
+        <div
+          className="mt-0.5 font-mono"
+          style={{ color: info.state === "breach" ? colors.warning : colors.loss }}
+        >
+          {info.state === "breach" ? "⚠ BREACH" : "✗ STOPPED"}
+          {realizedStr && ` ${realizedStr}`}
+          {info.closeTime && <span className="text-text-dim"> @{info.closeTime}</span>}
+        </div>
+      )}
+
+      {info.state === "expired" && (
+        <div className="mt-0.5 font-mono" style={{ color: colors.profit }}>
+          ✓ kept {realizedStr || "credit"}
+        </div>
+      )}
+
+      {info.state === "skipped" && <div className="mt-0.5 text-text-dim">– skipped</div>}
+    </div>
+  );
+}
+
+function EntryRow({ entry, accent, spx }: { entry: VariantEntry; accent: string; spx?: number }) {
+  const num = entry.entry_number ?? "?";
+  const time = entry.entry_time?.slice(11, 16) ?? "—";
+  const disposition = entry.disposition ?? "LIVE";
+
+  // A fully-skipped slot: collapse to one clean line — no phantom "0/0 $0".
+  const fullySkipped =
+    disposition === "SKIPPED" ||
+    (entry.call_side_skipped && entry.put_side_skipped) ||
+    (!entry.short_call_strike && !entry.short_put_strike);
+  if (fullySkipped) {
+    return (
+      <div className="rounded border border-border-dim bg-bg p-2 text-xs flex items-center justify-between">
+        <span className="font-mono">
+          <span style={{ color: accent }}>#{num}</span>{" "}
+          <span className="text-text-secondary">{time}</span>
+        </span>
+        <span
+          className="text-[10px] font-mono uppercase tracking-wider"
+          style={{ color: colors.textDim }}
+        >
+          skipped{entry.skip_reason ? ` · ${entry.skip_reason}` : " · credit gate"}
+        </span>
+      </div>
+    );
+  }
+
+  const call = resolveSide(entry, "call", spx);
+  const put = resolveSide(entry, "put", spx);
+  const anyLive = call.state === "live" || put.state === "live";
+  const anyStopped =
+    call.state === "stopped" || call.state === "breach" ||
+    put.state === "stopped" || put.state === "breach";
+
+  // Rollup badge. THE FIX: when one side has stopped but the other is still
+  // open, the entry reads "PARTIAL" (amber) — never a calm "LIVE".
+  let badge: string;
+  let badgeColor: string;
+  if (anyLive && anyStopped) {
+    badge = "PARTIAL";
+    badgeColor = colors.warning;
+  } else if (anyLive) {
+    badge = disposition === "SETTLING" ? "SETTLING" : "LIVE";
+    badgeColor = disposition === "SETTLING" ? colors.textSecondary : accent;
+  } else {
+    badge = disposition;
+    badgeColor =
+      disposition === "TP" || disposition === "EXPIRED" ? colors.profit :
+      disposition === "STOP" || disposition === "BREACH" ? colors.loss :
+      disposition === "SKIPPED" ? colors.warning :
+      colors.textSecondary;
+  }
+
+  // Current entry P&L = realized from closed side(s) + live mark on open
+  // side(s). Surfaces a stopped leg's loss even while the other leg runs.
+  const realizedTotal = (call.realized ?? 0) + (put.realized ?? 0);
+  const liveUnrealized = (call.unrealized ?? 0) + (put.unrealized ?? 0);
+  const currentPnl = realizedTotal + liveUnrealized;
 
   return (
     <div className="rounded border border-border-dim bg-bg p-2 text-xs">
       <div className="flex items-center justify-between mb-1">
         <div className="font-mono">
           <span style={{ color: accent }}>#{num}</span>{" "}
-          <span className="text-text-secondary">{entry.entry_time?.slice(11, 16) ?? "—"}</span>
+          <span className="text-text-secondary">{time}</span>
         </div>
         <div className="flex items-center gap-2">
-          {/* Realized P&L for closed entries — the answer to "what happened?" */}
-          {!isLive && realized !== 0 && (
-            <span className="text-[11px] font-mono" style={{ color: realizedColor }}>
-              {realized > 0 ? "+" : ""}${realized.toFixed(2)}
+          {Math.round(currentPnl) !== 0 && (
+            <span className="text-[11px] font-mono" style={{ color: pnlColor(currentPnl) }}>
+              {currentPnl > 0 ? "+" : ""}${currentPnl.toFixed(0)}
             </span>
           )}
-          <span className="text-[10px] font-mono uppercase tracking-wider" style={{ color: statusColor }}>
-            {disposition}
+          <span
+            className="text-[10px] font-mono uppercase tracking-wider"
+            style={{ color: badgeColor }}
+          >
+            {badge}
           </span>
         </div>
       </div>
       <div className="grid grid-cols-2 gap-2 font-mono text-text-secondary">
-        <div>
-          <span className="text-text-dim">C:</span>{" "}
-          <span style={{ color: callDone ? colors.textDim : colors.textPrimary }}>
-            {entry.short_call_strike}/{entry.long_call_strike}
-          </span>
-          <span className="text-text-dim ml-2">${entry.call_spread_credit?.toFixed(0)}</span>
-        </div>
-        <div>
-          <span className="text-text-dim">P:</span>{" "}
-          <span style={{ color: putDone ? colors.textDim : colors.textPrimary }}>
-            {entry.short_put_strike}/{entry.long_put_strike}
-          </span>
-          <span className="text-text-dim ml-2">${entry.put_spread_credit?.toFixed(0)}</span>
-        </div>
+        <SideLine tag="C" info={call} />
+        <SideLine tag="P" info={put} />
       </div>
-      {isLive && (buffer.call_pct !== null || buffer.put_pct !== null) && (
-        <div className="flex gap-3 mt-1.5">
-          {buffer.call_pct !== null && (
-            <div className="flex-1">
-              <div className="text-[10px] text-text-dim">
-                C buffer ${buffer.call_value?.toFixed(0)} / stop ${entry.call_side_stop?.toFixed(0)}
-              </div>
-              <BufferBar pct={buffer.call_pct} compact />
-            </div>
-          )}
-          {buffer.put_pct !== null && (
-            <div className="flex-1">
-              <div className="text-[10px] text-text-dim">
-                P buffer ${buffer.put_value?.toFixed(0)} / stop ${entry.put_side_stop?.toFixed(0)}
-              </div>
-              <BufferBar pct={buffer.put_pct} compact />
-            </div>
-          )}
-        </div>
-      )}
     </div>
   );
+}
+
+function mutedCushion(pct: number): string {
+  if (pct >= 40) return colors.profitMuted;
+  if (pct >= 25) return colors.warningMuted;
+  if (pct >= 15) return "#a6602b";
+  return colors.lossMuted;
 }
 
 function BufferBar({
   pct,
   label,
   compact = false,
+  muted = false,
 }: {
   pct: number | null;
   label?: string;
   compact?: boolean;
+  muted?: boolean;
 }) {
   const v = pct ?? 100;
   // Buffer MARGIN color (matches the live cards' cushion): green = lots of
   // cushion, red = near the stop. Fixed 2026-06-12 — this used to color
   // utilization (inverted), so a safe day looked red and a near-stop day green.
-  const color = cushionColor(v);
-  const height = compact ? "h-1" : "h-1.5";
+  // `muted` desaturates the scale for the footer's historical "worst today"
+  // bars so they read as past, not as a live alarm.
+  const color = muted ? mutedCushion(v) : cushionColor(v);
+  const height = compact ? "h-1.5" : "h-2";
 
   return (
     <div className={compact ? "" : "flex-1"}>

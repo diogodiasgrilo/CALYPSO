@@ -379,8 +379,8 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
             <AreaChart data={cumulativeData}>
               <defs>
                 <linearGradient id="cumPnlGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor={colors.profit} stopOpacity={0.3} />
-                  <stop offset="95%" stopColor={colors.profit} stopOpacity={0} />
+                  <stop offset="5%" stopColor={(cumulativeData[cumulativeData.length - 1]?.cumPnl ?? 0) < 0 ? colors.loss : colors.profit} stopOpacity={0.3} />
+                  <stop offset="95%" stopColor={(cumulativeData[cumulativeData.length - 1]?.cumPnl ?? 0) < 0 ? colors.loss : colors.profit} stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke={colors.borderDim} />
@@ -407,7 +407,7 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
               <Area
                 type="monotone"
                 dataKey="cumPnl"
-                stroke={colors.profit}
+                stroke={(cumulativeData[cumulativeData.length - 1]?.cumPnl ?? 0) < 0 ? colors.loss : colors.profit}
                 fill="url(#cumPnlGrad)"
                 strokeWidth={2}
               />
@@ -615,8 +615,11 @@ function EntriesTab({
 
     entries.forEach((e) => {
       const entryStops = stopLookup.get(`${e.date}_${e.entry_number}`) ?? [];
-      const callStopped = entryStops.some((s) => s.side === "call");
-      const putStopped = entryStops.some((s) => s.side === "put");
+      // Count only loss-stops as non-survival — Brandon variants also write
+      // profitable take-profit / GEX-breach exits to trade_stops (net_pnl > 0),
+      // and those did NOT "kill" the side.
+      const callStopped = entryStops.some((s) => s.side === "call" && (s.net_pnl ?? 0) < 0);
+      const putStopped = entryStops.some((s) => s.side === "put" && (s.net_pnl ?? 0) < 0);
 
       // Process call side
       if (e.otm_distance_call != null && e.otm_distance_call > 0) {

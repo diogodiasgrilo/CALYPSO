@@ -175,12 +175,12 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
           <div className="flex gap-3 text-[10px] mt-1 mb-1">
             {entry.call_spread_credit > 0 && (
               <span className="text-text-secondary">
-                Call: <span className="text-loss">${(entry.call_spread_credit / 100).toFixed(2)}</span>
+                Call: <span className="text-text-secondary">${entry.call_spread_credit.toFixed(0)}</span>
               </span>
             )}
             {entry.put_spread_credit > 0 && (
               <span className="text-text-secondary">
-                Put: <span className="text-loss">${(entry.put_spread_credit / 100).toFixed(2)}</span>
+                Put: <span className="text-text-secondary">${entry.put_spread_credit.toFixed(0)}</span>
               </span>
             )}
           </div>
@@ -273,9 +273,15 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
               {trendLabel}
             </span>
           )}
-          {isConditional && (
-            <span className="text-[9px] px-1 py-0.5 rounded text-text-dim" style={{ backgroundColor: `${colors.info}15`, color: colors.info }}>
-              CALL ONLY
+          {isConditional && (entry.put_only || entry.call_only) && (
+            <span
+              className="text-[9px] px-1 py-0.5 rounded"
+              style={{
+                backgroundColor: `${entry.put_only ? "#a371f7" : colors.info}15`,
+                color: entry.put_only ? "#a371f7" : colors.info,
+              }}
+            >
+              {entry.put_only ? "PUT ONLY" : "CALL ONLY"}
             </span>
           )}
         </div>

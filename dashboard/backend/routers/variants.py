@@ -588,6 +588,9 @@ def _variant_payload(vid: str) -> dict:
         "entries": _enrich_entries(entries),
         "pnl_history": state.get("pnl_history", []),
         "min_buffer_margin": _min_buffer_margin_pct(entries, db_path=paths["backtesting_db"]),
+        # Live SPX (top-level state field) — lets the comparison card show
+        # distance-to-stop in SPX points, not just cost-to-close dollars.
+        "spx_price": state.get("spx_price"),
         "spx_open": (state.get("market_data_ohlc") or {}).get("spx_open"),
         "vix_open": (state.get("market_data_ohlc") or {}).get("vix_open"),
         "spx_high": (state.get("market_data_ohlc") or {}).get("spx_high"),
