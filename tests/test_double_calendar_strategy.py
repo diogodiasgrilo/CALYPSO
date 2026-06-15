@@ -88,6 +88,30 @@ class TestMultiDayPredicate:
         assert inst._dc_entry_is_open(SimpleNamespace()) is False
 
 
+class TestPickExpiriesListedFilter:
+    """Live-found bug (2026-06-15): SPXW has expiry GAPS (Jun 29 not listed, Jun 30
+    is). _dc_pick_expiries must filter generated weekdays to actually-listed
+    chains so it never selects an unlisted expiry."""
+
+    def test_skips_unlisted_long_picks_listed(self, monkeypatch):
+        from datetime import datetime
+        monkeypatch.setattr(
+            "bots.hydra.double_calendar_strategy.get_us_market_time",
+            lambda: datetime(2026, 6, 15, 10, 0),  # Monday
+        )
+        inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
+        inst.dc_short_dte_min, inst.dc_short_dte_max = 6, 15
+        inst.dc_long_extra_dte_min, inst.dc_long_extra_dte_max = 1, 4
+        inst.dc_prefer_friday = True
+        inst.broker = MagicMock()
+        # Jun 29 (the natural +3 long) is NOT listed; everything else is.
+        inst.broker.get_option_chain.side_effect = (
+            lambda sym, iso, tc, exch: [] if iso == "2026-06-29" else [7560.0, 7565.0]
+        )
+        # short = Fri Jun 26 (11 DTE); long must skip the unlisted Jun 29 -> Jun 30.
+        assert inst._dc_pick_expiries() == ("2026-06-26", "2026-06-30")
+
+
 class TestResolveCalendarLegs:
     """Phase 2: resolve 4 conids across two expiries via the existing
     _get_option_uic (called with EXPLICIT non-0DTE expiries)."""

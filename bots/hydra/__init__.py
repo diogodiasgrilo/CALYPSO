@@ -36,6 +36,23 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D — live two-expiry probe + expiry-gap fix (2026-06-15, market-hours
+  VM probe): the gating market-hours check (two simultaneous SPXW expirations via
+  the live calypso-broker session, read-only — no deploy, no A/B/C restart)
+  CONFIRMED the capability: both a Fri 11-DTE short and a Tue +4 long return full
+  chains (714 strikes), conids, quotes, and delta/vega/theta, with the long leg
+  correctly dearer. TWO findings: (1) IBKR's snapshot returns delta/gamma/vega/
+  theta but NOT implied_vol (field 7633) for SPXW even after warmup — D's CRITICAL
+  path (delta-target strikes, mid-based debit, credit-gated transform) does NOT
+  use IV, only the informational _dc_front_back_iv signal does (and it already
+  degrades to 'no signal'), so D operates fully; the term-structure signal is just
+  unobservable on this feed (the offline backtest with real IV is the edge gate).
+  (2) BUG FIXED: SPXW has expiry GAPS (Jun 29 is a weekday but NOT a listed
+  expiry; Jun 30 is) — generate_candidate_expiries assumed every weekday is
+  listed, so D could pick a non-existent long and fail to resolve. _dc_pick_expiries
+  now filters generated candidates to ACTUALLY-listed chains (_dc_expiry_is_listed
+  via a cheap get_option_chain check) before selecting, so D skips gap days. +1
+  test; full suite 1546 passed. D still dry-run-LOCKED, undeployed.
 - Strategy D — adversarial-review fixes (2026-06-14, dry-run-only, A/B/C
   byte-identical): a 26-agent independently-verified review of the full Phases 0-7
   build found 0 critical / 2 high / 1 medium / 14 low (all D-internal or dry-run-

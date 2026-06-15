@@ -251,23 +251,43 @@ class DoubleCalendarStrategy(HydraStrategy):
     # expiry-selection logic lives in calendar_chain.
     # ------------------------------------------------------------------
 
+    def _dc_expiry_is_listed(self, expiry_iso: str) -> bool:
+        """True if IBKR actually lists an SPXW chain for this expiry. SPXW has
+        GAPS (verified live 2026-06-15: Jun 29 is a weekday but NOT a listed
+        expiry, while Jun 30 is), so a generated weekday calendar is not the same
+        as the listed-expiry set — picking an unlisted expiry would fail conid
+        resolution and skip the entry. Verified via a (cheap, cached) chain read."""
+        tc = getattr(self, "trading_class", None) or "SPXW"
+        exch = getattr(self, "exchange", None) or "CBOE"
+        sym = getattr(self, "underlying_symbol", None) or "SPX"
+        try:
+            return bool(self.broker.get_option_chain(sym, expiry_iso, tc, exch))
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("[DCTM-EXPIRIES] chain check failed for %s: %s", expiry_iso, exc)
+            return False
+
     def _dc_pick_expiries(self) -> Optional[Tuple[str, str]]:
         """Choose (short_expiry, long_expiry) for today from the SPXW trading-day
         candidates and the configured DTE windows. Returns None if no viable pair."""
         today_iso = get_us_market_time().strftime("%Y-%m-%d")
         horizon = self.dc_short_dte_max + self.dc_long_extra_dte_max + 3  # small buffer
         candidates = generate_candidate_expiries(today_iso, horizon)
+        # Filter generated weekdays down to expiries IBKR ACTUALLY lists (SPXW has
+        # gaps — see _dc_expiry_is_listed) so we never select an unlisted expiry.
+        listed = [c for c in candidates if self._dc_expiry_is_listed(c)]
         picked = pick_calendar_expiries(
-            candidates, today_iso,
+            listed, today_iso,
             self.dc_short_dte_min, self.dc_short_dte_max,
             self.dc_long_extra_dte_min, self.dc_long_extra_dte_max,
             prefer_friday=self.dc_prefer_friday,
         )
         if picked is None:
             logger.warning(
-                "[DCTM-EXPIRIES] no viable pair: short %d-%d DTE, long +%d-%d (candidates=%d)",
+                "[DCTM-EXPIRIES] no viable pair: short %d-%d DTE, long +%d-%d "
+                "(generated=%d, listed=%d)",
                 self.dc_short_dte_min, self.dc_short_dte_max,
-                self.dc_long_extra_dte_min, self.dc_long_extra_dte_max, len(candidates),
+                self.dc_long_extra_dte_min, self.dc_long_extra_dte_max,
+                len(candidates), len(listed),
             )
             return None
         short_exp, long_exp = picked
