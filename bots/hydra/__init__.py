@@ -36,6 +36,26 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D Phase 3 — entry + dry-run simulation (2026-06-14, dry-run-only, NO
+  running-bot behavior change while undeployed): D's actual entry path. (1)
+  _dc_delta_target_strike — scans on-grid OTM strikes outward from spot, reading
+  per-strike delta from the broker greeks, and picks the strike closest to
+  dc_target_delta within dc_delta_band (the 30-40delta short selection). (2)
+  _calculate_strikes — picks the two expiries + the call/put short strikes and
+  stamps them on a CalendarEntry (short+long of a side share the STRIKE, differ
+  in EXPIRY). (3) _dc_simulate_entry — opens the net-DEBIT double calendar from
+  REAL mids (no broker order; net_debit = buy-longs - sell-shorts; synthetic DRY
+  ids + per-leg fills). (4) _initiate_entry — orchestrates gates -> strikes ->
+  simulate -> book (debit, 4-leg commission, state save). (5)
+  _min_buying_power_per_unit overridden to a debit-based floor
+  (min_buying_power_per_calendar, default $2000/contract) since a calendar's
+  defined risk is the debit, not the IC floor. D stays dry-run-LOCKED — no real
+  order ever reaches the broker. +12 tests; full suite 1507 passed. KNOWN GAPS
+  (by design): _check_stop_losses is still a Phase-4 stub (an opened calendar
+  HOLDS with no transformer/stop/EOD-close yet); DB recording is Phase 6;
+  cross-restart persistence of dc_phase/expiry is Phase 5; and the simulation's
+  fidelity depends on the live two-expiry mids whose entitlement/warmup is still
+  offline-unverified (run _dc_probe_two_expiry_data on the VM). D is NOT deployed.
 - Strategy D Phase 2 — two-expiry data layer (2026-06-14, dry-run plumbing, NO
   running-bot behavior change): the broker-data plumbing to pick + read BOTH
   expirations. (1) New bots/hydra/calendar_chain.py (pure, broker-free):

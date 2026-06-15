@@ -56,6 +56,8 @@
     "max_contracts_per_order": 5,
     "max_contracts_per_underlying": 20,
     "min_buying_power_per_ic": 500,
+    "_comment_bp_calendar": "ORDER-004 BP floor for a double calendar (defined risk = the net debit paid). Much smaller than the IC defined-risk floor. Read by DoubleCalendarStrategy._min_buying_power_per_unit.",
+    "min_buying_power_per_calendar": 2000,
     "max_pnl_per_ic": 100,
     "min_pnl_per_ic": -1000,
     "downday_callonly_enabled": false,

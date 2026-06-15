@@ -60,16 +60,19 @@ import logging
 from datetime import date
 from typing import Dict, Optional, Tuple
 
-from bots.hydra.base_strategy import ConfigError
+from bots.hydra.base_strategy import ConfigError, MEICState
 # DCPhase + the two-expiry CalendarEntry model live in calendar_entry (Phase 1
 # foundation). Re-exported here so callers/tests can import them from the
-# strategy module. CalendarEntry is consumed by the entry logic in Phase 3.
+# strategy module.
 from bots.hydra.calendar_entry import CalendarEntry, DCPhase  # noqa: F401
 from bots.hydra.calendar_chain import generate_candidate_expiries, pick_calendar_expiries
 from bots.hydra.strategy import HydraStrategy
 from shared.market_hours import get_us_market_time
 
 logger = logging.getLogger(__name__)
+
+# Canonical-leg-name -> short tag for synthetic dry-run position ids.
+_DC_LEG_ABBR = {"short_call": "SC", "long_call": "LC", "short_put": "SP", "long_put": "LP"}
 
 
 class DoubleCalendarStrategy(HydraStrategy):
@@ -344,45 +347,188 @@ class DoubleCalendarStrategy(HydraStrategy):
         return ok
 
     # ------------------------------------------------------------------
-    # Strategy-defining hooks — STUBBED (the multi-week build)
-    # Overridden (not inherited) so D NEVER runs HYDRA's iron-condor logic.
+    # Entry + dry-run simulation (Phase 3)
+    # Pick the 30-40delta two-expiry strikes, open the net-DEBIT double calendar,
+    # and SIMULATE the fills from REAL mids (dry-run: no broker order, synthetic
+    # DRY ids). Overridden (not inherited) so D NEVER runs HYDRA's IC entry.
     # ------------------------------------------------------------------
 
+    def _min_buying_power_per_unit(self) -> float:
+        """A double calendar's defined risk is the net DEBIT paid (a long calendar
+        cannot lose more than the debit), FAR below the iron-condor defined-risk
+        floor. Use a conservative per-contract debit estimate (config-driven)."""
+        cfg = getattr(self, "strategy_config", {}) or {}
+        return float(cfg.get("min_buying_power_per_calendar", 2000.0))
+
+    def _dc_delta_target_strike(self, spx: float, right: str, expiry: str) -> Optional[float]:
+        """OTM strike whose option |delta| is closest to dc_target_delta within
+        dc_delta_band, on the SHORT expiry. Scans on-grid strikes outward from
+        spot (calls up, puts down), reading delta per candidate. Returns the
+        strike or None if none lands in the band."""
+        inc = getattr(self, "strike_increment", 5) or 5
+        lo, hi = self.dc_delta_band
+        base = round(spx / inc) * inc
+        best = None  # (abs(delta - target), strike)
+        for step in range(1, 41):  # bounded scan so a bad chain can't loop forever
+            strike = base + step * inc if right == "Call" else base - step * inc
+            if strike <= 0:
+                break
+            conid = self._get_option_uic(strike, right, expiry)
+            if not conid:
+                continue
+            try:
+                delta = abs(float((self.broker.get_option_greeks(conid) or {}).get("delta")))
+            except Exception:
+                continue
+            if delta <= 0:
+                continue
+            if lo <= delta <= hi:
+                score = abs(delta - self.dc_target_delta)
+                if best is None or score < best[0]:
+                    best = (score, strike)
+            elif delta < lo and best is not None:
+                break  # past the band (deltas fall as we go further OTM)
+        return best[1] if best else None
+
     def _calculate_strikes(self, entry) -> bool:
-        """STUB. The real implementation picks, for both a call and a put side:
-        the short expiry (DTE in [short_dte_min, short_dte_max]), the long expiry
-        (short + [long_extra_dte_min, long_extra_dte_max]), and the short strike
-        at ~target_delta within delta_band — then snaps to the chain. Returns
-        viability. Until built, no entry is viable.
-        """
-        logger.debug("DCTM: _calculate_strikes is a scaffold stub — no strikes selected.")
-        return False
+        """Pick the two expiries and the 30-40delta short strikes, and stamp them
+        onto the calendar entry. A calendar's short+long of a side share a STRIKE
+        but differ in EXPIRY."""
+        spx = self.current_price
+        if not spx or spx <= 0:
+            logger.error("[DCTM] no SPX price — cannot calculate strikes")
+            return False
+        picked = self._dc_pick_expiries()
+        if not picked:
+            return False
+        short_exp, long_exp = picked
+        kc = self._dc_delta_target_strike(spx, "Call", short_exp)
+        kp = self._dc_delta_target_strike(spx, "Put", short_exp)
+        if not kc or not kp:
+            logger.warning(
+                "[DCTM] no ~%.2fdelta strike in band %s (call=%s put=%s)",
+                self.dc_target_delta, list(self.dc_delta_band), kc, kp,
+            )
+            return False
+        entry.short_call_strike = entry.long_call_strike = kc
+        entry.short_put_strike = entry.long_put_strike = kp
+        entry.legs["short_call"].expiry = short_exp
+        entry.legs["long_call"].expiry = long_exp
+        entry.legs["short_put"].expiry = short_exp
+        entry.legs["long_put"].expiry = long_exp
+        logger.info("[DCTM] strikes Kc=%s Kp=%s | short=%s long=%s", kc, kp, short_exp, long_exp)
+        return True
+
+    def _dc_simulate_entry(self, entry) -> bool:
+        """Dry-run open of the net-DEBIT double calendar from REAL mids (no broker
+        order). Resolves the 4 conids across 2 expiries, prices the net debit
+        (buy longs - sell shorts), and stamps fills + synthetic DRY ids."""
+        short_exp, long_exp = entry.short_expiry, entry.long_expiry
+        leg_conids = self._dc_resolve_calendar_legs(
+            entry.short_call_strike, entry.short_put_strike, short_exp, long_exp
+        )
+        if not leg_conids:
+            return False
+        quotes = self._dc_read_leg_quotes(leg_conids)
+        mids = {k: quotes[k]["mid"] for k in leg_conids}
+        if any(m is None or m <= 0 for m in mids.values()):
+            logger.warning("[DCTM] incomplete mids %s — cannot price calendar", mids)
+            return False
+        n = self.contracts_per_entry
+        # Net DEBIT = cost of longs (bought) - credit from shorts (sold).
+        net_debit = (
+            mids["long_call"] + mids["long_put"] - mids["short_call"] - mids["short_put"]
+        ) * 100 * n
+        base_id = int(get_us_market_time().timestamp() * 1000)
+        for name, conid in leg_conids.items():
+            leg = entry.legs[name]
+            leg.uic = conid
+            leg.fill_price = mids[name]
+            leg.price = mids[name]
+            leg.position_id = f"DRY_{base_id}_{_DC_LEG_ABBR[name]}"
+        entry.net_debit = net_debit
+        entry.dc_phase = DCPhase.CALENDAR
+        entry.contracts = n
+        entry.is_complete = True
+        logger.info(
+            "[DCTM-OPEN] entry #%s DEBIT $%.2f | Kc=%s Kp=%s | short=%s long=%s | %dc",
+            entry.entry_number, net_debit, entry.short_call_strike,
+            entry.short_put_strike, short_exp, long_exp, n,
+        )
+        return True
+
+    def _dc_pre_entry_gates(self, entry_num: int) -> Optional[str]:
+        """Minimal pre-entry gates (reuse the shared helpers): orphaned orders,
+        market halt, buying power. Deliberately simpler than HYDRA's IC gates (no
+        VIX regime, no MKT-011 credit gate — those are credit-IC concepts)."""
+        if self._has_orphaned_orders():
+            self._next_entry_index += 1
+            return f"Entry #{entry_num} skipped - orphaned orders blocking"
+        is_halted, halt_reason = self._check_market_halt()
+        if is_halted:
+            return f"Entry #{entry_num} delayed - {halt_reason}"  # delay, don't advance
+        has_bp, bp_message = self._check_buying_power()
+        if not has_bp:
+            self.daily_state.entries_skipped += 1
+            self._next_entry_index += 1
+            return f"Entry #{entry_num} skipped - {bp_message}"
+        return None
 
     def _initiate_entry(self) -> str:
-        """STUB. The real implementation builds the net-DEBIT double calendar
-        (4 legs across 2 expiries), books the debit, and arms the transformer.
+        """Open the next scheduled double calendar (dry-run simulated).
 
-        Until built, advance the entry index (so the scheduler doesn't re-fire
-        the same slot every tick) and return a clear scaffold-skip message. No
-        position is opened, so D stays flat and cannot touch the shared account.
+        D is dry-run-LOCKED, so the simulated path always runs — no real order
+        ever reaches the broker. DB recording is Phase 6; the transformer / 20%
+        stop / EOD close (_check_stop_losses) is Phase 4.
         """
         entry_num = self._next_entry_index + 1
-        self._next_entry_index += 1
-        # Counter parity with the strangle skip paths so the per-variant DB /
-        # dashboard reflect the skip rather than a silent no-op.
-        self.daily_state.entries_skipped += 1
-        msg = (
-            f"Entry #{entry_num} skipped — DCTM (Strategy D) entry logic is a "
-            f"scaffold stub (double-calendar open + transformer not yet built)."
-        )
-        logger.info("[DCTM-SKIP] %s", msg)
-        return msg
+        logger.info("[DCTM] initiating entry #%s", entry_num)
+
+        gate = self._dc_pre_entry_gates(entry_num)
+        if gate is not None:
+            return gate
+
+        self._entry_in_progress = True
+        self.state = MEICState.ENTRY_IN_PROGRESS
+        try:
+            entry = CalendarEntry(entry_number=entry_num)
+            entry.contracts = self.contracts_per_entry
+            entry.strategy_id = f"dctm_{get_us_market_time().strftime('%Y%m%d')}_{entry_num:03d}"
+
+            if not self._calculate_strikes(entry):
+                self.daily_state.entries_skipped += 1
+                self._next_entry_index += 1
+                return f"Entry #{entry_num} skipped - strike/expiry selection failed"
+
+            if not self._dc_simulate_entry(entry):
+                self.daily_state.entries_failed += 1
+                self._next_entry_index += 1
+                return f"Entry #{entry_num} failed - could not price/simulate calendar"
+
+            entry.entry_time = get_us_market_time()
+            self.daily_state.entries.append(entry)
+            self.daily_state.entries_completed += 1
+            # 4-leg open commission (display only; debit P&L is separate).
+            entry.open_commission = 4 * self.commission_per_leg * self.contracts_per_entry
+            self.daily_state.total_commission += entry.open_commission
+
+            self._save_state_to_disk()  # persist before returning (crash-window guard)
+            # TODO(Phase 6): _record_entry_to_db with the calendar schema (the IC
+            # recorder would mis-store a debit calendar as a credit IC).
+            self._next_entry_index += 1
+            return (
+                f"Entry #{entry_num} placed: DC Time Machine "
+                f"Kc {entry.short_call_strike:.0f} / Kp {entry.short_put_strike:.0f}, "
+                f"debit ${entry.net_debit:.2f} (DRY)"
+            )
+        finally:
+            self._entry_in_progress = False
+            self.state = MEICState.MONITORING
 
     def _check_stop_losses(self):
-        """STUB. The real implementation monitors each open calendar intraday for:
-        the ~profit_trigger_pct -> attempt the transformer (close longs + buy wings,
-        fire only if transform credit >= debit + wing width), the
-        pre_transform_stop_pct hard exit, and the EOD-day-1 close-if-no-transform.
-        No positions exist in the scaffold, so this is a no-op.
-        """
+        """STUB (Phase 4). Will monitor each open calendar intraday for: the
+        ~profit_trigger_pct -> transformer (close longs + buy wings, fire only if
+        transform credit >= debit + wing width), the pre_transform_stop_pct hard
+        exit, and the EOD-day-1 close-if-no-transform. No-op until Phase 4 — an
+        open calendar simply holds (the lifecycle overrides keep it across days)."""
         return None
