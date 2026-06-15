@@ -36,6 +36,21 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D Phase 2 — two-expiry data layer (2026-06-14, dry-run plumbing, NO
+  running-bot behavior change): the broker-data plumbing to pick + read BOTH
+  expirations. (1) New bots/hydra/calendar_chain.py (pure, broker-free):
+  generate_candidate_expiries (trading-day SPXW candidates, holiday-aware) +
+  pick_calendar_expiries (short = in-window expiry, prefer the following-week
+  Friday; long = smallest gap in [long_extra_min, long_extra_max] after it). (2)
+  DoubleCalendarStrategy gains thin wrappers over the EXISTING broker-data
+  methods called with explicit non-0DTE expiries: _dc_pick_expiries,
+  _dc_resolve_calendar_legs (4 conids across 2 expiries via _get_option_uic),
+  _dc_read_iv / _dc_front_back_iv (per-expiry IV for the term-structure signal;
+  None — not 0 — on a flaky read), _dc_read_leg_quotes, and _dc_probe_two_expiry_data
+  (a LIVE on-VM diagnostic that verifies non-0DTE SPXW entitlement + snapshot
+  warmup — the one Phase-2 item that can't be checked offline). +25 tests; full
+  suite 1495 passed. STILL OFFLINE-UNVERIFIED: the live two-expiry entitlement/
+  warmup probe must be run on the VM in market hours before Phase 3 relies on it.
 - Strategy D Phase 1 — CalendarEntry foundation (2026-06-14, model-only, NO
   running-bot behavior change): the two-expiration / net-DEBIT position model
   every other D surface depends on. (1) Leg gains an additive optional `expiry`

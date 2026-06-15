@@ -57,13 +57,17 @@ so the account stays flat and NONE of those vectors touch C.
 from __future__ import annotations
 
 import logging
+from datetime import date
+from typing import Dict, Optional, Tuple
 
 from bots.hydra.base_strategy import ConfigError
 # DCPhase + the two-expiry CalendarEntry model live in calendar_entry (Phase 1
 # foundation). Re-exported here so callers/tests can import them from the
 # strategy module. CalendarEntry is consumed by the entry logic in Phase 3.
 from bots.hydra.calendar_entry import CalendarEntry, DCPhase  # noqa: F401
+from bots.hydra.calendar_chain import generate_candidate_expiries, pick_calendar_expiries
 from bots.hydra.strategy import HydraStrategy
+from shared.market_hours import get_us_market_time
 
 logger = logging.getLogger(__name__)
 
@@ -126,6 +130,9 @@ class DoubleCalendarStrategy(HydraStrategy):
         self.dc_pre_transform_stop_pct = float(dc.get("pre_transform_stop_pct", 0.20))
         self.dc_wing_width = float(dc.get("wing_width", 5))
         self.dc_eod_close_if_no_transform = bool(dc.get("eod_close_if_no_transform", True))
+        # Prefer the following-week Friday weekly for the short expiry (Burnich's
+        # setup); else the earliest in-window candidate. Phase 2.
+        self.dc_prefer_friday = bool(dc.get("prefer_friday", True))
 
         logger.info(
             "DCTM scaffold initialized (DRY-RUN ONLY). Short DTE %d-%d, long +%d-%d, "
@@ -200,6 +207,141 @@ class DoubleCalendarStrategy(HydraStrategy):
         # actually arrives, book that leg/condor at the SPXW PM close; until then
         # hold. Requires the debit-rooted, two-stage settlement path.
         return True
+
+    # ------------------------------------------------------------------
+    # Two-expiry data layer (Phase 2) — pick expiries, resolve per-expiry
+    # conids, read per-expiry quotes + IV. Thin wrappers over the existing
+    # broker-data methods called with EXPLICIT (non-0DTE) expiries; the pure
+    # expiry-selection logic lives in calendar_chain.
+    # ------------------------------------------------------------------
+
+    def _dc_pick_expiries(self) -> Optional[Tuple[str, str]]:
+        """Choose (short_expiry, long_expiry) for today from the SPXW trading-day
+        candidates and the configured DTE windows. Returns None if no viable pair."""
+        today_iso = get_us_market_time().strftime("%Y-%m-%d")
+        horizon = self.dc_short_dte_max + self.dc_long_extra_dte_max + 3  # small buffer
+        candidates = generate_candidate_expiries(today_iso, horizon)
+        picked = pick_calendar_expiries(
+            candidates, today_iso,
+            self.dc_short_dte_min, self.dc_short_dte_max,
+            self.dc_long_extra_dte_min, self.dc_long_extra_dte_max,
+            prefer_friday=self.dc_prefer_friday,
+        )
+        if picked is None:
+            logger.warning(
+                "[DCTM-EXPIRIES] no viable pair: short %d-%d DTE, long +%d-%d (candidates=%d)",
+                self.dc_short_dte_min, self.dc_short_dte_max,
+                self.dc_long_extra_dte_min, self.dc_long_extra_dte_max, len(candidates),
+            )
+            return None
+        short_exp, long_exp = picked
+        t = date.fromisoformat(today_iso)
+        logger.info(
+            "[DCTM-EXPIRIES] short=%s (%dDTE) long=%s (+%dd)",
+            short_exp, (date.fromisoformat(short_exp) - t).days,
+            long_exp, (date.fromisoformat(long_exp) - date.fromisoformat(short_exp)).days,
+        )
+        return picked
+
+    def _dc_resolve_calendar_legs(
+        self, call_strike: float, put_strike: float,
+        short_expiry: str, long_expiry: str,
+    ) -> Optional[Dict[str, int]]:
+        """Resolve the 4 calendar-leg conids across the two expirations. The call
+        calendar shares ``call_strike`` (short near / long far); the put calendar
+        shares ``put_strike``. Returns the {leg_name: conid} map or None if any
+        leg fails to resolve (off-grid strike / unlisted expiry)."""
+        legs = {
+            "short_call": self._get_option_uic(call_strike, "Call", short_expiry),
+            "long_call":  self._get_option_uic(call_strike, "Call", long_expiry),
+            "short_put":  self._get_option_uic(put_strike, "Put", short_expiry),
+            "long_put":   self._get_option_uic(put_strike, "Put", long_expiry),
+        }
+        missing = [k for k, v in legs.items() if not v]
+        if missing:
+            logger.warning(
+                "[DCTM-LEGS] unresolved conids %s (C %s / P %s, short %s / long %s)",
+                missing, call_strike, put_strike, short_expiry, long_expiry,
+            )
+            return None
+        return legs
+
+    def _dc_read_iv(self, conid: int) -> Optional[float]:
+        """Per-option implied vol from the broker greeks snapshot. Returns None
+        (NOT 0.0) on a missing/None/non-positive IV so a flaky read reads as
+        'no signal', never 'IV=0'."""
+        try:
+            g = self.broker.get_option_greeks(conid) or {}
+        except Exception as exc:
+            logger.warning("[DCTM-IV] greeks read failed for conid %s: %s", conid, exc)
+            return None
+        try:
+            iv = float(g.get("iv"))
+        except (TypeError, ValueError):
+            return None
+        return iv if iv > 0 else None
+
+    def _dc_front_back_iv(
+        self, strike: float, right: str, short_expiry: str, long_expiry: str,
+    ) -> Optional[Tuple[float, float]]:
+        """(front_iv, back_iv) for the same strike on the near vs far expiry — the
+        term-structure signal that IS the calendar's edge (front contracting
+        faster than back is favorable). None if either IV is unavailable."""
+        front_conid = self._get_option_uic(strike, right, short_expiry)
+        back_conid = self._get_option_uic(strike, right, long_expiry)
+        if not front_conid or not back_conid:
+            return None
+        front_iv = self._dc_read_iv(front_conid)
+        back_iv = self._dc_read_iv(back_conid)
+        if front_iv is None or back_iv is None:
+            logger.info(
+                "[DCTM-IV] term-structure unavailable (front=%s back=%s) — no signal",
+                front_iv, back_iv,
+            )
+            return None
+        return front_iv, back_iv
+
+    def _dc_read_leg_quotes(self, leg_conids: Dict[str, int]) -> Dict[str, dict]:
+        """Current mid (+ raw quote) per resolved leg. Reuses the crossed-quote-
+        guarded _read_option_quote / _quote_mid so a crossed book yields mid=0,
+        not a nonsense price."""
+        out: Dict[str, dict] = {}
+        for name, conid in leg_conids.items():
+            q = self._read_option_quote(conid) or {}
+            out[name] = {"mid": self._quote_mid(q), "raw": q}
+        return out
+
+    def _dc_probe_two_expiry_data(self) -> bool:
+        """LIVE diagnostic — run on the VM in market hours. Picks the two
+        expiries, resolves an ~ATM call+put on BOTH, and reads quotes + per-expiry
+        IV. This verifies non-0DTE SPXW entitlement + snapshot warmup — the one
+        Phase-2 item that cannot be checked offline. Returns True iff both
+        expirations produced a populated mid AND IV at the ATM strike."""
+        picked = self._dc_pick_expiries()
+        if not picked:
+            return False
+        short_exp, long_exp = picked
+        spx = self.current_price
+        if not spx or spx <= 0:
+            logger.warning("[DCTM-PROBE] no SPX price — cannot probe")
+            return False
+        inc = getattr(self, "strike_increment", 5) or 5
+        atm = round(spx / inc) * inc
+        legs = self._dc_resolve_calendar_legs(atm, atm, short_exp, long_exp)
+        if not legs:
+            return False
+        quotes = self._dc_read_leg_quotes(legs)
+        iv_call = self._dc_front_back_iv(atm, "Call", short_exp, long_exp)
+        ok = (
+            quotes["short_call"]["mid"] > 0 and quotes["long_call"]["mid"] > 0
+            and iv_call is not None
+        )
+        logger.info(
+            "[DCTM-PROBE] ATM %s | short_call mid=%.2f long_call mid=%.2f | front/back IV=%s | %s",
+            atm, quotes["short_call"]["mid"], quotes["long_call"]["mid"],
+            iv_call, "OK" if ok else "INCOMPLETE (entitlement/warmup?)",
+        )
+        return ok
 
     # ------------------------------------------------------------------
     # Strategy-defining hooks — STUBBED (the multi-week build)

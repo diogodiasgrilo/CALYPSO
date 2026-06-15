@@ -20,6 +20,7 @@
       "pre_transform_stop_pct": 0.20,
       "wing_width": 5,
       "eod_close_if_no_transform": true,
+      "prefer_friday": true,
       "entry_time_et": "10:00"
     },
     "entry_times": ["10:00"],
