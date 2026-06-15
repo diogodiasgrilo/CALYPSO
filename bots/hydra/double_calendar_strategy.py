@@ -158,6 +158,17 @@ class DoubleCalendarStrategy(HydraStrategy):
             self.dc_wing_width,
         )
 
+        # Phase 6: D's calendar-shaped DB tables in D's OWN (isolated) DB file —
+        # separate from the shared DataRecorder (which the base init already set
+        # up for market_ticks). Non-critical; never blocks trading.
+        self._dc_recorder = None
+        try:
+            from bots.hydra.dc_recorder import DCDataRecorder
+            dc_db = os.path.join(os.path.dirname(self.state_file), "backtesting.db")
+            self._dc_recorder = DCDataRecorder(dc_db)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("DCDataRecorder init failed (non-critical): %s", exc)
+
     # ------------------------------------------------------------------
     # Multi-day lifecycle overrides (REAL — the part that matters today)
     # ------------------------------------------------------------------
@@ -526,8 +537,10 @@ class DoubleCalendarStrategy(HydraStrategy):
             self.daily_state.total_commission += entry.open_commission
 
             self._save_state_to_disk()  # persist before returning (crash-window guard)
-            # TODO(Phase 6): _record_entry_to_db with the calendar schema (the IC
-            # recorder would mis-store a debit calendar as a credit IC).
+            if getattr(self, "_dc_recorder", None):
+                self._dc_recorder.record_calendar_entry(
+                    entry, self.current_price, entry.entry_time.strftime("%Y-%m-%d")
+                )
             self._next_entry_index += 1
             return (
                 f"Entry #{entry_num} placed: DC Time Machine "
@@ -670,6 +683,8 @@ class DoubleCalendarStrategy(HydraStrategy):
             "[DCTM-RISKFREE] E#%s risk-free achieved (max loss $0): debit $%.2f, transform credit $%.2f, wing %.0fpt",
             entry.entry_number, entry.net_debit, transform_credit, wing,
         )
+        if getattr(self, "_dc_recorder", None):
+            self._dc_recorder.record_transformation(entry, get_us_market_time().strftime("%Y-%m-%d"))
         return True
 
     def _dc_close_calendar(self, entry, reason: str, loss: bool) -> None:
@@ -693,6 +708,13 @@ class DoubleCalendarStrategy(HydraStrategy):
             "[%s] E#%s closed (%s): P&L $%.2f on debit $%.2f",
             tag, entry.entry_number, reason, pnl, entry.net_debit,
         )
+        if getattr(self, "_dc_recorder", None):
+            entry_date = entry.entry_time.strftime("%Y-%m-%d") if entry.entry_time else ""
+            self._dc_recorder.record_outcome(
+                entry, "stop" if loss else "eod_close", pnl,
+                getattr(self, "current_price", None), entry_date,
+                get_us_market_time().strftime("%Y-%m-%d"),
+            )
 
     # ------------------------------------------------------------------
     # Multi-day persistence + per-expiry settlement (Phase 5)
@@ -892,3 +914,39 @@ class DoubleCalendarStrategy(HydraStrategy):
             "[DCTM-SETTLE] E#%s (%s) settled at SPX %.2f: P&L $%.2f (debit $%.2f, transform $%.2f)",
             entry.entry_number, tag, spx, realized, entry.net_debit, entry.transform_credit,
         )
+        if getattr(self, "_dc_recorder", None):
+            entry_date = entry.entry_time.strftime("%Y-%m-%d") if entry.entry_time else ""
+            term = "transformed_settled" if tag == "TRANSFORMED" else "calendar_leftover"
+            self._dc_recorder.record_outcome(
+                entry, term, realized, spx, entry_date,
+                get_us_market_time().strftime("%Y-%m-%d"),
+            )
+
+    def _record_heartbeat_to_db(self):
+        """Record the market tick (generic SPX/VIX, useful for D) + D's calendar
+        snapshots. OVERRIDE: does NOT write the base IC-shaped spread_snapshots —
+        call/put_spread_value in IC-named columns would mis-describe a debit
+        calendar — routing per-entry marks to dc_calendar_snapshots instead."""
+        rec = getattr(self, "_data_recorder", None)
+        now = get_us_market_time()
+        timestamp = now.strftime("%Y-%m-%d %H:%M:%S")
+        if rec:
+            try:
+                rec.record_tick(
+                    timestamp=timestamp,
+                    spx_price=self.current_price,
+                    vix_level=self.current_vix,
+                    trend_signal=self._current_trend.value if self._current_trend else "unknown",
+                    bot_state=self.state.value if hasattr(self.state, "value") else str(self.state),
+                    entry_count=self.daily_state.entries_completed,
+                    active_count=len(self.daily_state.active_entries),
+                )
+            except Exception as e:
+                logger.debug("DCTM heartbeat tick failed: %s", e)
+        if getattr(self, "_dc_recorder", None):
+            for entry in self.daily_state.active_entries:
+                if isinstance(entry, CalendarEntry):
+                    try:
+                        self._dc_recorder.record_snapshot(entry, timestamp)
+                    except Exception as e:
+                        logger.debug("DCTM snapshot failed: %s", e)

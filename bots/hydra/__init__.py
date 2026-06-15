@@ -36,6 +36,24 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D Phase 6 — calendar DB schema (2026-06-14, dry-run-only, shared
+  DataRecorder UNTOUCHED, A/B/C byte-identical): D records its trades truthfully
+  in its OWN isolated DB (data/variant_d/backtesting.db). New bots/hydra/
+  dc_recorder.py:DCDataRecorder owns calendar-shaped tables — dc_calendar_entries
+  (debit, 2 expiries, DTEs, conids), dc_transformations (transform_credit,
+  is_risk_free, wing strikes), dc_outcomes (terminal_state + realized_pnl with
+  BOTH entry_date and close_date so P&L attributes to the entry date), and
+  dc_calendar_snapshots — all CREATE IF NOT EXISTS with their own dc_schema_info,
+  so NO shared SCHEMA_VERSION bump (A/B/C DBs unmigrated). The shared DataRecorder
+  is left exactly as-is. Wired into D: record_calendar_entry in _initiate_entry,
+  record_transformation on a fired transformer, record_outcome on stop/EOD/
+  settlement; and _record_heartbeat_to_db is OVERRIDDEN to write the generic
+  market tick + dc_calendar_snapshots instead of the IC-shaped spread_snapshots
+  (call/put_spread_value in IC-named columns would mis-describe a debit calendar).
+  All writes fire-and-forget (never block trading); a bad DB path degrades to a
+  no-op. +6 tests; full suite 1530 passed. STILL: Telegram/dashboard Phase 7; sim
+  fidelity rests on live two-expiry mids (run _dc_probe_two_expiry_data on the
+  VM). D dry-run-LOCKED, undeployed.
 - Strategy D Phase 5 — multi-day persistence + per-expiry settlement (2026-06-14,
   dry-run-only, ZERO base edits, A/B/C byte-identical): D survives restarts and
   books P&L on the right date. Persistence is a SIDECAR (data/variant_d/
