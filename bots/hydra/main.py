@@ -466,6 +466,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 stops_callback=strategy.build_telegram_stops,
                 config_callback=strategy.build_telegram_config,
                 compare_callback=strategy.build_telegram_compare,
+                calendars_callback=getattr(strategy, "build_telegram_calendars", None),
                 config_path=config_path,
                 active_positions_callback=lambda: len(strategy.daily_state.active_entries),
             )

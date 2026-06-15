@@ -13,7 +13,7 @@ from dashboard.backend.config import settings
 from dashboard.backend.ws.manager import ConnectionManager
 from dashboard.backend.ws.broadcaster import Broadcaster
 from dashboard.backend.ws import router as ws_router_module
-from dashboard.backend.routers import hydra, metrics, market, agents, widget, variants
+from dashboard.backend.routers import hydra, metrics, market, agents, widget, variants, dc
 from dashboard.backend.services.live_state import LiveStateProvider
 
 logging.basicConfig(
@@ -69,6 +69,7 @@ app.include_router(market.router, dependencies=_api_guard)
 app.include_router(agents.router, dependencies=_api_guard)
 app.include_router(widget.router, dependencies=_api_guard)
 app.include_router(variants.router, dependencies=_api_guard)
+app.include_router(dc.router, dependencies=_api_guard)  # Strategy D native view
 
 # WebSocket router
 app.include_router(ws_router_module.router)

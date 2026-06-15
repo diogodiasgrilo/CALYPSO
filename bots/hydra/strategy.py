@@ -8745,6 +8745,28 @@ class HydraStrategy(MEICStrategy):
             })
         return out
 
+    def build_telegram_calendars(self) -> str:
+        """Telegram /calendars command — Strategy D (DC Time Machine) status.
+
+        D is a multi-day net-DEBIT double calendar, deliberately kept OUT of the
+        0DTE iron-condor /compare head-to-head (credit/Sharpe are apples-to-
+        oranges). This is its D-native view: open calendars (phase / risk-free /
+        debit→credit) + recent outcomes, read from variant_d's sidecar + DB.
+        Available on variant A's poller (the only one that runs); reads D's files
+        cross-variant.
+        """
+        from bots.hydra.dc_status import dc_status, format_calendars_telegram
+        # Project data root: for variant A, dirname(state_file) is data/.
+        data_root = os.path.dirname(self.state_file)
+        vd = os.path.join(data_root, "variant_d")
+        sidecar = os.path.join(vd, "dc_open_trades.json")
+        db = os.path.join(vd, "backtesting.db")
+        try:
+            return format_calendars_telegram(dc_status(sidecar, db))
+        except Exception as e:
+            logger.error("build_telegram_calendars failed: %s", e)
+            return "Strategy D (DC Time Machine): status unavailable."
+
     def build_telegram_compare(self) -> str:
         """Telegram /compare command — on-demand variant comparison message.
 

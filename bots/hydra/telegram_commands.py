@@ -318,6 +318,7 @@ class TelegramCommandHandler:
         self._stops_callback: Optional[Callable[[], str]] = None
         self._config_callback: Optional[Callable[[], str]] = None
         self._compare_callback: Optional[Callable[[], str]] = None
+        self._calendars_callback: Optional[Callable[[], str]] = None
         self._active_positions_callback: Optional[Callable[[], int]] = None
         self._config_path: Optional[str] = None
         self._consecutive_errors = 0
@@ -370,6 +371,7 @@ class TelegramCommandHandler:
         stops_callback: Optional[Callable[[], str]] = None,
         config_callback: Optional[Callable[[], str]] = None,
         compare_callback: Optional[Callable[[], str]] = None,
+        calendars_callback: Optional[Callable[[], str]] = None,
         config_path: Optional[str] = None,
         active_positions_callback: Optional[Callable[[], int]] = None,
     ):
@@ -386,6 +388,7 @@ class TelegramCommandHandler:
         self._stops_callback = stops_callback
         self._config_callback = config_callback
         self._compare_callback = compare_callback
+        self._calendars_callback = calendars_callback
         self._config_path = config_path
         self._active_positions_callback = active_positions_callback
 
@@ -491,6 +494,8 @@ class TelegramCommandHandler:
                 self._handle_clio(chat_id)
             elif text.startswith("/compare"):
                 self._handle_compare(chat_id)
+            elif text.startswith("/calendars"):
+                self._handle_calendars(chat_id)
             elif text.startswith("/restart"):
                 self._handle_restart(chat_id)
             elif text.startswith("/help"):
@@ -646,6 +651,20 @@ class TelegramCommandHandler:
         except Exception as e:
             logger.error("Failed to build /compare response: %s", e)
             self._send_message(chat_id, "Failed to retrieve comparison data. Try again shortly.")
+
+    def _handle_calendars(self, chat_id: str):
+        """Handle /calendars — Strategy D (DC Time Machine) status (variant A only)."""
+        if not self._calendars_callback:
+            self._send_message(
+                chat_id,
+                "Strategy D status not available — /calendars runs on variant A only.",
+            )
+            return
+        try:
+            self._send_message(chat_id, self._calendars_callback())
+        except Exception as e:
+            logger.error("Failed to build /calendars response: %s", e)
+            self._send_message(chat_id, "Failed to retrieve Strategy D status. Try again shortly.")
 
     def _handle_config(self, chat_id: str):
         """Handle /config command — current configuration."""
@@ -1118,6 +1137,7 @@ class TelegramCommandHandler:
             "/apollo \u2014 Latest APOLLO briefing\n"
             "/clio \u2014 Latest CLIO weekly analysis\n"
             "/compare \u2014 Variant A vs all running variants (B, C, ...) head-to-head\n"
+            "/calendars \u2014 Strategy D (DC Time Machine) status\n"
             "\n*Control*\n"
             "/restart \u2014 Restart HYDRA\n"
             "/stop \u2014 Stop HYDRA (warns if positions)\n"

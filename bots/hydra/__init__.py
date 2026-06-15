@@ -36,6 +36,23 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D Phase 7 — D-native Telegram + dashboard observability (2026-06-14,
+  dry-run-only, completes the dry-run build): D is surfaced through its OWN view,
+  NOT folded into the 0DTE iron-condor /compare or dashboard _VARIANT_IDS
+  (credit/Sharpe head-to-head is apples-to-oranges for a multi-day net-DEBIT
+  calendar — the Phase-0 exclusions stay, by design). (1) bots/hydra/dc_status.py
+  (pure): reads D's sidecar (open calendars) + dc_outcomes and renders them;
+  build_telegram_calendars (HydraStrategy) + a new /calendars Telegram command
+  (variant A's poller renders D cross-variant — only A polls per Phase 0).
+  (2) Dashboard: dashboard/backend/services/dc_reader.py (dashboard-owned pure
+  reader, no bot import) + GET /api/dc/status (routers/dc.py) returning D's open
+  calendars + outcomes + summary; registered in dashboard main. A React DC panel
+  consuming /api/dc/status is the remaining UI polish (needs a frontend build +
+  browser to verify — not doable offline). +10 tests; full suite 1540 passed.
+  This completes the dry-run build (Phases 0-7). REMAINING before any go-live
+  consideration: run _dc_probe_two_expiry_data on the VM (live non-0DTE
+  entitlement/warmup, the one offline-unverifiable assumption) and, ideally, an
+  offline historical backtest go/no-go. D dry-run-LOCKED, undeployed.
 - Strategy D Phase 6 — calendar DB schema (2026-06-14, dry-run-only, shared
   DataRecorder UNTOUCHED, A/B/C byte-identical): D records its trades truthfully
   in its OWN isolated DB (data/variant_d/backtesting.db). New bots/hydra/
