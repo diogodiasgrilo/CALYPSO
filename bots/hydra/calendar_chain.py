@@ -92,20 +92,24 @@ def pick_calendar_expiries(
         return None
     in_window.sort(key=lambda c: _dte(today, c))
 
-    short_iso: Optional[str] = None
+    # Preference order for the SHORT: Fridays first (if preferred), then the rest
+    # by ascending DTE. Try each in turn and return the first that yields a valid
+    # LONG — so a Friday with no long in the gap doesn't skip the entry when an
+    # earlier non-Friday short would have worked (backtracking).
     if prefer_friday:
         fridays = [c for c in in_window if date.fromisoformat(c).weekday() == FRIDAY]
-        if fridays:
-            short_iso = fridays[0]
-    if short_iso is None:
-        short_iso = in_window[0]
+        non_fri = [c for c in in_window if date.fromisoformat(c).weekday() != FRIDAY]
+        ordered_shorts = fridays + non_fri
+    else:
+        ordered_shorts = in_window
 
-    short_dte = _dte(today, short_iso)
-    longs = [
-        c for c in candidates
-        if long_extra_min <= (_dte(today, c) - short_dte) <= long_extra_max
-    ]
-    if not longs:
-        return None
-    longs.sort(key=lambda c: _dte(today, c))  # smallest gap first
-    return short_iso, longs[0]
+    for short_iso in ordered_shorts:
+        short_dte = _dte(today, short_iso)
+        longs = [
+            c for c in candidates
+            if long_extra_min <= (_dte(today, c) - short_dte) <= long_extra_max
+        ]
+        if longs:
+            longs.sort(key=lambda c: _dte(today, c))  # smallest gap first
+            return short_iso, longs[0]
+    return None

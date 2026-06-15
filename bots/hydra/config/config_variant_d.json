@@ -1,5 +1,5 @@
 {
-  "_comment_variant": "HYDRA Variant D — Strategy D 'DC Time Machine' (Steve Burnich, video JtGW1wNFNIY): a multi-day SPX double calendar that transforms into a risk-free iron condor. SCAFFOLD + DRY-RUN-LOCKED. The strategy class (bots/hydra/double_calendar_strategy.py:DoubleCalendarStrategy) refuses any non-dry_run construction; its entry/transformer/multi-day-settlement logic is stubbed (D idles, skips entries, opens NOTHING) pending the full build. brandon.enabled=false so D runs its own (HydraStrategy-derived) path, not the Brandon stack. alerts + google_sheets are OFF so D never pollutes the canonical record or pages the operator. Do NOT flip dry_run=false next to a live C until MUST-FIX #1/#2/#3 ship (scope STATE-004 + orphan sweep to per-variant conids; budget buying power) — see the module docstring.",
+  "_comment_variant": "HYDRA Variant D — Strategy D 'DC Time Machine' (Steve Burnich, video JtGW1wNFNIY): a multi-day SPX double calendar that transforms into a risk-free iron condor. DRY-RUN-LOCKED. The strategy class (bots/hydra/double_calendar_strategy.py:DoubleCalendarStrategy) refuses any non-dry_run construction; the full dry-run strategy IS implemented (Phases 1-7) — it opens net-debit calendars (simulated from real mids), transforms/stops/EOD-closes, persists across restarts, and settles at the short expiry — but places NO real orders. brandon.enabled=false so D runs its own (HydraStrategy-derived) path, not the Brandon stack. alerts + google_sheets are OFF so D never pollutes the canonical record or pages the operator. Do NOT flip dry_run=false next to a live C until MUST-FIX #1/#2/#3 ship (scope STATE-004 + orphan sweep to per-variant conids; budget buying power) — see the module docstring.",
   "bot_name": "HYDRA",
   "dry_run": true,
   "_comment_credentials": "IBKR OAuth credentials are loaded from systemd $CREDENTIALS_DIRECTORY on the VM, or env vars in dev. Not in this file.",
@@ -8,7 +8,7 @@
     "name": "double_calendar",
     "commission_per_leg": 1.15,
     "underlying_symbol": "SPX",
-    "_comment_double_calendar": "Strategy-D-specific knobs (consumed by DoubleCalendarStrategy.__init__). Mirrors the DC Time Machine spec: short legs 6-15 DTE, long legs +1-4 DTE, shorts ~30-40 delta, transform on a ~7.5% intraday profit, 20%-of-debit pre-transform hard stop, 5pt wings, close at EOD day-1 if not transformed. UNUSED while the entry logic is stubbed; wired here so the surface is ready for the build.",
+    "_comment_double_calendar": "Strategy-D-specific knobs (consumed by DoubleCalendarStrategy). Mirrors the DC Time Machine spec: short legs 6-15 DTE, long legs +1-4 DTE, shorts ~30-40 delta, transform on a ~7.5% intraday profit, 20%-of-debit pre-transform hard stop, 5pt wings, close at EOD day-1 (eod_cutoff_et) if not transformed.",
     "double_calendar": {
       "short_dte_min": 6,
       "short_dte_max": 15,
@@ -153,7 +153,7 @@
     "strategy_type": "hydra"
   },
   "alerts": {
-    "_comment": "OFF on D (scaffold/dry-run) — avoids alert spam and operator paging. NOTE: CRITICAL/HIGH alerts still publish via the L-C2 severity bypass even when disabled; D's stubbed path emits none, but keep this in mind before enabling real-order D.",
+    "_comment": "OFF on D (scaffold/dry-run) — avoids alert spam and operator paging. NOTE: CRITICAL/HIGH alerts still publish via the L-C2 severity bypass even when disabled; D's dry-run path emits none, but keep this in mind before enabling real-order D.",
     "enabled": false,
     "phone_number": "+1XXXXXXXXXX",
     "email": "your@email.com"
@@ -165,6 +165,6 @@
     "spreadsheet_name": "Calypso_HYDRA_Variant_D",
     "strategy_type": "hydra_double_calendar"
   },
-  "_comment_api_pacing": "2.5 (gentler than C's 2.0) because a real double-calendar would fetch TWO-expiration chains + intraday transform monitoring — extra load on the shared calypso-broker session. Harmless while stubbed; set conservatively for the build.",
+  "_comment_api_pacing": "2.5 (gentler than C's 2.0) because a real double-calendar would fetch TWO-expiration chains + intraday transform monitoring — extra load on the shared calypso-broker session. Conservative for the dry-run shadow.",
   "api_pacing_multiplier": 2.5
 }

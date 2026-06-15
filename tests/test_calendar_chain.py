@@ -92,3 +92,14 @@ class TestPickExpiries:
             short_dte_min=6, short_dte_max=15, long_extra_min=1, long_extra_max=4,
         )
         assert got is None
+
+    def test_backtracks_when_preferred_friday_has_no_long(self):
+        # Friday Jun26 (DTE 11) is preferred but has NO long in +1..+4 here.
+        # The earlier non-Friday short Jun22 (DTE 7) does (Jun23, gap 1) — so a
+        # valid pair must still be returned rather than None.
+        cands = ["2026-06-22", "2026-06-23", "2026-06-26"]  # DTE 7, 8, 11
+        got = pick_calendar_expiries(
+            cands, TODAY, short_dte_min=6, short_dte_max=15,
+            long_extra_min=1, long_extra_max=4, prefer_friday=True,
+        )
+        assert got == ("2026-06-22", "2026-06-23")

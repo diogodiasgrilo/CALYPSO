@@ -36,6 +36,30 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D — adversarial-review fixes (2026-06-14, dry-run-only, A/B/C
+  byte-identical): a 26-agent independently-verified review of the full Phases 0-7
+  build found 0 critical / 2 high / 1 medium / 14 low (all D-internal or dry-run-
+  fidelity; A/B/C confirmed untouched). Fixed: (HIGH) sidecar clobber on startup —
+  _dc_save_sidecar is now guarded by a _dc_loaded flag (set before super().__init__)
+  so the base recovery/reset can't overwrite the real sidecar with an empty list
+  before _dc_load_sidecar reads it; (HIGH) _reset_for_new_day duplicated carried
+  calendars when the base reset early-returns (broker outage/STATE-004) — now
+  identity-deduped; (MEDIUM) _dc_simulate_entry rejects a net-credit/zero
+  "calendar" (inverted term structure) instead of opening an unmanaged position;
+  (LOW) wing_width stamped at OPEN (fixes spread_width/capital_deployed=0 in the
+  CALENDAR phase); (LOW) _dc_refresh_marks returns freshness and _dc_manage_calendar
+  acts on transform/stop ONLY when all leg marks are fresh this tick (EOD close
+  stays time-based); (LOW) leg conids nulled on close/settle (no spurious base
+  reconcile pass); (LOW) settlement persists base state + sidecar (not just
+  sidecar); (LOW) pick_calendar_expiries backtracks when the preferred Friday
+  short has no long in the gap; (LOW) dc_status opens the DB read-only (matches the
+  dashboard reader); (LOW) refreshed stale "SCAFFOLD/STUBBED" docstrings + config
+  comments. DEFERRED (documented, contained): the IC-credit-vertical daily-summary
+  leak (LOW — every D output sink is disabled, fix before enabling D sheets/
+  alerts), settlement marking against the intraday SPX vs the official PM/SOQ
+  close (dry-run fidelity), and two DataRecorder connections on one DB (fine under
+  WAL, single-threaded). The Telegram-poller-gated-to-A change is INTENDED (it
+  fixes the live multi-poller race), not a regression. +5 tests; full suite 1545.
 - Strategy D Phase 7 — D-native Telegram + dashboard observability (2026-06-14,
   dry-run-only, completes the dry-run build): D is surfaced through its OWN view,
   NOT folded into the 0DTE iron-condor /compare or dashboard _VARIANT_IDS

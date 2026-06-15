@@ -53,7 +53,7 @@ def read_recent_outcomes(db_path: str, limit: int = 10) -> list:
     if not db_path or not os.path.exists(db_path):
         return []
     try:
-        con = sqlite3.connect(db_path, timeout=5)
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
         con.row_factory = sqlite3.Row
         try:
             cur = con.execute(

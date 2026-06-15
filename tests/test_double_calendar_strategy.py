@@ -255,6 +255,7 @@ class TestSimulateEntry:
     def _inst(self, mids):
         inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
         inst.contracts_per_entry = 1
+        inst.dc_wing_width = 5.0
         inst._dc_resolve_calendar_legs = lambda kc, kp, se, le: {
             "short_call": 11, "long_call": 12, "short_put": 21, "long_put": 22,
         }
@@ -285,6 +286,12 @@ class TestSimulateEntry:
 
     def test_false_on_missing_mid(self):
         inst = self._inst({"short_call": 2.0, "long_call": 0.0, "short_put": 2.5, "long_put": 3.5})
+        assert inst._dc_simulate_entry(self._entry()) is False
+
+    def test_rejects_net_credit_calendar(self):
+        # Longs cheaper than shorts -> net_debit <= 0 (inverted term structure):
+        # not a valid calendar; must skip rather than open an unmanaged position.
+        inst = self._inst({"short_call": 4.0, "long_call": 2.0, "short_put": 4.0, "long_put": 2.0})
         assert inst._dc_simulate_entry(self._entry()) is False
 
 
@@ -440,7 +447,7 @@ class TestManageCalendar:
         inst.dc_profit_trigger_pct = 0.075
         inst.dc_pre_transform_stop_pct = 0.20
         inst.dc_eod_close_if_no_transform = True
-        inst._dc_refresh_marks = lambda e: None
+        inst._dc_refresh_marks = lambda e: True  # marks fresh this tick
         inst._dc_attempt_transform = lambda e: transform_ok
         inst._dc_past_eod_cutoff = lambda: past_eod
         self._closed = []
@@ -478,6 +485,39 @@ class TestManageCalendar:
         assert inst._dc_manage_calendar(self._entry(0.0)) is None
         assert self._closed == []
 
+    def test_stale_marks_skip_transform_and_stop(self):
+        # A profit that WOULD transform, but marks aren't fresh this tick -> no
+        # transform/stop fires (acting on a stale leg could be wrong).
+        inst = self._inst(pnl=20.0, transform_ok=True)
+        inst._dc_refresh_marks = lambda e: False  # not fresh
+        assert inst._dc_manage_calendar(self._entry(20.0)) is None
+        assert self._closed == []
+
+    def test_stale_marks_still_allow_eod_close(self):
+        # EOD close is time-based and must run even when marks are stale.
+        inst = self._inst(pnl=0.0, past_eod=True)
+        inst._dc_refresh_marks = lambda e: False
+        assert inst._dc_manage_calendar(self._entry(0.0)) == "EOD-CLOSE E#1"
+        assert self._closed == [("EOD no-transform", False)]
+
+
+class TestSidecarLoadGuard:
+    def test_save_is_noop_before_load(self, tmp_path):
+        from bots.hydra.base_strategy import MEICDailyState
+        inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
+        inst.state_file = str(tmp_path / "hydra_state.json")
+        inst.daily_state = MEICDailyState()
+        inst.daily_state.entries.append(_calendar_entry())
+        writes = []
+        inst._atomic_write_json = lambda path, data: writes.append((path, data))
+        # _dc_loaded not set / False -> save must NOT write (would clobber sidecar)
+        inst._dc_save_sidecar()
+        assert writes == []
+        # after load arms it, save writes
+        inst._dc_loaded = True
+        inst._dc_save_sidecar()
+        assert len(writes) == 1
+
 
 def _transformed_entry():
     """A risk-free transformed CalendarEntry: debit 200, transform credit 700,
@@ -497,6 +537,7 @@ class TestPersistence:
         inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
         inst.state_file = str(tmp_path / "hydra_state.json")
         inst._atomic_write_json = lambda path, data: Path(path).write_text(json.dumps(data))
+        inst._dc_loaded = True  # past the startup load-guard window
         from bots.hydra.base_strategy import MEICDailyState
         inst.daily_state = MEICDailyState()
         return inst
@@ -569,7 +610,7 @@ class TestSettlement:
         inst.daily_state = MEICDailyState()
         inst.contracts_per_entry = 1
         inst.current_price = 5000.0
-        inst._dc_save_sidecar = lambda: None
+        inst._save_state_to_disk = lambda: None  # _dc_settle_due persists via this
         return inst
 
     def test_transformed_settles_otm_keeps_full_locked_pnl(self):

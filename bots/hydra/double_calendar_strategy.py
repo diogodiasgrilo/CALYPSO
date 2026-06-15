@@ -1,4 +1,4 @@
-"""DoubleCalendarStrategy — "DC Time Machine" (Strategy D) SCAFFOLD, dry-run-LOCKED.
+"""DoubleCalendarStrategy — "DC Time Machine" (Strategy D), dry-run-LOCKED.
 
 Source strategy: Steve Burnich's "DC Time Machine" (YouTube JtGW1wNFNIY). Open a
 SPX **double calendar** for a net DEBIT (sell a shorter-dated option, buy a
@@ -9,35 +9,28 @@ the position into an iron condor whose collected credit exceeds the original
 debit by at least the wing width (structurally risk-free). The condor is then
 held to expiry. Full spec: /tmp/strategy_D_dc_time_machine.md.
 
-WHY THIS IS A SCAFFOLD, NOT A FINISHED STRATEGY
-HYDRA is architecturally pinned to "a position is born and dies in one 0DTE
-session." Strategy D is the opposite: TWO simultaneous expirations, a net-DEBIT
-entry, positions held 6-15 CALENDAR DAYS, and a mid-life restructuring order.
-Implementing the entry / transformer / debit-P&L / two-stage-settlement logic is
-a multi-week build (see the prior feasibility analysis). This file delivers the
-SAFE SHELL so D can be registered and run dry-run NOW without endangering the
-live variants — the strategy-defining hooks are explicit stubs.
+STATUS: the full dry-run strategy is IMPLEMENTED (Phases 1-7) and dry-run-LOCKED
+(no real orders). It picks two expiries + 30-40δ strikes, opens the net-debit
+calendar from real mids, transforms to a risk-free IC (or 20%-debit-stops /
+EOD-closes), survives restarts (sidecar persistence), settles at the short
+expiry, records to its own DB, and renders via Telegram /calendars + /api/dc/status.
 
-WHAT IS REAL HERE (safety, done):
+DESIGN — reuse structure, override economics:
+  * CalendarEntry (calendar_entry.py) SUBCLASSES IronCondorEntry to reuse the
+    structural plumbing (Leg bridge, active_entries, state save/load,
+    (conid,quantity) reconciliation) but OVERRIDES every economic property so the
+    IC credit-vertical math NEVER runs for a debit calendar. A double calendar's
+    4 legs map onto (short_call,long_call,short_put,long_put): short+long of a
+    side share the STRIKE, differ in EXPIRY; post-transform the longs move to wing
+    strikes on the short expiry → a real same-expiry IC.
   * Dry-run LOCK in __init__ (mirrors StrangleStrategy): a non-dry-run
-    construction raises ConfigError BEFORE any broker I/O. D cannot place real
-    paper orders until a deliberate operator flip AND the coexistence MUST-FIXes
-    ship (see below).
+    construction raises ConfigError BEFORE any broker I/O.
   * BOT_NAME="DCTM" and requires_protective_wings=False so the shared safety path
     never treats D's debit/calendar legs as a naked-short emergency.
-  * Multi-day lifecycle overrides: _reset_for_new_day no longer wipes D's open
-    multi-day positions at the daily reset, and check_after_hours_settlement
-    treats a legitimately-held position as NORMAL (not "settlement pending
-    forever", which would jam the daily-summary gate).
-  * The three abstract hooks are OVERRIDDEN to inert stubs so D never silently
-    runs HYDRA's iron-condor entry logic and masquerades as an IC.
-
-WHAT IS STUBBED (the multi-week build — clearly marked TODO):
-  * _calculate_strikes / _initiate_entry / _check_stop_losses — the actual
-    double-calendar entry, the transformer, the 20%-debit pre-transform stop,
-    the EOD-day-1 close, and the held-to-expiry condor settlement.
-  * An expiry-aware leg model + a debit-rooted P&L path (HydraIronCondorEntry is
-    a single-expiry credit IC and must NOT be reused for the calendar phase).
+  * Multi-day lifecycle overrides: _reset_for_new_day carries open positions
+    across the daily reset; check_after_hours_settlement settles at the short
+    expiry and treats a held position as NORMAL. ZERO edits to the fix-scarred
+    base save/load/settlement — D persists via a SIDECAR (dc_open_trades.json).
 
 COEXISTENCE WITH THE LIVE VARIANTS (A/B/C) — READ BEFORE FLIPPING dry_run=false
 A/B/C only coexist safely today because they are all 0DTE and the shared IBKR
@@ -104,14 +97,19 @@ class DoubleCalendarStrategy(HydraStrategy):
         """
         if not kwargs.get("dry_run", False):
             raise ConfigError(
-                "DoubleCalendarStrategy (Strategy D) is dry-run-LOCKED. Its entry / "
-                "transformer / debit-P&L / multi-day-settlement logic is a SCAFFOLD "
-                "stub, and running it with real paper orders next to the live "
+                "DoubleCalendarStrategy (Strategy D) is dry-run-LOCKED. The entry / "
+                "transformer / debit-P&L / multi-day-settlement logic IS implemented "
+                "(Phases 1-7), but running it with real paper orders next to the live "
                 "variants requires the coexistence MUST-FIXes (scope STATE-004 + "
                 "orphan sweep to per-variant conids; budget buying power) — see this "
                 "module's docstring. Set dry_run=true, or do not select "
                 "strategy.name='double_calendar'."
             )
+        # Sidecar-load guard, set BEFORE super().__init__ (which calls
+        # _recover_positions_from_saxo AND may call _save_state_to_disk during
+        # recovery). _dc_save_sidecar must NOT clobber the real sidecar with an
+        # empty list before _dc_load_sidecar has read it on startup.
+        self._dc_loaded = False
         super().__init__(*args, **kwargs)
         # Defense-in-depth: re-check after super in case dry_run is derived
         # differently downstream (it must equal the kwarg).
@@ -148,9 +146,9 @@ class DoubleCalendarStrategy(HydraStrategy):
             self.dc_eod_cutoff = time(15, 55)
 
         logger.info(
-            "DCTM scaffold initialized (DRY-RUN ONLY). Short DTE %d-%d, long +%d-%d, "
+            "DCTM initialized (DRY-RUN, LOCKED). Short DTE %d-%d, long +%d-%d, "
             "target Δ%.2f %s, profit-trigger %.1f%%, pre-transform stop %.0f%%, wing %.0fpt. "
-            "Entry/transformer/stop logic is STUBBED — D will idle (skip entries) until built.",
+            "Entry/transformer/stop/settlement logic LIVE (simulated); no real orders.",
             self.dc_short_dte_min, self.dc_short_dte_max,
             self.dc_long_extra_dte_min, self.dc_long_extra_dte_max,
             self.dc_target_delta, list(self.dc_delta_band),
@@ -199,12 +197,23 @@ class DoubleCalendarStrategy(HydraStrategy):
         carried = [e for e in self.daily_state.entries if self._dc_entry_is_open(e)]
         super()._reset_for_new_day()  # dry-run: account flat -> no STATE-004 halt
         if carried:
-            self.daily_state.entries.extend(carried)
-            logger.info(
-                "[DCTM-CARRY] carried %d open multi-day position(s) across the new-day "
-                "reset (not wiped, not flagged as an overnight 0DTE fault).",
-                len(carried),
-            )
+            # Re-attach only entries NOT already present. The base reset normally
+            # rebuilds daily_state (entries=[]) so we re-add all carried; but if it
+            # EARLY-RETURNS (broker outage / STATE-004) it leaves daily_state
+            # untouched (carried still in it) — a blind extend() would DUPLICATE.
+            # Identity check (`is`) avoids dataclass __eq__ matching a different entry.
+            existing = self.daily_state.entries
+            readopted = 0
+            for e in carried:
+                if not any(e is x for x in existing):
+                    existing.append(e)
+                    readopted += 1
+            if readopted:
+                logger.info(
+                    "[DCTM-CARRY] carried %d open multi-day position(s) across the new-day "
+                    "reset (not wiped, not flagged as an overnight 0DTE fault).",
+                    readopted,
+                )
             # TODO(full build): carry the cumulative cost basis / realized-P&L of
             # the surviving entries across the reset too — the base rebuild zeroes
             # the per-day counters, which is correct for 0DTE but loses multi-day
@@ -463,6 +472,16 @@ class DoubleCalendarStrategy(HydraStrategy):
         net_debit = (
             mids["long_call"] + mids["long_put"] - mids["short_call"] - mids["short_put"]
         ) * 100 * n
+        # A double calendar is a net-DEBIT structure by definition. An inverted
+        # term structure (shorts richer than longs) yields net_debit <= 0 — that
+        # is NOT this strategy, and it would also break pnl_pct = pnl/net_debit
+        # and leave the position unmanaged. Skip it rather than open an anomaly.
+        if net_debit <= 0:
+            logger.warning(
+                "[DCTM] skipping entry #%s — net credit/zero (%.2f); a calendar must be a net debit",
+                entry.entry_number, net_debit,
+            )
+            return False
         base_id = int(get_us_market_time().timestamp() * 1000)
         for name, conid in leg_conids.items():
             leg = entry.legs[name]
@@ -473,6 +492,10 @@ class DoubleCalendarStrategy(HydraStrategy):
         entry.net_debit = net_debit
         entry.dc_phase = DCPhase.CALENDAR
         entry.contracts = n
+        # Stamp the (config) wing width at OPEN so spread_width / capital_deployed
+        # are non-zero in the CALENDAR phase (it's the planned IC wing, known
+        # upfront; the transformer uses the same value).
+        entry.wing_width = self.dc_wing_width
         entry.is_complete = True
         logger.info(
             "[DCTM-OPEN] entry #%s DEBIT $%.2f | Kc=%s Kp=%s | short=%s long=%s | %dc",
@@ -573,42 +596,60 @@ class DoubleCalendarStrategy(HydraStrategy):
             # TRANSFORMED positions hold to expiry — settled in Phase 5.
         return "; ".join(actions) if actions else None
 
-    def _dc_refresh_marks(self, entry) -> None:
-        """Refresh each open leg's price from the current quote so unrealized_pnl
-        is current before a transform/stop/EOD decision."""
+    def _dc_refresh_marks(self, entry) -> bool:
+        """Refresh each open leg's price from the current quote. Returns True only
+        if EVERY open leg got a fresh positive mid THIS tick — a missing/crossed
+        mid leaves the prior (stale) price in place, so callers must not act on a
+        non-fresh mark (a frozen leg could otherwise trip the % stop on bad data)."""
         conids = {
             name: entry.legs[name].uic
             for name in ("short_call", "long_call", "short_put", "long_put")
             if entry.legs[name].uic
         }
         if not conids:
-            return
-        for name, q in self._dc_read_leg_quotes(conids).items():
-            if q["mid"] and q["mid"] > 0:
-                entry.legs[name].price = q["mid"]
+            return False
+        fresh = True
+        quotes = self._dc_read_leg_quotes(conids)
+        for name in conids:
+            mid = (quotes.get(name) or {}).get("mid")
+            if mid and mid > 0:
+                entry.legs[name].price = mid
+            else:
+                fresh = False
+        return fresh
 
     def _dc_past_eod_cutoff(self) -> bool:
         return get_us_market_time().time() >= self.dc_eod_cutoff
 
     def _dc_manage_calendar(self, entry) -> Optional[str]:
         """One open calendar's intraday decision (priority: transform -> stop -> EOD)."""
-        self._dc_refresh_marks(entry)
+        fresh = self._dc_refresh_marks(entry)
         if entry.net_debit <= 0:
             return None
-        pnl_pct = entry.unrealized_pnl / entry.net_debit
 
-        # 1. profit trigger -> attempt the (risk-free-gated) transformer
-        if pnl_pct >= self.dc_profit_trigger_pct:
-            if self._dc_attempt_transform(entry):
-                return f"TRANSFORM E#{entry.entry_number}"
-            # gate failed (not yet risk-free) -> fall through to stop/EOD checks
+        # The value-driven decisions (transform, % stop) act ONLY on a fully fresh
+        # mark this tick — a single stale leg could otherwise fire a false stop or
+        # a mistimed transform. EOD close is TIME-based and runs regardless.
+        if fresh:
+            pnl_pct = entry.unrealized_pnl / entry.net_debit
 
-        # 2. pre-transform hard stop (~20% of debit)
-        if pnl_pct <= -self.dc_pre_transform_stop_pct:
-            self._dc_close_calendar(entry, reason="20%-debit stop", loss=True)
-            return f"STOP E#{entry.entry_number}"
+            # 1. profit trigger -> attempt the (risk-free-gated) transformer
+            if pnl_pct >= self.dc_profit_trigger_pct:
+                if self._dc_attempt_transform(entry):
+                    return f"TRANSFORM E#{entry.entry_number}"
+                # gate failed (not yet risk-free) -> fall through to stop/EOD checks
 
-        # 3. EOD-day-1 close if still un-transformed
+            # 2. pre-transform hard stop (~20% of debit)
+            if pnl_pct <= -self.dc_pre_transform_stop_pct:
+                self._dc_close_calendar(entry, reason="20%-debit stop", loss=True)
+                return f"STOP E#{entry.entry_number}"
+        else:
+            logger.debug(
+                "[DCTM] E#%s marks not fresh this tick — skipping transform/stop",
+                entry.entry_number,
+            )
+
+        # 3. EOD-day-1 close if still un-transformed (time-based, runs regardless)
         if self.dc_eod_close_if_no_transform and self._dc_past_eod_cutoff():
             self._dc_close_calendar(entry, reason="EOD no-transform", loss=False)
             return f"EOD-CLOSE E#{entry.entry_number}"
@@ -687,6 +728,15 @@ class DoubleCalendarStrategy(HydraStrategy):
             self._dc_recorder.record_transformation(entry, get_us_market_time().strftime("%Y-%m-%d"))
         return True
 
+    @staticmethod
+    def _dc_clear_leg_conids(entry) -> None:
+        """Null the leg conids/ids of a CLOSED entry so the base account-wide
+        reconciliation never re-counts an already-settled calendar as a tracked
+        ('expected') position."""
+        for name in LEG_NAMES:
+            entry.legs[name].uic = None
+            entry.legs[name].position_id = None
+
     def _dc_close_calendar(self, entry, reason: str, loss: bool) -> None:
         """Liquidate an un-transformed calendar (dry-run): book realized P&L from
         the current mark, mark CLOSED, and set side-done flags so active_entries
@@ -703,6 +753,7 @@ class DoubleCalendarStrategy(HydraStrategy):
             entry.call_side_stopped = entry.put_side_stopped = True
         else:
             entry.call_side_pivot_closed = entry.put_side_pivot_closed = True
+        self._dc_clear_leg_conids(entry)
         tag = "DCTM-STOP" if loss else "DCTM-EOD-CLOSE"
         logger.warning(
             "[%s] E#%s closed (%s): P&L $%.2f on debit $%.2f",
@@ -798,7 +849,14 @@ class DoubleCalendarStrategy(HydraStrategy):
         return e
 
     def _dc_save_sidecar(self) -> None:
-        """Persist all OPEN (non-CLOSED) calendars to the sidecar."""
+        """Persist all OPEN (non-CLOSED) calendars to the sidecar.
+
+        Guarded by _dc_loaded: during startup the base recovery/reset may call
+        _save_state_to_disk BEFORE _dc_load_sidecar has run; writing then would
+        clobber the real sidecar with an empty list and lose the open calendar.
+        """
+        if not getattr(self, "_dc_loaded", False):
+            return
         records = [
             self._dc_serialize_entry(e)
             for e in self.daily_state.entries
@@ -814,6 +872,9 @@ class DoubleCalendarStrategy(HydraStrategy):
         AND prior-day opens, which the base date!=today guard drops). Replaces any
         base-loaded IC-shaped version of the same trade. Returns True if any
         calendar was adopted."""
+        # Mark loaded FIRST so subsequent _dc_save_sidecar calls are armed even
+        # when there's no file yet (a fresh start with no open calendars).
+        self._dc_loaded = True
         path = self._dc_state_path()
         if not os.path.exists(path):
             return False
@@ -883,7 +944,9 @@ class DoubleCalendarStrategy(HydraStrategy):
             return False
         for e in due:
             self._dc_settle_entry(e, spx)
-        self._dc_save_sidecar()
+        # Persist BOTH the base state file (realized P&L now in total_realized_pnl)
+        # and the sidecar (settled calendars removed) — not just the sidecar.
+        self._save_state_to_disk()
         return True
 
     def _dc_settle_entry(self, entry, spx: float) -> None:
@@ -910,6 +973,7 @@ class DoubleCalendarStrategy(HydraStrategy):
         self.daily_state.total_realized_pnl += realized
         entry.dc_phase = DCPhase.CLOSED
         entry.call_side_expired = entry.put_side_expired = True  # settled at expiry
+        self._dc_clear_leg_conids(entry)
         logger.info(
             "[DCTM-SETTLE] E#%s (%s) settled at SPX %.2f: P&L $%.2f (debit $%.2f, transform $%.2f)",
             entry.entry_number, tag, spx, realized, entry.net_debit, entry.transform_credit,
