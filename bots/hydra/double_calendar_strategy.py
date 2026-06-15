@@ -144,6 +144,12 @@ class DoubleCalendarStrategy(HydraStrategy):
             self.dc_eod_cutoff = time(hh, mm)
         except (ValueError, TypeError):
             self.dc_eod_cutoff = time(15, 55)
+        # Bounded strike-scan knobs (2026-06-15 latency fix): center the scan on a
+        # VIX-EM estimate of the target-delta OTM distance and read greeks for only
+        # a small window of strikes (capped), instead of scanning ~40 cold conids.
+        self.dc_delta_otm_fraction = float(dc.get("delta_otm_fraction", 0.40))
+        self.dc_delta_window = int(dc.get("delta_window", 8))
+        self.dc_delta_max_reads = int(dc.get("delta_max_reads", 10))
 
         logger.info(
             "DCTM initialized (DRY-RUN, LOCKED). Short DTE %d-%d, long +%d-%d, "
@@ -272,60 +278,41 @@ class DoubleCalendarStrategy(HydraStrategy):
     # expiry-selection logic lives in calendar_chain.
     # ------------------------------------------------------------------
 
-    def _dc_expiry_is_listed(self, expiry_iso: str) -> bool:
-        """True if IBKR lists an SPXW chain for THIS EXACT expiry. SPXW has GAPS
-        (verified live 2026-06-15: Jun 29 weekday is NOT a listed expiry, Jun 30
-        is), so a generated weekday calendar != the listed-expiry set.
-
-        MUST be DAY-granular: get_option_chain is MONTH-granular (it returns the
-        union of strikes across the whole month, so a gap weekday still looks
-        non-empty). We instead resolve one near-ATM conid AT THE EXACT EXPIRY via
-        _get_option_uic, which routes through qualify_option_strikes'
-        maturityDate==expiry filter — the SAME path _dc_resolve_calendar_legs
-        uses, so 'listed' here guarantees the legs will resolve. Resolved => listed."""
-        spx = getattr(self, "current_price", 0) or 0
-        if spx <= 0:
-            return False
-        inc = getattr(self, "strike_increment", 5) or 5
-        atm = round(spx / inc) * inc
-        try:
-            return bool(self._get_option_uic(atm, "Call", expiry_iso))
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("[DCTM-EXPIRIES] day-granular listed-check failed for %s: %s", expiry_iso, exc)
-            return False
-
-    def _dc_pick_expiries(self) -> Optional[Tuple[str, str]]:
-        """Choose (short_expiry, long_expiry) for today from the SPXW trading-day
-        candidates and the configured DTE windows. Returns None if no viable pair."""
+    def _dc_pick_expiries(self) -> Optional[Tuple[str, list]]:
+        """Choose the short expiry + an ORDERED list of candidate long expiries
+        (smallest gap first) for today. PURE / fast — NO per-candidate broker
+        calls. (The prior ATM listed-filter cost ~50s live AND was month-granular,
+        so it couldn't even detect gap weekdays.) Day-granular listing + the
+        both-expiry strike requirement are enforced later by _dc_delta_target_strike,
+        which batch-reads the chain on BOTH expiries and only accepts a strike
+        listed on both. _calculate_strikes then tries the long candidates in order.
+        Returns (short_expiry, [long_candidates]) or None."""
         today_iso = get_us_market_time().strftime("%Y-%m-%d")
-        horizon = self.dc_short_dte_max + self.dc_long_extra_dte_max + 3  # small buffer
+        t = date.fromisoformat(today_iso)
+        horizon = self.dc_short_dte_max + self.dc_long_extra_dte_max + 3
         candidates = generate_candidate_expiries(today_iso, horizon)
-        # Filter generated weekdays down to expiries IBKR ACTUALLY lists (SPXW has
-        # gaps — see _dc_expiry_is_listed) so we never select an unlisted expiry.
-        listed = [c for c in candidates if self._dc_expiry_is_listed(c)]
         picked = pick_calendar_expiries(
-            listed, today_iso,
+            candidates, today_iso,
             self.dc_short_dte_min, self.dc_short_dte_max,
             self.dc_long_extra_dte_min, self.dc_long_extra_dte_max,
             prefer_friday=self.dc_prefer_friday,
         )
         if picked is None:
             logger.warning(
-                "[DCTM-EXPIRIES] no viable pair: short %d-%d DTE, long +%d-%d "
-                "(generated=%d, listed=%d)",
+                "[DCTM-EXPIRIES] no viable short/long window: short %d-%d DTE, long +%d-%d (candidates=%d)",
                 self.dc_short_dte_min, self.dc_short_dte_max,
-                self.dc_long_extra_dte_min, self.dc_long_extra_dte_max,
-                len(candidates), len(listed),
+                self.dc_long_extra_dte_min, self.dc_long_extra_dte_max, len(candidates),
             )
             return None
-        short_exp, long_exp = picked
-        t = date.fromisoformat(today_iso)
-        logger.info(
-            "[DCTM-EXPIRIES] short=%s (%dDTE) long=%s (+%dd)",
-            short_exp, (date.fromisoformat(short_exp) - t).days,
-            long_exp, (date.fromisoformat(long_exp) - date.fromisoformat(short_exp)).days,
+        short_exp, _ = picked
+        sd = (date.fromisoformat(short_exp) - t).days
+        longs = sorted(
+            [c for c in candidates
+             if self.dc_long_extra_dte_min <= (date.fromisoformat(c) - t).days - sd <= self.dc_long_extra_dte_max],
+            key=lambda c: date.fromisoformat(c),
         )
-        return picked
+        logger.info("[DCTM-EXPIRIES] short=%s (%dDTE), long candidates=%s", short_exp, sd, longs)
+        return short_exp, longs
 
     def _dc_resolve_calendar_legs(
         self, call_strike: float, put_strike: float,
@@ -404,7 +391,11 @@ class DoubleCalendarStrategy(HydraStrategy):
         picked = self._dc_pick_expiries()
         if not picked:
             return False
-        short_exp, long_exp = picked
+        short_exp, longs = picked  # _dc_pick_expiries returns (short, [long candidates])
+        if not longs:
+            logger.warning("[DCTM-PROBE] no long candidate for short %s", short_exp)
+            return False
+        long_exp = longs[0]
         spx = self.current_price
         if not spx or spx <= 0:
             logger.warning("[DCTM-PROBE] no SPX price — cannot probe")
@@ -441,24 +432,53 @@ class DoubleCalendarStrategy(HydraStrategy):
         cfg = getattr(self, "strategy_config", {}) or {}
         return float(cfg.get("min_buying_power_per_calendar", 2000.0))
 
-    def _dc_delta_target_strike(self, spx: float, right: str, expiry: str) -> Optional[float]:
-        """OTM strike whose option |delta| is closest to dc_target_delta within
-        dc_delta_band, on the SHORT expiry. Scans on-grid strikes outward from
-        spot (calls up, puts down), reading delta per candidate. Returns the
-        strike or None if none lands in the band."""
+    def _dc_em_otm_distance(self, spx: float, short_expiry: str) -> float:
+        """Estimated OTM distance (points) for a ~dc_target_delta strike, from the
+        VIX-implied expected move: EM_1sd = spx*(VIX/100)*sqrt(DTE/365), scaled by
+        dc_delta_otm_fraction (~0.40 ≈ 35Δ in BS terms). Used to CENTER the bounded
+        scan so we read greeks for only a handful of strikes, not ~40."""
+        vix = self.current_vix if (self.current_vix and self.current_vix > 0) else 16.0
+        try:
+            dte = max(1, (date.fromisoformat(short_expiry) - get_us_market_time().date()).days)
+        except Exception:
+            dte = 10
+        em_1sd = spx * (vix / 100.0) * ((dte / 365.0) ** 0.5)
         inc = getattr(self, "strike_increment", 5) or 5
+        return max(inc, em_1sd * self.dc_delta_otm_fraction)
+
+    def _dc_delta_target_strike(
+        self, spx: float, right: str, short_expiry: str, long_expiry: str,
+    ) -> Optional[float]:
+        """Pick the ~dc_target_delta OTM strike that is LISTED ON BOTH expiries.
+
+        BOUNDED + BATCHED (fixes the ~95s/side scan): center a small strike window
+        on the VIX-EM estimate, batch-resolve conids on BOTH the short and long
+        expiry in ~4 broker calls (_read_option_chain = chain + batch qualify, which
+        is DAY-granular), intersect to the strikes listed on BOTH, then read greeks
+        (short expiry) for only those strikes nearest the estimate (capped). Returns
+        the in-band strike closest to target, or None. Reading the long-expiry chain
+        here is what guarantees _dc_resolve_calendar_legs won't fail on the long leg."""
+        inc = getattr(self, "strike_increment", 5) or 5
+        est = self._dc_em_otm_distance(spx, short_expiry)
+        base = round((spx + est if right == "Call" else spx - est) / inc) * inc
+        win = int(getattr(self, "dc_delta_window", 8))
+        window = [base + s * inc for s in range(-win, win + 1) if base + s * inc > 0]
+        idx = 0 if right == "Call" else 1
+        smap = self._read_option_chain(short_expiry, window)[idx]
+        lmap = self._read_option_chain(long_expiry, window)[idx]
+        both = [k for k in window if k in smap and k in lmap]  # listed on BOTH expiries
+        if not both:
+            logger.info(
+                "[DCTM] no %s strike near %.0f listed on BOTH %s/%s (window=%dpt)",
+                right, base, short_expiry, long_expiry, win * inc,
+            )
+            return None
         lo, hi = self.dc_delta_band
-        base = round(spx / inc) * inc
-        best = None  # (abs(delta - target), strike)
-        for step in range(1, 41):  # bounded scan so a bad chain can't loop forever
-            strike = base + step * inc if right == "Call" else base - step * inc
-            if strike <= 0:
-                break
-            conid = self._get_option_uic(strike, right, expiry)
-            if not conid:
-                continue
+        cap = int(getattr(self, "dc_delta_max_reads", 10))
+        best = None  # (abs(delta-target), strike)
+        for k in sorted(both, key=lambda x: abs(x - base))[:cap]:  # nearest-estimate first, capped
             try:
-                delta = abs(float((self.broker.get_option_greeks(conid) or {}).get("delta")))
+                delta = abs(float((self.broker.get_option_greeks(smap[k]) or {}).get("delta")))
             except Exception:
                 continue
             if delta <= 0:
@@ -466,15 +486,14 @@ class DoubleCalendarStrategy(HydraStrategy):
             if lo <= delta <= hi:
                 score = abs(delta - self.dc_target_delta)
                 if best is None or score < best[0]:
-                    best = (score, strike)
-            elif delta < lo and best is not None:
-                break  # past the band (deltas fall as we go further OTM)
+                    best = (score, k)
         return best[1] if best else None
 
     def _calculate_strikes(self, entry) -> bool:
-        """Pick the two expiries and the 30-40delta short strikes, and stamp them
-        onto the calendar entry. A calendar's short+long of a side share a STRIKE
-        but differ in EXPIRY."""
+        """Pick the two expiries and the 30-40delta short strikes (listed on BOTH
+        expiries), and stamp them onto the calendar entry. Short+long of a side
+        share a STRIKE but differ in EXPIRY. Tries the long candidates in order so
+        a thin long expiry doesn't skip the entry when another long works."""
         spx = self.current_price
         if not spx or spx <= 0:
             logger.error("[DCTM] no SPX price — cannot calculate strikes")
@@ -482,23 +501,25 @@ class DoubleCalendarStrategy(HydraStrategy):
         picked = self._dc_pick_expiries()
         if not picked:
             return False
-        short_exp, long_exp = picked
-        kc = self._dc_delta_target_strike(spx, "Call", short_exp)
-        kp = self._dc_delta_target_strike(spx, "Put", short_exp)
-        if not kc or not kp:
-            logger.warning(
-                "[DCTM] no ~%.2fdelta strike in band %s (call=%s put=%s)",
-                self.dc_target_delta, list(self.dc_delta_band), kc, kp,
-            )
-            return False
-        entry.short_call_strike = entry.long_call_strike = kc
-        entry.short_put_strike = entry.long_put_strike = kp
-        entry.legs["short_call"].expiry = short_exp
-        entry.legs["long_call"].expiry = long_exp
-        entry.legs["short_put"].expiry = short_exp
-        entry.legs["long_put"].expiry = long_exp
-        logger.info("[DCTM] strikes Kc=%s Kp=%s | short=%s long=%s", kc, kp, short_exp, long_exp)
-        return True
+        short_exp, longs = picked
+        for long_exp in longs[:2]:  # try the nearest 2 long candidates
+            kc = self._dc_delta_target_strike(spx, "Call", short_exp, long_exp)
+            kp = self._dc_delta_target_strike(spx, "Put", short_exp, long_exp)
+            if kc and kp:
+                entry.short_call_strike = entry.long_call_strike = kc
+                entry.short_put_strike = entry.long_put_strike = kp
+                entry.legs["short_call"].expiry = short_exp
+                entry.legs["long_call"].expiry = long_exp
+                entry.legs["short_put"].expiry = short_exp
+                entry.legs["long_put"].expiry = long_exp
+                logger.info("[DCTM] strikes Kc=%s Kp=%s | short=%s long=%s", kc, kp, short_exp, long_exp)
+                return True
+            logger.info("[DCTM] long %s yielded no both-expiry strike (call=%s put=%s) — trying next", long_exp, kc, kp)
+        logger.warning(
+            "[DCTM] no ~%.2fΔ strikes listed on both short %s + any long %s",
+            self.dc_target_delta, short_exp, longs[:2],
+        )
+        return False
 
     def _dc_simulate_entry(self, entry) -> bool:
         """Dry-run open of the net-DEBIT double calendar from REAL mids (no broker

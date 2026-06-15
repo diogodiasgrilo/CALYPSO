@@ -88,12 +88,13 @@ class TestMultiDayPredicate:
         assert inst._dc_entry_is_open(SimpleNamespace()) is False
 
 
-class TestPickExpiriesListedFilter:
-    """Live-found bug (2026-06-15): SPXW has expiry GAPS (Jun 29 not listed, Jun 30
-    is). _dc_pick_expiries must filter generated weekdays to actually-listed
-    chains so it never selects an unlisted expiry."""
+class TestPickExpiries:
+    """_dc_pick_expiries is PURE/fast (2026-06-15 latency fix): returns the short
+    expiry + an ordered list of long candidates, with NO per-candidate broker
+    calls. Listing + both-expiry strike availability is enforced later in the
+    bounded strike scan (which intersects strikes listed on BOTH expiries)."""
 
-    def test_skips_unlisted_long_picks_listed(self, monkeypatch):
+    def test_returns_short_and_ordered_longs(self, monkeypatch):
         from datetime import datetime
         monkeypatch.setattr(
             "bots.hydra.double_calendar_strategy.get_us_market_time",
@@ -103,14 +104,10 @@ class TestPickExpiriesListedFilter:
         inst.dc_short_dte_min, inst.dc_short_dte_max = 6, 15
         inst.dc_long_extra_dte_min, inst.dc_long_extra_dte_max = 1, 4
         inst.dc_prefer_friday = True
-        inst.current_price = 7565.0
-        inst.strike_increment = 5
-        # DAY-granular listed-check: _dc_expiry_is_listed resolves an ATM conid at
-        # the EXACT expiry via _get_option_uic. Jun 29 (the natural +3 long) is the
-        # gap day -> None (unlisted); every other expiry resolves.
-        inst._get_option_uic = lambda strike, right, iso: None if iso == "2026-06-29" else 880001
-        # short = Fri Jun 26 (11 DTE); long must skip the unlisted Jun 29 -> Jun 30.
-        assert inst._dc_pick_expiries() == ("2026-06-26", "2026-06-30")
+        short, longs = inst._dc_pick_expiries()
+        assert short == "2026-06-26"  # Friday, 11 DTE
+        # +1..4 after Jun 26 -> Jun 29 (gap 3) then Jun 30 (gap 4); weekend skipped
+        assert longs == ["2026-06-29", "2026-06-30"]
 
 
 class TestResolveCalendarLegs:
@@ -210,49 +207,98 @@ class TestMinBuyingPower:
 
 
 class TestDeltaTargetStrike:
-    """Phase 3: 30-40delta OTM strike selection from per-strike greeks."""
+    """Bounded, batched, BOTH-expiry strike selection (2026-06-15 latency fix):
+    center a small strike window on the VIX-EM estimate, batch-resolve conids on
+    the short AND long expiry via _read_option_chain, intersect to strikes listed
+    on BOTH, and read greeks for only the capped nearest-estimate subset."""
 
-    def _inst(self, right):
+    def _inst(self, right, short_strikes=None, long_strikes=None):
         inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
         inst.strike_increment = 5
         inst.dc_target_delta = 0.35
         inst.dc_delta_band = (0.30, 0.40)
-        inst._get_option_uic = lambda strike, r, expiry: int(strike)  # conid = strike
+        inst.current_vix = 16.0
+        inst.dc_delta_otm_fraction = 0.40
+        inst.dc_delta_window = 8
+        inst.dc_delta_max_reads = 20  # read the whole window in the test
+
+        def read_chain(expiry, strikes):
+            avail = short_strikes if expiry == "2026-06-26" else long_strikes
+            keep = strikes if avail is None else [k for k in strikes if k in avail]
+            m = {k: int(k) for k in keep}  # conid = int(strike)
+            return (m, m)  # (call_map, put_map) — identical for the test
+
+        inst._read_option_chain = read_chain
         inst.broker = MagicMock()
 
         def delta_for(conid):
             strike = float(conid)
-            if right == "Call":
-                d = 0.5 - (strike - 5000) * 0.002   # falls as strike rises
-            else:
-                d = 0.5 - (5000 - strike) * 0.002   # falls as strike drops
+            d = 0.5 - (strike - 5000) * 0.002 if right == "Call" else 0.5 - (5000 - strike) * 0.002
             return {"delta": d}
 
         inst.broker.get_option_greeks.side_effect = delta_for
         return inst
 
-    def test_call_picks_closest_to_target(self):
-        # delta 0.35 at strike 5075 (0.5 - 75*0.002)
-        assert self._inst("Call")._dc_delta_target_strike(5000.0, "Call", "2026-06-26") == 5075.0
+    def _mp(self, monkeypatch):
+        from datetime import datetime
+        monkeypatch.setattr(
+            "bots.hydra.double_calendar_strategy.get_us_market_time",
+            lambda: datetime(2026, 6, 15, 10, 0),  # 11 DTE to 2026-06-26
+        )
 
-    def test_put_picks_closest_to_target(self):
-        # delta 0.35 at strike 4925 (0.5 - 75*0.002)
-        assert self._inst("Put")._dc_delta_target_strike(5000.0, "Put", "2026-06-26") == 4925.0
+    def test_call_picks_closest_to_target_on_both(self, monkeypatch):
+        self._mp(monkeypatch)
+        # delta 0.35 at strike 5075; EM-centered window includes it on both expiries
+        got = self._inst("Call")._dc_delta_target_strike(5000.0, "Call", "2026-06-26", "2026-06-30")
+        assert got == 5075.0
 
-    def test_none_when_band_unreachable(self):
+    def test_put_picks_closest_to_target_on_both(self, monkeypatch):
+        self._mp(monkeypatch)
+        got = self._inst("Put")._dc_delta_target_strike(5000.0, "Put", "2026-06-26", "2026-06-30")
+        assert got == 4925.0
+
+    def test_excludes_strike_not_listed_on_long(self, monkeypatch):
+        self._mp(monkeypatch)
+        # long expiry lists everything EXCEPT the 0.35Δ target (5075) -> next-closest in band
+        long_strikes = set(range(4000, 6001, 5)) - {5075}
+        got = self._inst("Call", long_strikes=long_strikes)._dc_delta_target_strike(
+            5000.0, "Call", "2026-06-26", "2026-06-30")
+        assert got in (5070.0, 5080.0)  # both 0.36/0.34 — equidistant from 0.35
+
+    def test_none_when_no_strike_on_both(self, monkeypatch):
+        self._mp(monkeypatch)
+        # long expiry lists nothing -> empty intersection -> None (no greeks read)
+        inst = self._inst("Call", long_strikes=set())
+        assert inst._dc_delta_target_strike(5000.0, "Call", "2026-06-26", "2026-06-30") is None
+        inst.broker.get_option_greeks.assert_not_called()
+
+    def test_none_when_band_unreachable(self, monkeypatch):
+        self._mp(monkeypatch)
         inst = self._inst("Call")
-        inst.dc_delta_band = (0.01, 0.02)  # deltas never get this low in 40 steps
-        assert inst._dc_delta_target_strike(5000.0, "Call", "2026-06-26") is None
+        inst.dc_delta_band = (0.01, 0.02)  # no window strike is this far OTM
+        assert inst._dc_delta_target_strike(5000.0, "Call", "2026-06-26", "2026-06-30") is None
 
 
 class TestCalculateStrikes:
-    def _inst(self, kc=5075.0, kp=4925.0, expiries=("2026-06-26", "2026-06-29")):
+    """_calculate_strikes now iterates the long candidates (short, [longs]) and
+    uses the first long that yields a ~target-delta strike on BOTH expiries."""
+
+    def _inst(self, strike_by_long=None, expiries=("2026-06-26", ["2026-06-29", "2026-06-30"])):
         inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
         inst.current_price = 5000.0
         inst.dc_target_delta = 0.35
-        inst.dc_delta_band = (0.30, 0.40)
         inst._dc_pick_expiries = lambda: expiries
-        inst._dc_delta_target_strike = lambda spx, right, exp: kc if right == "Call" else kp
+
+        # strike_by_long None -> any long yields (5075, 4925); else map long_exp -> (kc, kp).
+        def dts(spx, right, short_exp, long_exp):
+            if strike_by_long is None:
+                return 5075.0 if right == "Call" else 4925.0
+            pair = strike_by_long.get(long_exp)
+            if not pair:
+                return None
+            return pair[0] if right == "Call" else pair[1]
+
+        inst._dc_delta_target_strike = dts
         return inst
 
     def test_sets_strikes_and_expiries(self):
@@ -262,17 +308,23 @@ class TestCalculateStrikes:
         # calendar: short+long of a side share the strike
         assert e.short_call_strike == 5075.0 and e.long_call_strike == 5075.0
         assert e.short_put_strike == 4925.0 and e.long_put_strike == 4925.0
-        # but differ in expiry
+        # first long candidate used
         assert e.short_expiry == "2026-06-26" and e.long_expiry == "2026-06-29"
+
+    def test_falls_back_to_second_long(self):
+        # first long (Jun 29) yields no both-expiry strike; second (Jun 30) works
+        inst = self._inst(strike_by_long={"2026-06-30": (5075.0, 4925.0)})
+        e = CalendarEntry(entry_number=1)
+        assert inst._calculate_strikes(e) is True
+        assert e.long_expiry == "2026-06-30"
 
     def test_false_when_no_expiry_pair(self):
         inst = self._inst()
         inst._dc_pick_expiries = lambda: None
         assert inst._calculate_strikes(CalendarEntry(entry_number=1)) is False
 
-    def test_false_when_no_delta_strike(self):
-        inst = self._inst()
-        inst._dc_delta_target_strike = lambda spx, right, exp: None
+    def test_false_when_no_long_yields_strike(self):
+        inst = self._inst(strike_by_long={})  # no long yields a both-expiry strike
         assert inst._calculate_strikes(CalendarEntry(entry_number=1)) is False
 
 

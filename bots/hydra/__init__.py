@@ -36,6 +36,33 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D — strike-selection latency + both-expiry SHOWSTOPPER fix (2026-06-15,
+  dry-run-only, A/B/C byte-identical): a LIVE entry-path exercise on the VM broker
+  (read-only, market hours — the audit that code review + unit tests could not do)
+  found D's real entry took ~4 MINUTES and then SKIPPED anyway. Root causes: (1)
+  _dc_delta_target_strike scanned greeks for up to ~40 COLD conids/side (each
+  snapshot warmup ~2-4s) ≈ 95s/side; (2) _dc_pick_expiries' day-granular listed-
+  filter added ~50s of per-candidate broker calls; (3) it picked the ~Δ strike on
+  the SHORT expiry without checking the LONG lists it, so the long leg failed to
+  resolve and the whole entry was discarded. A ~4-min broker burst would also
+  saturate the ONE shared calypso-broker session and add latency to LIVE C. FIX
+  (bounded delta-scan, user-chosen): _dc_pick_expiries is now PURE/fast (returns
+  (short, [long candidates]) — no broker calls); _dc_delta_target_strike centers a
+  small strike window on the VIX-expected-move estimate (em_1sd × delta_otm_fraction
+  ≈ 35Δ OTM distance), batch-resolves conids on BOTH expiries via _read_option_chain
+  (chain + batch qualify, DAY-granular), intersects to strikes listed on BOTH, and
+  reads greeks for only the capped nearest-estimate subset (delta_max_reads, default
+  10) — ~4 chain calls + ≤10 greeks reads/side instead of ~120 cold calls;
+  _calculate_strikes iterates the long candidates so a thin long expiry falls back to
+  the next instead of skipping the entry. The both-expiry intersection is the real
+  gap-day guard (a strike unlisted on the long is now structurally excluded), making
+  the prior month-granular/ATM-only filter unnecessary (removed). New config knobs:
+  delta_otm_fraction (0.40), delta_window (8), delta_max_reads (10). Tests rewritten
+  for the new signatures (both-expiry intersection, long-candidate fallback); full
+  suite 1552 passed. D remains dry-run-LOCKED + STOPPED/undeployed pending a passing
+  live re-test (fast + all 4 legs resolve + net_debit>0). Lesson: a live entry-path
+  exercise is mandatory before trusting D — latency + real strike/expiry listing
+  can't be seen statically.
 - Strategy D — post-audit re-review fixes (2026-06-15, dry-run-only, A/B/C
   byte-identical): a 14-agent independently-verified re-review of the 3 post-audit
   commits found 0 critical / 0 high / 2 medium / 8 low (deduped to 3 real issues).
