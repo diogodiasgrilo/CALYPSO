@@ -63,12 +63,12 @@ export function PnLCurve() {
             </defs>
             <XAxis
               dataKey="time"
-              tick={{ fontSize: 10, fill: colors.textDim }}
+              tick={{ fontSize: 11, fill: colors.textSecondary }}
               axisLine={{ stroke: "rgba(255,255,255,0.06)" }}
               tickLine={false}
             />
             <YAxis
-              tick={{ fontSize: 10, fill: colors.textDim }}
+              tick={{ fontSize: 11, fill: colors.textSecondary }}
               axisLine={false}
               tickLine={false}
               tickFormatter={(v) => `$${v}`}

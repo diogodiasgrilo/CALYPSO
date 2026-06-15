@@ -74,12 +74,10 @@ function buildMonthGrid(monthKey: string, days: DaySummary[]): GridCell[][] {
 export function MonthCalendar({
   monthKey,
   days,
-  maxPnl,
   onDayClick,
 }: {
   monthKey: string;
   days: DaySummary[];
-  maxPnl: number;
   onDayClick: (date: string) => void;
 }) {
   const [, monthStr] = monthKey.split("-");
@@ -89,6 +87,9 @@ export function MonthCalendar({
   const netPnl = days.reduce((sum, d) => sum + (d.net_pnl || 0), 0);
   const wins = days.filter((d) => (d.net_pnl || 0) > 0).length;
   const losses = days.filter((d) => (d.net_pnl || 0) < 0).length;
+  // Scale heat-map intensity to THIS month's own range, not the whole year — a
+  // single outsized day elsewhere shouldn't wash every other day toward flat.
+  const monthMax = Math.max(1, ...days.map((d) => Math.abs(d.net_pnl || 0)));
 
   return (
     <div className="bg-card rounded-lg border border-border-dim p-3">
@@ -136,7 +137,7 @@ export function MonthCalendar({
 
               // Trading day with data
               const pnl = summary.net_pnl || 0;
-              const intensity = Math.min(Math.abs(pnl) / maxPnl, 1);
+              const intensity = Math.min(Math.abs(pnl) / monthMax, 1);
               const bgColor =
                 pnl > 0
                   ? `rgba(126, 232, 199, ${0.15 + intensity * 0.6})`

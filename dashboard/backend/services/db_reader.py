@@ -157,9 +157,13 @@ class BacktestingDBReader:
     # daily_summaries.entries_stopped conflates Brandon take-profit exits with
     # stop-losses for the B/C variants, which made History disagree with both;
     # exposing actual_stops lets the "Stops" columns mean stop-losses everywhere.
+    # Count only real stop-LOSSES, not Brandon take-profit / GEX-breach exits
+    # (the bot writes all of them to trade_stops). net_pnl < 0 isolates losses
+    # and needs no exit_reason column, so it's correct on both pre- and
+    # post-v11 DBs (the v11 exit_reason column only appears after a bot restart).
     _ACTUAL_STOPS = (
-        "(SELECT COUNT(*) FROM trade_stops ts WHERE ts.date = daily_summaries.date) "
-        "AS actual_stops"
+        "(SELECT COUNT(*) FROM trade_stops ts WHERE ts.date = daily_summaries.date "
+        "AND ts.net_pnl < 0) AS actual_stops"
     )
 
     async def get_daily_summaries(self, limit: int = 30) -> list[dict]:

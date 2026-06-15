@@ -29,10 +29,6 @@ export function History() {
   const currentYear = new Date().getFullYear();
   const startYear = 2026;
   const monthGroups = useMemo(() => groupByMonth(summaries), [summaries]);
-  const maxPnl = useMemo(
-    () => Math.max(...summaries.map((s) => Math.abs(s.net_pnl || 0)), 1),
-    [summaries]
-  );
 
   const selectedSummary = useMemo(
     () => summaries.find((s) => s.date === selectedDate) ?? null,
@@ -121,7 +117,6 @@ export function History() {
                 key={monthKey}
                 monthKey={monthKey}
                 days={days}
-                maxPnl={maxPnl}
                 onDayClick={handleDayClick}
               />
             ))}

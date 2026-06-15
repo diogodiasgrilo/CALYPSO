@@ -26,6 +26,7 @@ interface ReplayEntry {
   total_credit: number;
   short_call_strike: number;
   short_put_strike: number;
+  entry_type?: string;
 }
 
 interface PnLPoint {
@@ -98,6 +99,7 @@ export function SessionReplay({ date }: { date: string }) {
             total_credit: (e.total_credit ?? ((e.call_spread_credit as number ?? 0) + (e.put_spread_credit as number ?? 0))) as number,
             short_call_strike: (e.short_call_strike ?? 0) as number,
             short_put_strike: (e.short_put_strike ?? 0) as number,
+            entry_type: (e.entry_type ?? "") as string,
           };
         }));
 
@@ -294,14 +296,14 @@ export function SessionReplay({ date }: { date: string }) {
               </defs>
               <XAxis
                 dataKey="time"
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickLine={false}
               />
               <YAxis
                 width={45}
                 domain={yDomain}
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickLine={false}
                 tickFormatter={(v: number) => `$${v}`}
@@ -344,8 +346,8 @@ export function SessionReplay({ date }: { date: string }) {
                 <span className="text-text-dim">{fmtEntryTime(e.entry_time)}</span>
               </div>
               <div className="flex justify-between text-text-secondary">
-                <span>C:{e.short_call_strike}</span>
-                <span>P:{e.short_put_strike}</span>
+                <span>{(e.entry_type || "").includes("put_only") ? "C: —" : `C:${e.short_call_strike}`}</span>
+                <span>{(e.entry_type || "").includes("call_only") ? "P: —" : `P:${e.short_put_strike}`}</span>
               </div>
               <div className="text-right mt-0.5" style={{ color: colors.profit }}>
                 ${(e.total_credit ?? 0).toFixed(2)}

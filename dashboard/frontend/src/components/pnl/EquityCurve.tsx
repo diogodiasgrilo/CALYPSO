@@ -60,13 +60,13 @@ export function EquityCurve({ dailySummaries }: EquityCurveProps) {
             </defs>
             <XAxis
               dataKey="label"
-              tick={{ fontSize: 10, fill: colors.textDim }}
+              tick={{ fontSize: 11, fill: colors.textSecondary }}
               axisLine={{ stroke: "rgba(255,255,255,0.06)" }}
               tickLine={false}
               interval="preserveStartEnd"
             />
             <YAxis
-              tick={{ fontSize: 10, fill: colors.textDim }}
+              tick={{ fontSize: 11, fill: colors.textSecondary }}
               axisLine={false}
               tickLine={false}
               tickFormatter={(v: number) => v < 0 ? `-$${Math.abs(v)}` : `$${v}`}

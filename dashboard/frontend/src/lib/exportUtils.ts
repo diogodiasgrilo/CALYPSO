@@ -20,8 +20,18 @@ function downloadCSV(filename: string, csv: string) {
 
 function buildCSV(data: Record<string, unknown>[]): string | null {
   if (data.length === 0) return null;
-  const headers = Object.keys(data[0]);
-  const headerRow = headers.map(escapeCSV).join(",");
+  // Union of keys across ALL rows (first-seen order) so a later row carrying an
+  // extra column isn't silently dropped and every row stays column-aligned.
+  const headers: string[] = [];
+  const seen = new Set<string>();
+  for (const row of data) {
+    for (const k of Object.keys(row)) {
+      if (!seen.has(k)) { seen.add(k); headers.push(k); }
+    }
+  }
+  // Friendly Title-Case headers (raw keys still used to look up values).
+  const humanize = (k: string) => k.replace(/_/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+  const headerRow = headers.map((h) => escapeCSV(humanize(h))).join(",");
   const rows = data.map((row) => headers.map((h) => escapeCSV(row[h])).join(","));
   return [headerRow, ...rows].join("\n");
 }

@@ -14,10 +14,12 @@ function computeUnrealizedPnl(entries: HydraEntry[]): number {
     const putActive = !e.put_side_stopped && !e.put_side_skipped && !e.put_side_expired;
     if (callActive) total += e.call_spread_credit - (e.call_spread_value ?? 0);
     if (putActive) total += e.put_spread_credit - (e.put_spread_value ?? 0);
-    // Surviving long legs after MKT-025 stop (long stays open, not salvaged)
-    // Only count long values for sides that were actually opened
-    if (!e.call_side_skipped) total += (e.call_long_value ?? 0);
-    if (!e.put_side_skipped) total += (e.put_long_value ?? 0);
+    // Surviving long leg after a MKT-025 short-only stop (the long stays open).
+    // Only the STOPPED side's long survives separately; for an active side the
+    // long value is already inside spread_value, so adding it here double-counts
+    // (the 2026-06 phantom-$750 bug). Gate strictly on the stopped flag.
+    if (e.call_side_stopped) total += (e.call_long_value ?? 0);
+    if (e.put_side_stopped) total += (e.put_long_value ?? 0);
   }
   return total;
 }

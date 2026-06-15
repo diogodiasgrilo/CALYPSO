@@ -3014,10 +3014,16 @@ class HydraStrategy(MEICStrategy):
                 # theoretical spread_value mark) makes actual_debit + slippage_on_close
                 # real; _record_stop_to_db books net_pnl = -(cost - credit), so a TP
                 # is recorded as a profit and a breach close as a loss, correctly.
+                # v11: tag the early-close reason so analytics can separate a
+                # profitable take-profit from a real stop-loss. close_reason is
+                # already set to "TP"/"BREACH" by the Brandon strategy before this.
+                _early_reason = {"TP": "take_profit", "BREACH": "gex_breach"}.get(
+                    getattr(entry, "close_reason", None) or "", "early_close")
                 self._record_stop_to_db(
                     entry, side_name,
                     getattr(entry, f"{side_name}_side_stop", None) or 0.0,
                     side_close_cost,
+                    exit_reason=_early_reason,
                 )
 
             # Mark entry complete if all sides now done
@@ -5072,8 +5078,13 @@ class HydraStrategy(MEICStrategy):
         )
 
     def _record_stop_to_db(self, entry, side: str, stop_level: float,
-                           actual_close_cost: float):
-        """Record stop loss data to SQLite with execution quality metrics."""
+                           actual_close_cost: float, exit_reason: str = "stop_loss"):
+        """Record stop loss data to SQLite with execution quality metrics.
+
+        exit_reason (v11) discriminates a real stop-loss from a Brandon
+        take-profit / GEX-breach early-close — all of which route through here.
+        Defaults to 'stop_loss' so the two HYDRA-stop call sites need no change.
+        """
         if not self._data_recorder:
             return
         try:
@@ -5130,6 +5141,7 @@ class HydraStrategy(MEICStrategy):
                 "trigger_level": stop_level,
                 "actual_debit": actual_close_cost,
                 "net_pnl": net_pnl,
+                "exit_reason": exit_reason,
                 "quoted_mid_at_stop": quoted_mid,
                 "slippage_on_close": slippage,
                 "spx_move_since_entry": spx_move,

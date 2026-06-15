@@ -49,6 +49,19 @@ interface TradeStop {
   net_pnl: number;
   confirmation_seconds: number;
   breach_recoveries: number;
+  // v11: 'stop_loss' | 'take_profit' | 'gex_breach' | 'early_close'. Older rows
+  // (pre-v11) are undefined → we fall back to the net_pnl sign.
+  exit_reason?: string;
+}
+
+/**
+ * A real stop-LOSS, as opposed to a Brandon take-profit / GEX-breach early-close
+ * (both of which the bot also writes to trade_stops). Prefer the explicit v11
+ * exit_reason; for legacy rows without it, treat a negative net_pnl as a loss-stop.
+ */
+function isRealStop(s: TradeStop): boolean {
+  if (s.exit_reason) return s.exit_reason === "stop_loss";
+  return (s.net_pnl ?? 0) < 0;
 }
 
 interface DaySummary {
@@ -386,11 +399,11 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
               <CartesianGrid strokeDasharray="3 3" stroke={colors.borderDim} />
               <XAxis
                 dataKey="date"
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
@@ -425,11 +438,11 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
             <BarChart data={histogramData}>
               <XAxis
                 dataKey="range"
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 allowDecimals={false}
               />
@@ -460,11 +473,11 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
               <CartesianGrid strokeDasharray="3 3" stroke={colors.borderDim} />
               <XAxis
                 dataKey="date"
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `${v}%`}
                 domain={[0, 100]}
@@ -500,11 +513,11 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
             <BarChart data={dowData}>
               <XAxis
                 dataKey="day"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
@@ -660,11 +673,11 @@ function EntriesTab({
             <BarChart data={creditBySlot}>
               <XAxis
                 dataKey="slot"
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
@@ -726,11 +739,11 @@ function EntriesTab({
             <BarChart data={pnlByEntry}>
               <XAxis
                 dataKey="entry"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
@@ -763,11 +776,11 @@ function EntriesTab({
             <BarChart data={otmBucketData}>
               <XAxis
                 dataKey="otm"
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `${v}%`}
                 domain={[0, 100]}
@@ -802,11 +815,17 @@ function EntriesTab({
 
 function StopsTab({
   entries,
-  stops,
+  stops: allStops,
 }: {
   entries: TradeEntry[];
   stops: TradeStop[];
 }) {
+  // Brandon variants also log take-profit / GEX-breach exits to trade_stops;
+  // every chart on this tab is about stop-LOSSES. Filter to real loss-stops once
+  // (v11 exit_reason; legacy rows fall back to net_pnl sign) — all downstream
+  // memos reference `stops`, so this single swap corrects the whole tab.
+  const stops = useMemo(() => allStops.filter(isRealStop), [allStops]);
+
   // 1. Stop rate by time slot
   const stopRateByEntry = useMemo(() => {
     const entrySlotLookup = new Map<string, number>();
@@ -913,6 +932,9 @@ function StopsTab({
 
   return (
     <>
+      <div className="text-[11px] text-text-secondary mb-1">
+        Stop-losses only — Brandon take-profit / GEX-breach exits are excluded.
+      </div>
       {/* Stop Rate by Time Slot */}
       <ChartCard title="Stop Rate by Time Slot">
         {stops.length === 0 ? (
@@ -922,11 +944,11 @@ function StopsTab({
             <BarChart data={stopRateByEntry}>
               <XAxis
                 dataKey="entry"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `${v}%`}
                 domain={[0, 100]}
@@ -991,11 +1013,11 @@ function StopsTab({
             <BarChart data={slippageData}>
               <XAxis
                 dataKey="range"
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 allowDecimals={false}
               />
@@ -1025,15 +1047,15 @@ function StopsTab({
             <BarChart data={stopsPerDayData}>
               <XAxis
                 dataKey="stops"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
-                label={{ value: "# Stops", position: "insideBottom", offset: -2, fontSize: 9, fill: colors.textDim }}
+                label={{ value: "# Stops", position: "insideBottom", offset: -2, fontSize: 11, fill: colors.textSecondary }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 allowDecimals={false}
-                label={{ value: "Days", angle: -90, position: "insideLeft", fontSize: 9, fill: colors.textDim }}
+                label={{ value: "Days", angle: -90, position: "insideLeft", fontSize: 11, fill: colors.textSecondary }}
               />
               <Tooltip
                 contentStyle={chartTooltipStyle}
@@ -1158,14 +1180,14 @@ function MarketTab({
                 name="VIX"
                 type="number"
                 domain={["dataMin - 0.5", "dataMax + 0.5"]}
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
                 tickFormatter={(v) => Number(v).toFixed(1)}
               />
               <YAxis
                 dataKey="pnl"
                 name="P&L"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
@@ -1199,15 +1221,15 @@ function MarketTab({
                 name="Range"
                 type="number"
                 domain={["dataMin - 2", "dataMax + 2"]}
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
                 tickFormatter={(v) => Number(v).toFixed(0)}
-                label={{ value: "SPX Range (pts)", position: "insideBottom", offset: -2, fontSize: 9, fill: colors.textDim }}
+                label={{ value: "SPX Range (pts)", position: "insideBottom", offset: -2, fontSize: 11, fill: colors.textSecondary }}
               />
               <YAxis
                 dataKey="pnl"
                 name="P&L"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
@@ -1237,11 +1259,11 @@ function MarketTab({
             <BarChart data={directionData}>
               <XAxis
                 dataKey="direction"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
@@ -1274,11 +1296,11 @@ function MarketTab({
             <BarChart data={trendData}>
               <XAxis
                 dataKey="signal"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />

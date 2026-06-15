@@ -46,7 +46,7 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 10
+SCHEMA_VERSION = 11
 
 # ============================================================================
 # Schema Migration SQL
@@ -145,6 +145,17 @@ MIGRATION_V9_SQL = [
 # services/homer/db_manager.py.
 MIGRATION_V10_SQL = [
     "ALTER TABLE spread_snapshots ADD COLUMN date TEXT",
+]
+
+# v11 (2026-06-15): exit_reason discriminator on trade_stops. Brandon variants
+# route take-profit AND GEX-breach early-closes through the SAME record_stop()
+# path as real stop-losses, so the table conflated wins (TP) with losses. The
+# Analytics "Stops" tab therefore counted profitable take-profits as stop-outs.
+# Values: 'stop_loss' | 'take_profit' | 'gex_breach' | 'early_close'. Additive +
+# nullable — historical rows stay NULL and the dashboard falls back to the
+# net_pnl sign for them. Kept in sync with services/homer/db_manager.py.
+MIGRATION_V11_SQL = [
+    "ALTER TABLE trade_stops ADD COLUMN exit_reason TEXT",
 ]
 
 # v7: shadow entries table — records what OTM-based selection WOULD have chosen
@@ -367,6 +378,9 @@ class DataRecorder:
                 if current_version < 10:
                     # v10: first-class date column on spread_snapshots
                     migration_sql += MIGRATION_V10_SQL
+                if current_version < 11:
+                    # v11: exit_reason discriminator on trade_stops
+                    migration_sql += MIGRATION_V11_SQL
 
                 for sql in migration_sql:
                     try:
@@ -563,6 +577,8 @@ class DataRecorder:
                 "spx_move_since_entry", "minutes_held", "cascade_gap_seconds",
                 # v8 contract count
                 "contracts",
+                # v11 exit-reason discriminator (stop_loss/take_profit/gex_breach)
+                "exit_reason",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)

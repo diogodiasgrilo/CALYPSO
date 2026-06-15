@@ -1031,7 +1031,14 @@ class MEICStrategy(abc.ABC):
         if alert_service:
             self.alert_service = alert_service
         else:
-            self.alert_service = AlertService(config, self.BOT_NAME)
+            # Variant-aware alert source so every email/Telegram alert identifies
+            # WHICH HYDRA variant fired (A=HYDRA, B=HYDRA_B, C=HYDRA_C) instead of
+            # a generic "HYDRA". Mirrors main._variant_bot_name() + the monitor-log
+            # tag, and gives each variant its own dedup-fingerprint namespace so a
+            # storm on one variant can't suppress another variant's alerts.
+            _variant = (os.environ.get("HYDRA_VARIANT_ID", "") or "").strip().lower()
+            _alert_name = f"{self.BOT_NAME}_{_variant.upper()}" if _variant else self.BOT_NAME
+            self.alert_service = AlertService(config, _alert_name)
 
         # Position Registry for multi-bot isolation
         self.registry = PositionRegistry(REGISTRY_FILE)
