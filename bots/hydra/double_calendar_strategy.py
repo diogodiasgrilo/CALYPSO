@@ -57,7 +57,7 @@ so the account stays flat and NONE of those vectors touch C.
 from __future__ import annotations
 
 import logging
-from datetime import date
+from datetime import date, time
 from typing import Dict, Optional, Tuple
 
 from bots.hydra.base_strategy import ConfigError, MEICState
@@ -136,6 +136,13 @@ class DoubleCalendarStrategy(HydraStrategy):
         # Prefer the following-week Friday weekly for the short expiry (Burnich's
         # setup); else the earliest in-window candidate. Phase 2.
         self.dc_prefer_friday = bool(dc.get("prefer_friday", True))
+        # EOD-day-1 close cutoff (ET) for an un-transformed calendar. Phase 4.
+        cutoff = str(dc.get("eod_cutoff_et", "15:55"))
+        try:
+            hh, mm = (int(x) for x in cutoff.split(":")[:2])
+            self.dc_eod_cutoff = time(hh, mm)
+        except (ValueError, TypeError):
+            self.dc_eod_cutoff = time(15, 55)
 
         logger.info(
             "DCTM scaffold initialized (DRY-RUN ONLY). Short DTE %d-%d, long +%d-%d, "
@@ -525,10 +532,158 @@ class DoubleCalendarStrategy(HydraStrategy):
             self._entry_in_progress = False
             self.state = MEICState.MONITORING
 
+    # ------------------------------------------------------------------
+    # Transformer + risk controls (Phase 4) — the DC Time Machine's mechanic.
+    # Per open calendar each tick: ~profit_trigger -> attempt the transformer
+    # (close longs + buy wings, FIRE ONLY IF transform_credit >= debit + wing =
+    # risk-free); else 20%-of-debit hard stop; else EOD-day-1 close. A TRANSFORMED
+    # position holds to expiry (settled in Phase 5).
+    # ------------------------------------------------------------------
+
     def _check_stop_losses(self):
-        """STUB (Phase 4). Will monitor each open calendar intraday for: the
-        ~profit_trigger_pct -> transformer (close longs + buy wings, fire only if
-        transform credit >= debit + wing width), the pre_transform_stop_pct hard
-        exit, and the EOD-day-1 close-if-no-transform. No-op until Phase 4 — an
-        open calendar simply holds (the lifecycle overrides keep it across days)."""
+        """Manage every open double calendar (CALENDAR phase). Returns a summary
+        of actions taken this tick, or None."""
+        actions = []
+        for entry in list(self.daily_state.active_entries):
+            if not isinstance(entry, CalendarEntry):
+                continue
+            if entry.dc_phase == DCPhase.CALENDAR:
+                act = self._dc_manage_calendar(entry)
+                if act:
+                    actions.append(act)
+            # TRANSFORMED positions hold to expiry — settled in Phase 5.
+        return "; ".join(actions) if actions else None
+
+    def _dc_refresh_marks(self, entry) -> None:
+        """Refresh each open leg's price from the current quote so unrealized_pnl
+        is current before a transform/stop/EOD decision."""
+        conids = {
+            name: entry.legs[name].uic
+            for name in ("short_call", "long_call", "short_put", "long_put")
+            if entry.legs[name].uic
+        }
+        if not conids:
+            return
+        for name, q in self._dc_read_leg_quotes(conids).items():
+            if q["mid"] and q["mid"] > 0:
+                entry.legs[name].price = q["mid"]
+
+    def _dc_past_eod_cutoff(self) -> bool:
+        return get_us_market_time().time() >= self.dc_eod_cutoff
+
+    def _dc_manage_calendar(self, entry) -> Optional[str]:
+        """One open calendar's intraday decision (priority: transform -> stop -> EOD)."""
+        self._dc_refresh_marks(entry)
+        if entry.net_debit <= 0:
+            return None
+        pnl_pct = entry.unrealized_pnl / entry.net_debit
+
+        # 1. profit trigger -> attempt the (risk-free-gated) transformer
+        if pnl_pct >= self.dc_profit_trigger_pct:
+            if self._dc_attempt_transform(entry):
+                return f"TRANSFORM E#{entry.entry_number}"
+            # gate failed (not yet risk-free) -> fall through to stop/EOD checks
+
+        # 2. pre-transform hard stop (~20% of debit)
+        if pnl_pct <= -self.dc_pre_transform_stop_pct:
+            self._dc_close_calendar(entry, reason="20%-debit stop", loss=True)
+            return f"STOP E#{entry.entry_number}"
+
+        # 3. EOD-day-1 close if still un-transformed
+        if self.dc_eod_close_if_no_transform and self._dc_past_eod_cutoff():
+            self._dc_close_calendar(entry, reason="EOD no-transform", loss=False)
+            return f"EOD-CLOSE E#{entry.entry_number}"
         return None
+
+    def _dc_attempt_transform(self, entry) -> bool:
+        """The transformer (dry-run): close the two back-dated long legs and buy
+        protective wings on the SHORT expiry, turning the calendar into an iron
+        condor. Fires ONLY if the realized transform credit clears
+        net_debit + wing_width (i.e. structurally risk-free); otherwise holds.
+        Returns True iff the transform fired."""
+        n = entry.contracts or self.contracts_per_entry
+        short_exp = entry.short_expiry
+        kc, kp = entry.short_call_strike, entry.short_put_strike
+        wing = self.dc_wing_width
+
+        wing_call_conid = self._get_option_uic(kc + wing, "Call", short_exp)
+        wing_put_conid = self._get_option_uic(kp - wing, "Put", short_exp)
+        if not wing_call_conid or not wing_put_conid:
+            logger.info(
+                "[DCTM] transform deferred — wing conids unresolved (C %s / P %s @ %s)",
+                kc + wing, kp - wing, short_exp,
+            )
+            return False
+
+        # Sell the back-dated longs; buy the wings on the short expiry.
+        lq = self._dc_read_leg_quotes({"long_call": entry.long_call_uic, "long_put": entry.long_put_uic})
+        wq = self._dc_read_leg_quotes({"wing_call": wing_call_conid, "wing_put": wing_put_conid})
+        lc, lp = lq["long_call"]["mid"], lq["long_put"]["mid"]
+        wc, wp = wq["wing_call"]["mid"], wq["wing_put"]["mid"]
+        if any(m is None or m <= 0 for m in (lc, lp, wc, wp)):
+            logger.info("[DCTM] transform deferred — incomplete mids (lc=%s lp=%s wc=%s wp=%s)", lc, lp, wc, wp)
+            return False
+
+        transform_credit = (lc + lp - wc - wp) * 100 * n
+        threshold = entry.net_debit + wing * 100 * n
+        if transform_credit < threshold:
+            logger.info(
+                "[DCTM] transform NOT risk-free yet: credit $%.2f < debit+wing $%.2f — holding",
+                transform_credit, threshold,
+            )
+            return False
+
+        # FIRE: the longs become wings on the short expiry → a same-expiry IC.
+        lc_leg, lp_leg = entry.legs["long_call"], entry.legs["long_put"]
+        lc_leg.strike, lc_leg.expiry, lc_leg.uic = kc + wing, short_exp, wing_call_conid
+        lc_leg.price = lc_leg.fill_price = wc
+        lp_leg.strike, lp_leg.expiry, lp_leg.uic = kp - wing, short_exp, wing_put_conid
+        lp_leg.price = lp_leg.fill_price = wp
+
+        # Resulting IC credit (display/total_credit): short premium - wing cost.
+        sq = self._dc_read_leg_quotes({"short_call": entry.short_call_uic, "short_put": entry.short_put_uic})
+        sc = sq["short_call"]["mid"] or entry.short_call_price
+        sp = sq["short_put"]["mid"] or entry.short_put_price
+        entry.legs["short_call"].price = sc
+        entry.legs["short_put"].price = sp
+        entry.call_spread_credit = max(0.0, sc - wc) * 100 * n
+        entry.put_spread_credit = max(0.0, sp - wp) * 100 * n
+
+        entry.transform_credit = transform_credit
+        entry.wing_width = wing
+        entry.transformed_at = get_us_market_time().isoformat()
+        entry.dc_phase = DCPhase.TRANSFORMED
+        entry.evaluate_risk_free()  # gate == risk-free condition, so this is True
+
+        logger.info(
+            "[DCTM-TRANSFORM] E#%s credit $%.2f >= debit+wing $%.2f → IC C %s/%s P %s/%s (exp %s)",
+            entry.entry_number, transform_credit, threshold,
+            kc, kc + wing, kp, kp - wing, short_exp,
+        )
+        logger.info(
+            "[DCTM-RISKFREE] E#%s risk-free achieved (max loss $0): debit $%.2f, transform credit $%.2f, wing %.0fpt",
+            entry.entry_number, entry.net_debit, transform_credit, wing,
+        )
+        return True
+
+    def _dc_close_calendar(self, entry, reason: str, loss: bool) -> None:
+        """Liquidate an un-transformed calendar (dry-run): book realized P&L from
+        the current mark, mark CLOSED, and set side-done flags so active_entries
+        drops it. ``loss`` distinguishes the 20%-stop from the managed EOD close."""
+        self._dc_refresh_marks(entry)
+        pnl = entry.unrealized_pnl  # CALENDAR phase: calendar_value - net_debit
+        n = entry.contracts or self.contracts_per_entry
+        close_comm = 4 * self.commission_per_leg * n
+        self.daily_state.total_realized_pnl += pnl
+        self.daily_state.total_commission += close_comm
+        entry.close_commission = close_comm
+        entry.dc_phase = DCPhase.CLOSED
+        if loss:
+            entry.call_side_stopped = entry.put_side_stopped = True
+        else:
+            entry.call_side_pivot_closed = entry.put_side_pivot_closed = True
+        tag = "DCTM-STOP" if loss else "DCTM-EOD-CLOSE"
+        logger.warning(
+            "[%s] E#%s closed (%s): P&L $%.2f on debit $%.2f",
+            tag, entry.entry_number, reason, pnl, entry.net_debit,
+        )

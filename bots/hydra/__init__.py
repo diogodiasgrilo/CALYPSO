@@ -36,6 +36,24 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D Phase 4 — transformer + risk controls (2026-06-14, dry-run-only, NO
+  running-bot behavior change while undeployed): _check_stop_losses is now real —
+  the DC Time Machine's defining mechanic. Per open calendar each tick
+  (_dc_manage_calendar, priority order): (1) at >= dc_profit_trigger_pct profit,
+  attempt the TRANSFORMER (_dc_attempt_transform) — sell the 2 back-dated longs +
+  buy wings at Kc+wing / Kp-wing on the SHORT expiry, and FIRE ONLY IF the
+  realized transform credit >= net_debit + wing_width*100*contracts (structurally
+  risk-free); on fire the long legs become the wings (calendar -> same-expiry
+  iron condor), dc_phase -> TRANSFORMED, is_risk_free set, [DCTM-TRANSFORM] +
+  [DCTM-RISKFREE] logged; if the gate fails it HOLDS (no non-risk-free transform).
+  (2) else at <= -dc_pre_transform_stop_pct (default 20% of debit) -> hard close
+  ([DCTM-STOP]). (3) else past the EOD cutoff (dc_eod_cutoff_et, default 15:55) ->
+  EOD-day-1 close ([DCTM-EOD-CLOSE]). A closed calendar books realized P&L from
+  the mark, marks CLOSED, and sets side-done flags so active_entries drops it; a
+  TRANSFORMED position holds to expiry (settled in Phase 5). +9 tests; full suite
+  1516 passed. STILL: cross-restart persistence Phase 5, DB Phase 6, Telegram/
+  dashboard Phase 7; sim fidelity rests on live two-expiry mids (offline-
+  unverified — run _dc_probe_two_expiry_data on the VM). D dry-run-LOCKED, undeployed.
 - Strategy D Phase 3 — entry + dry-run simulation (2026-06-14, dry-run-only, NO
   running-bot behavior change while undeployed): D's actual entry path. (1)
   _dc_delta_target_strike — scans on-grid OTM strikes outward from spot, reading

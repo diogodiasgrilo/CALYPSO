@@ -332,3 +332,147 @@ class TestInitiateEntry:
         assert "skipped" in msg
         assert len(inst.daily_state.entries) == 0
         assert inst.daily_state.entries_skipped == 1
+
+
+def _calendar_entry(net_debit=200.0):
+    e = CalendarEntry(entry_number=1)
+    e.contracts = 1
+    e.net_debit = net_debit
+    e.short_call_strike = e.long_call_strike = 5075.0
+    e.short_put_strike = e.long_put_strike = 4925.0
+    e.legs["short_call"].uic = 11
+    e.legs["long_call"].uic = 12
+    e.legs["short_put"].uic = 21
+    e.legs["long_put"].uic = 22
+    for nm, exp in (("short_call", "2026-06-26"), ("long_call", "2026-06-29"),
+                    ("short_put", "2026-06-26"), ("long_put", "2026-06-29")):
+        e.legs[nm].expiry = exp
+    e.dc_phase = DCPhase.CALENDAR
+    return e
+
+
+class TestTransformer:
+    def _inst(self, mids):
+        inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
+        inst.contracts_per_entry = 1
+        inst.dc_wing_width = 5.0
+        # wing conids resolve (Call->9001, Put->9002)
+        inst._get_option_uic = lambda strike, right, exp: 9001 if right == "Call" else 9002
+        inst._dc_read_leg_quotes = lambda conids: {k: {"mid": mids[k]} for k in conids}
+        return inst
+
+    def test_fires_when_risk_free(self):
+        # credit = (lc+lp - wc-wp)*100 = (4+4-0.5-0.5)*100 = 700; threshold = 200 + 5*100 = 700
+        mids = {"long_call": 4.0, "long_put": 4.0, "wing_call": 0.5, "wing_put": 0.5,
+                "short_call": 2.0, "short_put": 2.0}
+        inst = self._inst(mids)
+        e = _calendar_entry(net_debit=200.0)
+        assert inst._dc_attempt_transform(e) is True
+        assert e.dc_phase == DCPhase.TRANSFORMED
+        assert e.long_call_strike == 5080.0 and e.long_put_strike == 4920.0  # wings
+        assert e.transform_credit == 700.0
+        assert e.is_risk_free is True
+        # IC credit = (short - wing) per side: (2 - 0.5)*100 = 150 each -> 300
+        assert e.total_credit == 300.0
+
+    def test_holds_when_not_risk_free(self):
+        # wings expensive -> credit (4+4-2-2)*100 = 400 < 700 threshold
+        mids = {"long_call": 4.0, "long_put": 4.0, "wing_call": 2.0, "wing_put": 2.0,
+                "short_call": 2.0, "short_put": 2.0}
+        inst = self._inst(mids)
+        e = _calendar_entry(net_debit=200.0)
+        assert inst._dc_attempt_transform(e) is False
+        assert e.dc_phase == DCPhase.CALENDAR  # unchanged
+        assert e.transform_credit == 0.0
+
+    def test_holds_when_wing_unresolved(self):
+        inst = self._inst({})
+        inst._get_option_uic = lambda strike, right, exp: None
+        e = _calendar_entry()
+        assert inst._dc_attempt_transform(e) is False
+        assert e.dc_phase == DCPhase.CALENDAR
+
+
+class TestCloseCalendar:
+    def _inst(self):
+        inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
+        from bots.hydra.base_strategy import MEICDailyState
+        inst.daily_state = MEICDailyState()
+        inst.contracts_per_entry = 1
+        inst.commission_per_leg = 1.15
+        inst._dc_refresh_marks = lambda e: None  # keep the prices we set
+        return inst
+
+    def _entry_with_pnl(self, pnl):
+        # net_debit 200; set leg prices so calendar_value = net_debit + pnl
+        e = _calendar_entry(net_debit=200.0)
+        target_value = (200.0 + pnl) / 100.0  # per-contract points
+        # split across call/put evenly: each side contributes target_value/2 of (long-short)
+        half = target_value / 2
+        e.legs["short_call"].price = 2.0
+        e.legs["long_call"].price = 2.0 + half
+        e.legs["short_put"].price = 2.0
+        e.legs["long_put"].price = 2.0 + half
+        return e
+
+    def test_stop_books_loss_and_flags(self):
+        inst = self._inst()
+        e = self._entry_with_pnl(-50.0)
+        inst._dc_close_calendar(e, reason="20%-debit stop", loss=True)
+        assert e.dc_phase == DCPhase.CLOSED
+        assert e.call_side_stopped and e.put_side_stopped
+        assert inst.daily_state.total_realized_pnl == pytest.approx(-50.0)
+        assert e.close_commission == pytest.approx(4 * 1.15 * 1)
+
+    def test_eod_close_uses_pivot_flags(self):
+        inst = self._inst()
+        e = self._entry_with_pnl(10.0)
+        inst._dc_close_calendar(e, reason="EOD no-transform", loss=False)
+        assert e.dc_phase == DCPhase.CLOSED
+        assert e.call_side_pivot_closed and e.put_side_pivot_closed
+        assert inst.daily_state.total_realized_pnl == pytest.approx(10.0)
+
+
+class TestManageCalendar:
+    def _inst(self, pnl, transform_ok=True, past_eod=False):
+        inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
+        inst.dc_profit_trigger_pct = 0.075
+        inst.dc_pre_transform_stop_pct = 0.20
+        inst.dc_eod_close_if_no_transform = True
+        inst._dc_refresh_marks = lambda e: None
+        inst._dc_attempt_transform = lambda e: transform_ok
+        inst._dc_past_eod_cutoff = lambda: past_eod
+        self._closed = []
+        inst._dc_close_calendar = lambda e, reason, loss: self._closed.append((reason, loss))
+        return inst
+
+    def _entry(self, pnl, net_debit=200.0):
+        e = _calendar_entry(net_debit=net_debit)
+        half = ((net_debit + pnl) / 100.0) / 2
+        e.legs["short_call"].price = 2.0
+        e.legs["long_call"].price = 2.0 + half
+        e.legs["short_put"].price = 2.0
+        e.legs["long_put"].price = 2.0 + half
+        return e
+
+    def test_profit_triggers_transform(self):
+        inst = self._inst(pnl=20.0, transform_ok=True)  # +10% of 200
+        msg = inst._dc_manage_calendar(self._entry(20.0))
+        assert msg == "TRANSFORM E#1"
+
+    def test_loss_triggers_stop(self):
+        inst = self._inst(pnl=-50.0)  # -25% of 200
+        msg = inst._dc_manage_calendar(self._entry(-50.0))
+        assert msg == "STOP E#1"
+        assert self._closed == [("20%-debit stop", True)]
+
+    def test_eod_close_when_flat_and_past_cutoff(self):
+        inst = self._inst(pnl=0.0, past_eod=True)
+        msg = inst._dc_manage_calendar(self._entry(0.0))
+        assert msg == "EOD-CLOSE E#1"
+        assert self._closed == [("EOD no-transform", False)]
+
+    def test_nothing_when_flat_and_not_eod(self):
+        inst = self._inst(pnl=0.0, past_eod=False)
+        assert inst._dc_manage_calendar(self._entry(0.0)) is None
+        assert self._closed == []
