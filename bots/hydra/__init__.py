@@ -36,6 +36,41 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Variant-C TP / reconciliation / alert hardening + dashboard observability (2026-06-15).
+  Bot-side behavior changes (live on A/B/C after this restart):
+  (1) Variant-aware alerts — AlertService bot_name is now HYDRA / HYDRA_B / HYDRA_C
+      (was a generic "HYDRA" for all three), so every email/Telegram alert says WHICH
+      variant fired and each variant gets its own dedup namespace (base_strategy reads
+      the HYDRA_VARIANT_ID suffix). Cloud Function uses bot_name only as a label, so
+      delivery is unaffected.
+  (2) DataRecorder schema v11 — trade_stops gains exit_reason (stop_loss / take_profit /
+      gex_breach / early_close); HydraStrategy._record_stop_to_db threads it (Brandon
+      TP/breach tagged from close_reason). Additive + nullable migration. The dashboard
+      Stops/Survival analytics now exclude profitable Brandon take-profit exits from
+      "stops" (exit_reason, with a net_pnl<0 fallback for pre-v11 rows).
+  (3) POS-003 reconciliation confirm-before-alarm — IBKR's positions endpoint lags fills
+      ~20-40s, so a reconciliation racing a just-executed close read STALE quantities and
+      fired a false CRITICAL "orphan" + HIGH "mismatch" (2026-06-15 variant C, 25s after
+      E#2's TP). The FIRST detection now schedules a 30s settle re-check (non-blocking,
+      _recon_recheck_at) and only alerts/acts on what persists — also stops
+      _handle_position_discrepancies from marking a live leg stopped off a stale qty=0.
+      Merge attribution was already correct (_expected_position_quantities sums per conid),
+      so same-strike multi-entry positions reconcile by net quantity.
+  (4) Brandon take-profit — worthless-leg fix + near-expiry hold-if-safe. The old guard
+      skipped TP whenever a side's spread_value==0 (assumed "stale quote"); a genuinely
+      worthless leg is also $0, so a worthless-leg IC could NEVER take profit (C E#1's
+      7450 put rode to expiry instead). Now a $0 is trusted when the short is >=
+      worthless_otm_pts OTM (default 20); and in the final hold_to_expiry_minutes
+      (default 60) a comfortably-OTM IC (every live short >= hold_safe_cushion_pts,
+      default 25) is held to expiry (keeps 100%, zero close cost) over an 80% TP that
+      pays slippage + commission — the credit+buffer stop still backstops a reversal.
+      Knobs under strategy.brandon.take_profit; pure helpers _tp_value_trustworthy /
+      _tp_hold_to_expiry, tested.
+  Read-only dashboard (no bot behavior): comparison-page per-side stop visibility +
+  "cost"/"cushion" relabel + SIM vs PAPER-$ badge + distance-to-stop + per-contract
+  leaderboard; main/history/analytics correctness (conditional PUT/CALL-ONLY badge,
+  one-sided strikes, Brandon TP no longer shown as a red loss, cumulative-P&L color);
+  chart-tick accessibility contrast/size.
 - Strategy D — strike-selection latency + both-expiry SHOWSTOPPER fix (2026-06-15,
   dry-run-only, A/B/C byte-identical): a LIVE entry-path exercise on the VM broker
   (read-only, market hours — the audit that code review + unit tests could not do)
