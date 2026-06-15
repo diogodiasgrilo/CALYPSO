@@ -1,6 +1,6 @@
 import { useState, useEffect, useRef, useCallback, useId } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search, LayoutDashboard, CalendarDays, BarChart3, Download, Volume2, VolumeX, Eye } from "lucide-react";
+import { Search, LayoutDashboard, CalendarDays, BarChart3, CalendarClock, Download, Volume2, VolumeX, Eye } from "lucide-react";
 import { useHydraStore } from "../../store/hydraStore";
 import { exportDailySummariesCSV } from "../../lib/exportUtils";
 
@@ -54,6 +54,13 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       action: () => { navigate("/analytics"); onClose(); },
       keywords: "analytics charts performance stats",
       shortcut: "3",
+    },
+    {
+      id: "dc-time-machine",
+      label: "Go to DC Time Machine",
+      icon: <CalendarClock size={14} />,
+      action: () => { navigate("/dc"); onClose(); },
+      keywords: "dc double calendar strategy d time machine",
     },
     {
       id: "strikes",

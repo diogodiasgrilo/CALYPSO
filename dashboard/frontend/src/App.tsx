@@ -1,11 +1,12 @@
 import { useState, useCallback, useEffect } from "react";
 import { Routes, Route, NavLink } from "react-router-dom";
-import { LayoutDashboard, CalendarDays, BarChart3, Scale } from "lucide-react";
+import { LayoutDashboard, CalendarDays, BarChart3, Scale, CalendarClock } from "lucide-react";
 import { DashboardLayout } from "./components/layout/DashboardLayout";
 import { Dashboard } from "./pages/Dashboard";
 import { History } from "./pages/History";
 import { Analytics } from "./pages/Analytics";
 import { Comparison } from "./pages/Comparison";
+import { DoubleCalendar } from "./pages/DoubleCalendar";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { CommandPalette } from "./components/shared/CommandPalette";
 import { ToastContainer } from "./components/shared/ToastContainer";
@@ -26,7 +27,22 @@ function useComparisonEnabled() {
   return enabled;
 }
 
-function NavTabs({ comparisonEnabled }: { comparisonEnabled: boolean }) {
+// Strategy D (DC Time Machine) is surfaced by its own dedicated page, NOT the
+// 0DTE iron-condor /comparison (net DEBIT vs net credit is apples-to-oranges).
+// Show the tab only when the dc endpoint answers with D's payload, so it stays
+// hidden cleanly on deployments where D isn't running.
+function useDcEnabled() {
+  const [enabled, setEnabled] = useState<boolean>(false);
+  useEffect(() => {
+    fetch("/api/dc/status")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((j) => setEnabled(j?.strategy === "double_calendar"))
+      .catch(() => setEnabled(false));
+  }, []);
+  return enabled;
+}
+
+function NavTabs({ comparisonEnabled, dcEnabled }: { comparisonEnabled: boolean; dcEnabled: boolean }) {
   const linkClass = ({ isActive }: { isActive: boolean }) =>
     `flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
       isActive
@@ -54,6 +70,12 @@ function NavTabs({ comparisonEnabled }: { comparisonEnabled: boolean }) {
           Comparison
         </NavLink>
       )}
+      {dcEnabled && (
+        <NavLink to="/dc" className={linkClass}>
+          <CalendarClock size={14} />
+          DC Time Machine
+        </NavLink>
+      )}
     </nav>
   );
 }
@@ -62,6 +84,7 @@ function App() {
   useWebSocket();
   const [cmdPaletteOpen, setCmdPaletteOpen] = useState(false);
   const comparisonEnabled = useComparisonEnabled();
+  const dcEnabled = useDcEnabled();
 
   const togglePalette = useCallback(() => {
     setCmdPaletteOpen((prev) => !prev);
@@ -71,7 +94,7 @@ function App() {
 
   return (
     <DashboardLayout>
-      <NavTabs comparisonEnabled={comparisonEnabled} />
+      <NavTabs comparisonEnabled={comparisonEnabled} dcEnabled={dcEnabled} />
       <div className="mt-3">
         <Routes>
           <Route path="/" element={<Dashboard />} />
@@ -81,6 +104,9 @@ function App() {
               The page itself self-protects with a "disabled" notice when
               comparison_mode_enabled is false on the backend. */}
           <Route path="/comparison" element={<Comparison />} />
+          {/* Strategy D — DC Time Machine (D-native view; route always registered
+              so a direct URL works, the page self-handles the unavailable case). */}
+          <Route path="/dc" element={<DoubleCalendar />} />
         </Routes>
       </div>
       <CommandPalette open={cmdPaletteOpen} onClose={() => setCmdPaletteOpen(false)} />
