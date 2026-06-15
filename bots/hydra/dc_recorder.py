@@ -4,10 +4,11 @@ The shared DataRecorder's schema is a single-expiry CREDIT iron condor (trade_en
 with credit columns, no expiry/DTE, no transformation event), so it cannot record a
 multi-day net-DEBIT double calendar truthfully. Rather than bump the shared
 SCHEMA_VERSION (which would migrate A/B/C's DBs too), D gets its OWN additive
-tables in its OWN physically-separate DB file (data/variant_d/backtesting.db via
-HYDRA_VARIANT_ID). This recorder owns only those ``dc_*`` tables — the shared
-DataRecorder (market_ticks etc.) is left completely untouched, so A/B/C are
-byte-identical. All writes are fire-and-forget (never raise into the trading loop).
+tables in its OWN physically-separate DB file (data/variant_d/dc_calendar.db,
+derived from the variant state-file directory) — NOT the shared backtesting.db
+the base DataRecorder uses for market_ticks. This recorder owns only those
+``dc_*`` tables; the shared DataRecorder is left completely untouched, so A/B/C
+are byte-identical. All writes are fire-and-forget (never raise into the trading loop).
 
 Tables (CREATE IF NOT EXISTS; own dc_schema_info, independent of the shared one):
   - dc_calendar_entries   one row per opened double calendar (debit, 2 expiries)

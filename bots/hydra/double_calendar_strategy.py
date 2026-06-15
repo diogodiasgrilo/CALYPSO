@@ -273,18 +273,25 @@ class DoubleCalendarStrategy(HydraStrategy):
     # ------------------------------------------------------------------
 
     def _dc_expiry_is_listed(self, expiry_iso: str) -> bool:
-        """True if IBKR actually lists an SPXW chain for this expiry. SPXW has
-        GAPS (verified live 2026-06-15: Jun 29 is a weekday but NOT a listed
-        expiry, while Jun 30 is), so a generated weekday calendar is not the same
-        as the listed-expiry set — picking an unlisted expiry would fail conid
-        resolution and skip the entry. Verified via a (cheap, cached) chain read."""
-        tc = getattr(self, "trading_class", None) or "SPXW"
-        exch = getattr(self, "exchange", None) or "CBOE"
-        sym = getattr(self, "underlying_symbol", None) or "SPX"
+        """True if IBKR lists an SPXW chain for THIS EXACT expiry. SPXW has GAPS
+        (verified live 2026-06-15: Jun 29 weekday is NOT a listed expiry, Jun 30
+        is), so a generated weekday calendar != the listed-expiry set.
+
+        MUST be DAY-granular: get_option_chain is MONTH-granular (it returns the
+        union of strikes across the whole month, so a gap weekday still looks
+        non-empty). We instead resolve one near-ATM conid AT THE EXACT EXPIRY via
+        _get_option_uic, which routes through qualify_option_strikes'
+        maturityDate==expiry filter — the SAME path _dc_resolve_calendar_legs
+        uses, so 'listed' here guarantees the legs will resolve. Resolved => listed."""
+        spx = getattr(self, "current_price", 0) or 0
+        if spx <= 0:
+            return False
+        inc = getattr(self, "strike_increment", 5) or 5
+        atm = round(spx / inc) * inc
         try:
-            return bool(self.broker.get_option_chain(sym, expiry_iso, tc, exch))
+            return bool(self._get_option_uic(atm, "Call", expiry_iso))
         except Exception as exc:  # noqa: BLE001
-            logger.debug("[DCTM-EXPIRIES] chain check failed for %s: %s", expiry_iso, exc)
+            logger.debug("[DCTM-EXPIRIES] day-granular listed-check failed for %s: %s", expiry_iso, exc)
             return False
 
     def _dc_pick_expiries(self) -> Optional[Tuple[str, str]]:
@@ -807,6 +814,10 @@ class DoubleCalendarStrategy(HydraStrategy):
                 getattr(self, "current_price", None), entry_date,
                 get_us_market_time().strftime("%Y-%m-%d"),
             )
+        # Crash-window guard: persist the CLOSE now (base state + sidecar drops the
+        # now-CLOSED calendar) so a crash before the next heartbeat can't re-adopt
+        # it as open from a stale sidecar. Mirrors _dc_settle_due / _initiate_entry.
+        self._save_state_to_disk()
 
     # ------------------------------------------------------------------
     # Multi-day persistence + per-expiry settlement (Phase 5)

@@ -3,7 +3,7 @@
 Pure stdlib (json + sqlite3) — the dashboard must NOT import bot/trading code
 (CLAUDE.md), so this is a dashboard-owned reader of D's dry-run artifacts: the
 open-calendar sidecar (dc_open_trades.json) + the dc_outcomes table in D's
-isolated backtesting.db. Mirrors the other dashboard readers' read-only style.
+isolated dc_calendar.db. Mirrors the other dashboard readers' read-only style.
 
 D is a multi-day net-DEBIT double calendar and is intentionally NOT in the
 0DTE iron-condor variant comparison (_VARIANT_IDS) — credit/Sharpe are

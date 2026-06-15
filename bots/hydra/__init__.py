@@ -36,6 +36,23 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D — post-audit re-review fixes (2026-06-15, dry-run-only, A/B/C
+  byte-identical): a 14-agent independently-verified re-review of the 3 post-audit
+  commits found 0 critical / 0 high / 2 medium / 8 low (deduped to 3 real issues).
+  Fixed: (MEDIUM) the expiry-listed filter was a NO-OP — get_option_chain is
+  MONTH-granular (JUN26 covers all June expiries) so a gap weekday (Jun 29) still
+  looked listed; _dc_expiry_is_listed is now DAY-granular (resolves one ATM conid
+  at the exact expiry via _get_option_uic → qualify_option_strikes' maturityDate
+  filter, the same path the legs resolve through), so gap days are genuinely
+  excluded (the misleading get_option_chain-mock test was rewritten). (LOW)
+  _dc_close_calendar now calls _save_state_to_disk (crash-window guard) so a stop/
+  EOD close is persisted immediately — a crash before the next heartbeat can no
+  longer re-adopt a CLOSED calendar as open from a stale sidecar (mirrors
+  _dc_settle_due / _initiate_entry). (LOW) refreshed stale 'backtesting.db'
+  docstrings (dc_recorder, dc_reader) + clarified that variant_d_backtesting_db is
+  the market-tick DB while the calendar tables live in dc_calendar.db. The
+  prior fail-safe (a gap-day pick already failing cleanly at leg resolution) meant
+  none of these were trading-correctness or A/B/C risks. +1 test, full suite 1549.
 - Strategy D — close the 3 deferred-LOW review findings (2026-06-15, dry-run-only,
   A/B/C byte-identical): (1) get_daily_summary OVERRIDDEN in D to zero the
   IC-credit-vertical breakdown (expired_credits/stop_loss_debits) and report

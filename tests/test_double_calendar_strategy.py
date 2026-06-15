@@ -103,11 +103,12 @@ class TestPickExpiriesListedFilter:
         inst.dc_short_dte_min, inst.dc_short_dte_max = 6, 15
         inst.dc_long_extra_dte_min, inst.dc_long_extra_dte_max = 1, 4
         inst.dc_prefer_friday = True
-        inst.broker = MagicMock()
-        # Jun 29 (the natural +3 long) is NOT listed; everything else is.
-        inst.broker.get_option_chain.side_effect = (
-            lambda sym, iso, tc, exch: [] if iso == "2026-06-29" else [7560.0, 7565.0]
-        )
+        inst.current_price = 7565.0
+        inst.strike_increment = 5
+        # DAY-granular listed-check: _dc_expiry_is_listed resolves an ATM conid at
+        # the EXACT expiry via _get_option_uic. Jun 29 (the natural +3 long) is the
+        # gap day -> None (unlisted); every other expiry resolves.
+        inst._get_option_uic = lambda strike, right, iso: None if iso == "2026-06-29" else 880001
         # short = Fri Jun 26 (11 DTE); long must skip the unlisted Jun 29 -> Jun 30.
         assert inst._dc_pick_expiries() == ("2026-06-26", "2026-06-30")
 
@@ -433,6 +434,8 @@ class TestCloseCalendar:
         inst.contracts_per_entry = 1
         inst.commission_per_leg = 1.15
         inst._dc_refresh_marks = lambda e: None  # keep the prices we set
+        self._saved = []
+        inst._save_state_to_disk = lambda: self._saved.append(True)  # crash-window guard
         return inst
 
     def _entry_with_pnl(self, pnl):
@@ -455,6 +458,7 @@ class TestCloseCalendar:
         assert e.call_side_stopped and e.put_side_stopped
         assert inst.daily_state.total_realized_pnl == pytest.approx(-50.0)
         assert e.close_commission == pytest.approx(4 * 1.15 * 1)
+        assert self._saved == [True]  # persisted on close (crash-window guard)
 
     def test_eod_close_uses_pivot_flags(self):
         inst = self._inst()

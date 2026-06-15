@@ -95,6 +95,10 @@ class Settings(BaseSettings):
     # would render as a credit + a fabricated width. Activate in Phase 7.
     variant_d_state_file: Path = Path("/opt/calypso/data/variant_d/hydra_state.json")
     variant_d_metrics_file: Path = Path("/opt/calypso/data/variant_d/hydra_metrics.json")
+    # NOTE: this is D's MARKET-TICK DB (shared DataRecorder), for the variant
+    # framework if 'd' is ever added to _VARIANT_IDS. D's CALENDAR tables live in
+    # a SEPARATE file, data/variant_d/dc_calendar.db, surfaced via /api/dc/status
+    # (routers/dc.py), NOT through this field.
     variant_d_backtesting_db: Path = Path("/opt/calypso/data/variant_d/backtesting.db")
     variant_d_log_file: Path = Path("/opt/calypso/logs/hydra_variant_d/bot.log")
     variant_d_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_d.json")
