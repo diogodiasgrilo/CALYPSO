@@ -36,6 +36,26 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D Phase 5 — multi-day persistence + per-expiry settlement (2026-06-14,
+  dry-run-only, ZERO base edits, A/B/C byte-identical): D survives restarts and
+  books P&L on the right date. Persistence is a SIDECAR (data/variant_d/
+  dc_open_trades.json — the Brandon-hedge precedent) so the fix-scarred 0DTE base
+  save/load is NOT touched: _save_state_to_disk calls super() (base file
+  unchanged) then writes the sidecar with the multi-day fields the fixed IC
+  schema can't hold (dc_phase, per-leg expiry, net_debit, transform_credit,
+  wing_width, is_risk_free, flags); _recover_positions_from_saxo calls super()
+  (base today-only recovery) then _dc_load_sidecar re-adopts open calendars —
+  including ones opened on a PRIOR day, which the base date!=today guard drops —
+  replacing any base-loaded IC-shaped version by strategy_id. Settlement:
+  check_after_hours_settlement now calls _dc_settle_due — any position whose SHORT
+  expiry has arrived settles at the SPX close: a TRANSFORMED IC books
+  transform_credit - net_debit - IC-intrinsic (each side capped at the wing; >= 0
+  when the risk-free gate held), a leftover CALENDAR liquidates at mark; both mark
+  CLOSED + side-expired so active_entries drops them. +8 tests (serialize/load
+  round-trip, dedup, CLOSED-exclusion, OTM/ITM settlement, settle-due past/future/
+  spx-defer). Full suite 1524 passed. STILL: DB Phase 6, Telegram/dashboard Phase
+  7; sim fidelity rests on live two-expiry mids (run _dc_probe_two_expiry_data on
+  the VM). D dry-run-LOCKED, undeployed.
 - Strategy D Phase 4 — transformer + risk controls (2026-06-14, dry-run-only, NO
   running-bot behavior change while undeployed): _check_stop_losses is now real —
   the DC Time Machine's defining mechanic. Per open calendar each tick

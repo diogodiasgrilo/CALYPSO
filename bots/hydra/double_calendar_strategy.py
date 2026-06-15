@@ -56,11 +56,14 @@ so the account stays flat and NONE of those vectors touch C.
 
 from __future__ import annotations
 
+import json
 import logging
-from datetime import date, time
-from typing import Dict, Optional, Tuple
+import os
+from datetime import date, datetime, time
+from typing import Dict, List, Optional, Tuple
 
 from bots.hydra.base_strategy import ConfigError, MEICState
+from bots.hydra.leg import LEG_NAMES
 # DCPhase + the two-expiry CalendarEntry model live in calendar_entry (Phase 1
 # foundation). Re-exported here so callers/tests can import them from the
 # strategy module.
@@ -205,6 +208,12 @@ class DoubleCalendarStrategy(HydraStrategy):
         if D is holding open multi-day positions, report settled-for-today so the
         daily summary proceeds; otherwise defer to the base 0DTE-style logic.
         """
+        # Phase 5: settle any position whose SHORT expiry has arrived (the
+        # transformed IC / leftover calendar settles at the SPXW PM close), then
+        # treat the rest as normally-held multi-day positions.
+        today = get_us_market_time().strftime("%Y-%m-%d")
+        self._dc_settle_due(today)
+
         open_md = [e for e in self.daily_state.entries if self._dc_entry_is_open(e)]
         if not open_md:
             return super().check_after_hours_settlement()
@@ -213,9 +222,6 @@ class DoubleCalendarStrategy(HydraStrategy):
             "calendar, not pending settlement; daily summary may proceed.",
             len(open_md),
         )
-        # TODO(full build): per-expiry settlement — when a position's SHORT expiry
-        # actually arrives, book that leg/condor at the SPXW PM close; until then
-        # hold. Requires the debit-rooted, two-stage settlement path.
         return True
 
     # ------------------------------------------------------------------
@@ -686,4 +692,203 @@ class DoubleCalendarStrategy(HydraStrategy):
         logger.warning(
             "[%s] E#%s closed (%s): P&L $%.2f on debit $%.2f",
             tag, entry.entry_number, reason, pnl, entry.net_debit,
+        )
+
+    # ------------------------------------------------------------------
+    # Multi-day persistence + per-expiry settlement (Phase 5)
+    # D owns its persistence via a SIDECAR (the Brandon-hedge precedent) so the
+    # 0DTE base save/load stays byte-identical: super() writes the base state
+    # file unchanged; the sidecar carries the multi-day fields (dc_phase,
+    # expiries, debit, transform) the fixed IC schema can't, and lets a calendar
+    # opened on a PRIOR day be re-adopted (the base date!=today guard drops it).
+    # ------------------------------------------------------------------
+
+    def _dc_state_path(self) -> str:
+        """Sidecar path next to the variant state file (data/variant_d/...)."""
+        return os.path.join(os.path.dirname(self.state_file), "dc_open_trades.json")
+
+    def _dc_serialize_entry(self, e) -> dict:
+        """Serialize a CalendarEntry to a sidecar dict (all multi-day fields)."""
+        return {
+            "entry_number": e.entry_number,
+            "strategy_id": getattr(e, "strategy_id", ""),
+            "structure": getattr(e, "structure", "double_calendar"),
+            "dc_phase": e.dc_phase.value,
+            "contracts": e.contracts,
+            "entry_time": e.entry_time.isoformat() if e.entry_time else None,
+            "net_debit": e.net_debit,
+            "transform_credit": e.transform_credit,
+            "wing_width": e.wing_width,
+            "is_risk_free": e.is_risk_free,
+            "transformed_at": e.transformed_at,
+            "is_complete": e.is_complete,
+            "call_spread_credit": e.call_spread_credit,
+            "put_spread_credit": e.put_spread_credit,
+            "flags": {
+                f: getattr(e, f, False) for f in (
+                    "call_side_stopped", "put_side_stopped",
+                    "call_side_pivot_closed", "put_side_pivot_closed",
+                    "call_side_expired", "put_side_expired",
+                )
+            },
+            "legs": {
+                name: {
+                    "strike": e.legs[name].strike,
+                    "uic": e.legs[name].uic,
+                    "expiry": e.legs[name].expiry,
+                    "fill_price": e.legs[name].fill_price,
+                    "price": e.legs[name].price,
+                    "position_id": e.legs[name].position_id,
+                }
+                for name in LEG_NAMES
+            },
+        }
+
+    def _dc_deserialize_entry(self, d: dict):
+        """Rebuild a CalendarEntry from a sidecar dict."""
+        e = CalendarEntry(entry_number=int(d["entry_number"]))
+        e.strategy_id = d.get("strategy_id", "")
+        e.structure = d.get("structure", "double_calendar")
+        e.dc_phase = DCPhase(d.get("dc_phase", "calendar"))
+        e.contracts = int(d.get("contracts", 1))
+        et = d.get("entry_time")
+        e.entry_time = datetime.fromisoformat(et) if et else None
+        e.net_debit = float(d.get("net_debit", 0.0))
+        e.transform_credit = float(d.get("transform_credit", 0.0))
+        e.wing_width = float(d.get("wing_width", 0.0))
+        e.is_risk_free = bool(d.get("is_risk_free", False))
+        e.transformed_at = d.get("transformed_at", "")
+        e.is_complete = bool(d.get("is_complete", False))
+        e.call_spread_credit = float(d.get("call_spread_credit", 0.0))
+        e.put_spread_credit = float(d.get("put_spread_credit", 0.0))
+        for f, v in (d.get("flags") or {}).items():
+            setattr(e, f, bool(v))
+        for name, lr in (d.get("legs") or {}).items():
+            if name not in e.legs:
+                continue
+            leg = e.legs[name]
+            leg.strike = lr.get("strike", 0.0)
+            leg.uic = lr.get("uic")
+            leg.expiry = lr.get("expiry")
+            leg.fill_price = lr.get("fill_price", 0.0)
+            leg.price = lr.get("price", 0.0)
+            leg.position_id = lr.get("position_id")
+        return e
+
+    def _dc_save_sidecar(self) -> None:
+        """Persist all OPEN (non-CLOSED) calendars to the sidecar."""
+        records = [
+            self._dc_serialize_entry(e)
+            for e in self.daily_state.entries
+            if isinstance(e, CalendarEntry) and e.dc_phase != DCPhase.CLOSED
+        ]
+        try:
+            self._atomic_write_json(self._dc_state_path(), records)
+        except Exception as exc:
+            logger.error("[DCTM] sidecar save failed: %s", exc)
+
+    def _dc_load_sidecar(self) -> bool:
+        """Re-adopt open multi-day calendars from the sidecar (survives restarts
+        AND prior-day opens, which the base date!=today guard drops). Replaces any
+        base-loaded IC-shaped version of the same trade. Returns True if any
+        calendar was adopted."""
+        path = self._dc_state_path()
+        if not os.path.exists(path):
+            return False
+        try:
+            with open(path) as f:
+                records = json.load(f)
+        except Exception as exc:
+            logger.error("[DCTM] sidecar read failed: %s", exc)
+            return False
+        if not records:
+            return False
+        sidecar_ids = {r.get("strategy_id") for r in records}
+        # Drop any base-loaded (IronCondorEntry, dc_phase-less) version of these.
+        self.daily_state.entries = [
+            e for e in self.daily_state.entries
+            if getattr(e, "strategy_id", None) not in sidecar_ids
+        ]
+        adopted = 0
+        for r in records:
+            try:
+                self.daily_state.entries.append(self._dc_deserialize_entry(r))
+                adopted += 1
+            except Exception as exc:
+                logger.error("[DCTM] could not rebuild calendar from sidecar: %s", exc)
+        if adopted:
+            logger.info("[DCTM-RECOVER] re-adopted %d multi-day calendar(s) from sidecar", adopted)
+        return adopted > 0
+
+    def _save_state_to_disk(self):
+        """Base state file (unchanged) + the D sidecar with the multi-day fields."""
+        super()._save_state_to_disk()
+        self._dc_save_sidecar()
+
+    def _recover_positions_from_saxo(self) -> bool:
+        """Base today-only recovery, then re-adopt multi-day calendars from the
+        sidecar (the base load drops a prior-day calendar via its date!=today
+        guard). Called from the inherited __init__; sidecar load needs no dc_*
+        config, so init ordering is safe."""
+        base = super()._recover_positions_from_saxo()
+        adopted = self._dc_load_sidecar()
+        return base or adopted
+
+    # ── Per-expiry settlement ──────────────────────────────────────────
+
+    @staticmethod
+    def _clamp(x: float, lo: float, hi: float) -> float:
+        return max(lo, min(x, hi))
+
+    def _dc_settlement_spx(self) -> Optional[float]:
+        """SPX level to settle against (the short expiry's PM close ≈ the latest
+        read at after-hours). None if unreadable (defer settlement)."""
+        spx = getattr(self, "current_price", 0) or 0
+        return spx if spx > 0 else None
+
+    def _dc_settle_due(self, today: str) -> bool:
+        """Settle every open position whose SHORT expiry has arrived (ISO compare).
+        Returns True if anything settled."""
+        due = [
+            e for e in self.daily_state.entries
+            if self._dc_entry_is_open(e) and (e.short_expiry or "") and e.short_expiry <= today
+        ]
+        if not due:
+            return False
+        spx = self._dc_settlement_spx()
+        if spx is None:
+            logger.warning("[DCTM-SETTLE] %d position(s) due but SPX unreadable — deferring", len(due))
+            return False
+        for e in due:
+            self._dc_settle_entry(e, spx)
+        self._dc_save_sidecar()
+        return True
+
+    def _dc_settle_entry(self, entry, spx: float) -> None:
+        """Book terminal P&L for a position at its short expiry and mark CLOSED.
+
+        TRANSFORMED (held iron condor): realized = transform_credit - net_debit -
+        IC intrinsic at S* (each side's intrinsic capped at the wing). Risk-free
+        when the transform gate held, so this is >= 0 in the worst case.
+        CALENDAR (defensive — EOD-day-1 close should prevent reaching expiry):
+        liquidate at the current mark.
+        """
+        n = entry.contracts or self.contracts_per_entry
+        if entry.dc_phase == DCPhase.TRANSFORMED:
+            wing = entry.wing_width
+            call_intr = self._clamp(spx - entry.short_call_strike, 0.0, wing)
+            put_intr = self._clamp(entry.short_put_strike - spx, 0.0, wing)
+            ic_cost = (call_intr + put_intr) * 100 * n
+            realized = entry.transform_credit - entry.net_debit - ic_cost
+            tag = "TRANSFORMED"
+        else:
+            self._dc_refresh_marks(entry)
+            realized = entry.unrealized_pnl  # calendar mark - debit
+            tag = "CALENDAR-leftover"
+        self.daily_state.total_realized_pnl += realized
+        entry.dc_phase = DCPhase.CLOSED
+        entry.call_side_expired = entry.put_side_expired = True  # settled at expiry
+        logger.info(
+            "[DCTM-SETTLE] E#%s (%s) settled at SPX %.2f: P&L $%.2f (debit $%.2f, transform $%.2f)",
+            entry.entry_number, tag, spx, realized, entry.net_debit, entry.transform_credit,
         )

@@ -8,6 +8,7 @@ predicate that the lifecycle overrides depend on.
 """
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from types import SimpleNamespace
@@ -17,7 +18,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 import pytest
 
-from bots.hydra.base_strategy import ConfigError
+from bots.hydra.base_strategy import ConfigError, IronCondorEntry
 from bots.hydra.double_calendar_strategy import CalendarEntry, DCPhase, DoubleCalendarStrategy
 from bots.hydra.strategy import HydraStrategy
 
@@ -476,3 +477,133 @@ class TestManageCalendar:
         inst = self._inst(pnl=0.0, past_eod=False)
         assert inst._dc_manage_calendar(self._entry(0.0)) is None
         assert self._closed == []
+
+
+def _transformed_entry():
+    """A risk-free transformed CalendarEntry: debit 200, transform credit 700,
+    wing 5pt, IC at C 5075/5080 P 4925/4920, short expiry 2026-06-19."""
+    e = _calendar_entry(net_debit=200.0)
+    e.dc_phase = DCPhase.TRANSFORMED
+    e.transform_credit = 700.0
+    e.wing_width = 5.0
+    e.is_risk_free = True
+    e.long_call_strike = 5080.0  # wing
+    e.long_put_strike = 4920.0   # wing
+    return e
+
+
+class TestPersistence:
+    def _inst(self, tmp_path):
+        inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
+        inst.state_file = str(tmp_path / "hydra_state.json")
+        inst._atomic_write_json = lambda path, data: Path(path).write_text(json.dumps(data))
+        from bots.hydra.base_strategy import MEICDailyState
+        inst.daily_state = MEICDailyState()
+        return inst
+
+    def test_serialize_deserialize_round_trip(self):
+        inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
+        e = _transformed_entry()
+        e.strategy_id = "dctm_20260615_001"
+        e.legs["short_call"].uic = 11
+        e.legs["long_call"].expiry = "2026-06-19"
+        e.legs["short_call"].expiry = "2026-06-19"
+        d = inst._dc_serialize_entry(e)
+        e2 = inst._dc_deserialize_entry(d)
+        assert e2.dc_phase == DCPhase.TRANSFORMED
+        assert e2.net_debit == 200.0 and e2.transform_credit == 700.0
+        assert e2.wing_width == 5.0 and e2.is_risk_free is True
+        assert e2.strategy_id == "dctm_20260615_001"
+        assert e2.short_call_strike == 5075.0 and e2.long_call_strike == 5080.0
+        assert e2.short_call_uic == 11
+        assert e2.short_expiry == "2026-06-19"
+
+    def test_save_then_load_round_trip(self, tmp_path):
+        inst = self._inst(tmp_path)
+        e = _transformed_entry()
+        e.strategy_id = "dctm_20260615_001"
+        inst.daily_state.entries.append(e)
+        inst._dc_save_sidecar()
+        assert Path(inst._dc_state_path()).exists()
+
+        # fresh instance loads the sidecar back as a CalendarEntry
+        inst2 = self._inst(tmp_path)
+        assert inst2._dc_load_sidecar() is True
+        assert len(inst2.daily_state.entries) == 1
+        loaded = inst2.daily_state.entries[0]
+        assert isinstance(loaded, CalendarEntry)
+        assert loaded.dc_phase == DCPhase.TRANSFORMED
+        assert loaded.transform_credit == 700.0
+
+    def test_sidecar_excludes_closed(self, tmp_path):
+        inst = self._inst(tmp_path)
+        open_e = _transformed_entry(); open_e.strategy_id = "open"
+        closed_e = _calendar_entry(); closed_e.strategy_id = "closed"; closed_e.dc_phase = DCPhase.CLOSED
+        inst.daily_state.entries += [open_e, closed_e]
+        inst._dc_save_sidecar()
+        records = json.loads(Path(inst._dc_state_path()).read_text())
+        assert [r["strategy_id"] for r in records] == ["open"]
+
+    def test_load_drops_base_loaded_ic_version(self, tmp_path):
+        # Simulate the base load having reconstructed an IC-shaped version of the
+        # same trade (same strategy_id) — the sidecar load must replace it.
+        inst = self._inst(tmp_path)
+        e = _transformed_entry(); e.strategy_id = "dup"
+        inst.daily_state.entries.append(e)
+        inst._dc_save_sidecar()
+
+        inst2 = self._inst(tmp_path)
+        ic_version = IronCondorEntry(entry_number=1)
+        ic_version.strategy_id = "dup"
+        inst2.daily_state.entries.append(ic_version)
+        inst2._dc_load_sidecar()
+        # exactly one entry, and it's the CalendarEntry (not the IC version)
+        assert len(inst2.daily_state.entries) == 1
+        assert isinstance(inst2.daily_state.entries[0], CalendarEntry)
+
+
+class TestSettlement:
+    def _inst(self):
+        inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
+        from bots.hydra.base_strategy import MEICDailyState
+        inst.daily_state = MEICDailyState()
+        inst.contracts_per_entry = 1
+        inst.current_price = 5000.0
+        inst._dc_save_sidecar = lambda: None
+        return inst
+
+    def test_transformed_settles_otm_keeps_full_locked_pnl(self):
+        inst = self._inst()
+        e = _transformed_entry()
+        inst._dc_settle_entry(e, spx=5000.0)  # between strikes -> intrinsic 0
+        assert e.dc_phase == DCPhase.CLOSED
+        assert e.call_side_expired and e.put_side_expired
+        # realized = transform_credit - net_debit - 0 = 500
+        assert inst.daily_state.total_realized_pnl == pytest.approx(500.0)
+
+    def test_transformed_settles_itm_floors_at_zero(self):
+        inst = self._inst()
+        e = _transformed_entry()
+        inst._dc_settle_entry(e, spx=5100.0)  # call side deep ITM -> intrinsic = wing
+        # realized = 700 - 200 - (5*100) = 0  (risk-free floor)
+        assert inst.daily_state.total_realized_pnl == pytest.approx(0.0)
+
+    def test_settle_due_settles_past_skips_future(self):
+        inst = self._inst()
+        due = _transformed_entry(); due.strategy_id = "due"
+        due.legs["short_call"].expiry = "2026-06-19"  # short_expiry in the past
+        future = _transformed_entry(); future.strategy_id = "future"
+        future.legs["short_call"].expiry = "2026-07-10"  # not yet
+        inst.daily_state.entries += [due, future]
+        assert inst._dc_settle_due("2026-06-26") is True
+        assert due.dc_phase == DCPhase.CLOSED
+        assert future.dc_phase == DCPhase.TRANSFORMED  # untouched
+
+    def test_settle_due_defers_when_spx_unreadable(self):
+        inst = self._inst()
+        inst.current_price = 0
+        due = _transformed_entry()
+        due.legs["short_call"].expiry = "2026-06-19"
+        inst.daily_state.entries.append(due)
+        assert inst._dc_settle_due("2026-06-26") is False
+        assert due.dc_phase == DCPhase.TRANSFORMED  # not settled
