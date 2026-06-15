@@ -141,6 +141,18 @@ class BrandonHydraStrategy(HydraStrategy):
         tp = bcfg.get("take_profit") or {}
         self.brandon_take_profit_enabled = bool(tp.get("enabled", False))
         self.brandon_take_profit_threshold = float(tp.get("threshold", 0.80))
+        # Near-expiry "hold-if-safe": in the final N minutes, prefer riding a
+        # comfortably-OTM IC to expiry (keeps 100% of credit, zero close cost)
+        # over an 80% TP that pays slippage + commission. The credit+buffer stop
+        # still backstops a reversal (this only suppresses the early TP, never the
+        # stop). hold_to_expiry_minutes=0 disables it.
+        self.brandon_tp_hold_to_expiry_minutes = float(tp.get("hold_to_expiry_minutes", 60.0))
+        self.brandon_tp_hold_safe_cushion_pts = float(tp.get("hold_safe_cushion_pts", 25.0))
+        # A side whose spread VALUE is $0 is trusted as genuinely worthless (so
+        # the IC's TP can still fire) only when its short is at least this many
+        # points OTM; a $0 nearer the money is treated as a stale/missing quote
+        # and TP is deferred (the 2026-06-15 worthless-leg-blocks-TP fix).
+        self.brandon_tp_worthless_otm_pts = float(tp.get("worthless_otm_pts", 20.0))
 
         gex = bcfg.get("gex") or {}
         self.brandon_gex_enabled = bool(gex.get("enabled", False))
@@ -654,19 +666,109 @@ class BrandonHydraStrategy(HydraStrategy):
     # Take-profit (LIVE)
     # ------------------------------------------------------------------
 
+    @staticmethod
+    def _tp_value_trustworthy(value: float, otm_pts: Optional[float], worthless_otm_pts: float) -> bool:
+        """Is a side's spread value reliable enough to base a TP decision on?
+
+        True if value > 0 (a real quote), OR value is $0 but the short is
+        comfortably OTM (>= worthless_otm_pts) — a far-OTM option near expiry is
+        genuinely worthless, so $0 is real. A $0 nearer the money is treated as a
+        stale/missing quote (untrustworthy) so we defer rather than fire TP on it.
+
+        Replaces the old ``spread_value == 0 -> skip`` guard, which PERMANENTLY
+        blocked TP on any IC with a worthless leg (2026-06-15: variant C E#1's
+        7450 put decayed to $0 and the entry could never take profit).
+        """
+        if value > 0:
+            return True
+        if otm_pts is None:
+            return False
+        return otm_pts >= worthless_otm_pts
+
+    @staticmethod
+    def _tp_hold_to_expiry(
+        minutes_to_close: Optional[float],
+        hold_window_min: float,
+        call_otm_pts: Optional[float],
+        put_otm_pts: Optional[float],
+        cushion_pts: float,
+    ) -> bool:
+        """Prefer holding to expiry over an 80% TP in the final ``hold_window_min``
+        minutes when every LIVE short (otm not None) is at least ``cushion_pts``
+        OTM. Expiry keeps 100% with zero close cost; the credit+buffer stop still
+        guards a reversal (this only suppresses the early TP, never the stop). A
+        short within the cushion is NOT safe -> returns False so TP can still fire.
+        """
+        if hold_window_min <= 0:
+            return False
+        if minutes_to_close is None or minutes_to_close > hold_window_min:
+            return False
+        known = [o for o in (call_otm_pts, put_otm_pts) if o is not None]
+        if not known:
+            return False  # no spot / no assessable live short -> can't confirm safe
+        return all(o >= cushion_pts for o in known)
+
+    def _minutes_to_market_close(self) -> Optional[float]:
+        """Minutes from now until the regular (or early-close) cash session end,
+        or None outside the session (so hold-if-safe is inert after hours and in
+        unit tests run after market close)."""
+        try:
+            from shared.market_hours import get_us_market_time, get_market_close_time
+            from bots.hydra.base_strategy import is_market_open
+            if not is_market_open():
+                return None
+            now = get_us_market_time()
+            close_t = get_market_close_time(now)
+            close_dt = now.replace(
+                hour=close_t.hour, minute=close_t.minute, second=0, microsecond=0
+            )
+            return (close_dt - now).total_seconds() / 60.0
+        except Exception:
+            return None
+
     def _brandon_check_take_profit(self, entry) -> Optional[str]:
         call_alive = self._brandon_side_alive(entry, "call")
         put_alive = self._brandon_side_alive(entry, "put")
         if not call_alive and not put_alive:
             return None
 
-        # Per-side staleness check (closes the hole in evaluate_iron_condor's
-        # SUM-based check): if a side is alive with credit but spread_value
-        # is 0, that side hasn't been refreshed yet on this tick. Wait one
-        # tick rather than firing TP on bogus data.
-        if call_alive and entry.call_spread_credit > 0 and entry.call_spread_value == 0:
+        # OTM cushion (index points, + = still OTM) for each LIVE short. Numeric
+        # guards so a missing/non-numeric strike yields None (treated as unknown)
+        # rather than raising.
+        spot = self.current_price
+        spot_ok = isinstance(spot, (int, float)) and spot > 0
+        sc, sp = entry.short_call_strike, entry.short_put_strike
+        call_otm = (sc - spot) if (call_alive and spot_ok and isinstance(sc, (int, float)) and sc > 0) else None
+        put_otm = (spot - sp) if (put_alive and spot_ok and isinstance(sp, (int, float)) and sp > 0) else None
+        worthless_otm = getattr(self, "brandon_tp_worthless_otm_pts", 20.0)
+
+        # Staleness guard (fixed 2026-06-15): defer TP only when a live side's $0
+        # value is UNTRUSTWORTHY (a stale/missing quote near the money) — NOT when
+        # it decayed to a genuine $0 far OTM. The old ``value == 0`` test blocked
+        # TP forever on any worthless-leg IC (variant C E#1 never took profit).
+        if call_alive and entry.call_spread_credit > 0 and not self._tp_value_trustworthy(
+            entry.call_spread_value, call_otm, worthless_otm
+        ):
             return None
-        if put_alive and entry.put_spread_credit > 0 and entry.put_spread_value == 0:
+        if put_alive and entry.put_spread_credit > 0 and not self._tp_value_trustworthy(
+            entry.put_spread_value, put_otm, worthless_otm
+        ):
+            return None
+
+        # Near-expiry hold-if-safe: ride a comfortably-OTM IC to expiry (100%, no
+        # close cost) rather than take an 80% profit that pays slippage + fees.
+        hold_window = getattr(self, "brandon_tp_hold_to_expiry_minutes", 60.0)
+        if self._tp_hold_to_expiry(
+            self._minutes_to_market_close(),
+            hold_window,
+            call_otm,
+            put_otm,
+            getattr(self, "brandon_tp_hold_safe_cushion_pts", 25.0),
+        ):
+            logger.debug(
+                "BRANDON-TP E#%s: holding to expiry (safe OTM, within %.0fm of close)",
+                entry.entry_number, hold_window,
+            )
             return None
 
         decision = take_profit.evaluate_iron_condor(
