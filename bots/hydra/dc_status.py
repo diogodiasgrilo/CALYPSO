@@ -88,11 +88,16 @@ def _fmt_money(v: Optional[float]) -> str:
     return f"${float(v):,.0f}" if v is not None else "—"
 
 
-def format_calendars_telegram(status: dict) -> str:
-    """Render dc_status() as a Telegram message."""
+def format_calendars_telegram(status: dict, title: str = "Strategy D — DC Time Machine") -> str:
+    """Render dc_status() as a Telegram message.
+
+    ``title`` lets the group-comparison renderer label each calendar member with
+    its own display name (D vs E) instead of the D-specific default. The default
+    preserves the legacy single-strategy header for any caller that omits it.
+    """
     s = status.get("summary", {})
     cals = status.get("open_calendars", [])
-    lines = ["📅 *Strategy D — DC Time Machine* (dry-run)"]
+    lines = [f"📅 *{title}* (dry-run)"]
     lines.append(
         f"Open: {s.get('open_count', 0)} | Transformed: {s.get('transformed_count', 0)} "
         f"| Risk-free: {s.get('risk_free_count', 0)}"

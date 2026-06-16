@@ -98,16 +98,24 @@ class TestDashboardReader:
 
 class TestBuildTelegramCalendars:
     def test_renders_from_variant_d_files(self, tmp_path):
+        # Phase 7: /calendars is now a thin alias to the calendar-GROUP path of
+        # build_telegram_compare — it renders the "Multi-day Calendar" group and
+        # labels each member by its taxonomy display name (D = "DC Time Machine
+        # (D)") instead of the bare "Strategy D". The data + strikes are the same.
         inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
         data = tmp_path / "data"
         (data / "variant_d").mkdir(parents=True)
         inst.state_file = str(data / "hydra_state.json")  # variant-A-style root
         (data / "variant_d" / "dc_open_trades.json").write_text(json.dumps([OPEN_RECORD]))
         msg = inst.build_telegram_calendars()
-        assert "Strategy D" in msg and "5075" in msg
+        assert "Multi-day Calendar" in msg  # group header
+        assert "DC Time Machine (D)" in msg  # member display name + letter
+        assert "5075" in msg  # debit-native strike data still present
 
     def test_graceful_when_no_files(self, tmp_path):
         inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
         inst.state_file = str(tmp_path / "data" / "hydra_state.json")
         msg = inst.build_telegram_calendars()
-        assert "Strategy D" in msg  # empty status, not an error
+        # Empty status, not an error: the group header + a "nothing ran" line.
+        assert "Multi-day Calendar" in msg
+        assert "No calendar strategies have run yet." in msg

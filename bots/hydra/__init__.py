@@ -36,6 +36,30 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy E (SPY double calendar) + strategy-grouping/naming redesign (2026-06-16).
+  All dry-run / additive — A/B/C/D byte-unchanged. Feature branch.
+  - New strategy E: SpyDoubleCalendarStrategy (registry "spy_double_calendar", "SPY Double
+    Calendar"), a MANAGED SPY double calendar (net-debit call calendar above spot + put
+    calendar below), expected-move strikes, low-IV entry gate (VIX proxy), laddered
+    profit-taking, NO hard stop, never held to expiry. Dry-run-LOCKED. Sibling of D via a
+    new shared base CalendarStrategyBase (D's calendar plumbing lifted verbatim — D stays
+    byte-identical; its 135 tests pass with zero edits). Go-live gates (in the class
+    docstring): SPY American early-assignment/dividend handling; multi-contract ladder
+    net_debit scaling; true IV-rank gate; the shared-account coexistence MUST-FIXes.
+  - Strategy taxonomy (shared/strategy_taxonomy.py): single source of truth keyed by the
+    unchanged variant letter → display_name + comparability group (ic_0dte credit {a,b,c}
+    / calendar_multiday debit {d,e}). main.py banner is taxonomy-driven and FAIL-STOPS if
+    the runtime-resolved strategy class disagrees with the table. The alert-wire bot_name,
+    the anti-spam fingerprint, and HOMER's Sheets anchors stay FROZEN.
+  - Comms: alerts/Telegram/email show display names + group labels (additive payload
+    fields; Cloud Function renders with bot_name fallback); /compare is group-scoped (bare
+    = the 0DTE-IC group; /compare calendars = the calendar group via a calendar-native,
+    no-IC-field renderer); /help regrouped by group; poller stays variant-A-only.
+  - Dashboard (read-only): group-aware /api/strategies API + a debit-native DCDBReader
+    (no IC-field leakage); a main-page strategy picker (header re-binds to the selection,
+    no cross-strategy toasts), group comparison tabs (credit IC and debit calendar never
+    share a P&L axis), and EOD auto-update (cumulative + end-of-day cards refresh at close,
+    no manual reload). Full suite 1680 passed / 15 skipped.
 - Strategy D hardening + dashboard put-only/metrics fixes (2026-06-16). D is dry-run
   (no real money). Triggered by C's GEX-routed put-only day + D's premature stop.
   Strategy D (double_calendar_strategy / DoubleCalendarStrategy), bot-side:

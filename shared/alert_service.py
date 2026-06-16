@@ -388,6 +388,32 @@ class AlertService:
         enriched_details = dict(details) if details else {}
         enriched_details.setdefault("contracts", effective_contracts)
 
+        # ── Additive display fields (Phase 7) ────────────────────────────────
+        # NEW payload keys that ride alongside (never replace) the frozen
+        # alert-wire `bot_name`. The Cloud Function PREFERS these for the
+        # Telegram title / email subject and FALLS BACK to `bot_name` when
+        # absent (older payloads / other bots). `bot_name` itself — the
+        # anti-spam dedup partition key and the monitor-log column — is
+        # UNCHANGED (audit AUD-1-H1): it stays self.bot_name in the payload
+        # below, the fingerprint still keys on it, routing is untouched.
+        # The taxonomy is stdlib-only so importing it here adds no deps.
+        display_name = group_label = None
+        try:
+            from shared import strategy_taxonomy as _tax
+            _vid = _tax.variant_id()
+            # Only attach when THIS process's alert-wire name is the HYDRA-family
+            # variant name the taxonomy resolves to (e.g. self.bot_name "HYDRA_C"
+            # == taxonomy.bot_name("c")). A non-HYDRA AlertService (a legacy
+            # IRON_FLY/DELTA_NEUTRAL instance with HYDRA_VARIANT_ID unset) would
+            # otherwise be mislabeled "HYDRA Baseline" — so we leave the fields
+            # off and the CF falls back to bot_name unchanged.
+            if self.bot_name == _tax.bot_name(_vid):
+                _m = _tax.meta(_vid)
+                display_name = _m.display_name
+                group_label = _tax.group(_vid).label
+        except Exception as e:  # pragma: no cover - defensive; never block an alert
+            logger.debug("Alert display-name resolution skipped: %s", e)
+
         # Build alert payload
         payload = {
             "bot_name": self.bot_name,
@@ -404,6 +430,12 @@ class AlertService:
                 "email_address": self._email
             }
         }
+        # Additive only — omit keys entirely if resolution failed so the CF
+        # fallback (to bot_name) triggers cleanly rather than rendering None.
+        if display_name:
+            payload["display_name"] = display_name
+        if group_label:
+            payload["group_label"] = group_label
 
         # Format log message
         priority_emoji = {

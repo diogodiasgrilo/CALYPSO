@@ -45,8 +45,21 @@ import requests
 
 from shared.secret_manager import get_secret
 from shared.market_hours import is_market_open, get_us_market_time, is_weekend, get_holiday_name
+from shared import strategy_taxonomy
 
 logger = logging.getLogger(__name__)
+
+
+def _poller_header() -> str:
+    """The Telegram response header label for the POLLER variant, taxonomy-driven.
+
+    The poller only ever runs in variant A's process (gated on the raw
+    ``HYDRA_VARIANT_ID`` unset check in main.py), so this resolves to e.g.
+    ``"HYDRA Baseline (A)"``. Replaces the hardcoded ``*HYDRA*`` literals in the
+    command response headers (display-only — no frozen key is affected).
+    """
+    vid = strategy_taxonomy.variant_id()
+    return f"{strategy_taxonomy.display_name(vid)} ({vid.upper()})"
 
 
 class _TokenRedactingFilter(logging.Filter):
@@ -317,7 +330,10 @@ class TelegramCommandHandler:
         self._entry_callback: Optional[Callable[[int], str]] = None
         self._stops_callback: Optional[Callable[[], str]] = None
         self._config_callback: Optional[Callable[[], str]] = None
-        self._compare_callback: Optional[Callable[[], str]] = None
+        # /compare accepts an OPTIONAL group selector (e.g. "calendars"); a
+        # bare call (no arg) keeps the legacy behavior. _handle_compare calls it
+        # with the selector when present and falls back to no-arg on TypeError.
+        self._compare_callback: Optional[Callable[..., str]] = None
         self._calendars_callback: Optional[Callable[[], str]] = None
         self._active_positions_callback: Optional[Callable[[], int]] = None
         self._config_path: Optional[str] = None
@@ -370,7 +386,7 @@ class TelegramCommandHandler:
         entry_callback: Optional[Callable[[int], str]] = None,
         stops_callback: Optional[Callable[[], str]] = None,
         config_callback: Optional[Callable[[], str]] = None,
-        compare_callback: Optional[Callable[[], str]] = None,
+        compare_callback: Optional[Callable[..., str]] = None,
         calendars_callback: Optional[Callable[[], str]] = None,
         config_path: Optional[str] = None,
         active_positions_callback: Optional[Callable[[], int]] = None,
@@ -493,7 +509,7 @@ class TelegramCommandHandler:
             elif text.startswith("/clio"):
                 self._handle_clio(chat_id)
             elif text.startswith("/compare"):
-                self._handle_compare(chat_id)
+                self._handle_compare(chat_id, text)
             elif text.startswith("/calendars"):
                 self._handle_calendars(chat_id)
             elif text.startswith("/restart"):
@@ -521,7 +537,7 @@ class TelegramCommandHandler:
                 reason = "after hours"
 
             msg = (
-                f"\U0001f4ca *HYDRA* | Market Closed\n"
+                f"\U0001f4ca *{_poller_header()}* | Market Closed\n"
                 f"\n"
                 f"Market is currently closed ({reason}).\n"
                 f"No live positions to display.\n"
@@ -539,7 +555,7 @@ class TelegramCommandHandler:
         try:
             snapshot = self._snapshot_callback()
             time_str = now_et.strftime("%I:%M %p ET")
-            msg = f"\U0001f4ca *HYDRA* | Snapshot\n\n{snapshot}\n\n_{time_str}_"
+            msg = f"\U0001f4ca *{_poller_header()}* | Snapshot\n\n{snapshot}\n\n_{time_str}_"
             self._send_message(chat_id, msg)
         except Exception as e:
             logger.error("Failed to build snapshot for /snapshot command: %s", e)
@@ -634,20 +650,33 @@ class TelegramCommandHandler:
             logger.error("Failed to build /stops response: %s", e)
             self._send_message(chat_id, "Failed to retrieve stop data. Try again shortly.")
 
-    def _handle_compare(self, chat_id: str):
-        """Handle /compare command — variant A vs all running non-A variants
-        (B, C, ...) head-to-head snapshot. The callback auto-discovers running
-        variants via filesystem glob, so adding a new variant doesn't need a
-        change here."""
+    def _handle_compare(self, chat_id: str, text: str = "/compare"):
+        """Handle /compare command — GROUP-SCOPED head-to-head snapshot.
+
+        Bare ``/compare`` compares the poller's group (variant A → the 0DTE iron
+        condors {A,B,C}). An optional group selector — ``/compare calendars`` —
+        scopes to the multi-day calendar group {D,E} with a calendar-native
+        renderer. Comparison never mixes credit and debit groups. The callback
+        auto-discovers running variants per group, so a new variant needs no
+        change here.
+        """
         if not self._compare_callback:
             self._send_message(
                 chat_id,
                 "Comparison not available — variant comparison mode isn't enabled on this bot.",
             )
             return
+        # Parse an optional group selector after the command word.
+        parts = (text or "").split(maxsplit=1)
+        selector = parts[1].strip() if len(parts) > 1 else None
         try:
-            msg = self._compare_callback()
+            # Backwards-compatible: callbacks that don't accept a selector arg
+            # (older wiring) still work for bare /compare.
+            msg = self._compare_callback(selector) if selector else self._compare_callback()
             self._send_message(chat_id, msg)
+        except TypeError:
+            # Callback doesn't take a selector — fall back to the default group.
+            self._send_message(chat_id, self._compare_callback())
         except Exception as e:
             logger.error("Failed to build /compare response: %s", e)
             self._send_message(chat_id, "Failed to retrieve comparison data. Try again shortly.")
@@ -799,7 +828,7 @@ class TelegramCommandHandler:
             self._send_message(chat_id, "Cannot read config file.")
             return
 
-        lines = ["\u2699\ufe0f *HYDRA* | Editable Config", ""]
+        lines = [f"\u2699\ufe0f *{_poller_header()}* | Editable Config", ""]
         for name, param_def in EDITABLE_PARAMS.items():
             current = self._get_config_value(config, param_def["path"])
             display = self._format_display_value(current, param_def)
@@ -1118,32 +1147,48 @@ class TelegramCommandHandler:
     # =========================================================================
 
     def _handle_help(self, chat_id: str):
-        """Handle /help command — list all available commands."""
-        msg = (
-            "\U0001f916 *HYDRA Commands*\n\n"
-            "*Monitoring*\n"
-            "/status \u2014 Bot state, market data, filters\n"
-            "/snapshot \u2014 Live position snapshot\n"
-            "/entry N \u2014 Details for entry #N\n"
-            "/lastday \u2014 Last complete trading day\n"
-            "/week \u2014 Current week summary\n"
-            "/account \u2014 Lifetime performance\n"
-            "/stops \u2014 Stop loss analysis\n"
-            "\n*Configuration*\n"
-            "/config \u2014 View current config\n"
-            "/set \u2014 Edit config parameter\n"
-            "\n*Reports*\n"
-            "/hermes \u2014 Latest HERMES report\n"
-            "/apollo \u2014 Latest APOLLO briefing\n"
-            "/clio \u2014 Latest CLIO weekly analysis\n"
-            "/compare \u2014 Variant A vs all running variants (B, C, ...) head-to-head\n"
-            "/calendars \u2014 Strategy D (DC Time Machine) status\n"
-            "\n*Control*\n"
-            "/restart \u2014 Restart HYDRA\n"
-            "/stop \u2014 Stop HYDRA (warns if positions)\n"
-            "\n/help \u2014 This message"
-        )
-        self._send_message(chat_id, msg)
+        """Handle /help command \u2014 strategies grouped by comparability group,
+        then the commands. The strategy roster is taxonomy-driven so a new
+        variant appears here automatically once registered."""
+        lines = ["\U0001f916 *HYDRA Commands*", ""]
+
+        # Strategy roster, grouped by comparability group.
+        lines.append("*Strategies* (by comparability group)")
+        for gid, g in strategy_taxonomy.GROUPS.items():
+            members = strategy_taxonomy.members(gid)
+            if not members:
+                continue
+            lines.append(f"\n_{g.label}_")
+            for vid in members:
+                m = strategy_taxonomy.meta(vid)
+                lines.append(f"  \u2022 {m.display_name} ({vid.upper()})")
+
+        # Commands (all existing names kept; /compare gains the calendar group).
+        lines += [
+            "\n*Monitoring*",
+            "/status \u2014 Bot state, market data, filters",
+            "/snapshot \u2014 Live position snapshot",
+            "/entry N \u2014 Details for entry #N",
+            "/lastday \u2014 Last complete trading day",
+            "/week \u2014 Current week summary",
+            "/account \u2014 Lifetime performance",
+            "/stops \u2014 Stop loss analysis",
+            "\n*Configuration*",
+            "/config \u2014 View current config",
+            "/set \u2014 Edit config parameter",
+            "\n*Reports & Comparison*",
+            "/hermes \u2014 Latest HERMES report",
+            "/apollo \u2014 Latest APOLLO briefing",
+            "/clio \u2014 Latest CLIO weekly analysis",
+            "/compare \u2014 0DTE Iron Condor head-to-head (A, B, C)",
+            "/compare calendars \u2014 Multi-day Calendar head-to-head (D, E)",
+            "/calendars \u2014 Multi-day Calendar status (alias of /compare calendars)",
+            "\n*Control*",
+            "/restart \u2014 Restart HYDRA",
+            "/stop \u2014 Stop HYDRA (warns if positions)",
+            "\n/help \u2014 This message",
+        ]
+        self._send_message(chat_id, "\n".join(lines))
 
     # =========================================================================
     # TELEGRAM FORMATTING HELPERS

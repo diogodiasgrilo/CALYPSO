@@ -275,6 +275,40 @@ def send_email(to_email: str, subject: str, body_html: str, body_text: str) -> b
         return False
 
 
+def _variant_letter(bot_name: str) -> str:
+    """Derive the single variant LETTER from the frozen alert-wire bot_name.
+
+    bot_name is the dedup partition key (FROZEN): "HYDRA" (variant A, no suffix),
+    "HYDRA_B"/"HYDRA_C"/"DCTM_D"/"SPYDC_E" (suffixed). The trailing token after
+    the last underscore is the letter; a bare base (no underscore) is variant A.
+    This keeps the letter in the Telegram title + email subject so existing
+    email filters survive (audit AUD-1-H1 — the letter never leaves the wire).
+    """
+    if not bot_name:
+        return ""
+    tail = bot_name.rsplit("_", 1)[-1]
+    if len(tail) == 1 and tail.isalpha():
+        return tail.upper()
+    # Bare base like "HYDRA"/"CALYPSO" — the legacy single-bot is variant A.
+    return "A" if bot_name.upper() in ("HYDRA", "DCTM", "SPYDC") else ""
+
+
+def _display_label(alert: Dict[str, Any]) -> str:
+    """Header/subject label, PREFERRING the additive `display_name` (+ letter)
+    and FALLING BACK to the frozen `bot_name` (older payloads / other bots).
+
+    The Cloud Function is a standalone GCP deploy and CANNOT import
+    shared/strategy_taxonomy (audit AUD-4-secondary) — it reads the fields the
+    AlertService put on the wire and nothing else.
+    """
+    bot_name = alert.get("bot_name", "CALYPSO")
+    display_name = alert.get("display_name")
+    if not display_name:
+        return bot_name  # fallback: unchanged behavior
+    letter = _variant_letter(bot_name)
+    return f"{display_name} ({letter})" if letter else display_name
+
+
 def _md_escape(text) -> str:
     """Escape Telegram legacy-Markdown special chars in DYNAMIC alert content
     so an unbalanced _ / * / ` / [ (e.g. snake_case fields like
@@ -299,12 +333,16 @@ def format_telegram_message(alert: Dict[str, Any]) -> str:
     - Concise but complete
     - Action-oriented for urgent alerts
     """
-    bot_name = alert.get("bot_name", "CALYPSO")
     priority = alert.get("priority", "medium").upper()
     title = alert.get("title", "Alert")
     message = alert.get("message", "")
     timestamp = alert.get("timestamp", "")
     details = alert.get("details") or {}
+
+    # Prefer the additive display label (e.g. "Brandon Narrow (live) (C)") and
+    # fall back to the frozen bot_name. group_label rides as a secondary tag.
+    header_label = _display_label(alert)
+    group_label = alert.get("group_label")
 
     # Priority emoji
     priority_emoji = {
@@ -328,8 +366,15 @@ def format_telegram_message(alert: Dict[str, Any]) -> str:
     # Build Telegram message
     lines = []
 
-    # Compact header: emoji + bot name + title (values escaped; *bold* kept)
-    lines.append(f"{emoji} *{_md_escape(bot_name)}* | {_md_escape(title)}")
+    # Compact header: emoji + display label (+ group) + title (values escaped;
+    # *bold* kept). Falls back to bot_name inside _display_label.
+    if group_label:
+        lines.append(
+            f"{emoji} *{_md_escape(header_label)}* · {_md_escape(group_label)} "
+            f"| {_md_escape(title)}"
+        )
+    else:
+        lines.append(f"{emoji} *{_md_escape(header_label)}* | {_md_escape(title)}")
     lines.append("")
 
     # Main message (already contains the key info)
@@ -399,10 +444,16 @@ def format_telegram_message(alert: Dict[str, Any]) -> str:
 
 
 def format_email_subject(alert: Dict[str, Any]) -> str:
-    """Format email subject line."""
-    bot_name = alert.get("bot_name", "CALYPSO")
+    """Format email subject line.
+
+    PREFERS the additive display label — e.g. ``[HIGH] SPY Double Calendar (E): <title>``
+    — and FALLS BACK to the frozen ``bot_name`` (``[HIGH] HYDRA_C: <title>``) for
+    older payloads / other bots. The variant LETTER stays in the subject so the
+    user's existing email filters keep matching (audit AUD-1-H1 / §2c).
+    """
     priority = alert.get("priority", "medium").upper()
     title = alert.get("title", "Alert")
+    label = _display_label(alert)  # "DisplayName (Letter)" or bot_name fallback
 
     prefix_map = {
         "CRITICAL": "[CRITICAL]",
@@ -413,8 +464,8 @@ def format_email_subject(alert: Dict[str, Any]) -> str:
     prefix = prefix_map.get(priority, "")
 
     if prefix:
-        return f"{prefix} {bot_name}: {title}"
-    return f"{bot_name}: {title}"
+        return f"{prefix} {label}: {title}"
+    return f"{label}: {title}"
 
 
 def format_email_body(alert: Dict[str, Any]) -> tuple:
@@ -424,12 +475,16 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
     Returns:
         tuple: (html_body, text_body)
     """
-    bot_name = alert.get("bot_name", "CALYPSO")
     priority = alert.get("priority", "medium").upper()
     title = alert.get("title", "Alert")
     message = alert.get("message", "")
     timestamp = alert.get("timestamp", "")
     details = alert.get("details") or {}
+
+    # Prefer the additive display label (+ group) over the frozen bot_name.
+    header_label = _display_label(alert)
+    group_label = alert.get("group_label")
+    header_meta = f"{header_label} • {group_label}" if group_label else header_label
 
     # Format timestamp to human-readable ET
     time_display = ""
@@ -511,7 +566,7 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
 <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; margin: 0; padding: 20px; background: #f5f5f5;">
     <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 8px; overflow: hidden; box-shadow: 0 2px 8px rgba(0,0,0,0.1);">
         <div style="background: {color}; color: white; padding: 24px;">
-            <div style="font-size: 13px; opacity: 0.9; margin-bottom: 8px;">{bot_name} • {priority}</div>
+            <div style="font-size: 13px; opacity: 0.9; margin-bottom: 8px;">{header_meta} • {priority}</div>
             <h1 style="margin: 0; font-size: 22px; font-weight: 600;">{title}</h1>
         </div>
         <div style="padding: 24px;">
@@ -526,7 +581,7 @@ def format_email_body(alert: Dict[str, Any]) -> tuple:
 </html>"""
 
     # Plain text body
-    text = f"""{bot_name} | {priority}
+    text = f"""{header_meta} | {priority}
 {'=' * 50}
 {title}
 {'=' * 50}

@@ -50,6 +50,7 @@ from shared.ib_client import (
     IBClient, AmbiguousOrderError, RatePenaltyError, _normalize_position_dict,
 )
 from shared.alert_service import AlertService, AlertType, AlertPriority
+from shared import strategy_taxonomy
 from shared.market_hours import get_us_market_time, is_early_close_day
 from shared.technical_indicators import get_current_ema, calculate_atr
 from shared.event_calendar import is_fomc_t_plus_one
@@ -8447,17 +8448,28 @@ class HydraStrategy(MEICStrategy):
     # VARIANT COMPARISON (1v1 dry-run experiment)
     # =========================================================================
 
-    def _discover_variant_ids(self) -> list:
-        """Find all non-A variant ids that have a current state file.
+    def _discover_variant_ids(self, group_id: Optional[str] = None) -> list:
+        """Find all non-A variant ids that have current on-disk artifacts,
+        restricted to a comparability ``group_id`` (the apples-to-apples fix).
 
-        Globs ``data/variant_*/hydra_state.json``. Returns lowercase variant
-        ids sorted alphabetically (e.g. ``["b", "c"]``). Filesystem-driven
-        discovery so adding a new variant only requires installing its
-        systemd service — no code change here.
+        Globs ``data/variant_*/``. ``group_id`` defaults to the POLLER's group
+        (variant A → ``ic_0dte``), so a bare call returns exactly ``["b", "c"]``
+        as before — the hardcoded ``if vid == "d": continue`` guard is GONE,
+        replaced by the taxonomy: D/E simply belong to ``calendar_multiday`` and
+        are excluded from the IC group by data, not by a scattered ``if``.
+
+        The artifact probed is family-specific so we never mistake a net-debit
+        calendar for an IC: IC variants must have ``hydra_state.json``; calendar
+        variants must have the calendar sidecar ``dc_open_trades.json`` OR
+        ``dc_calendar.db``. Returns lowercase ids sorted alphabetically.
         """
+        if group_id is None:
+            group_id = strategy_taxonomy.group(strategy_taxonomy.variant_id()).id
         try:
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            variant_dir = os.path.join(project_root, "data")
+            # Data root = the directory holding this (variant-A) bot's state
+            # file — i.e. <repo>/data — the SAME root build_telegram_calendars /
+            # _format_calendar_comparison use, so discovery and rendering agree.
+            variant_dir = os.path.dirname(self.state_file)
             ids = []
             if not os.path.isdir(variant_dir):
                 return []
@@ -8467,16 +8479,21 @@ class HydraStrategy(MEICStrategy):
                 vid = name[len("variant_"):]
                 if not vid or vid == "a":
                     continue
-                # INTERIM (Phase 0, 2026-06-14): exclude variant D from /compare.
-                # D is the multi-day "DC Time Machine" — a net-DEBIT double
-                # calendar. The IC-shaped variant summary (_build_variant_summary)
-                # would render its debit as a CREDIT and fabricate a spread width.
-                # Re-included in Phase 7 with structure-aware rendering.
-                if vid == "d":
+                # Group-scoped: only consider variants registered to the target
+                # comparability group (credit ICs vs net-debit calendars never mix).
+                if strategy_taxonomy.meta(vid).group_id != group_id:
                     continue
-                state_path = os.path.join(variant_dir, name, "hydra_state.json")
-                if os.path.exists(state_path):
-                    ids.append(vid)
+                vdir = os.path.join(variant_dir, name)
+                family = strategy_taxonomy.meta(vid).structure_family
+                if family == "double_calendar":
+                    # Calendar variants persist via a sidecar + isolated DB, NOT
+                    # hydra_state.json. Either artifact existing means it ran.
+                    if (os.path.exists(os.path.join(vdir, "dc_open_trades.json"))
+                            or os.path.exists(os.path.join(vdir, "dc_calendar.db"))):
+                        ids.append(vid)
+                else:
+                    if os.path.exists(os.path.join(vdir, "hydra_state.json")):
+                        ids.append(vid)
             return sorted(ids)
         except Exception as e:
             logger.warning(f"Variant discovery failed: {e}")
@@ -8738,15 +8755,18 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             logger.warning(f"Variant comparison alert send failed (non-fatal): {e}")
 
-    def _collect_other_variants(self) -> list:
-        """Discover and load every non-A variant whose state file is fresh.
+    def _collect_other_variants(self, group_id: Optional[str] = None) -> list:
+        """Discover and load every non-A IC variant whose state file is fresh.
 
         Returns a list of dicts: ``[{"id": "b", "summary": {...}, "spread": 110,
         "entries": [...]}]`` sorted by id. Stale or missing variants are
         silently dropped — they just don't appear in the comparison.
+
+        ``group_id`` (default = the poller's IC group) scopes discovery so this
+        IC-shaped collector is never fed a net-debit calendar variant.
         """
         out = []
-        for vid in self._discover_variant_ids():
+        for vid in self._discover_variant_ids(group_id):
             state = self._load_variant_state(vid)
             if not state:
                 continue
@@ -8757,38 +8777,133 @@ class HydraStrategy(MEICStrategy):
             })
         return out
 
-    def build_telegram_calendars(self) -> str:
-        """Telegram /calendars command — Strategy D (DC Time Machine) status.
+    @staticmethod
+    def _resolve_compare_group(selector: str) -> Optional[str]:
+        """Map a free-text /compare selector to a canonical group_id, or None.
 
-        D is a multi-day net-DEBIT double calendar, deliberately kept OUT of the
-        0DTE iron-condor /compare head-to-head (credit/Sharpe are apples-to-
-        oranges). This is its D-native view: open calendars (phase / risk-free /
-        debit→credit) + recent outcomes, read from variant_d's sidecar + DB.
-        Available on variant A's poller (the only one that runs); reads D's files
-        cross-variant.
+        Accepts the exact group id (``ic_0dte`` / ``calendar_multiday``), the
+        group label (case-insensitive), or friendly aliases (``calendars``,
+        ``calendar``, ``ic``, ``condor``, ``0dte``). Returns None for anything
+        unrecognized so the caller refuses rather than guessing a group (the
+        credit-vs-debit mix must stay impossible).
+        """
+        if not selector:
+            return None
+        s = selector.strip().lower()
+        if s in strategy_taxonomy.GROUPS:
+            return s
+        for gid, g in strategy_taxonomy.GROUPS.items():
+            if s == g.label.lower():
+                return gid
+        aliases = {
+            "calendars": "calendar_multiday",
+            "calendar": "calendar_multiday",
+            "multiday": "calendar_multiday",
+            "dc": "calendar_multiday",
+            "ic": "ic_0dte",
+            "condor": "ic_0dte",
+            "ironcondor": "ic_0dte",
+            "iron_condor": "ic_0dte",
+            "0dte": "ic_0dte",
+        }
+        return aliases.get(s)
+
+    def _format_calendar_comparison(self, group_id: str) -> str:
+        """Calendar-native renderer for the ``calendar_multiday`` group.
+
+        Reads EACH calendar-group member's (D and E) authoritative dry-run
+        artifacts — the open-calendar SIDECAR (``dc_open_trades.json``) + the
+        ``dc_outcomes`` table in its isolated ``dc_calendar.db`` — via
+        ``dc_status``. Renders DEBIT-native (net_debit / open calendars /
+        transformed-credit / outcomes). NEVER touches the IC credit/buffer/
+        spread-width fields (those don't exist for a net-debit calendar and
+        would be fabricated nonsense).
+
+        Enumerates every registered calendar-group member from the taxonomy
+        (not just a hardcoded ``variant_d``), labeled with its display name.
         """
         from bots.hydra.dc_status import dc_status, format_calendars_telegram
-        # Project data root: for variant A, dirname(state_file) is data/.
-        data_root = os.path.dirname(self.state_file)
-        vd = os.path.join(data_root, "variant_d")
-        sidecar = os.path.join(vd, "dc_open_trades.json")
-        db = os.path.join(vd, "dc_calendar.db")  # D's isolated calendar DB
-        try:
-            return format_calendars_telegram(dc_status(sidecar, db))
-        except Exception as e:
-            logger.error("build_telegram_calendars failed: %s", e)
-            return "Strategy D (DC Time Machine): status unavailable."
+        from shared import strategy_taxonomy as _tax
 
-    def build_telegram_compare(self) -> str:
-        """Telegram /compare command — on-demand variant comparison message.
+        g = _tax.GROUPS.get(group_id)
+        group_label = g.label if g else "Multi-day Calendar"
+        data_root = os.path.dirname(self.state_file)  # variant A → data/
 
-        Works any time of day. Reads each non-A variant's state file at call
-        time so intraday users can spot-check the head-to-head between entries.
-        Auto-discovers variants by globbing data/variant_*/.
+        sections = [f"📅 *{group_label}* — Calendar comparison (dry-run)"]
+        rendered_any = False
+        for vid in _tax.members(group_id):
+            vdir = os.path.join(data_root, f"variant_{vid}")
+            sidecar = os.path.join(vdir, "dc_open_trades.json")
+            db = os.path.join(vdir, "dc_calendar.db")  # isolated calendar DB
+            if not (os.path.exists(sidecar) or os.path.exists(db)):
+                continue  # this calendar variant hasn't run — skip silently
+            rendered_any = True
+            name = _tax.display_name(vid)
+            try:
+                # Title the inner section with THIS member's display name so E
+                # isn't mislabeled "Strategy D".
+                body = format_calendars_telegram(
+                    dc_status(sidecar, db), title=f"{name} ({vid.upper()})"
+                )
+            except Exception as e:
+                logger.error("calendar status for variant %s failed: %s", vid, e)
+                body = "status unavailable."
+            sections.append(f"\n{body}")
+        if not rendered_any:
+            sections.append("\nNo calendar strategies have run yet.")
+        return "\n".join(sections)
+
+    def build_telegram_calendars(self) -> str:
+        """Telegram /calendars command — thin alias to the calendar-group path
+        of :meth:`build_telegram_compare`.
+
+        The calendar group is a multi-day net-DEBIT family (D = DC Time Machine,
+        E = SPY Double Calendar), deliberately kept OUT of the 0DTE iron-condor
+        ``/compare`` head-to-head (credit/Sharpe are apples-to-oranges). This
+        renders every calendar-group member's native view: open calendars
+        (phase / risk-free / debit→credit) + recent outcomes. Available on
+        variant A's poller; reads the calendars' files cross-variant.
+        """
+        return self.build_telegram_compare(group_id="calendar_multiday")
+
+    def build_telegram_compare(self, group_id: Optional[str] = None) -> str:
+        """Telegram /compare command — group-scoped, on-demand comparison.
+
+        ``group_id`` defaults to the POLLER's group (variant A → ``ic_0dte``),
+        so a bare ``/compare`` reproduces the exact ``{a,b,c}`` IC head-to-head
+        as before (behavior-preserving). The handler may also pass a group
+        selector parsed from the command text (e.g. ``/compare calendars`` →
+        ``calendar_multiday``).
+
+        Comparison is scoped to ONE comparability group, so a credit IC and a
+        net-debit calendar can NEVER share an axis. The renderer is chosen by
+        the group's ``pnl_shape``/``structure_family``: the IC summary renderer
+        for ``ic_0dte`` (credit), the calendar-native renderer for
+        ``calendar_multiday`` (debit).
         """
         if HYDRA_VARIANT_ID is not None:
             return f"/compare is only available on variant A (this bot is variant {HYDRA_VARIANT_ID.upper()})."
-        others = self._collect_other_variants()
+
+        if group_id is None:
+            group_id = strategy_taxonomy.group(strategy_taxonomy.variant_id()).id
+        else:
+            group_id = self._resolve_compare_group(group_id)
+            if group_id is None:
+                return (
+                    "Unknown comparison group. Refusing to mix groups — pick one:\n"
+                    "`/compare` (0DTE Iron Condor) or `/compare calendars` (Multi-day Calendar)."
+                )
+
+        g = strategy_taxonomy.GROUPS.get(group_id)
+        if g is None:
+            return f"Unknown comparison group {group_id!r}. Try `/compare` or `/compare calendars`."
+
+        # Calendar group → debit-native renderer (reads sidecar + dc_calendar.db).
+        if group_id == "calendar_multiday" or g.pnl_shape == "debit":
+            return self._format_calendar_comparison(group_id)
+
+        # IC (credit) group → the existing IC summary renderer, scoped to members.
+        others = self._collect_other_variants(group_id)
         if not others:
             return (
                 "No other variants running (or state files stale).\n"
