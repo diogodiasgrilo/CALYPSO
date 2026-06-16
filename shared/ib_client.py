@@ -566,6 +566,9 @@ _RATE_PENALTY_COOLDOWN_S = 10 * 60
 _PINNED_UNDERLYING_CONIDS = {
     ("SPX", "IND"): 416904,
     ("VIX", "IND"): 13455763,
+    # SPDR S&P 500 ETF (the probe CONTROL instrument; also Strategy E's underlying).
+    # Documented paper conid, late 2025 / early 2026 (CLAUDE.md "Key IBKR Symbols").
+    ("SPY", "STK"): 756733,
 }
 
 # IBKR-audit #16: sentinel for place_order(price_increment=...) meaning "use the

@@ -1,0 +1,73 @@
+[Unit]
+Description=HYDRA Variant E (Strategy E "SPY Double Calendar" — multi-day SPY double calendar, MANAGED: laddered profit-take + trading-day time-exit, NO transformer, NO hard stop) | DRY-RUN-LOCKED: the full strategy runs in SIMULATION only (the class refuses any non-dry_run construction), so this unit places NO real orders and cannot touch the shared paper account. Going live is a gated build, NOT a config flip — the coexistence MUST-FIXes (scope STATE-004 + orphan sweep to per-variant conids; budget buying power) AND SPY American early-assignment + dividend handling must ship first.
+# OAuth 1.0a is gateway-free and headless — no IB Gateway, no token-keeper
+# service. network-online.target so the OAuth handshake to api.ibkr.com
+# has DNS+TLS available at startup.
+After=network-online.target
+Wants=network-online.target
+# This variant MUST proxy through the shared calypso-broker session
+# (CALYPSO_BROKER_URL below). IBKR allows ONE brokerage session per username,
+# so if this unit started without the URL it would open its OWN session and
+# re-trigger the eviction crash-loop. Order after the broker so it is up first.
+Wants=calypso-broker.service
+After=calypso-broker.service
+# Restart rate-limiter. StartLimitIntervalSec/StartLimitBurst MUST be in
+# [Unit]; in [Service] systemd silently ignores them (P7-audit H5).
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+Environment="HYDRA_VARIANT_ID=e"
+Environment="PYTHONUNBUFFERED=1"
+# Route all IBKR access through the shared broker (drop-in default committed so
+# a clean redeploy reproduces broker-proxy mode, not direct-session mode).
+Environment="CALYPSO_BROKER_URL=http://127.0.0.1:8788"
+
+# Variant-isolated state file paths (Polish Item 5 — pre-start snapshot).
+Environment="STATE_FILE=/opt/calypso/data/variant_e/hydra_state.json"
+Environment="SNAPSHOT_DIR=/opt/calypso/data/variant_e/state_snapshots"
+
+# ─── IBKR OAuth 1.0a credentials ────────────────────────────────────────
+# Variant E talks to IBKR's paper account (same credentials / same paper
+# account as the other variants). E is dry-run so it places no real orders,
+# but it still needs real-time data via the same OAuth session.
+LoadCredentialEncrypted=ibkr_consumer_key:/etc/calypso/ibkr/consumer_key.cred
+LoadCredentialEncrypted=ibkr_access_token:/etc/calypso/ibkr/access_token.cred
+LoadCredentialEncrypted=ibkr_access_token_secret:/etc/calypso/ibkr/access_token_secret.cred
+LoadCredentialEncrypted=ibkr_signature_pem:/etc/calypso/ibkr/signature.pem.cred
+LoadCredentialEncrypted=ibkr_encryption_pem:/etc/calypso/ibkr/encryption.pem.cred
+LoadCredentialEncrypted=ibkr_dhparam_pem:/etc/calypso/ibkr/dhparam.pem.cred
+
+EnvironmentFile=-/etc/calypso/polygon.env
+
+# Pre-start state-file snapshot (Polish Item 5). Variant-aware.
+ExecStartPre=/opt/calypso/scripts/pre_start_snapshot.sh
+
+ExecStart=/opt/calypso/.venv/bin/python -m bots.hydra.main --config bots/hydra/config/config_variant_e.json
+
+TimeoutStartSec=120
+Restart=always
+RestartSec=30
+KillSignal=SIGTERM
+TimeoutStopSec=30
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hydra_variant_e
+
+# ─── Sandboxing (defense-in-depth, parity with hydra.service) ────────────
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+# AUD2-L4 — PrivateDevices=yes (ProtectDevices is ignored on systemd 252; see hydra.service)
+PrivateDevices=yes
+ReadWritePaths=/opt/calypso
+
+[Install]
+WantedBy=multi-user.target

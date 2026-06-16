@@ -141,10 +141,18 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         status="dry_run_locked",
         bot_name_base="DCTM",
     ),
-    # Variant "e" (the SPY double-calendar sibling of D) is added in its build phase,
-    # once its registry class + name are created. Its row will be:
-    #   group_id="calendar_multiday", structure_family="double_calendar",
-    #   pnl_shape="debit", dte_class="multi_day", status="dry_run_locked".
+    "e": StrategyMeta(
+        id="e",
+        display_name="SPY Double Calendar",
+        short_name="SPYDC-E",
+        strategy_class="spy_double_calendar",
+        group_id="calendar_multiday",
+        structure_family="double_calendar",
+        pnl_shape="debit",
+        dte_class="multi_day",
+        status="dry_run_locked",
+        bot_name_base="SPYDC",
+    ),
 }
 
 

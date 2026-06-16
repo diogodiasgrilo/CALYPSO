@@ -50,7 +50,7 @@ def test_a_group_has_exactly_one_pnl_shape():
 
 def test_known_membership_today():
     assert tax.members("ic_0dte") == ["a", "b", "c"]
-    assert tax.members("calendar_multiday") == ["d"]  # "e" added in its build phase
+    assert tax.members("calendar_multiday") == ["d", "e"]  # E (SPY double calendar) joined D
 
 
 # ---------------------------------------------------------------------------
@@ -60,7 +60,8 @@ def test_known_membership_today():
 def test_comparable_with_is_same_group_only():
     assert sorted(tax.comparable_with("a")) == ["b", "c"]
     assert sorted(tax.comparable_with("b")) == ["a", "c"]
-    assert tax.comparable_with("d") == []  # only member of its group today
+    assert tax.comparable_with("d") == ["e"]  # D and E share the calendar group
+    assert tax.comparable_with("e") == ["d"]
 
 
 def test_comparable_never_crosses_pnl_shape():

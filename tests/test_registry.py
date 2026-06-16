@@ -44,6 +44,12 @@ class TestResolveName:
         cfg = {"strategy": {"name": "double_calendar", "brandon": {"enabled": False}}}
         assert resolve_strategy_name(cfg) == "double_calendar"
 
+    def test_spy_double_calendar_name_resolves(self):
+        # Strategy E — registered name selects it (brandon disabled so the
+        # brandon.enabled precedence doesn't win first).
+        cfg = {"strategy": {"name": "spy_double_calendar", "brandon": {"enabled": False}}}
+        assert resolve_strategy_name(cfg) == "spy_double_calendar"
+
     def test_descriptive_legacy_name_falls_through_to_default(self):
         # Regression: the real A config carries a human-readable label here that
         # the pre-registry entrypoint ignored. It must NOT crash with
@@ -73,12 +79,17 @@ class TestResolveClass:
     def test_double_calendar_resolves(self):
         assert resolve_strategy_class("double_calendar").__name__ == "DoubleCalendarStrategy"
 
+    def test_spy_double_calendar_resolves(self):
+        assert resolve_strategy_class("spy_double_calendar").__name__ == "SpyDoubleCalendarStrategy"
+
     def test_unknown_raises(self):
         with pytest.raises(StrategyNotRegistered):
             resolve_strategy_class("nope")
 
     def test_available_lists_registered(self):
-        assert available_strategies() == ["brandon", "double_calendar", "hydra", "strangle"]
+        assert available_strategies() == [
+            "brandon", "double_calendar", "hydra", "spy_double_calendar", "strangle"
+        ]
 
 
 class TestBuildStrategy:

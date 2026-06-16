@@ -66,6 +66,35 @@ def _dte(today: date, iso: str) -> int:
     return (date.fromisoformat(iso) - today).days
 
 
+def trading_days_until(
+    from_iso: str,
+    to_iso: str,
+    is_holiday: Optional[Callable[[date], bool]] = None,
+) -> int:
+    """Number of TRADING days strictly after ``from_iso`` up to and including
+    ``to_iso`` (i.e. how many trading sessions remain until the target date,
+    counting the target itself). Returns 0 if ``to_iso`` is on/before
+    ``from_iso``.
+
+    Additive pure helper (stdlib + market_hours only) used by the managed
+    calendar sibling (Strategy E) for its trading-day time-exit window — "close
+    when within N trading days of the short expiry". ``from_iso`` itself is NOT
+    counted (it's "today"); the target IS counted (the expiry session). Example:
+    if ``to_iso`` is the next trading day after ``from_iso`` the result is 1.
+    """
+    start = date.fromisoformat(from_iso)
+    end = date.fromisoformat(to_iso)
+    if end <= start:
+        return 0
+    count = 0
+    d = start + timedelta(days=1)
+    while d <= end:
+        if _is_trading_day(d, is_holiday):
+            count += 1
+        d += timedelta(days=1)
+    return count
+
+
 def pick_calendar_expiries(
     candidates: List[str],
     today_iso: str,

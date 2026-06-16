@@ -35,6 +35,12 @@ _REGISTRY: Dict[str, str] = {
     # LOCKED — the entry/transformer/multi-day-settlement logic is stubbed and a
     # real-order run requires the coexistence MUST-FIXes (see the module docstring).
     "double_calendar": "bots.hydra.double_calendar_strategy:DoubleCalendarStrategy",
+    # Strategy E — "SPY Double Calendar" multi-day double calendar (SCAFFOLD),
+    # sibling of D. MANAGED (laddered profit-take + trading-day time-exit, no
+    # transformer, no hard stop). Selected via strategy.name = "spy_double_calendar";
+    # dry-run LOCKED — the class refuses any non-dry_run construction and a real-order
+    # run requires the coexistence MUST-FIXes + SPY American-assignment handling.
+    "spy_double_calendar": "bots.hydra.spy_double_calendar_strategy:SpyDoubleCalendarStrategy",
 }
 
 # Default when neither brandon.enabled nor strategy.name is set — preserves the
