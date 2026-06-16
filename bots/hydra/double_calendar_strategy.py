@@ -150,6 +150,23 @@ class DoubleCalendarStrategy(HydraStrategy):
         self.dc_delta_otm_fraction = float(dc.get("delta_otm_fraction", 0.40))
         self.dc_delta_window = int(dc.get("delta_window", 8))
         self.dc_delta_max_reads = int(dc.get("delta_max_reads", 6))
+        # Stop hardening (2026-06-16). A double calendar's mark is built from 4
+        # independent option mids, so a single noisy tick can spike past the -20%
+        # stop and revert (live: E#1 closed at a realized -6.3% on a -20%
+        # trigger). (1) require the breach to PERSIST stop_confirm_seconds before
+        # closing (MKT-046 analogue); (2) gate value-driven decisions on
+        # real-time quotes; (3) cap concurrent open calendars so the daily entry
+        # can't stack multi-day debit/BP.
+        self.dc_stop_confirm_seconds = float(dc.get("stop_confirm_seconds", 20.0))
+        # Real-time quote gate is OPT-IN (default off): the breach-persistence
+        # window above is the primary noise defense and works regardless, whereas
+        # an over-eager realtime gate could FREEZE D entirely if non-0DTE SPXW
+        # snapshots don't reliably carry the 6509 'R' flag. Enable once non-0DTE
+        # real-time entitlement is confirmed on the VM.
+        self.dc_require_realtime_quotes = bool(dc.get("require_realtime_quotes", False))
+        self.dc_max_concurrent = int(dc.get("max_concurrent", 1))
+        # entry_number -> first-breach time, for the stop-confirmation window.
+        self._dc_stop_breach: Dict[int, datetime] = {}
 
         logger.info(
             "DCTM initialized (DRY-RUN, LOCKED). Short DTE %d-%d, long +%d-%d, "
@@ -228,6 +245,44 @@ class DoubleCalendarStrategy(HydraStrategy):
             # the surviving entries across the reset too — the base rebuild zeroes
             # the per-day counters, which is correct for 0DTE but loses multi-day
             # debit accounting. Needs the debit-rooted P&L path.
+
+    def _calculate_capital_deployed(self) -> float:
+        """Capital at risk for D = sum of OPEN calendars' net debit (pre-transform
+        the max loss IS the debit; post-risk-free-transform it's ~0). The base
+        method uses spread_width × 100 × contracts — for D's same-strike calendar
+        that is just the wing notional (e.g. $500), LESS than the debit actually
+        paid ($1035), so the heartbeat Capital/Return were computed off the wrong
+        base."""
+        total = 0.0
+        for e in self.daily_state.entries:
+            if self._dc_entry_is_open(e):
+                total += float(getattr(e, "net_debit", 0.0) or 0.0)
+        return total
+
+    def get_detailed_position_status(self) -> List[str]:
+        """Calendar-native per-entry heartbeat lines. D holds net-DEBIT double
+        calendars, so the inherited IC-style line (Credit/cushion/SV) is garbage
+        for D ('Credit $0', '-469% cushion', an SV that ignores the debit). Render
+        the calendar's real economics: phase, strikes, both expiries, debit,
+        current liquidation value, and unrealized P&L as % of debit."""
+        lines: List[str] = []
+        for entry in self.daily_state.active_entries:
+            if not isinstance(entry, CalendarEntry):
+                continue  # D only holds calendars; skip anything unexpected
+            phase = getattr(entry.dc_phase, "value", str(entry.dc_phase))
+            debit = float(getattr(entry, "net_debit", 0.0) or 0.0)
+            value = entry.calendar_value
+            upnl = entry.unrealized_pnl
+            pct = (upnl / debit * 100.0) if debit > 0 else 0.0
+            confirming = " ⏳stop-confirm" if entry.entry_number in self._dc_stop_breach else ""
+            lines.append(
+                f"  Entry #{entry.entry_number} [{phase}]: "
+                f"Kc={entry.short_call_strike:.0f} Kp={entry.short_put_strike:.0f} | "
+                f"short {getattr(entry, 'short_expiry', '?')} / long {getattr(entry, 'long_expiry', '?')} | "
+                f"debit ${debit:.0f} | value ${value:.0f} | "
+                f"P&L ${upnl:+.0f} ({pct:+.1f}%) | {entry.contracts}c{confirming}"
+            )
+        return lines
 
     def check_after_hours_settlement(self) -> bool:
         """Treat a legitimately-held multi-day position as NORMAL after the close.
@@ -379,8 +434,20 @@ class DoubleCalendarStrategy(HydraStrategy):
         out: Dict[str, dict] = {}
         for name, conid in leg_conids.items():
             q = self._read_option_quote(conid) or {}
-            out[name] = {"mid": self._quote_mid(q), "raw": q}
+            out[name] = {"mid": self._quote_mid(q), "raw": q, "realtime": self._dc_quote_is_realtime(q)}
         return out
+
+    def _dc_quote_is_realtime(self, q: dict) -> bool:
+        """True unless the broker DEFINITIVELY flags the quote as delayed/frozen.
+        Wraps HYDRA's _option_quote_is_realtime (IBKR field 6509); defaults to
+        True when the check is unavailable/errors so a missing entitlement signal
+        never freezes D's stop/transform entirely — it only rejects a quote we
+        can positively confirm is non-real-time."""
+        try:
+            checker = getattr(self, "_option_quote_is_realtime", None)
+            return bool(checker(q)) if checker else True
+        except Exception:
+            return True
 
     def _dc_probe_two_expiry_data(self) -> bool:
         """LIVE diagnostic — run on the VM in market hours. Picks the two
@@ -614,6 +681,17 @@ class DoubleCalendarStrategy(HydraStrategy):
         """Minimal pre-entry gates (reuse the shared helpers): orphaned orders,
         market halt, buying power. Deliberately simpler than HYDRA's IC gates (no
         VIX regime, no MKT-011 credit gate — those are credit-IC concepts)."""
+        # Concurrent-calendar cap: D holds a multi-day debit position, so opening
+        # a fresh daily calendar while one is still open would stack debit + tie
+        # up more of the shared account's BP. Default 1 (one calendar at a time).
+        open_cals = sum(1 for e in self.daily_state.entries if self._dc_entry_is_open(e))
+        if open_cals >= getattr(self, "dc_max_concurrent", 1):
+            self.daily_state.entries_skipped += 1
+            self._next_entry_index += 1
+            return (
+                f"Entry #{entry_num} skipped - {open_cals} calendar(s) already open "
+                f"(max {self.dc_max_concurrent})"
+            )
         if self._has_orphaned_orders():
             self._next_entry_index += 1
             return f"Entry #{entry_num} skipped - orphaned orders blocking"
@@ -716,9 +794,15 @@ class DoubleCalendarStrategy(HydraStrategy):
             return False
         fresh = True
         quotes = self._dc_read_leg_quotes(conids)
+        require_rt = getattr(self, "dc_require_realtime_quotes", True)
         for name in conids:
-            mid = (quotes.get(name) or {}).get("mid")
-            if mid and mid > 0:
+            qrow = quotes.get(name) or {}
+            mid = qrow.get("mid")
+            rt_ok = qrow.get("realtime", True) or not require_rt
+            # A positive mid from a real-time quote updates the price; a missing/
+            # crossed mid OR a confirmed-stale quote leaves the prior price and
+            # marks the tick not-fresh (so value-driven stop/transform skip it).
+            if mid and mid > 0 and rt_ok:
                 entry.legs[name].price = mid
             else:
                 fresh = False
@@ -738,17 +822,40 @@ class DoubleCalendarStrategy(HydraStrategy):
         # a mistimed transform. EOD close is TIME-based and runs regardless.
         if fresh:
             pnl_pct = entry.unrealized_pnl / entry.net_debit
+            en = entry.entry_number
+            breaches = self._dc_stop_breach
 
             # 1. profit trigger -> attempt the (risk-free-gated) transformer
             if pnl_pct >= self.dc_profit_trigger_pct:
                 if self._dc_attempt_transform(entry):
+                    breaches.pop(en, None)
                     return f"TRANSFORM E#{entry.entry_number}"
                 # gate failed (not yet risk-free) -> fall through to stop/EOD checks
 
-            # 2. pre-transform hard stop (~20% of debit)
+            # 2. pre-transform hard stop (~20% of debit) — CONFIRM-BEFORE-CLOSE.
+            # The calendar mark is noisy (4 independent mids); require the breach
+            # to persist dc_stop_confirm_seconds before closing, and clear it on
+            # recovery (MKT-046 analogue). Without this a single noisy tick fired
+            # a real stop (2026-06-16).
+            now = get_us_market_time()
             if pnl_pct <= -self.dc_pre_transform_stop_pct:
-                self._dc_close_calendar(entry, reason="20%-debit stop", loss=True)
-                return f"STOP E#{entry.entry_number}"
+                if en not in breaches:
+                    breaches[en] = now
+                    logger.warning(
+                        "[DCTM] E#%s breached -%.0f%% stop (pnl %.1f%%) — confirming %.0fs...",
+                        en, self.dc_pre_transform_stop_pct * 100, pnl_pct * 100,
+                        self.dc_stop_confirm_seconds,
+                    )
+                elif (now - breaches[en]).total_seconds() >= self.dc_stop_confirm_seconds:
+                    self._dc_close_calendar(entry, reason="20%-debit stop", loss=True)
+                    return f"STOP E#{entry.entry_number}"
+                # else: still inside the confirm window — hold
+            elif en in breaches:
+                logger.info(
+                    "[DCTM] E#%s stop breach recovered (pnl %.1f%%) — false stop avoided",
+                    en, pnl_pct * 100,
+                )
+                breaches.pop(en, None)
         else:
             logger.debug(
                 "[DCTM] E#%s marks not fresh this tick — skipping transform/stop",
@@ -846,8 +953,13 @@ class DoubleCalendarStrategy(HydraStrategy):
     def _dc_close_calendar(self, entry, reason: str, loss: bool) -> None:
         """Liquidate an un-transformed calendar (dry-run): book realized P&L from
         the current mark, mark CLOSED, and set side-done flags so active_entries
-        drops it. ``loss`` distinguishes the 20%-stop from the managed EOD close."""
-        self._dc_refresh_marks(entry)
+        drops it. ``loss`` distinguishes the 20%-stop from the managed EOD close.
+
+        Caller MUST have refreshed marks this tick (_dc_manage_calendar does at
+        the top). We deliberately do NOT re-refresh here: re-fetching the noisy
+        4-mid calendar value would book a DIFFERENT P&L than the one that
+        triggered the close (2026-06-16: a -20% trigger booked at -6.3%)."""
+        self._dc_stop_breach.pop(entry.entry_number, None)
         pnl = entry.unrealized_pnl  # CALENDAR phase: calendar_value - net_debit
         n = entry.contracts or self.contracts_per_entry
         close_comm = 4 * self.commission_per_leg * n
