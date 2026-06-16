@@ -1,5 +1,5 @@
 [Unit]
-Description=HYDRA Variant D (Strategy D "DC Time Machine" — multi-day double calendar -> risk-free iron condor) | SCAFFOLD + DRY-RUN-LOCKED: the strategy class refuses any non-dry_run construction and its entry/transformer logic is stubbed, so this unit opens NO positions and cannot touch the shared paper account. Do NOT flip dry_run=false next to a live C until the coexistence MUST-FIXes ship (scope STATE-004 + orphan sweep to per-variant conids; budget buying power).
+Description=HYDRA Variant D (Strategy D "DC Time Machine" — multi-day double calendar -> risk-free iron condor) | DRY-RUN-LOCKED: the full strategy runs in SIMULATION only (the class refuses any non-dry_run construction), so this unit places NO real orders and cannot touch the shared paper account. Going live is a gated, multi-week build, NOT a config flip — read docs/migration/D_GOLIVE_RUNBOOK.md (canonical go-live runbook) before flipping dry_run=false next to a live C; the coexistence MUST-FIXes (scope STATE-004 + orphan sweep to per-variant conids; budget buying power) must ship first.
 # OAuth 1.0a is gateway-free and headless — no IB Gateway, no token-keeper
 # service. network-online.target so the OAuth handshake to api.ibkr.com
 # has DNS+TLS available at startup.

@@ -33,6 +33,13 @@ DESIGN — reuse structure, override economics:
     base save/load/settlement — D persists via a SIDECAR (dc_open_trades.json).
 
 COEXISTENCE WITH THE LIVE VARIANTS (A/B/C) — READ BEFORE FLIPPING dry_run=false
+>>> CANONICAL GO-LIVE RUNBOOK: docs/migration/D_GOLIVE_RUNBOOK.md <<<
+Read that runbook IN FULL before flipping dry_run=false, building any real-order
+path, removing the dry-run lock, or touching a coexistence guard. It is the single
+source of truth for taking D live — every step, the arm-gate, the flip / rollback /
+emergency-flatten procedures, and the readiness gate. Supporting analysis:
+docs/migration/D_GOLIVE_SCOPE_AND_AUDIT.md (scope + audit + NO-GO verdict) and
+docs/migration/D_MVL_PHASE1_PLAN.md (the MVL-D first-live-step plan).
 A/B/C only coexist safely today because they are all 0DTE and the shared IBKR
 paper account is FLAT overnight. A REAL-ORDER multi-day D holding positions
 overnight in that shared account would be SEEN by C's account-wide guards. Before
@@ -74,10 +81,13 @@ _DC_LEG_ABBR = {"short_call": "SC", "long_call": "LC", "short_put": "SP", "long_
 class DoubleCalendarStrategy(HydraStrategy):
     """Strategy D — double calendar -> risk-free iron condor (DC Time Machine).
 
-    SCAFFOLD: the safety shell and multi-day lifecycle overrides are real; the
-    strategy-defining hooks are inert stubs pending the full build. Inherits
-    HYDRA's scheduling / monitoring / state / IBKR / Telegram / DB machinery so
-    only the strategy-specific pieces remain to be written.
+    The full strategy runs in SIMULATION (dry-run-LOCKED): entry, transform, 20%
+    stop, and settlement are implemented and exercised against live two-expiration
+    quotes, but NO real orders are placed. What does NOT exist yet is the real-order
+    execution path + the coexistence guards (STATE-004 / orphan / BP scoping) — by
+    deliberate safety design, not omission. Building those and flipping dry_run=false
+    is a gated, multi-week effort: read docs/migration/D_GOLIVE_RUNBOOK.md first.
+    Inherits HYDRA's scheduling / monitoring / state / IBKR / Telegram / DB machinery.
     """
 
     BOT_NAME = "DCTM"
@@ -101,9 +111,10 @@ class DoubleCalendarStrategy(HydraStrategy):
                 "transformer / debit-P&L / multi-day-settlement logic IS implemented "
                 "(Phases 1-7), but running it with real paper orders next to the live "
                 "variants requires the coexistence MUST-FIXes (scope STATE-004 + "
-                "orphan sweep to per-variant conids; budget buying power) — see this "
-                "module's docstring. Set dry_run=true, or do not select "
-                "strategy.name='double_calendar'."
+                "orphan sweep to per-variant conids; budget buying power). Going live "
+                "is a gated, multi-week build, NOT a config flip — follow the canonical "
+                "runbook docs/migration/D_GOLIVE_RUNBOOK.md. Set dry_run=true, or do "
+                "not select strategy.name='double_calendar'."
             )
         # Sidecar-load guard, set BEFORE super().__init__ (which calls
         # _recover_positions_from_saxo AND may call _save_state_to_disk during
@@ -116,7 +127,8 @@ class DoubleCalendarStrategy(HydraStrategy):
         if not getattr(self, "dry_run", False):
             raise ConfigError(
                 "DoubleCalendarStrategy resolved to dry_run=false after init — "
-                "refusing to arm an unimplemented, coexistence-unsafe strategy."
+                "refusing to arm an unimplemented, coexistence-unsafe strategy. "
+                "See docs/migration/D_GOLIVE_RUNBOOK.md before attempting go-live."
             )
 
         # DC-specific knobs (config.strategy.double_calendar.*). Read here so the

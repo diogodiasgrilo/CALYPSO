@@ -1,8 +1,9 @@
 """DoubleCalendarStrategy (Strategy D — "DC Time Machine") scaffold tests.
 
 Pins the SAFETY-critical scaffold behavior: the dry-run lock refuses any
-non-dry-run construction (D's entry/transformer logic is stubbed and a
-real-order run would need the coexistence MUST-FIXes), the undefined-risk
+non-dry-run construction (D runs in SIMULATION only and a real-order run would
+need the coexistence MUST-FIXes — see docs/migration/D_GOLIVE_RUNBOOK.md), the
+undefined-risk
 contract flag, the BOT_NAME, the DCPhase enum, and the multi-day open-position
 predicate that the lifecycle overrides depend on.
 """
@@ -10,6 +11,7 @@ from __future__ import annotations
 
 import json
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -493,6 +495,7 @@ class TestCloseCalendar:
         inst._dc_refresh_marks = lambda e: None  # keep the prices we set
         self._saved = []
         inst._save_state_to_disk = lambda: self._saved.append(True)  # crash-window guard
+        inst._dc_stop_breach = {}  # close clears any pending stop-confirm breach
         return inst
 
     def _entry_with_pnl(self, pnl):
@@ -531,6 +534,8 @@ class TestManageCalendar:
         inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
         inst.dc_profit_trigger_pct = 0.075
         inst.dc_pre_transform_stop_pct = 0.20
+        inst.dc_stop_confirm_seconds = 20.0
+        inst._dc_stop_breach = {}
         inst.dc_eod_close_if_no_transform = True
         inst._dc_refresh_marks = lambda e: True  # marks fresh this tick
         inst._dc_attempt_transform = lambda e: transform_ok
@@ -554,7 +559,11 @@ class TestManageCalendar:
         assert msg == "TRANSFORM E#1"
 
     def test_loss_triggers_stop(self):
-        inst = self._inst(pnl=-50.0)  # -25% of 200
+        # -25% of 200, breach already persisted past the confirm window so the
+        # stop fires this tick. (The confirm-before-close timing itself is
+        # covered in test_dc_stop_hardening.py.)
+        inst = self._inst(pnl=-50.0)
+        inst._dc_stop_breach = {1: datetime(2020, 1, 1, tzinfo=timezone.utc)}
         msg = inst._dc_manage_calendar(self._entry(-50.0))
         assert msg == "STOP E#1"
         assert self._closed == [("20%-debit stop", True)]
