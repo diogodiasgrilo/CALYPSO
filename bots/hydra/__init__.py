@@ -36,6 +36,37 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D hardening + dashboard put-only/metrics fixes (2026-06-16). D is dry-run
+  (no real money). Triggered by C's GEX-routed put-only day + D's premature stop.
+  Strategy D (double_calendar_strategy / DoubleCalendarStrategy), bot-side:
+  - Premature-stop fix: _dc_close_calendar no longer RE-refreshes marks (it booked a
+    different value than the noisy tick that triggered the close — a -20% trigger
+    booked at -6.3%); the 20%-debit stop now requires the breach to PERSIST
+    dc_stop_confirm_seconds (default 20s) before closing, clearing on recovery
+    (MKT-046 analogue). Optional real-time quote gate (dc_require_realtime_quotes,
+    default OFF — the persistence window is the primary defense).
+  - Calendar-native observability (the inherited IC heartbeat showed 'Credit $0 /
+    -469% cushion / SV ignoring the debit'): get_detailed_position_status override
+    (phase, Kc/Kp, both expiries, debit, value, P&L %-of-debit);
+    _calculate_capital_deployed override (sum of OPEN net_debit, was the $500 wing
+    notional < the $1035 debit); _calculate_max_loss_with_stops/_catastrophic
+    overrides (stop_pct×debit / full debit, not IC stop math).
+  - Lifecycle/BP: concurrent-calendar cap (dc_max_concurrent, default 1) + per-
+    variant BP budget (dc_max_deployed_debit, default $5000 — MUST-FIX #3, caps D's
+    footprint on the shared account); calendar-aware get_monitoring_mode (vigilant
+    near the stop/transform triggers and during a stop-confirm, vs the inherited
+    always-normal ~12.5s). Multi-day realized-P&L was already correct (cost basis on
+    the carried entry; realized booked at settlement) — the stale TODO was corrected
+    to document it. Tested 15/15.
+  Dashboard (read-only): EntryCard shows strikes for put-only/call-only entries (the
+  short_call_strike>0 gate hid them); PerformanceMetrics gates annualized ratios
+  behind >=20 trading days (a tiny sample made Sharpe=111 and Sortino/Calmar/PF/WL=INF);
+  PositionHeatmap axis includes the live SPX (far-OTM put-only had spot off-chart).
+  NOTE: C's tiny put-only credit on 06-16 ($70 vs $455 on 06-15) is NOT a bug — the
+  GEX strike-adjuster skipped the call side (call short within 25pt of a negative-GEX
+  accel-zone peak at 7565) → put-only; 06-15 had no accel wall near the call → full
+  ICs. Side effect: put-only credit barely clears commission (~$16-18) — a strategy-
+  tuning concern (consider a min-credit floor), not an error.
 - Variant-C TP / reconciliation / alert hardening + dashboard observability (2026-06-15).
   Bot-side behavior changes (live on A/B/C after this restart):
   (1) Variant-aware alerts — AlertService bot_name is now HYDRA / HYDRA_B / HYDRA_C

@@ -165,6 +165,10 @@ class DoubleCalendarStrategy(HydraStrategy):
         # real-time entitlement is confirmed on the VM.
         self.dc_require_realtime_quotes = bool(dc.get("require_realtime_quotes", False))
         self.dc_max_concurrent = int(dc.get("max_concurrent", 1))
+        # Per-variant buying-power budget (MUST-FIX #3): cap the total net debit D
+        # deploys across OPEN calendars so it can't starve the shared account's BP
+        # (the LIVE variant C draws on the same account). 0 disables.
+        self.dc_max_deployed_debit = float(dc.get("max_deployed_debit", 5000.0))
         # entry_number -> first-breach time, for the stop-confirmation window.
         self._dc_stop_breach: Dict[int, datetime] = {}
 
@@ -241,10 +245,14 @@ class DoubleCalendarStrategy(HydraStrategy):
                     "reset (not wiped, not flagged as an overnight 0DTE fault).",
                     readopted,
                 )
-            # TODO(full build): carry the cumulative cost basis / realized-P&L of
-            # the surviving entries across the reset too — the base rebuild zeroes
-            # the per-day counters, which is correct for 0DTE but loses multi-day
-            # debit accounting. Needs the debit-rooted P&L path.
+            # Multi-day P&L accounting (verified 2026-06-16): each carried entry
+            # keeps its OWN cost basis (net_debit, transform_credit) as fields, so
+            # _dc_settle_entry books the terminal P&L (transform_credit − net_debit
+            # − IC intrinsic, or mark − debit) into the SETTLEMENT day's
+            # total_realized_pnl correctly — there is nothing to carry in the
+            # per-day counter. Open positions surface as UNREALIZED in
+            # net_pnl/total_pnl; lifetime totals accumulate in the metrics file via
+            # log_daily_summary. The per-day total_realized_pnl=0 reset is correct.
 
     def _calculate_capital_deployed(self) -> float:
         """Capital at risk for D = sum of OPEN calendars' net debit (pre-transform
@@ -258,6 +266,52 @@ class DoubleCalendarStrategy(HydraStrategy):
             if self._dc_entry_is_open(e):
                 total += float(getattr(e, "net_debit", 0.0) or 0.0)
         return total
+
+    def _dc_open_debit_at_risk(self) -> float:
+        """Net debit across OPEN pre-transform (CALENDAR) calendars — the capital
+        genuinely at risk. TRANSFORMED legs are (gated) risk-free, so excluded."""
+        total = 0.0
+        for e in self.daily_state.entries:
+            if self._dc_entry_is_open(e) and getattr(e, "dc_phase", None) == DCPhase.CALENDAR:
+                total += float(getattr(e, "net_debit", 0.0) or 0.0)
+        return total
+
+    def _calculate_max_loss_with_stops(self) -> float:
+        """D's max loss WITH the 20%-debit stop working = stop_pct × open debit.
+        The base IC math (stop_level − credit per side) is meaningless for a
+        net-debit calendar and produced phantom numbers in the heartbeat."""
+        return self._dc_open_debit_at_risk() * self.dc_pre_transform_stop_pct
+
+    def _calculate_max_loss_catastrophic(self) -> float:
+        """D's worst case if the stop fails = the full debit paid (a long calendar
+        cannot lose more than its debit). Risk-free TRANSFORMED legs excluded."""
+        return self._dc_open_debit_at_risk()
+
+    def get_monitoring_mode(self) -> str:
+        """Calendar-aware vigilance. The base keys off call/put_side_stop (which D
+        never sets → always 'normal' → ~12.5s checks). Go vigilant (2s) when a
+        stop breach is being CONFIRMED, or when any open calendar's P&L is within
+        75% of the stop or transform trigger — so the confirm window resolves and
+        the transformer fires promptly."""
+        if not self.daily_state.active_entries:
+            self._current_monitoring_mode = "normal"
+            return "normal"
+        if self._dc_stop_breach:  # mid-confirmation -> watch closely
+            self._current_monitoring_mode = "vigilant"
+            return "vigilant"
+        for entry in self.daily_state.active_entries:
+            if not isinstance(entry, CalendarEntry):
+                continue
+            debit = float(getattr(entry, "net_debit", 0.0) or 0.0)
+            if debit <= 0:
+                continue
+            pnl_pct = entry.unrealized_pnl / debit
+            if (pnl_pct <= -0.75 * self.dc_pre_transform_stop_pct
+                    or pnl_pct >= 0.75 * self.dc_profit_trigger_pct):
+                self._current_monitoring_mode = "vigilant"
+                return "vigilant"
+        self._current_monitoring_mode = "normal"
+        return "normal"
 
     def get_detailed_position_status(self) -> List[str]:
         """Calendar-native per-entry heartbeat lines. D holds net-DEBIT double
@@ -692,6 +746,21 @@ class DoubleCalendarStrategy(HydraStrategy):
                 f"Entry #{entry_num} skipped - {open_cals} calendar(s) already open "
                 f"(max {self.dc_max_concurrent})"
             )
+        # Per-variant BP budget: don't open a new calendar if the debit already
+        # deployed across open calendars is at/over the configured budget.
+        budget = getattr(self, "dc_max_deployed_debit", 0.0)
+        if budget > 0:
+            deployed = sum(
+                float(getattr(e, "net_debit", 0.0) or 0.0)
+                for e in self.daily_state.entries if self._dc_entry_is_open(e)
+            )
+            if deployed >= budget:
+                self.daily_state.entries_skipped += 1
+                self._next_entry_index += 1
+                return (
+                    f"Entry #{entry_num} skipped - deployed debit ${deployed:.0f} "
+                    f">= BP budget ${budget:.0f}"
+                )
         if self._has_orphaned_orders():
             self._next_entry_index += 1
             return f"Entry #{entry_num} skipped - orphaned orders blocking"
