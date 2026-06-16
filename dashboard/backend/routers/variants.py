@@ -693,28 +693,28 @@ async def get_variant_summary(variant_id: str):
     }
 
 
-@router.get("/comparison")
-async def get_comparison():
-    """All variants + leaderboard delta computed server-side.
+def build_comparison(member_ids: list[str], baseline_id: str = "a") -> dict:
+    """Compute the live head-to-head comparison payload for a set of variants.
 
-    Frontend polls this every ~2s. Returns enough data to render the entire
-    Comparison page without further round-trips: leaderboard, strikes table,
-    buffer bars, P&L line chart series.
+    Member-scoped core of ``/comparison`` (and the group-scoped
+    ``/api/strategies/groups/{gid}/comparison`` adapter). ``member_ids`` are the
+    lowercase variant letters to include (only those with a state reader are
+    rendered); ``baseline_id`` is the lowercase letter the ``deltas_vs_*`` are
+    measured against (was hardcoded "a" — now passed by the caller so a group
+    can pick its own baseline from group metadata).
 
-    The leaderboard's ``winner`` field is the variant id with the highest
-    NET P&L (realized + unrealized − commission) among AVAILABLE variants.
-    Tie returns ``"tie"``. ``deltas`` exposes per-variant deltas vs the
-    canonical variant A so multi-way leaderboards can show "B is +$50 vs A,
-    C is −$120 vs A" without re-deriving on the client.
+    The leaderboard's ``winner`` field is the variant id with the highest NET
+    P&L (realized + unrealized − commission) among AVAILABLE members. Tie
+    returns ``"tie"``. ``deltas_vs_baseline`` exposes per-variant deltas vs the
+    baseline so multi-way leaderboards can show "B is +$50 vs A" client-side.
 
-    Backwards compat: ``a_net_pnl`` / ``b_net_pnl`` / ``delta_net_pnl`` are
-    kept so older frontend builds don't 500 mid-deploy. New frontend code
-    should read ``leaderboard.scores`` (a dict of id→net_pnl) and
-    ``leaderboard.deltas_vs_a`` instead.
+    Backwards compat: ``deltas_vs_a`` / ``a_net_pnl`` / ``b_net_pnl`` /
+    ``delta_net_pnl`` are kept (baseline=A) so older frontend builds don't 500
+    mid-deploy. New frontend code should read ``leaderboard.scores`` +
+    ``leaderboard.deltas_vs_baseline`` + ``leaderboard.baseline_id`` instead.
     """
-    _check_enabled()
-
-    payloads = {vid.upper(): _variant_payload(vid) for vid in _VARIANT_IDS if vid in _state_readers}
+    ids = [vid for vid in member_ids if vid in _state_readers]
+    payloads = {vid.upper(): _variant_payload(vid) for vid in ids}
 
     # Score table: only count available variants in the winner determination.
     scores: dict[str, float] = {}
@@ -729,22 +729,45 @@ async def get_comparison():
         leaders = [vid for vid, s in scores.items() if abs(s - best) < 0.01]
         winner = leaders[0] if len(leaders) == 1 else "tie"
 
+    baseline_upper = baseline_id.upper()
+    baseline_score = scores.get(baseline_upper, 0)
+    deltas_vs_baseline = {
+        vid: round(score - baseline_score, 2)
+        for vid, score in scores.items()
+        if vid != baseline_upper
+    }
+    # Legacy alias when the baseline IS A (the only case older builds expect).
     a_score = scores.get("A", 0)
-    deltas_vs_a = {vid: round(score - a_score, 2) for vid, score in scores.items() if vid != "A"}
 
     return {
         "date": get_today_et(),
         "leaderboard": {
             "winner": winner,
-            "scores": scores,           # {id: net_pnl} — only available variants
-            "deltas_vs_a": deltas_vs_a,  # signed: + = beats A, − = behind A
-            # Legacy fields (kept for in-flight frontend builds):
+            "scores": scores,                   # {id: net_pnl} — only available variants
+            "baseline_id": baseline_upper,      # which id the deltas are measured against
+            "deltas_vs_baseline": deltas_vs_baseline,
+            # Legacy fields (kept for in-flight frontend builds — baseline=A):
+            "deltas_vs_a": {vid: round(score - a_score, 2) for vid, score in scores.items() if vid != "A"},
             "a_net_pnl": scores.get("A", 0),
             "b_net_pnl": scores.get("B", 0),
             "delta_net_pnl": scores.get("A", 0) - scores.get("B", 0),
         },
         "variants": payloads,
     }
+
+
+@router.get("/comparison")
+async def get_comparison():
+    """All IC variants + leaderboard delta computed server-side.
+
+    Frontend polls this every ~2s. Returns enough data to render the entire
+    Comparison page without further round-trips: leaderboard, strikes table,
+    buffer bars, P&L line chart series. Thin wrapper over :func:`build_comparison`
+    scoped to the full IC variant set with baseline A — byte-identical to the
+    pre-refactor behaviour.
+    """
+    _check_enabled()
+    return build_comparison(list(_VARIANT_IDS), baseline_id="a")
 
 
 @router.get("/{variant_id}/daily")
@@ -844,9 +867,12 @@ def _cumulative_series(summaries: list[dict]) -> list[dict]:
     return out
 
 
-@router.get("/aggregate")
-async def get_aggregate():
-    """Cross-variant lifetime + per-day aggregate for the cross-day view.
+async def build_aggregate(member_ids: list[str]) -> dict:
+    """Cross-variant lifetime + per-day aggregate for a set of variants.
+
+    Member-scoped core of ``/aggregate`` (and the group-scoped
+    ``/api/strategies/groups/{gid}/aggregate`` adapter). ``member_ids`` are the
+    lowercase variant letters to include (only those with a DB reader render).
 
     Returns:
       - per-variant lifetime stats (cumulative_pnl, win_rate, sharpe, drawdown)
@@ -868,9 +894,7 @@ async def get_aggregate():
     legacy ``a_net_pnl``/``b_net_pnl``/``cumulative_a``/``cumulative_b`` are
     kept on each per_day row so older frontend builds don't 500 mid-deploy.
     """
-    _check_enabled()
-
-    available_ids_lower = [vid for vid in _VARIANT_IDS if vid in _state_readers]
+    available_ids_lower = [vid for vid in member_ids if vid in _db_readers]
     available_ids_upper = [vid.upper() for vid in available_ids_lower]
 
     # ---- Lifetime metrics + per-variant DB summaries ----
@@ -985,3 +1009,14 @@ async def get_aggregate():
         "variants": variants_payload,
         "head_to_head": head_to_head,
     }
+
+
+@router.get("/aggregate")
+async def get_aggregate():
+    """Cross-variant lifetime + per-day aggregate (full IC variant set).
+
+    Thin wrapper over :func:`build_aggregate` scoped to the full IC variant set
+    — byte-identical to the pre-refactor behaviour.
+    """
+    _check_enabled()
+    return await build_aggregate(list(_VARIANT_IDS))
