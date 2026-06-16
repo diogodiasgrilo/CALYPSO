@@ -104,6 +104,23 @@ class Settings(BaseSettings):
     variant_d_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_d.json")
     variant_d_label: str = "D (DC Time Machine · multi-day · dry-run scaffold)"
 
+    # ── Variant E — SPY Double Calendar (PRE-STAGED, not yet active) ──────────
+    # Second multi-day net-DEBIT calendar strategy (sibling of D). Like D it is
+    # intentionally NOT in _VARIANT_IDS (routers/variants.py) — the IC-shaped
+    # /api/variants comparison would mis-render a debit calendar as a credit.
+    # The /api/strategies group endpoints (calendar_multiday) serve E + D via
+    # the shape-distinct DCDBReader instead. Paths mirror variant_d_* under
+    # data/variant_e/. Its CALENDAR tables live in a SEPARATE file,
+    # data/variant_e/dc_calendar.db (sibling of D's), surfaced via the calendar
+    # group payload — NOT through the backtesting_db field (that's the shared
+    # DataRecorder market-tick DB, kept for framework symmetry only).
+    variant_e_state_file: Path = Path("/opt/calypso/data/variant_e/hydra_state.json")
+    variant_e_metrics_file: Path = Path("/opt/calypso/data/variant_e/hydra_metrics.json")
+    variant_e_backtesting_db: Path = Path("/opt/calypso/data/variant_e/backtesting.db")
+    variant_e_log_file: Path = Path("/opt/calypso/logs/hydra_variant_e/bot.log")
+    variant_e_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_e.json")
+    variant_e_label: str = "E (SPY Double Calendar · multi-day · dry-run scaffold)"
+
     # ── Cumulative track-record BASELINE (rebase the cumulative to a date) ────
     # 2026-06-04: every cumulative figure (the single P&L card + the Comparison
     # lifetime totals + the running-cumulative curves) is summed from each
@@ -124,6 +141,7 @@ class Settings(BaseSettings):
     variant_b_baseline_date: str = ""
     variant_c_baseline_date: str = ""
     variant_d_baseline_date: str = ""
+    variant_e_baseline_date: str = ""
 
     # Agent intel directories
     agent_intel_dir: Path = Path("/opt/calypso/intel")
