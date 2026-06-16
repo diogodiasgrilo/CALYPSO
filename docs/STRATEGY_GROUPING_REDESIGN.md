@@ -270,6 +270,13 @@ tests stay green under a faithful lift):
    tabs, shape-aware renderers. **+ audit (blocking):** decide the per-strategy live-state model (header chrome
    re-binds to the selection via the snapshot envelope; stop-toasts don't cross strategies); scope the picker to
    the Dashboard tab until History/Analytics are parameterized. `tsc -b` + `vite build` clean.
+   **+ operator request (2026-06-16): EOD auto-update.** The MAIN dashboard's **cumulative section** and every
+   other end-of-trading-day field must refresh **automatically the moment the trading day ends** — today they
+   only update on a manual page reload. The backend already polls `hydra_metrics.json` (10s) + `backtesting.db`
+   (30s); the gap is that the cumulative/summary widgets fetch once on mount and don't react to the end-of-day
+   write. Fix: emit a settlement/EOD-complete event over the WebSocket (or have the metrics poll detect the
+   daily-summary write) so the main page re-fetches cumulative metrics + the daily summary live at close, no
+   reload. Applies per selected strategy.
 7. **Comms**: Telegram group-scoped `/compare` + selectors (requires threading `text` into 4 handler signatures —
    not purely additive) + a **calendar-native summary reader** (reads the DC sidecar, not `hydra_state.json`);
    `AlertService` adds `display_name`/`group_label` **payload** fields (CF renders + falls back to `bot_name`);
