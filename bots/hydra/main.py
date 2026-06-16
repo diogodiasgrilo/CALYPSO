@@ -197,48 +197,25 @@ def _variant_bot_name() -> str:
 
 
 def print_banner():
-    """Print the application banner (variant-aware).
+    """Print the application banner, driven by the strategy taxonomy.
 
-    Variant D is the multi-day "DC Time Machine" double-calendar strategy —
-    NOT a 0DTE iron condor — so it gets its own banner to avoid misleading the
-    journalctl/stdout startup log. A/B/C keep the iron-condor banner.
+    The banner is built from shared.strategy_taxonomy (display name + comparability
+    group + structure/pnl-shape/cadence/status) keyed on HYDRA_VARIANT_ID, so every
+    variant — including future ones — gets a correct, non-misleading startup banner
+    without a hardcoded ``if variant == "d"`` special-case.
     """
-    variant = (os.environ.get("HYDRA_VARIANT_ID", "") or "").strip().lower() or None
-    if variant == "d":
-        banner = """
+    from shared import strategy_taxonomy as tax
+
+    m = tax.meta()
+    g = tax.group()
+    banner = f"""
     ╔═══════════════════════════════════════════════════════════════╗
-    ║                                                               ║
-    ║         STRATEGY D — DC TIME MACHINE (SCAFFOLD)               ║
-    ║         ════════════════════════════════════                ║
-    ║                                                               ║
-    ║         Double Calendar → Risk-Free Iron Condor (SPX)        ║
-    ║         MULTI-DAY · NET DEBIT · DRY-RUN ONLY                  ║
-    ║                                                               ║
-    ║         Entry/transformer logic STUBBED — opens nothing       ║
-    ║         dry-run LOCKED (no real orders, ever)                 ║
-    ║                                                               ║
-    ║         Version: 2.0.0-rc.1 (IBKR-standalone)                 ║
-    ║         Broker: Interactive Brokers (paper)                   ║
-    ║                                                               ║
-    ╚═══════════════════════════════════════════════════════════════╝
-    """
-    else:
-        banner = """
-    ╔═══════════════════════════════════════════════════════════════╗
-    ║                                                               ║
-    ║         HYDRA 0DTE TRADING BOT                                ║
-    ║         ══════════════════════                                ║
-    ║                                                               ║
-    ║         Multi-Entry Iron Condors (SPX 0DTE)                   ║
-    ║         3 Entries | Credit Gates | Buffer Decay               ║
-    ║                                                               ║
-    ║         #1: 10:45 ET (base)                                   ║
-    ║         #2: 11:15 ET (base)                                   ║
-    ║         #3: 14:00 ET (conditional Up/Down-day)                ║
-    ║                                                               ║
-    ║         Version: 2.0.0-rc.1 (IBKR-standalone)                 ║
-    ║         Broker: Interactive Brokers (paper)                   ║
-    ║                                                               ║
+    ║  CALYPSO · HYDRA on Interactive Brokers (paper)
+    ║  ─────────────────────────────────────────────
+    ║  Strategy : {m.display_name}  [{m.id.upper()}]
+    ║  Group    : {g.label}  ({m.structure_family} · {m.pnl_shape})
+    ║  Cadence  : {m.dte_class}   Status: {m.status}
+    ║  Version  : 2.0.0-rc.1 (IBKR-standalone)
     ╚═══════════════════════════════════════════════════════════════╝
     """
     print(banner)
@@ -328,8 +305,18 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
         # precedence (brandon.enabled wins, else strategy.name, else "hydra"), so
         # this is behavior-identical for the current config.
         from bots.hydra.registry import build_strategy, resolve_strategy_name
+        from shared import strategy_taxonomy as _tax
         selected = resolve_strategy_name(config)
-        trade_logger.log_event(f"Loading strategy: {selected}")
+        # Guardrail (audit AUD-4-F1): the variant->class binding is config-driven
+        # (which --config the unit passes) and enforced nowhere, so a mis-pointed
+        # unit could silently run the wrong strategy under a letter and mis-render
+        # it across every surface. Fail-stop if the runtime-resolved class disagrees
+        # with the taxonomy's expectation for this variant.
+        _tax.assert_class_matches(_tax.variant_id(), selected)
+        trade_logger.log_event(
+            f"Loading strategy: {selected} "
+            f"({_tax.display_name()} [{_tax.variant_id().upper()}] · {_tax.group().label})"
+        )
         strategy = build_strategy(config, broker, trade_logger, dry_run=dry_run)
     except Exception as e:
         trade_logger.log_error(f"Failed to initialize strategy: {e}")
