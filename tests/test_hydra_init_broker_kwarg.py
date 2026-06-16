@@ -1423,16 +1423,28 @@ class TestHourlyReconciliationBody:
         return s
 
     def _run(self, s):
-        from datetime import datetime
+        from datetime import datetime, timedelta
         # _check_hourly_reconciliation imports is_market_open from
         # bots.hydra.base_strategy (post-P1 reparent) — patch it there,
         # not bots.meic.strategy. Patching the wrong module left the
         # real is_market_open live → the test passed only during real
         # market hours.
+        #
+        # Confirm-before-alarm (2026-06-15): the FIRST detection of any
+        # discrepancy/orphan only schedules a settle-window re-check (IBKR
+        # position-feed lag guard); the alert/cleanup fires on the confirmation
+        # pass. Drive both passes so these body tests see the COMMITTED behavior.
+        # No-finding cases never schedule a re-check, so the second pass is a
+        # no-op there (and the no-alert assertions still hold).
+        t0 = datetime(2026, 5, 21, 11, 0, 0)
         with patch("bots.hydra.base_strategy.is_market_open", return_value=True), \
-             patch("bots.hydra.strategy.get_us_market_time",
-                   return_value=datetime(2026, 5, 21, 11, 0, 0)):
+             patch("bots.hydra.strategy.get_us_market_time", return_value=t0):
             s._check_hourly_reconciliation()
+        if getattr(s, "_recon_recheck_at", None) is not None:
+            with patch("bots.hydra.base_strategy.is_market_open", return_value=True), \
+                 patch("bots.hydra.strategy.get_us_market_time",
+                       return_value=t0 + timedelta(seconds=60)):
+                s._check_hourly_reconciliation()
 
     def test_empty_actual_treated_as_fetch_failure(self):
         """Broker returns nothing while we expect legs → skip, no alert."""

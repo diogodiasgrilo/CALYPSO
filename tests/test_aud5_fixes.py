@@ -482,7 +482,10 @@ class TestSpreadSnapshotsDateColumn:
             v = conn.execute("SELECT value FROM schema_info WHERE key='version'").fetchone()[0]
         finally:
             conn.close()
-        assert int(v) == SCHEMA_VERSION == 10
+        # The `date` column is the point of this test; it was introduced at v10
+        # and is carried forward (schema is now v11+). Assert the fresh DB is at
+        # the current SCHEMA_VERSION rather than pinning a stale literal.
+        assert int(v) == SCHEMA_VERSION
 
     def test_record_writes_date_from_timestamp(self, tmp_path):
         from shared.data_recorder import DataRecorder
