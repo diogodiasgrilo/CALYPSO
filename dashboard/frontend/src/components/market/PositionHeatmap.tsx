@@ -32,8 +32,12 @@ export function PositionHeatmap() {
   }
   if (allStrikes.length === 0) return null;
 
-  const minStrike = Math.min(...allStrikes) - 10;
-  const maxStrike = Math.max(...allStrikes) + 10;
+  // Include the live SPX in the axis range so the spot marker is always on-chart
+  // and the axis can't read "7450 … SPX 7547 … 7485" (spot outside the strikes,
+  // e.g. far-OTM put-only entries). Pad 10pt on each side.
+  const axisPoints = spx > 0 ? [...allStrikes, spx] : allStrikes;
+  const minStrike = Math.min(...axisPoints) - 10;
+  const maxStrike = Math.max(...axisPoints) + 10;
   const range = maxStrike - minStrike;
   if (range <= 0) return null;
 

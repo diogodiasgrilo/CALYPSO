@@ -106,48 +106,48 @@ export function PerformanceMetrics() {
 
   const { sharpe, sortino, dd, calmar, pf, exp, wlRatio } = stats;
 
-  const fmtRatio = (v: number) =>
-    isNaN(v) ? "N/A" : v === Infinity ? "∞" : v === -Infinity ? "-∞" : v.toFixed(2);
+  // Annualized ratios (Sharpe/Sortino/Calmar/Profit Factor/Win-Loss) are
+  // statistically meaningless on a handful of days — a few flat-ish days makes
+  // Sharpe explode (e.g. 111), and "no losing day yet" makes the others ∞. Gate
+  // them behind a minimum sample and show "—" with a building note until then.
+  // Max Drawdown and Expectancy are dollar values that are meaningful earlier.
+  const MIN_DAYS_FOR_RATIOS = 20;
+  const n = effectivePnls?.length ?? 0;
+  const enoughForRatios = n >= MIN_DAYS_FOR_RATIOS;
+
+  const ratio = (v: number, good: number, ok: number) => {
+    const usable = enoughForRatios && isFinite(v) && !isNaN(v);
+    return {
+      value: usable ? v.toFixed(2) : "—",
+      color: usable
+        ? v >= good ? colors.profit : v >= ok ? colors.warning : colors.loss
+        : colors.textDim,
+    };
+  };
+  const sh = ratio(sharpe, 1, 0);
+  const so = ratio(sortino, 1.5, 0);
+  const ca = ratio(calmar, 2, 0);
+  const pfc = ratio(pf, 1.5, 1);
+  const wl = ratio(wlRatio, 1, 0);
 
   return (
     <div>
-      <h3 className="label-upper mb-2">Performance</h3>
+      <div className="flex items-baseline justify-between mb-2">
+        <h3 className="label-upper">Performance</h3>
+        {!enoughForRatios && (
+          <span className="text-[10px] text-text-dim">
+            ratios need ≥{MIN_DAYS_FOR_RATIOS} days · have {n}
+          </span>
+        )}
+      </div>
       <div className="grid grid-cols-4 max-lg:grid-cols-2 max-sm:grid-cols-1 gap-2">
-        <MetricCard
-          label="Sharpe (ann.)"
-          value={fmtRatio(sharpe)}
-          color={sharpe >= 1 ? colors.profit : sharpe >= 0 ? colors.warning : colors.loss}
-        />
-        <MetricCard
-          label="Sortino (ann.)"
-          value={fmtRatio(sortino)}
-          color={sortino >= 1.5 ? colors.profit : sortino >= 0 ? colors.warning : colors.loss}
-        />
-        <MetricCard
-          label="Max Drawdown"
-          value={formatPnL(-dd.value)}
-          color={colors.loss}
-        />
-        <MetricCard
-          label="Calmar (ann.)"
-          value={fmtRatio(calmar)}
-          color={calmar >= 2 ? colors.profit : calmar >= 0 ? colors.warning : colors.loss}
-        />
-        <MetricCard
-          label="Profit Factor"
-          value={fmtRatio(pf)}
-          color={pf >= 1.5 ? colors.profit : pf >= 1 ? colors.warning : colors.loss}
-        />
-        <MetricCard
-          label="Expectancy"
-          value={formatPnL(exp)}
-          color={pnlColor(exp)}
-        />
-        <MetricCard
-          label="Win/Loss Ratio"
-          value={fmtRatio(wlRatio)}
-          color={wlRatio >= 1 ? colors.profit : colors.loss}
-        />
+        <MetricCard label="Sharpe (ann.)" value={sh.value} color={sh.color} />
+        <MetricCard label="Sortino (ann.)" value={so.value} color={so.color} />
+        <MetricCard label="Max Drawdown" value={formatPnL(-dd.value)} color={colors.loss} />
+        <MetricCard label="Calmar (ann.)" value={ca.value} color={ca.color} />
+        <MetricCard label="Profit Factor" value={pfc.value} color={pfc.color} />
+        <MetricCard label="Expectancy" value={formatPnL(exp)} color={pnlColor(exp)} />
+        <MetricCard label="Win/Loss Ratio" value={wl.value} color={wl.color} />
       </div>
     </div>
   );
