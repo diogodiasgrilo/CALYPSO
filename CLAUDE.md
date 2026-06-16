@@ -1048,6 +1048,7 @@ For the full 86-fix history including all Saxo-era bugs and resolutions, see `bo
 | P7 audit findings (49 issues, all closed) | [docs/migration/P7_AUDIT_FINDINGS.md](docs/migration/P7_AUDIT_FINDINGS.md) | Round 1 register + Round 2/3 verifications |
 | Credentials setup | [deploy/IBKR_CREDENTIALS_SETUP.md](deploy/IBKR_CREDENTIALS_SETUP.md) | One-time setup + pre-start checklist |
 | HYDRA strategy spec | [docs/HYDRA_STRATEGY_SPECIFICATION.md](docs/HYDRA_STRATEGY_SPECIFICATION.md) | Full spec: decision flows, MKT rules, stop math |
+| Adding a NEW strategy (playbook + audit) | [docs/NEW_STRATEGY_PLAYBOOK.md](docs/NEW_STRATEGY_PLAYBOOK.md) | Step-by-step (Steps 0–10) distilled from Strategy D; coexistence checklist; go-live gate; audit log |
 | HYDRA trading journal | [docs/HYDRA_TRADING_JOURNAL.md](docs/HYDRA_TRADING_JOURNAL.md) | Daily results (updated by HOMER) |
 | Buffer optimization | [docs/HYDRA_BUFFER_OPTIMIZATION.md](docs/HYDRA_BUFFER_OPTIMIZATION.md) | Per-VIX-regime buffer study |
 | Early close analysis | [docs/HYDRA_EARLY_CLOSE_ANALYSIS.md](docs/HYDRA_EARLY_CLOSE_ANALYSIS.md) | Why MKT-018 is disabled |
