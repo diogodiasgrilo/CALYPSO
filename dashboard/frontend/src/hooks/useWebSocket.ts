@@ -2,6 +2,15 @@
 
 import { useEffect, useRef, useCallback } from "react";
 import { useHydraStore } from "../store/hydraStore";
+import { useSelectedSnapshotStore } from "../components/dashboard/selectedSnapshotStore";
+
+/** True when the dashboard is currently showing a NON-primary strategy.
+ *  StrategyDashboard publishes the polled snapshot ONLY for a non-primary
+ *  selection (null on the primary), so a non-null snapshot here means "not the
+ *  primary" — exactly the cross-strategy-toast guard (audit AUD-3-F1). */
+function isViewingNonPrimary(): boolean {
+  return useSelectedSnapshotStore.getState().snapshot !== null;
+}
 
 const MAX_RECONNECT_DELAY = 30_000;
 /** If no message received for this long, declare connection dead and reconnect. */
@@ -87,14 +96,21 @@ export function useWebSocket() {
             break;
           case "stop_events":
             applyStopEvents(msg.data);
-            // Toast notification for new stops
-            for (const stop of msg.data) {
-              if (stop.stop_time) {
-                addToast({
-                  type: "stop",
-                  title: `Stop Triggered`,
-                  message: `Entry #${stop.entry_number} ${stop.side} side stopped`,
-                });
+            // Toast notification for new stops — the WS stream tracks the
+            // PRIMARY strategy only. Suppress these toasts while the user is
+            // viewing a DIFFERENT strategy on the dashboard, so a primary-C
+            // stop doesn't pop while the body shows E (audit AUD-3-F1). The
+            // stopEvents themselves are still applied (harmless; the primary
+            // view reads them). null/unset selection = primary = show toasts.
+            if (!isViewingNonPrimary()) {
+              for (const stop of msg.data) {
+                if (stop.stop_time) {
+                  addToast({
+                    type: "stop",
+                    title: `Stop Triggered`,
+                    message: `Entry #${stop.entry_number} ${stop.side} side stopped`,
+                  });
+                }
               }
             }
             break;

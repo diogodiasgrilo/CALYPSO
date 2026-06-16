@@ -298,6 +298,15 @@ export function OffDaySummaryCards() {
   const comparisons = useHydraStore((s) => s.comparisons);
   const [recentDays, setRecentDays] = useState<DailySummary[]>([]);
   const [lastDayEntries, setLastDayEntries] = useState<EntryPnL[]>([]);
+  // EOD auto-update (operator request): these "Last Trading Day" / "Week in
+  // Review" widgets are end-of-day fields that previously fetched ONCE on mount
+  // and went stale until a manual reload. We re-run the fetch when the trading
+  // day ends OR when settlement writes new cumulative metrics — both signals
+  // arrive over the live WebSocket (market_status flips is_open→false at 4 PM ET;
+  // the metrics poll re-reads hydra_metrics.json ~10s and updates last_updated).
+  // Keying the effect on those means the cards refresh at close with no reload.
+  const marketOpen = useHydraStore((s) => s.market?.is_open ?? null);
+  const metricsUpdated = useHydraStore((s) => s.metrics?.last_updated ?? null);
 
   useEffect(() => {
     fetch("/api/metrics/daily?days=10")
@@ -340,7 +349,8 @@ export function OffDaySummaryCards() {
         }
       })
       .catch(() => {});
-  }, []);
+    // marketOpen / metricsUpdated drive the EOD re-fetch (see note above).
+  }, [marketOpen, metricsUpdated]);
 
   // Last trading day = most recent entry (summaries come DESC from API)
   const lastDay = recentDays.length > 0 ? recentDays[0] : null;

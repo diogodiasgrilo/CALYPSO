@@ -37,21 +37,15 @@ import {
 } from "recharts";
 import { colors, pnlColor, cushionColor } from "../lib/tradingColors";
 import { formatPnL, isRegularSessionTime } from "../lib/formatters";
+import { accentForStrategy } from "../lib/pnlShape";
 
 const POLL_MS = 2000;
 
-// Per-variant accent color. Order: A=blue, B=amber, C=mint, D=coral, E=purple-ish.
-// New variants past E render in textPrimary — easy to extend if needed.
-const VARIANT_ACCENTS: Record<string, string> = {
-  A: colors.info,
-  B: colors.warning,
-  C: colors.profit,
-  D: colors.loss,
-  E: "#a371f7",
-};
-
+// Per-variant accent color now comes from the shared, id-derived map (replaces
+// the positional VARIANT_ACCENTS) so the same letter gets the same color on the
+// dashboard picker, the comparison panels, and the group tabs alike.
 function accentFor(id: string): string {
-  return VARIANT_ACCENTS[id] ?? colors.textPrimary;
+  return accentForStrategy(id);
 }
 
 interface VariantConfig {
@@ -173,7 +167,7 @@ interface VariantPayload {
   vix_open?: number;
 }
 
-interface ComparisonPayload {
+export interface ComparisonPayload {
   date: string;
   leaderboard: {
     winner: string; // "A" | "B" | "C" | ... | "tie" | "n/a"
@@ -233,7 +227,7 @@ interface H2HPoint {
   [key: string]: number | string;
 }
 
-interface AggregatePayload {
+export interface AggregatePayload {
   variants: Record<string, AggregateVariant>;
   head_to_head: {
     common_days: number;
@@ -350,6 +344,25 @@ export function Comparison() {
     );
   }
 
+  return <ComparisonView data={data} aggregate={aggregate} variantIds={variantIds} />;
+}
+
+/**
+ * The CREDIT-shape (iron-condor) comparison renderer — reused by both the
+ * legacy /api/variants-driven page above AND the group tabs
+ * (GroupComparison feeding the ic_0dte group's members + baseline). Takes its
+ * data as props so the same panels render regardless of the data source. A
+ * SINGLE chart never receives two pnl_shapes — this view is credit-only.
+ */
+export function ComparisonView({
+  data,
+  aggregate,
+  variantIds,
+}: {
+  data: ComparisonPayload;
+  aggregate: AggregatePayload | null;
+  variantIds: string[];
+}) {
   const { variants, leaderboard } = data;
 
   // Render variant payloads in canonical order. Missing payloads (e.g. a

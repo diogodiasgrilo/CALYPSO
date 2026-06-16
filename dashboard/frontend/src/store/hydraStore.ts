@@ -192,6 +192,30 @@ export interface Toast {
 
 export type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
 
+// ── Selected-strategy persistence (main-dashboard picker) ──
+// The picker only changes WHICH read source the main page queries + a UI pref.
+// It is NOT a write path. The chosen letter is persisted to localStorage and
+// validated against the taxonomy on boot (falls back to primary if stale).
+const SELECTED_STRATEGY_KEY = "calypso-selected-strategy";
+
+function loadSelectedStrategy(): string | null {
+  try {
+    const v = localStorage.getItem(SELECTED_STRATEGY_KEY);
+    return v ? v.trim().toLowerCase() : null;
+  } catch {
+    return null;
+  }
+}
+
+function persistSelectedStrategy(id: string | null): void {
+  try {
+    if (id) localStorage.setItem(SELECTED_STRATEGY_KEY, id);
+    else localStorage.removeItem(SELECTED_STRATEGY_KEY);
+  } catch {
+    /* localStorage unavailable (private mode) — selection stays in-memory only */
+  }
+}
+
 // ── Store ──
 
 interface DashboardStore {
@@ -236,6 +260,12 @@ interface DashboardStore {
   showStrikes: boolean;
   muted: boolean;
 
+  // Main-dashboard strategy selection (picker). Lowercase letter or null when
+  // unset/never chosen — the selector resolves null to the taxonomy primary.
+  // Persisted to localStorage; the Header reads the SELECTED strategy's chrome
+  // (not the WS primary) so a non-primary selection re-binds the whole header.
+  selectedStrategyId: string | null;
+
   // Actions
   setConnectionStatus: (status: ConnectionStatus) => void;
   applySnapshot: (data: Record<string, unknown>) => void;
@@ -253,6 +283,7 @@ interface DashboardStore {
   setClientCount: (count: number) => void;
   toggleStrikes: () => void;
   toggleMuted: () => void;
+  setSelectedStrategy: (id: string | null) => void;
 }
 
 export const useHydraStore = create<DashboardStore>()(
@@ -272,6 +303,7 @@ export const useHydraStore = create<DashboardStore>()(
     toasts: [],
     showStrikes: false,
     muted: false,
+    selectedStrategyId: loadSelectedStrategy(),
 
     setConnectionStatus: (status) =>
       set((s) => {
@@ -397,6 +429,13 @@ export const useHydraStore = create<DashboardStore>()(
     toggleMuted: () =>
       set((s) => {
         s.muted = !s.muted;
+      }),
+
+    setSelectedStrategy: (id) =>
+      set((s) => {
+        const norm = id ? id.trim().toLowerCase() : null;
+        s.selectedStrategyId = norm;
+        persistSelectedStrategy(norm);
       }),
   }))
 );

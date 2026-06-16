@@ -1,4 +1,5 @@
 import { Volume2, VolumeX, LogOut } from "lucide-react";
+import { useLocation } from "react-router-dom";
 import { getApiKey, clearApiKey } from "../../apiKey";
 import { useHydraStore } from "../../store/hydraStore";
 import { formatPrice } from "../../lib/formatters";
@@ -6,19 +7,76 @@ import { vixColor, colors } from "../../lib/tradingColors";
 import { useFlashOnChange } from "../../hooks/useFlashOnChange";
 import { isMuted, toggleMute } from "../../lib/sounds";
 import { useBotConfig } from "../../hooks/useBotConfig";
+import { useStrategyMeta } from "../../hooks/useStrategyMeta";
+import { useSelectedStrategy } from "../../hooks/useSelectedStrategy";
+import { useSelectedSnapshotStore } from "../dashboard/selectedSnapshotStore";
+import { StrategyPicker } from "../shared/StrategyPicker";
 import { useState } from "react";
+import type { ICSnapshotBody } from "../../hooks/useStrategySnapshot";
 
 export function Header() {
   const { connectionStatus, hydraState, market, todayOHLC } = useHydraStore();
   const [muted, setMuted] = useState(isMuted());
   const cfg = useBotConfig();
-  const dryRun = cfg.dry_run === true;
+  const meta = useStrategyMeta();
+  const { strategy, isPrimarySelected } = useSelectedStrategy();
+  const selectedSnapshot = useSelectedSnapshotStore((s) => s.snapshot);
+  const location = useLocation();
 
-  // SPX: use last OHLC bar close (most recent), fall back to state file high/low midpoint
-  const lastBar = todayOHLC.length > 0 ? todayOHLC[todayOHLC.length - 1] : null;
-  const ohlc = hydraState?.market_data_ohlc;
-  const spx = lastBar?.close ?? (ohlc?.spx_high ? (ohlc.spx_high + ohlc.spx_low) / 2 : 0);
-  const vix = lastBar?.vix ?? (ohlc?.vix_high ? (ohlc.vix_high + ohlc.vix_low) / 2 : 0);
+  // The picker is the DASHBOARD tab's control (audit AUD-3-F4). On other tabs
+  // (History/Analytics — still primary-bound) we hide it and show a note so it
+  // never silently lies about what those pages show.
+  const onDashboardTab = location.pathname === "/";
+
+  // ── Header chrome source resolution (audit AUD-3-F1) ──
+  // When a NON-primary strategy is selected AND its snapshot has arrived, the
+  // WHOLE header re-binds to that selection: label, dry-run banner, and the
+  // underlying prices come from the snapshot envelope/body — NOT the WS store
+  // (which always tracks the primary C). On the primary (or before the snapshot
+  // loads), we use the original WS-driven chrome exactly as before.
+  const usingSelected = !!selectedSnapshot && !isPrimarySelected;
+
+  // Dry-run flag follows the selection.
+  const dryRun = usingSelected
+    ? selectedSnapshot!.dry_run === true
+    : cfg.dry_run === true;
+
+  // Label follows the selection (display_name/label from the envelope).
+  const primaryLabel = usingSelected
+    ? selectedSnapshot!.label || selectedSnapshot!.display_name
+    : cfg.primary_label;
+
+  // Underlying symbol (defaults SPX for the primary IC stack).
+  const underlying = usingSelected
+    ? selectedSnapshot!.underlying_symbol || "SPX"
+    : "SPX";
+
+  // Price source. WS primary: last OHLC bar / state-file midpoint. Selected:
+  // the snapshot body's spx fields (IC) — calendars carry no intraday SPX/VIX,
+  // so we suppress the price chips for them rather than show stale primary data.
+  let spx = 0;
+  let vix = 0;
+  let showVix = true;
+  if (usingSelected) {
+    if (selectedSnapshot!.data_kind === "ic_state") {
+      const body = selectedSnapshot!.body as ICSnapshotBody;
+      const high = body.spx_high ?? 0;
+      const low = body.spx_low ?? 0;
+      spx = body.spx_price ?? (high && low ? (high + low) / 2 : 0);
+      // The IC snapshot body has vix_open but no live VIX; show open as a hint.
+      vix = body.vix_open ?? 0;
+    } else {
+      // Calendar strategy — no intraday SPX/VIX in the body.
+      spx = 0;
+      vix = 0;
+      showVix = false;
+    }
+  } else {
+    const lastBar = todayOHLC.length > 0 ? todayOHLC[todayOHLC.length - 1] : null;
+    const ohlc = hydraState?.market_data_ohlc;
+    spx = lastBar?.close ?? (ohlc?.spx_high ? (ohlc.spx_high + ohlc.spx_low) / 2 : 0);
+    vix = lastBar?.vix ?? (ohlc?.vix_high ? (ohlc.vix_high + ohlc.vix_low) / 2 : 0);
+  }
 
   const spxFlash = useFlashOnChange(spx);
   const vixFlash = useFlashOnChange(vix);
@@ -35,10 +93,15 @@ export function Header() {
     setMuted(isMuted());
   };
 
+  const showPicker = onDashboardTab && !meta.loading;
+  // Off-dashboard note: name the primary so History/Analytics never imply the
+  // picker's selection applies to them.
+  const primaryName = meta.byId[meta.primaryId]?.display_name;
+  const showOffTabNote = !onDashboardTab && !meta.loading && !!strategy && !isPrimarySelected && !!primaryName;
+
   return (
     <>
-      {/* 2026-04-27: Path-B dry-run banner. Prominent, full-width, hard to miss.
-          Renders only when backend reports dry_run=true. */}
+      {/* Dry-run banner — follows the SELECTED strategy. */}
       {dryRun && (
         <div
           className="w-full text-center font-bold tracking-widest text-xs sm:text-sm py-1.5 max-sm:py-1 select-none"
@@ -47,13 +110,13 @@ export function Header() {
             color: "#1a1a1a",
             letterSpacing: "0.15em",
           }}
-          title="Dry-run mode: real IBKR-paper prices, no real orders placed. Position IDs prefixed DRY_*."
+          title="Dry-run mode: real broker prices, no real orders placed."
         >
           ⚠ DRY-RUN MODE — REAL PRICES, NO REAL ORDERS — POSITION IDs PREFIXED DRY_* ⚠
         </div>
       )}
       <header className="flex items-center justify-between px-4 max-sm:px-2 py-2 bg-bg border-b border-border-dim">
-      {/* Left: Logo + title + connection */}
+      {/* Left: Logo + title + connection + strategy picker */}
       <div className="flex items-center gap-3 max-sm:gap-2">
         <img
           src="/hydra-logo.png"
@@ -66,18 +129,36 @@ export function Header() {
         <span className="text-text-primary font-bold text-base max-sm:text-sm tracking-wide">
           HYDRA
         </span>
-        {cfg.primary_label && (
+
+        {/* Strategy picker (dashboard tab only). */}
+        {showPicker && <StrategyPicker />}
+
+        {/* Static label fallback when the picker isn't shown (other tabs) or
+            there's only one strategy. The label follows the selection. */}
+        {!showPicker && primaryLabel && (
           <span
             className="text-[10px] sm:text-xs font-bold px-2 py-0.5 rounded uppercase tracking-wide whitespace-nowrap"
             style={{
               backgroundColor: dryRun ? "rgba(210,153,34,0.18)" : "rgba(126,232,199,0.18)",
               color: dryRun ? colors.warning : colors.profit,
             }}
-            title="The strategy this main page is showing. Other variants are on the Comparison page."
+            title="The strategy this page is showing."
           >
-            {cfg.primary_label}
+            {primaryLabel}
           </span>
         )}
+
+        {/* Off-dashboard note — History/Analytics are primary-bound. */}
+        {showOffTabNote && (
+          <span
+            className="text-[10px] sm:text-xs px-2 py-0.5 rounded whitespace-nowrap text-text-secondary"
+            style={{ backgroundColor: "var(--bg-elevated)" }}
+            title="History and Analytics show the primary strategy regardless of the dashboard picker selection."
+          >
+            shows {primaryName}
+          </span>
+        )}
+
         <div className="flex items-center gap-1.5 ml-2 max-sm:ml-1">
           <div className={`w-2 h-2 rounded-full ${connDot}`} />
           <span className="text-text-secondary text-xs capitalize hidden sm:inline">
@@ -86,7 +167,7 @@ export function Header() {
         </div>
       </div>
 
-      {/* Center: SPX + VIX */}
+      {/* Center: underlying + VIX */}
       <div className="flex items-center gap-6 max-sm:gap-3">
         {spx > 0 && (
           <div
@@ -98,13 +179,13 @@ export function Header() {
                 : ""
             }`}
           >
-            <span className="text-text-secondary mr-1">SPX</span>
+            <span className="text-text-secondary mr-1">{underlying}</span>
             <span className="text-text-primary font-semibold">
               {formatPrice(spx)}
             </span>
           </div>
         )}
-        {vix > 0 && (
+        {showVix && vix > 0 && (
           <div
             className={`text-sm max-sm:text-xs ${
               vixFlash === "up"

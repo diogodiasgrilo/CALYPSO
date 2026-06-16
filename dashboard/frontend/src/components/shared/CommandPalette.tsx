@@ -1,7 +1,8 @@
 import { useState, useEffect, useRef, useCallback, useId } from "react";
 import { useNavigate } from "react-router-dom";
-import { Search, LayoutDashboard, CalendarDays, BarChart3, CalendarClock, Download, Volume2, VolumeX, Eye } from "lucide-react";
+import { Search, LayoutDashboard, CalendarDays, BarChart3, Scale, Layers, Download, Volume2, VolumeX, Eye } from "lucide-react";
 import { useHydraStore } from "../../store/hydraStore";
+import { useStrategyMeta } from "../../hooks/useStrategyMeta";
 import { exportDailySummariesCSV } from "../../lib/exportUtils";
 
 interface Command {
@@ -29,6 +30,32 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   const toggleStrikes = useHydraStore((s) => s.toggleStrikes);
   const toggleMuted = useHydraStore((s) => s.toggleMuted);
   const muted = useHydraStore((s) => s.muted);
+  const setSelectedStrategy = useHydraStore((s) => s.setSelectedStrategy);
+  const meta = useStrategyMeta();
+
+  // Data-driven commands from the taxonomy (no hardcoded variant letters):
+  //  - "Switch strategy → {display_name}" for every main-dashboard-capable,
+  //    available strategy (navigates to the Dashboard + sets the picker).
+  //  - "Go to {group.label} comparison" for every comparable group.
+  const strategyCommands: Command[] = meta.strategies
+    .filter((s) => s.capabilities.main_dashboard && s.available)
+    .map((s) => ({
+      id: `strategy-${s.id}`,
+      label: `Switch strategy → ${s.display_name}`,
+      icon: <Layers size={14} />,
+      action: () => { setSelectedStrategy(s.id); navigate("/"); onClose(); },
+      keywords: `strategy switch select ${s.display_name} ${s.id} ${s.group_id}`,
+    }));
+
+  const groupCommands: Command[] = meta.groups
+    .filter((g) => g.comparable)
+    .map((g) => ({
+      id: `group-${g.id}`,
+      label: `Go to ${g.label} comparison`,
+      icon: <Scale size={14} />,
+      action: () => { navigate(`/comparison/${g.id}`); onClose(); },
+      keywords: `comparison compare group ${g.label} ${g.id}`,
+    }));
 
   const commands: Command[] = [
     {
@@ -55,13 +82,8 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       keywords: "analytics charts performance stats",
       shortcut: "3",
     },
-    {
-      id: "dc-time-machine",
-      label: "Go to DC Time Machine",
-      icon: <CalendarClock size={14} />,
-      action: () => { navigate("/dc"); onClose(); },
-      keywords: "dc double calendar strategy d time machine",
-    },
+    ...strategyCommands,
+    ...groupCommands,
     {
       id: "strikes",
       label: "Toggle Strike Lines",

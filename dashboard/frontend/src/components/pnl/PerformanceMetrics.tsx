@@ -34,19 +34,35 @@ export function PerformanceMetrics() {
   const [dailyPnls, setDailyPnls] = useState<number[] | null>(null);
   const [error, setError] = useState(false);
   const performancePnls = useHydraStore((s) => s.performancePnls);
+  // EOD auto-update (operator request): re-fetch the one-shot performance
+  // endpoint when the trading day ends OR when settlement writes new metrics —
+  // so the section refreshes at close WITHOUT a manual reload. We key the fetch
+  // effect on the market-open flag and the metrics' last_updated date so a
+  // transition to closed / a fresh metrics write re-runs it. (The WS
+  // performance_update push also feeds `performancePnls` below; this fetch is
+  // the belt-and-suspenders for clients that connect after that one-shot push.)
+  const marketOpen = useHydraStore((s) => s.market?.is_open ?? null);
+  const metricsUpdated = useHydraStore((s) => s.metrics?.last_updated ?? null);
 
   useEffect(() => {
+    let cancelled = false;
     fetch("/api/metrics/performance")
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       })
       .then((data) => {
+        if (cancelled) return;
         if (data.daily_pnls) setDailyPnls(data.daily_pnls);
         else setDailyPnls([]);
       })
-      .catch(() => setError(true));
-  }, []);
+      .catch(() => {
+        if (!cancelled) setError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [marketOpen, metricsUpdated]);
 
   // Use WebSocket-pushed data (after market close) if available, otherwise API data
   const effectivePnls = performancePnls ?? dailyPnls;
