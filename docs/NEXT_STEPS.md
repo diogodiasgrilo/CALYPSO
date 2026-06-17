@@ -9,15 +9,17 @@
 
 ## 0. Current snapshot
 
-- **Branch:** `feat/strategy-grouping-spy-calendar` (pushed to origin; **not merged**). 9 commits.
-- **Built + tested (full suite 1680 passed / 15 skipped; frontend `tsc -b` + `vite build` clean):**
+- **Branch:** **MERGED** into `hydra-ibkr-standalone` (2026-06-16, at `e5688f0`; latest `741fc66`). The merge
+  also reconciled a HOMER auto-commit that had regressed the mainline (see [[homer-vm-autocommit-gotcha]] / §6).
+- **Built + tested (full suite ~1686 passed / 15 skipped; frontend `tsc -b` + `vite build` clean):**
   Strategy taxonomy → bot wiring → `CalendarStrategyBase` (D byte-identical) → **Strategy E (SPY double
   calendar, dry-run-locked)** → dashboard backend `/api/strategies` → dashboard frontend (picker + group
-  tabs + EOD auto-update) → comms (group-scoped `/compare` + display names).
-- **Deployed:** the **dashboard only** (frontend + backend overlay) to the VM for visual verification —
-  bot code untouched. See §4.
-- **NOT deployed / NOT live:** Strategy E and Strategy D are both **dry-run-LOCKED**; neither runs on the VM
-  as a service yet. A/B/C are unchanged.
+  tabs + **full-parity non-primary 0DTE view** + EOD auto-update) → comms (group-scoped `/compare` + display names).
+- **Deployed to the VM:** the full dashboard (picker + group tabs + full-parity 0DTE view) AND **Strategy E
+  running dry-run** (`hydra_variant_e` active; SPY resolves @~750.72; recorder DB created; available in the
+  picker). `calypso-broker` was restarted for the new `shared/ib_client`; session healthy. VM tree clean.
+- **Still dry-run-LOCKED / NOT live:** E and D place **no real orders**. A/B/C unchanged (A=dry-run per its
+  config, C=live-paper). Real-money/live-paper go-live for E/D remains gated (§2b/§3).
 
 ---
 
