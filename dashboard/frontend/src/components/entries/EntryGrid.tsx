@@ -33,6 +33,42 @@ export function EntryGrid({ entries: entriesProp }: EntryGridProps = {}) {
   const schedule = hydraState?.entry_schedule;
   const showConditional = useShowConditionalEntries();
 
+  // ── Non-primary (polled) strategies ──────────────────────────────────────
+  // When the parent passes a polled snapshot's entries, render EXACTLY those.
+  // Do NOT derive the slot count from useBotConfig() below — that is ALWAYS the
+  // GLOBAL /api/hydra/bot-config (variant A's config: 2 base slots). Any strategy
+  // that runs more entries than A (e.g. B's 4) had its extra entries — AND their
+  // P&L — silently hidden, which made a losing day look like a winning one
+  // (2026-06-17). We don't have the selected strategy's own schedule client-side,
+  // so rendering the actual placed entries (numbered) is the correct, no-hiding
+  // behavior. The primary (WS-store) path below is untouched — there the config
+  // genuinely IS this strategy's (variant A), so its schedule logic stays exact.
+  if (entriesProp) {
+    const sorted = [...entriesProp].sort(
+      (a, b) => (a.entry_number ?? 0) - (b.entry_number ?? 0)
+    );
+    return (
+      <div>
+        <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
+          Entries
+        </h3>
+        {sorted.length === 0 ? (
+          <div className="text-sm text-text-secondary py-2">No entries today.</div>
+        ) : (
+          <div className="grid gap-2 max-sm:grid-cols-1 grid-cols-2 lg:grid-cols-3">
+            {sorted.map((entry, i) => (
+              <EntryCard
+                key={entry.entry_number ?? i}
+                entry={entry}
+                label={`#${entry.entry_number ?? i + 1}`}
+              />
+            ))}
+          </div>
+        )}
+      </div>
+    );
+  }
+
   // Canonical base times (pre-VIX-cap) come from bot config.
   // As of 2026-04-17, the 10:15 slot is dropped at ALL VIX levels (max_entries [2,2,2,1]).
   // Live bot code (v1.24.0+) emits effective numbering: Entry #1 = 10:45, #2 = 11:15,
