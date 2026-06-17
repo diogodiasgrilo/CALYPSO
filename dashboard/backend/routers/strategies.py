@@ -116,6 +116,22 @@ def _is_available(vid: str) -> bool:
         return False
 
 
+def _is_available_meta(m: tax.StrategyMeta) -> bool:
+    """Availability for /meta + the picker: the variant has produced data and can
+    be selected. State file (the bot has run) OR — for a calendar strategy — any
+    calendar artifact (dc_calendar.db / dc_open_trades.json). A fresh calendar with
+    no open positions writes its DB/recorder before a base state file, so the
+    state-file-only check would wrongly grey out a running calendar variant (e.g. E
+    on its first dry-run day before any entry)."""
+    if _is_available(m.id):
+        return True
+    if _data_kind(m) == "dc_calendar":
+        vd = _variant_dir(m.id)
+        if vd is not None and ((vd / "dc_calendar.db").exists() or (vd / "dc_open_trades.json").exists()):
+            return True
+    return False
+
+
 def _file_age_seconds(path: Optional[Path]) -> Optional[float]:
     try:
         if path is None or not Path(path).exists():
@@ -158,7 +174,7 @@ def _strategy_meta_dict(m: tax.StrategyMeta) -> dict:
         "data_kind": _data_kind(m),
         "is_live": m.status == "live",
         "is_primary": m.id == PRIMARY_ID,
-        "available": _is_available(m.id),
+        "available": _is_available_meta(m),
         "capabilities": _capabilities(m),
     }
 
