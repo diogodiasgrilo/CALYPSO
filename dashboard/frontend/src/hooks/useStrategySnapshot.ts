@@ -78,6 +78,46 @@ export interface PnLPoint {
   pnl: number;
 }
 
+// 1-min SPX OHLC bar — matches the WS store's OHLCBar + market_ohlc_1min row
+// shape so the SPXChart candle path is byte-identical whether the bars come
+// from the WS store or this polled snapshot.
+export interface ICSnapshotOHLCBar {
+  timestamp: string;
+  open: number;
+  high: number;
+  low: number;
+  close: number;
+  vix?: number;
+}
+
+// Lifetime cumulative metrics for DailyPnLCard's "Cumulative" section. Same
+// shape as /api/metrics/cumulative (the DB-canonical rollup), per-variant.
+export interface ICSnapshotCumulative {
+  cumulative_pnl?: number;
+  winning_days?: number;
+  losing_days?: number;
+  total_credit_collected?: number;
+  total_entries?: number;
+  total_stops?: number;
+  cumulative_baseline_date?: string;
+  capital_deployed?: number;
+  avg_capital_per_day?: number;
+  roi_pct?: number;
+  [key: string]: unknown;
+}
+
+// Advanced-stats payload for PerformanceMetrics — `daily_pnls` is the same array
+// /api/metrics/performance returns (the widget computes the ratios client-side).
+export interface ICSnapshotPerformance {
+  daily_pnls?: number[];
+  advanced?: {
+    sharpe: number;
+    max_drawdown: number;
+    best_day: number;
+    worst_day: number;
+  };
+}
+
 export interface ICSnapshotBody {
   available: boolean;
   reason?: string;
@@ -93,6 +133,12 @@ export interface ICSnapshotBody {
   vix_open?: number;
   state?: string;
   date?: string;
+  // Full-mirror enrichment (2026-06): the variant's OWN today OHLC bars,
+  // lifetime cumulative metrics, and performance stats so a non-primary IC view
+  // renders the SAME panels as the primary WS view.
+  ohlc?: ICSnapshotOHLCBar[];
+  cumulative?: ICSnapshotCumulative;
+  performance?: ICSnapshotPerformance;
 }
 
 // ── Calendar (dc_calendar) body — debit-native, NO IC fields ──

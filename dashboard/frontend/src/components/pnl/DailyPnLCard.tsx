@@ -3,7 +3,11 @@ import { useHydraStore } from "../../store/hydraStore";
 import { formatPnL, winRate } from "../../lib/formatters";
 import { pnlColor, colors } from "../../lib/tradingColors";
 import { useAnimatedNumber } from "../../hooks/useAnimatedNumber";
-import type { HydraEntry } from "../../store/hydraStore";
+import type { HydraEntry, CumulativeMetrics } from "../../store/hydraStore";
+import type {
+  ICSnapshotSummary,
+  ICSnapshotCumulative,
+} from "../../hooks/useStrategySnapshot";
 
 /** Compute unrealized P&L from active sides + surviving long leg values. */
 function computeUnrealizedPnl(entries: HydraEntry[]): number {
@@ -50,20 +54,47 @@ function StatCell({ label, children, className = "" }: { label: string; children
   );
 }
 
-export function DailyPnLCard() {
-  const { hydraState, metrics, comparisons } = useHydraStore();
+interface DailyPnLCardProps {
+  /** Polled non-primary snapshot's today-summary. When provided, the "Today"
+   *  section reads from THIS (net_pnl/credit/commission/stops/entries) instead
+   *  of the WS store. Omitted → WS store, byte-identical to the old behavior. */
+  summary?: ICSnapshotSummary;
+  /** Polled non-primary snapshot's lifetime cumulative metrics. When provided,
+   *  the "Cumulative" section reads from THIS instead of the WS metrics store. */
+  cumulative?: ICSnapshotCumulative;
+}
+
+export function DailyPnLCard({ summary, cumulative }: DailyPnLCardProps = {}) {
+  // Hooks always called; props (when present) override the WS-store reads so the
+  // primary path is unchanged when no prop is passed.
+  const { hydraState, metrics: wsMetrics, comparisons: wsComparisons } = useHydraStore();
+
+  const usingProps = summary !== undefined || cumulative !== undefined;
+  // Off-primary there is no historical-comparison stream (avg/best/worst) — it's
+  // a WS-only augmentation — so the avg badges/threshold simply don't render.
+  const comparisons = usingProps ? null : wsComparisons;
+  const metrics: CumulativeMetrics | ICSnapshotCumulative | null = usingProps
+    ? (cumulative ?? null)
+    : wsMetrics;
 
   const entries = hydraState?.entries ?? [];
-  const commission = hydraState?.total_commission ?? 0;
-  const credit = hydraState?.total_credit_received ?? 0;
-  const totalStops =
+
+  // ── Today section ──
+  // Prop mode: the snapshot summary already carries the LIVE net P&L
+  // (realized + unrealized − commission) + credit/commission/stop totals.
+  // WS mode: derive net P&L from the live store exactly as before.
+  const wsCommission = hydraState?.total_commission ?? 0;
+  const wsCredit = hydraState?.total_credit_received ?? 0;
+  const wsTotalStops =
     (hydraState?.call_stops_triggered ?? 0) +
     (hydraState?.put_stops_triggered ?? 0);
+  const wsRealizedPnl = hydraState?.total_realized_pnl ?? 0;
+  const wsUnrealizedPnl = useMemo(() => computeUnrealizedPnl(entries), [entries]);
 
-  // Live P&L = realized (actual stop costs from bot) + unrealized (active spread values)
-  const realizedPnl = hydraState?.total_realized_pnl ?? 0;
-  const unrealizedPnl = useMemo(() => computeUnrealizedPnl(entries), [entries]);
-  const netPnl = realizedPnl + unrealizedPnl - commission;
+  const commission = summary ? summary.total_commission ?? 0 : wsCommission;
+  const credit = summary ? summary.total_credit_received ?? 0 : wsCredit;
+  const totalStops = summary ? summary.total_stops ?? 0 : wsTotalStops;
+  const netPnl = summary ? summary.net_pnl ?? 0 : wsRealizedPnl + wsUnrealizedPnl - wsCommission;
 
   const animatedPnl = useAnimatedNumber(netPnl);
 
@@ -91,8 +122,14 @@ export function DailyPnLCard() {
   // (Prior fallback of 3 matched canonical pre-regime numbering and would mis-
   // classify Entry #3 as base in the rare state-unavailable window.)
   const baseCount = schedule?.base?.length ?? 2;
-  const baseEntries = entries.filter((e) => e.entry_number <= baseCount).length;
-  const conditionalEntries = entries.filter((e) => e.entry_number > baseCount).length;
+  // Prop mode: the summary's entries_completed is the authoritative "placed"
+  // count (the polled body doesn't carry the WS store's schedule/entries here).
+  const baseEntries = summary
+    ? summary.entries_completed ?? 0
+    : entries.filter((e) => e.entry_number <= baseCount).length;
+  const conditionalEntries = summary
+    ? 0
+    : entries.filter((e) => e.entry_number > baseCount).length;
 
   return (
     <div className="space-y-3">

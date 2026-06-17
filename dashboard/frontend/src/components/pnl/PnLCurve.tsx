@@ -8,13 +8,26 @@ import {
   ReferenceArea,
   ResponsiveContainer,
 } from "recharts";
-import { useHydraStore } from "../../store/hydraStore";
+import { useHydraStore, type PnLDataPoint } from "../../store/hydraStore";
 import { colors } from "../../lib/tradingColors";
 import { formatPnL, isRegularSessionTime } from "../../lib/formatters";
 
-export function PnLCurve() {
-  const pnlHistoryRaw = useHydraStore((s) => s.pnlHistory);
-  const comparisons = useHydraStore((s) => s.comparisons);
+interface PnLCurveProps {
+  /** Polled non-primary snapshot's pnl_history. When provided, the curve plots
+   *  THIS series instead of the WS store. The comparison threshold bands are a
+   *  WS-only augmentation, so they don't render in prop mode. Omitted → WS
+   *  store, byte-identical to the old behavior. */
+  pnlHistory?: PnLDataPoint[];
+}
+
+export function PnLCurve({ pnlHistory: pnlHistoryProp }: PnLCurveProps = {}) {
+  // Hooks always called; a prop overrides the WS-store read.
+  const storeHistory = useHydraStore((s) => s.pnlHistory);
+  const storeComparisons = useHydraStore((s) => s.comparisons);
+
+  const usingProps = pnlHistoryProp !== undefined;
+  const pnlHistoryRaw = pnlHistoryProp ?? storeHistory;
+  const comparisons = usingProps ? null : storeComparisons;
 
   // Intraday chart: regular session only (09:30–16:00 ET). The bot also records
   // after-hours points (settlement snapshot + any restarts) which would stretch

@@ -1,4 +1,4 @@
-import { useHydraStore } from "../../store/hydraStore";
+import { useHydraStore, type HydraEntry } from "../../store/hydraStore";
 import { colors, cushionColor } from "../../lib/tradingColors";
 
 function computeCushion(spreadValue: number, stopLevel: number): number {
@@ -6,11 +6,22 @@ function computeCushion(spreadValue: number, stopLevel: number): number {
   return Math.max(0, Math.min(100, ((stopLevel - spreadValue) / stopLevel) * 100));
 }
 
-export function PositionHeatmap() {
+interface PositionHeatmapProps {
+  /** Polled non-primary snapshot's entries. When provided, the map renders
+   *  THESE instead of the WS store's. Omitted → WS store. */
+  entries?: HydraEntry[];
+  /** Live SPX spot for the polled path (the snapshot's spx_price). The WS path
+   *  derives SPX from the last OHLC bar; off-primary we pass the snapshot value
+   *  since the store's OHLC belongs to the primary. */
+  spx?: number;
+}
+
+export function PositionHeatmap({ entries: entriesProp, spx: spxProp }: PositionHeatmapProps = {}) {
   const hydraState = useHydraStore((s) => s.hydraState);
   const todayOHLC = useHydraStore((s) => s.todayOHLC);
 
-  const entries = hydraState?.entries ?? [];
+  const usingProps = entriesProp !== undefined;
+  const entries = entriesProp ?? hydraState?.entries ?? [];
   const activeEntries = entries.filter((e) => {
     if (!e.entry_time) return false;
     const callDone = e.call_side_stopped || e.call_side_expired || e.call_side_skipped;
@@ -20,9 +31,10 @@ export function PositionHeatmap() {
 
   if (activeEntries.length === 0) return null;
 
-  // Current SPX from last bar
+  // Current SPX: prop mode uses the snapshot's spx_price; WS mode reads the
+  // last OHLC bar's close exactly as before.
   const lastBar = todayOHLC.length > 0 ? todayOHLC[todayOHLC.length - 1] : null;
-  const spx = lastBar?.close ?? 0;
+  const spx = usingProps ? (spxProp ?? 0) : (lastBar?.close ?? 0);
 
   // Find strike range across all entries
   const allStrikes: number[] = [];

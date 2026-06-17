@@ -30,7 +30,16 @@ function MetricCard({ label, value, color }: MetricCardProps) {
   );
 }
 
-export function PerformanceMetrics() {
+interface PerformanceMetricsProps {
+  /** Polled non-primary snapshot's performance daily-P&L array (the same shape
+   *  /api/metrics/performance returns). When provided, the metrics compute from
+   *  THIS array and the component does NOT fetch the (primary) performance
+   *  endpoint. Omitted → fetch + WS store, byte-identical to the old behavior. */
+  dailyPnls?: number[];
+}
+
+export function PerformanceMetrics({ dailyPnls: dailyPnlsProp }: PerformanceMetricsProps = {}) {
+  const usingProps = dailyPnlsProp !== undefined;
   const [dailyPnls, setDailyPnls] = useState<number[] | null>(null);
   const [error, setError] = useState(false);
   const performancePnls = useHydraStore((s) => s.performancePnls);
@@ -45,6 +54,9 @@ export function PerformanceMetrics() {
   const metricsUpdated = useHydraStore((s) => s.metrics?.last_updated ?? null);
 
   useEffect(() => {
+    // Prop mode: the daily P&L array is supplied by the polled snapshot (the
+    // variant's OWN performance), so DON'T fetch the primary's endpoint.
+    if (usingProps) return;
     let cancelled = false;
     fetch("/api/metrics/performance")
       .then((r) => {
@@ -62,10 +74,11 @@ export function PerformanceMetrics() {
     return () => {
       cancelled = true;
     };
-  }, [marketOpen, metricsUpdated]);
+  }, [usingProps, marketOpen, metricsUpdated]);
 
-  // Use WebSocket-pushed data (after market close) if available, otherwise API data
-  const effectivePnls = performancePnls ?? dailyPnls;
+  // Prop mode: use the supplied array. WS mode: WebSocket-pushed data (after
+  // market close) if available, otherwise API data.
+  const effectivePnls = usingProps ? dailyPnlsProp : (performancePnls ?? dailyPnls);
 
   // useMemo MUST be called unconditionally (Rules of Hooks — no hooks after early returns)
   const stats = useMemo(() => {
@@ -94,7 +107,9 @@ export function PerformanceMetrics() {
     );
   }
 
-  if (dailyPnls === null) {
+  // Loading skeleton only in WS mode (the fetch hasn't resolved yet). In prop
+  // mode the data is supplied synchronously, so there's no loading window.
+  if (!usingProps && dailyPnls === null) {
     return (
       <div>
         <h3 className="label-upper mb-2">Performance</h3>

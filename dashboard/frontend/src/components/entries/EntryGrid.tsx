@@ -17,10 +17,19 @@ function findEntryByNumber(
   return null;
 }
 
-export function EntryGrid() {
+interface EntryGridProps {
+  /** Polled non-primary snapshot's entries. When provided, the grid renders
+   *  THESE instead of the WS store's. The schedule still comes from the bot
+   *  config / state schedule (the polled body doesn't carry an entry_schedule),
+   *  which is exactly the WS fallback when a schedule is absent. Omitted → WS
+   *  store, byte-identical to the old behavior. */
+  entries?: HydraEntry[];
+}
+
+export function EntryGrid({ entries: entriesProp }: EntryGridProps = {}) {
   const { hydraState } = useHydraStore();
   const config = useBotConfig();
-  const entries: HydraEntry[] = hydraState?.entries ?? [];
+  const entries: HydraEntry[] = entriesProp ?? hydraState?.entries ?? [];
   const schedule = hydraState?.entry_schedule;
   const showConditional = useShowConditionalEntries();
 

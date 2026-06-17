@@ -45,6 +45,35 @@ logger = logging.getLogger("dashboard.strategies")
 router = APIRouter(prefix="/api/strategies", tags=["strategies"])
 
 
+def _run_coro(coro):
+    """Run an async DB-reader coroutine to completion from the SYNC snapshot
+    builders, whether or not an event loop is already running.
+
+    The snapshot helpers are sync (``_ic_snapshot`` is called synchronously from
+    the ``async`` route), but the ``BacktestingDBReader`` methods are
+    ``to_thread``-wrapped coroutines. ``asyncio.run`` would raise
+    ``RuntimeError`` when invoked from inside the FastAPI request loop, so when a
+    loop is already running we drive the coroutine on its own loop in a worker
+    thread (the reads are tiny one-day queries on a 2s poll — cheap). With no
+    running loop (e.g. unit tests calling the helper directly) we use
+    ``asyncio.run`` directly.
+    """
+    import asyncio
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        # No running loop — safe to drive it directly.
+        return asyncio.run(coro)
+
+    # A loop is already running on this thread (the FastAPI request handler).
+    # Run the coroutine on a fresh loop in a worker thread and block for it.
+    import concurrent.futures
+
+    with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
 # ---------------------------------------------------------------------------
 # Identity / configuration
 # ---------------------------------------------------------------------------
@@ -205,16 +234,148 @@ def _header_chrome(vid: str, m: tax.StrategyMeta) -> dict:
     }
 
 
+def _read_variant_ohlc(db_path: Optional[Path]) -> list:
+    """Today's 1-min SPX OHLC bars for a variant, from its OWN backtesting DB.
+
+    Mirrors the WS broadcaster / ``/api/market/ohlc`` priority so the polled
+    SPXChart gets the SAME ``{timestamp, open, high, low, close, vix}`` shape:
+      1. HOMER's authoritative ``market_ohlc_1min`` (post-close), else
+      2. dense bars computed live from that DB's ``market_ticks`` (intraday).
+    Returns ``[]`` on missing DB / empty table (never raises). Read-only.
+
+    NOTE: the BacktestingDBReader methods are async (``to_thread`` wrapped); this
+    snapshot path is sync, so we drive them through a private event loop. The
+    reads are tiny (one day of 1-min bars) and infrequent (2s poll), so the
+    per-call loop is cheap and keeps this helper callable from the sync snapshot.
+    """
+    if db_path is None:
+        return []
+    try:
+        if not Path(db_path).exists():
+            return []
+    except OSError:
+        return []
+
+    from dashboard.backend.services.db_reader import BacktestingDBReader
+
+    reader = BacktestingDBReader(Path(db_path))
+    today = get_today_et()
+
+    async def _go() -> list:
+        if not await reader.is_available():
+            return []
+        bars = await reader.get_today_ohlc(today)
+        if bars:
+            return bars
+        return await reader.compute_ohlc_from_ticks(today)
+
+    try:
+        return _run_coro(_go()) or []
+    except Exception as e:  # pragma: no cover — defensive, never block the snapshot
+        logger.debug(f"snapshot ohlc read failed for {db_path}: {e}")
+        return []
+
+
+def _read_variant_cumulative(vid: str) -> dict:
+    """The variant's OWN lifetime cumulative metrics, in the shape
+    ``DailyPnLCard``'s "Cumulative" section reads (cumulative_pnl, winning_days,
+    losing_days, total_credit_collected, roi_pct, avg_capital_per_day, ...).
+
+    Sourced like ``/api/metrics/cumulative`` but per-variant: the variant's
+    ``hydra_metrics.json`` file as the base, OVERLAID with DB-canonical
+    aggregates from its OWN backtesting DB (``apply_db_cumulative``) so a stale
+    metrics file can't drift the card. Rebased to the variant's own
+    ``baseline_date`` when set. Returns ``{}`` when neither source exists.
+    """
+    from dashboard.backend.services.metrics_reader import MetricsFileReader
+    from dashboard.backend.services.db_reader import (
+        BacktestingDBReader,
+        apply_db_cumulative,
+    )
+
+    metrics_file = getattr(settings, f"variant_{vid}_metrics_file", None)
+    db_path = getattr(settings, f"variant_{vid}_backtesting_db", None)
+    baseline = getattr(settings, f"variant_{vid}_baseline_date", "") or ""
+
+    base: Optional[dict] = None
+    if metrics_file is not None:
+        try:
+            base = MetricsFileReader(Path(metrics_file)).read_latest()
+        except Exception as e:
+            logger.debug(f"snapshot cumulative metrics read failed for {vid}: {e}")
+
+    overrides: dict = {}
+    if db_path is not None:
+        try:
+            if Path(db_path).exists():
+                overrides = _run_coro(
+                    BacktestingDBReader(Path(db_path)).get_cumulative_overrides(baseline)
+                ) or {}
+        except Exception as e:
+            logger.debug(f"snapshot cumulative DB read failed for {vid}: {e}")
+
+    merged = apply_db_cumulative(base, overrides)
+    if merged is None:
+        return {}
+    merged = dict(merged)
+    # Echo the rebase baseline (empty = full history) for the UI's "since" caption,
+    # matching /api/metrics/cumulative's contract.
+    merged["cumulative_baseline_date"] = baseline
+    return merged
+
+
+def _read_variant_performance(vid: str) -> dict:
+    """Advanced stats (Sharpe/Sortino/Max Drawdown/Calmar/Profit Factor/
+    Expectancy/Win-Loss) over the variant's OWN daily summaries.
+
+    Returns ``{"daily_pnls": [...]}`` — the SAME shape ``/api/metrics/performance``
+    returns — so the polled ``PerformanceMetrics`` computes the identical ratios
+    client-side. ``{"daily_pnls": []}`` when the DB is missing / has no
+    summaries (the widget then shows its "need ≥2 days" note). Rebased to the
+    variant's own ``baseline_date`` when set.
+
+    Also surfaces ``advanced`` (Sharpe / max_drawdown / best / worst) computed by
+    ``variants_router._compute_advanced_stats`` — the SAME computation the
+    Comparison/aggregate pages use — for callers/tests that want the
+    server-computed numbers without re-deriving them from ``daily_pnls``.
+    """
+    from dashboard.backend.services.db_reader import BacktestingDBReader
+
+    db_path = getattr(settings, f"variant_{vid}_backtesting_db", None)
+    baseline = getattr(settings, f"variant_{vid}_baseline_date", "") or ""
+    if db_path is None:
+        return {"daily_pnls": [], "advanced": variants_router._compute_advanced_stats([])}
+    try:
+        if not Path(db_path).exists():
+            return {"daily_pnls": [], "advanced": variants_router._compute_advanced_stats([])}
+        pnls = _run_coro(BacktestingDBReader(Path(db_path)).get_daily_pnls(baseline)) or []
+    except Exception as e:
+        logger.debug(f"snapshot performance read failed for {vid}: {e}")
+        pnls = []
+    return {
+        "daily_pnls": pnls,
+        "advanced": variants_router._compute_advanced_stats(pnls),
+    }
+
+
 def _ic_snapshot(vid: str, m: tax.StrategyMeta) -> dict:
     """IC (``ic_state``) per-strategy snapshot — reuses the existing per-variant
     state/summary/entries readers exactly as /api/variants does. Missing state
-    file → available:false (the variants payload already does this)."""
+    file → available:false (the variants payload already does this).
+
+    FULL-MIRROR enrichment (2026-06): so a non-primary IC selection renders the
+    SAME panels as the primary WS view, the body also carries the variant's OWN
+    ``ohlc`` (SPX 1-min bars for the candle chart), ``cumulative`` (lifetime
+    metrics for the DailyPnLCard "Cumulative" section), and ``performance``
+    (daily P&L array + advanced stats for PerformanceMetrics). Every one of these
+    reads the variant's OWN db/metrics files (NOT the canonical-C ones) and is
+    missing-file-tolerant — an absent file degrades to ``[]`` / ``{}``, never a
+    500."""
     # variants_router._variant_payload builds the same shape /api/variants and
     # the broadcaster use; but it only knows _VARIANT_IDS. For an id that lives
     # in settings but not _VARIANT_IDS we still build from settings paths via the
     # same readers, so reuse its building blocks rather than its registry.
     from dashboard.backend.services.state_reader import StateFileReader
-    from dashboard.backend.services.db_reader import BacktestingDBReader
 
     state_file = _state_file_for(vid)
     db_path = getattr(settings, f"variant_{vid}_backtesting_db", None)
@@ -224,7 +385,6 @@ def _ic_snapshot(vid: str, m: tax.StrategyMeta) -> dict:
 
     state = StateFileReader(state_file).read_latest() or {}
     entries = state.get("entries", [])
-    ohlc_db = BacktestingDBReader(db_path) if db_path is not None else None
     body = {
         "available": True,
         "state_file_age_seconds": round(age, 1),
@@ -239,6 +399,10 @@ def _ic_snapshot(vid: str, m: tax.StrategyMeta) -> dict:
         "spx_low": (state.get("market_data_ohlc") or {}).get("spx_low"),
         "state": state.get("state"),
         "date": state.get("date"),
+        # Full-mirror enrichment — the variant's OWN data, each missing-file-tolerant.
+        "ohlc": _read_variant_ohlc(db_path),
+        "cumulative": _read_variant_cumulative(vid),
+        "performance": _read_variant_performance(vid),
     }
     return body
 

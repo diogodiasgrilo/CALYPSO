@@ -1,27 +1,24 @@
 /**
- * Iron-condor main-dashboard view. Two data sources, one layout intent:
+ * Iron-condor main-dashboard view. Two data sources, ONE layout intent:
  *
  *   - source === "ws"  → the PRIMARY strategy. Renders the EXISTING live-
  *     WebSocket component tree EXACTLY as the old Dashboard.tsx did — zero
- *     regression. These widgets read the WS store directly.
+ *     regression. These widgets read the WS store directly (no props passed).
  *
  *   - source === polled snapshot body → a NON-primary IC strategy. Renders the
- *     same IC information (day summary, entries with per-side cushions, intraday
- *     P&L) built from the polled /api/strategies/{id}/snapshot body. The heavy
- *     WS-only widgets (live SPX TradingView chart, agents, log feed) are
- *     process-global, not per-strategy, so they stay on the primary view only.
+ *     SAME panels as the primary (SPX candle chart with the variant's own entry
+ *     markers, the Today + Cumulative P&L cards, the intraday P&L curve, the
+ *     entry grid, the position heatmap, the Performance metrics, the entry
+ *     timeline) — but feeds each widget the polled /api/strategies/{id}/snapshot
+ *     body via props. The widgets fall back to the WS store when NOT given a
+ *     prop, so the primary path is byte-identical.
+ *
+ * Process-global widgets: AgentStatusPanel is rendered on both (the 5-agent
+ * suite is shared, not per-strategy). LiveLogFeed is per-PROCESS (the dashboard
+ * tails the primary's log only), so it renders on the primary and shows a small
+ * "log lives on the variant's own process" note off-primary — parity of the
+ * trading panels is NOT gated on the log.
  */
-
-import {
-  LineChart,
-  Line,
-  XAxis,
-  YAxis,
-  Tooltip,
-  ResponsiveContainer,
-  CartesianGrid,
-  ReferenceLine,
-} from "recharts";
 
 import { SPXChart } from "../market/SPXChart";
 import { DailyPnLCard } from "../pnl/DailyPnLCard";
@@ -37,11 +34,13 @@ import {
   FOMCBanner,
   OffDaySummaryCards,
 } from "../market/MarketContextBanner";
-import { useHydraStore } from "../../store/hydraStore";
-import { colors, pnlColor } from "../../lib/tradingColors";
-import { formatPnL, isRegularSessionTime } from "../../lib/formatters";
-import { ICEntryRow, BufferBar } from "./icEntryView";
-import type { ICSnapshotBody } from "../../hooks/useStrategySnapshot";
+import { useHydraStore, type HydraEntry, type OHLCBar } from "../../store/hydraStore";
+import { BufferBar } from "./icEntryView";
+import type {
+  ICSnapshotBody,
+  ICSnapshotEntry,
+  ICSnapshotOHLCBar,
+} from "../../hooks/useStrategySnapshot";
 
 // ── PRIMARY (WebSocket) view — the original Dashboard layout, unchanged ──
 function PrimaryICView() {
@@ -103,77 +102,78 @@ function PrimaryICView() {
   );
 }
 
-// ── NON-PRIMARY (polled) IC view — built from the snapshot body ──
-function StatCell({ label, children }: { label: string; children: React.ReactNode }) {
-  return (
-    <div className="text-center">
-      <div className="text-[10px] text-text-dim uppercase tracking-wider mb-0.5">{label}</div>
-      <div className="text-sm font-semibold text-text-primary">{children}</div>
-    </div>
-  );
+// ── Snapshot → widget adapters ──────────────────────────────────────────────
+// The widgets consume the WS store's HydraEntry / OHLCBar shapes. The polled
+// snapshot's ICSnapshotEntry / ICSnapshotOHLCBar carry the SAME field names but
+// with looser (optional) typing; these coercions fill the required numeric/bool
+// fields with safe defaults so a widget reads identical values whether the row
+// came from the WS store or the snapshot. No behavior change — just typing.
+
+function coerceEntry(e: ICSnapshotEntry): HydraEntry {
+  const n = (v: unknown): number => (typeof v === "number" ? v : 0);
+  const b = (v: unknown): boolean => v === true;
+  const s = (v: unknown): string => (typeof v === "string" ? v : "");
+  return {
+    ...e,
+    entry_number: n(e.entry_number),
+    entry_time: (e.entry_time as string | null) ?? null,
+    short_call_strike: n(e.short_call_strike),
+    long_call_strike: n(e.long_call_strike),
+    short_put_strike: n(e.short_put_strike),
+    long_put_strike: n(e.long_put_strike),
+    call_spread_credit: n(e.call_spread_credit),
+    put_spread_credit: n(e.put_spread_credit),
+    call_side_stop: n(e.call_side_stop),
+    put_side_stop: n(e.put_side_stop),
+    effective_call_stop: n(e.effective_call_stop),
+    effective_put_stop: n(e.effective_put_stop),
+    actual_call_stop_debit: n(e.actual_call_stop_debit),
+    actual_put_stop_debit: n(e.actual_put_stop_debit),
+    short_call_fill_price: n(e.short_call_fill_price),
+    long_call_fill_price: n(e.long_call_fill_price),
+    short_put_fill_price: n(e.short_put_fill_price),
+    long_put_fill_price: n(e.long_put_fill_price),
+    is_complete: b(e.is_complete),
+    call_side_stopped: b(e.call_side_stopped),
+    put_side_stopped: b(e.put_side_stopped),
+    call_side_expired: b(e.call_side_expired),
+    put_side_expired: b(e.put_side_expired),
+    call_side_skipped: b(e.call_side_skipped),
+    put_side_skipped: b(e.put_side_skipped),
+    close_reason: (e.close_reason as string | null | undefined) ?? null,
+    call_only: b(e.call_only),
+    put_only: b(e.put_only),
+    trend_signal: (e.trend_signal as string | null | undefined) ?? null,
+    override_reason: (e.override_reason as string | null | undefined) ?? null,
+    open_commission: n(e.open_commission),
+    close_commission: n(e.close_commission),
+    contracts: n(e.contracts) || 1,
+    call_long_sold: b(e.call_long_sold),
+    put_long_sold: b(e.put_long_sold),
+    call_long_sold_revenue: n(e.call_long_sold_revenue),
+    put_long_sold_revenue: n(e.put_long_sold_revenue),
+    call_spread_value: n(e.call_spread_value),
+    put_spread_value: n(e.put_spread_value),
+    call_long_value: n(e.call_long_value),
+    put_long_value: n(e.put_long_value),
+    call_stop_time: s(e.call_stop_time),
+    put_stop_time: s(e.put_stop_time),
+  } as HydraEntry;
 }
 
-function PolledDaySummary({ body }: { body: ICSnapshotBody }) {
-  const s = body.summary;
-  const netPnl = s?.net_pnl ?? 0;
-  const credit = s?.total_credit_received ?? 0;
-  const commission = s?.total_commission ?? 0;
-  const stops = s?.total_stops ?? 0;
-  const entriesDone = s?.entries_completed ?? 0;
-
-  return (
-    <div className="bg-card rounded-lg border border-border-dim p-4">
-      <h3 className="label-upper mb-2">Today</h3>
-      <div className="text-center mb-4">
-        <span className="metric-hero" style={{ color: pnlColor(netPnl) }}>
-          {formatPnL(netPnl)}
-        </span>
-      </div>
-      <div className="grid grid-cols-4 gap-1 pt-3 border-t border-border-dim">
-        <StatCell label="Entries">{entriesDone}</StatCell>
-        <StatCell label="Stops">
-          <span style={{ color: stops > 0 ? colors.loss : colors.textPrimary }}>{stops}</span>
-        </StatCell>
-        <StatCell label="Credit">${credit.toFixed(0)}</StatCell>
-        <StatCell label="Comm.">${commission.toFixed(0)}</StatCell>
-      </div>
-    </div>
-  );
+function coerceOHLC(bars: ICSnapshotOHLCBar[]): OHLCBar[] {
+  return bars.map((b) => ({
+    timestamp: b.timestamp,
+    open: b.open,
+    high: b.high,
+    low: b.low,
+    close: b.close,
+    vix: b.vix,
+  }));
 }
 
-function PolledPnLChart({ body }: { body: ICSnapshotBody }) {
-  const series = (body.pnl_history ?? []).filter((p) => isRegularSessionTime(p.time));
-  if (series.length === 0) {
-    return (
-      <div className="rounded border border-border-dim bg-card p-4">
-        <div className="text-xs uppercase tracking-wide text-text-secondary mb-2">P&amp;L Over Time</div>
-        <div className="text-sm text-text-dim italic">
-          No P&amp;L data yet — appears once an entry has been monitored for one heartbeat cycle.
-        </div>
-      </div>
-    );
-  }
-  return (
-    <div className="rounded border border-border-dim bg-card p-3">
-      <div className="text-xs uppercase tracking-wide text-text-secondary mb-2">P&amp;L Over Time</div>
-      <ResponsiveContainer width="100%" height={220}>
-        <LineChart data={series} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
-          <CartesianGrid stroke={colors.borderDim} strokeDasharray="3 3" />
-          <XAxis dataKey="time" stroke={colors.textSecondary} tick={{ fontSize: 10 }} interval="preserveStartEnd" />
-          <YAxis stroke={colors.textSecondary} tick={{ fontSize: 10 }} tickFormatter={(v) => `$${v}`} />
-          <Tooltip
-            contentStyle={{ backgroundColor: colors.bgElevated, border: `1px solid ${colors.border}`, borderRadius: 4, fontSize: 12 }}
-            formatter={(value) => [formatPnL(Number(value)), "Net P&L"]}
-          />
-          <ReferenceLine y={0} stroke={colors.border} />
-          <Line type="monotone" dataKey="pnl" stroke={colors.info} strokeWidth={2} dot={false} isAnimationActive={false} />
-        </LineChart>
-      </ResponsiveContainer>
-    </div>
-  );
-}
-
-function PolledICView({ body, accent }: { body: ICSnapshotBody; accent: string }) {
+// ── NON-PRIMARY (polled) IC view — full parity with the primary panels ──
+function PolledICView({ body }: { body: ICSnapshotBody; accent: string }) {
   if (!body.available) {
     return (
       <div className="p-6 text-text-secondary">
@@ -183,30 +183,46 @@ function PolledICView({ body, accent }: { body: ICSnapshotBody; accent: string }
     );
   }
 
-  const entries = body.entries ?? [];
+  const snapEntries = body.entries ?? [];
+  const entries = snapEntries.map(coerceEntry);
+  const ohlc = coerceOHLC(body.ohlc ?? []);
+  const spx = body.spx_price ?? 0;
   const margin = body.min_buffer_margin ?? { call_pct: 100, put_pct: 100 };
-  const spx = body.spx_price;
+  const netPnl = body.summary?.net_pnl ?? 0;
+
+  const ambientClass =
+    netPnl > 0 ? "ambient-profit" : netPnl < 0 ? "ambient-loss" : "";
 
   return (
-    <div className="space-y-3">
-      <div className="grid grid-cols-12 gap-3 max-lg:grid-cols-1">
-        <div className="col-span-8 max-lg:col-span-1">
-          <PolledPnLChart body={body} />
-        </div>
-        <div className="col-span-4 max-lg:col-span-1">
-          <PolledDaySummary body={body} />
-        </div>
-      </div>
+    <div className="relative">
+      {ambientClass && (
+        <div
+          className={`absolute inset-x-0 top-0 h-64 pointer-events-none ${ambientClass}`}
+        />
+      )}
 
-      <div className="rounded border border-border-dim bg-card p-4 space-y-2">
-        <div className="text-xs uppercase tracking-wide text-text-secondary">Entries</div>
-        {entries.length === 0 ? (
-          <div className="text-sm text-text-dim italic">No entries yet today.</div>
-        ) : (
-          entries.map((e, i) => <ICEntryRow key={i} entry={e} accent={accent} spx={spx} />)
-        )}
-        <div className="border-t border-border-dim pt-2">
-          <div className="text-xs text-text-secondary mb-1">
+      <div className="relative space-y-3">
+        {/* SPX candle chart (this variant's OWN bars) + Today/Cumulative cards */}
+        <div className="grid grid-cols-12 gap-3 max-lg:grid-cols-1">
+          <div className="col-span-8 max-lg:col-span-1">
+            <SPXChart ohlc={ohlc} entries={entries} date={body.date ?? null} />
+          </div>
+          <div className="col-span-4 max-lg:col-span-1">
+            <DailyPnLCard summary={body.summary} cumulative={body.cumulative ?? {}} />
+          </div>
+        </div>
+
+        <PnLCurve pnlHistory={body.pnl_history ?? []} />
+        <EntryGrid entries={entries} />
+        <PositionHeatmap entries={entries} spx={spx} />
+        <PerformanceMetrics dailyPnls={body.performance?.daily_pnls ?? []} />
+        <EntryTimeline entries={entries} />
+
+        {/* Worst-cushion (low-water) footnote — preserved muted semantics. This
+            is the historical low-water mark, distinct from the live per-entry
+            cushions the EntryGrid / PositionHeatmap show. */}
+        <div className="rounded border border-border-dim bg-card p-4 space-y-2">
+          <div className="text-xs text-text-secondary">
             Worst cushion today{" "}
             <span className="text-text-dim">(low-water — not live · 100% safe → 0% at stop)</span>
           </div>
@@ -214,6 +230,17 @@ function PolledICView({ body, accent }: { body: ICSnapshotBody; accent: string }
             <BufferBar label="Call" pct={margin.call_pct} muted />
             <BufferBar label="Put" pct={margin.put_pct} muted />
           </div>
+        </div>
+
+        {/* Agents are process-global (the 5-agent suite is shared) — render. */}
+        <AgentStatusPanel />
+
+        {/* The live log is per-PROCESS (the dashboard tails the primary's log
+            only), so we don't show the primary's log under a non-primary
+            selection. A short note keeps the operator oriented. */}
+        <div className="text-[11px] text-text-dim italic px-1">
+          Live log streams on this variant's own process — view it via its journal
+          (e.g. <span className="font-mono not-italic">journalctl -u hydra_variant_*</span>).
         </div>
       </div>
     </div>

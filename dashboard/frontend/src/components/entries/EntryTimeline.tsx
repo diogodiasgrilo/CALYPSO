@@ -45,9 +45,16 @@ function getStatus(entry: HydraEntry | undefined): EntryStatus {
   return "placing";
 }
 
-export function EntryTimeline() {
+interface EntryTimelineProps {
+  /** Polled non-primary snapshot's entries. When provided, the timeline dots
+   *  resolve from THESE instead of the WS store. Omitted → WS store,
+   *  byte-identical to the old behavior. */
+  entries?: HydraEntry[];
+}
+
+export function EntryTimeline({ entries: entriesProp }: EntryTimelineProps = {}) {
   const { hydraState } = useHydraStore();
-  const entries = hydraState?.entries ?? [];
+  const entries = entriesProp ?? hydraState?.entries ?? [];
   const showConditional = useShowConditionalEntries();
   const schedule = hydraState?.entry_schedule;
 

@@ -91,7 +91,39 @@ function entriesHash(entries: HydraEntry[]): string {
   ).join("~");
 }
 
-export function SPXChart() {
+/** Derive belowBar stop markers from entries' per-side *_stop_time fields.
+ *  Used in the polled (non-primary) path where there is no WS stopEvents stream;
+ *  the snapshot entries carry the stop times directly. The primary path still
+ *  uses the live WS stopEvents (richer, transition-detected). */
+function stopEventsFromEntries(entries: HydraEntry[]): StopEventLike[] {
+  const out: StopEventLike[] = [];
+  for (const e of entries) {
+    if (e.call_side_stopped && e.call_stop_time) {
+      out.push({ entry_number: e.entry_number, side: "call", stop_time: e.call_stop_time });
+    }
+    if (e.put_side_stopped && e.put_stop_time) {
+      out.push({ entry_number: e.entry_number, side: "put", stop_time: e.put_stop_time });
+    }
+  }
+  return out;
+}
+
+type StopEventLike = { entry_number: number; side: string; stop_time: string };
+
+interface SPXChartProps {
+  /** When provided, the candle/line bars come from THIS array (the polled
+   *  snapshot's OHLC) instead of the WS store — for a non-primary IC view.
+   *  Omitted (undefined) → read the WS store, byte-identical to the old behavior. */
+  ohlc?: OHLCBar[];
+  /** When provided, entry markers + strike lines come from THESE entries (the
+   *  polled snapshot's entries) instead of the WS store. Stop markers are then
+   *  derived from the entries' *_stop_time fields (no WS stop stream off-primary). */
+  entries?: HydraEntry[];
+  /** Fallback date for time-only stop timestamps, when in prop mode. */
+  date?: string | null;
+}
+
+export function SPXChart({ ohlc: ohlcProp, entries: entriesProp, date: dateProp }: SPXChartProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
   const seriesRef = useRef<AnySeries | null>(null);
@@ -107,14 +139,26 @@ export function SPXChart() {
   // price-lines effect re-attaches them to the new series.
   const [seriesVersion, setSeriesVersion] = useState(0);
 
-  const todayOHLC = useHydraStore((s) => s.todayOHLC);
-  const hydraEntries = useHydraStore((s) => s.hydraState?.entries);
-  const stateDate = useHydraStore((s) => s.hydraState?.date);
-  const stopEvents = useHydraStore((s) => s.stopEvents);
+  // Hooks are always called (Rules of Hooks); a prop, when present, overrides
+  // the corresponding WS-store value. No prop → behave EXACTLY as before.
+  const storeOHLC = useHydraStore((s) => s.todayOHLC);
+  const storeEntries = useHydraStore((s) => s.hydraState?.entries);
+  const storeDate = useHydraStore((s) => s.hydraState?.date);
+  const storeStopEvents = useHydraStore((s) => s.stopEvents);
   const showStrikes = useHydraStore((s) => s.showStrikes);
   const toggleStrikes = useHydraStore((s) => s.toggleStrikes);
 
-  const entries = useMemo(() => hydraEntries ?? [], [hydraEntries]);
+  const usingProps = entriesProp !== undefined;
+  const todayOHLC = ohlcProp ?? storeOHLC;
+  const stateDate = usingProps ? (dateProp ?? null) : storeDate;
+  const entries = useMemo(
+    () => entriesProp ?? storeEntries ?? [],
+    [entriesProp, storeEntries],
+  );
+  const stopEvents = useMemo(
+    () => (usingProps ? stopEventsFromEntries(entries) : storeStopEvents),
+    [usingProps, entries, storeStopEvents],
+  );
 
   // Create chart on mount
   useEffect(() => {
@@ -280,7 +324,7 @@ export function SPXChart() {
             : reason === "BREACH" ? colors.warning
               : colors.loss;
         return {
-          time: parseET(s.stop_time, stateDate) as Time,
+          time: parseET(s.stop_time, stateDate ?? undefined) as Time,
           position: "belowBar" as const,
           color,
           shape: "circle" as const,
