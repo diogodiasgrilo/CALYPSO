@@ -169,8 +169,16 @@ def git_commit_and_push(journal_path: str, date_labels: list) -> bool:
         dates_str = ", ".join(date_labels)
         commit_msg = f"journal: HOMER auto-update ({dates_str})"
 
+        # Path-SCOPE the commit to the journal ONLY (2026-06-16 hardening). A bare
+        # `git commit -m` commits everything currently STAGED — so any unrelated
+        # change left in the VM index (e.g. a deploy overlay applied with
+        # `git checkout <ref> -- <paths>`, which stages) would be swept into this
+        # "journal" commit and pushed to the shared branch. That happened once and
+        # regressed the mainline (see the homer-autocommit memo / docs/NEXT_STEPS).
+        # The explicit pathspec commits ONLY the journal's working-tree change,
+        # ignoring anything else staged.
         result = subprocess.run(
-            ["git", "commit", "-m", commit_msg],
+            ["git", "commit", "-m", commit_msg, "--", journal_path],
             cwd=_project_root,
             capture_output=True,
             text=True,
