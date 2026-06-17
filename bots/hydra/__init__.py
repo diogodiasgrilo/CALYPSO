@@ -36,6 +36,18 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- IBKR-audit #5b — settlement SPX fallback so an ITM-settled short isn't mis-booked
+  as worthless on a post-close restart (2026-06-17). Sibling bug to MKT-047: after C's
+  stop-close FAILED (leaving the ITM put unbooked), a post-close RESTART ran settlement
+  before the live SPX snapshot warmed up → _settlement_spx_level returned None →
+  _settlement_booked_pnl assumed worthless → the ~$3.1k max-loss put was booked as a
+  +$336.70 PROFIT (dashboard showed C as a winner). Fix: (1) persist last_spx_price in
+  the state file + restore it into self.spx_price on recovery; (2) _settlement_spx_level
+  now falls back to the last-known SPX (self.spx_price / current_price) BEFORE assuming
+  worthless — only assumes worthless with no reference at all. Latent for every live IC
+  (A/B unaffected today: A booked via stops on OTM-ending puts, B via dry-run stops; only
+  C, the live broker, hit the stop-close-fail + restart combo). 9 new tests
+  (tests/test_settlement_itm_spx_fallback.py); suite 1712 passed/15 skipped.
 - MKT-047 — EOD safety flatten + near-expiry MARKET escalation (2026-06-17).
   Trading-safety fix for all 0DTE IC variants (A/B/C). Root cause: on the 06-17
   FOMC selloff, variant C's E#1 put breached its credit+buffer stop at 15:57 but

@@ -10800,6 +10800,16 @@ class HydraStrategy(MEICStrategy):
                 "vix_low": self.market_data.vix_low if self.market_data.vix_low != float('inf') else 0.0,
             }
 
+            # Persist the last-seen SPX so a POST-CLOSE restart can still verify
+            # ITM settlement (IBKR-audit #5b, 2026-06-17). Without it the live
+            # index read fails on a fresh restart (snapshot not warmed up) and an
+            # ITM-settled short is mis-booked as WORTHLESS = a phantom profit
+            # (the 06-17 variant-C +$336.70-vs-actual-(-$3.1k) bug). Consumed by
+            # _settlement_spx_level's fallback chain.
+            state_data["last_spx_price"] = (
+                getattr(self, "spx_price", 0.0) or getattr(self, "current_price", 0.0) or 0.0
+            )
+
             state_data["last_saved"] = get_us_market_time().isoformat()
 
             # Write atomically + durably (temp → fsync → rename → dir fsync).
@@ -11585,17 +11595,29 @@ class HydraStrategy(MEICStrategy):
         stale data). Any exception or missing price → None (caller falls back
         to the legacy worthless assumption rather than crashing settlement).
         """
+        price = None
         try:
             price, _avail = self._read_index_price(self.underlying_symbol)
         except Exception as exc:  # pragma: no cover - defensive
-            logger.warning(f"  Settlement SPX read failed ({exc}); "
-                           f"cannot verify ITM settlement, assuming worthless")
-            return None
-        if price is None or price <= 0:
-            logger.warning("  Settlement SPX read returned no price; "
-                           "cannot verify ITM settlement, assuming worthless")
-            return None
-        return float(price)
+            logger.warning(f"  Settlement SPX live read failed ({exc}); trying fallback")
+        if price is not None and price > 0:
+            return float(price)
+        # IBKR-audit #5b (2026-06-17): the live read FAILS on a fresh post-close
+        # restart (snapshot not warmed up). Fall back to the last-known SPX
+        # (persisted as last_spx_price, restored into self.spx_price on recovery)
+        # BEFORE assuming worthless — otherwise an ITM-settled short is mis-booked
+        # as a full-credit profit (the variant-C +$336.70-vs-actual-(-$3.1k) bug).
+        # Only assume worthless when we have NO reference at all.
+        fallback = getattr(self, "spx_price", 0.0) or getattr(self, "current_price", 0.0) or 0.0
+        if fallback and fallback > 0:
+            logger.warning(
+                f"  Settlement SPX live read unavailable; using last-known SPX "
+                f"${fallback:.2f} to verify ITM settlement (post-close fallback)"
+            )
+            return float(fallback)
+        logger.warning("  Settlement SPX unavailable AND no last-known fallback; "
+                       "cannot verify ITM settlement, assuming worthless")
+        return None
 
     def _settlement_booked_pnl(
         self, entry, side: str, settlement_level: Optional[float],
@@ -12441,6 +12463,15 @@ class HydraStrategy(MEICStrategy):
                 vix_low = ohlc.get("vix_low", 0.0)
                 if vix_low > 0:
                     self.market_data.vix_low = vix_low
+
+            # Restore the last-seen SPX (IBKR-audit #5b) so post-close settlement
+            # can verify ITM even before the first live index read warms up — the
+            # fix for the 06-17 mis-booking of variant C's ITM put as worthless.
+            _last_spx = saved_state.get("last_spx_price", 0.0) or 0.0
+            if _last_spx > 0:
+                self.spx_price = _last_spx
+                if not getattr(self, "current_price", 0.0):
+                    self.current_price = _last_spx
 
             # FIX #77: Restore ALL entries from state file, not just "fully done" ones.
             # Previously, entries with surviving sides (e.g., IC with call stopped but put
