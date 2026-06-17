@@ -52,7 +52,7 @@ from shared.ib_client import IBClient
 from bots.hydra.order_types import BuySell, OrderType
 from bots.hydra.leg import LEG_NAMES, Leg, _new_legset, bind_leg_bridge
 from shared.alert_service import AlertService, AlertType, AlertPriority
-from shared.market_hours import get_us_market_time, is_market_open, is_early_close_day
+from shared.market_hours import get_us_market_time, is_market_open, is_early_close_day, get_market_close_time
 from shared.event_calendar import is_fomc_meeting_day, is_fomc_announcement_day
 from shared.position_registry import PositionRegistry
 
@@ -4122,7 +4122,34 @@ class MEICStrategy(abc.ABC):
         pay up to fill but never an uncapped sweep. A worthless long (no bid)
         falls through to MARKET and simply expires if it can't sell — harmless.
         Returns the same normalized dict as ``_close_leg_order``.
+
+        MKT-047 (2026-06-17): inside the final minutes before the actual market
+        close, a crossing marketable-limit can chase-and-miss a fast tape and
+        then expire un-filled (the 06-17 FOMC late-breach failure: variant C's
+        put stopped at 15:57 but every limit close "did not fill" until the 16:00
+        expiry rejected it). When within ``eod_flatten_market_minutes`` of the
+        close we escalate straight to a true MARKET order — take whatever fill is
+        available rather than miss entirely. 0 / unset disables the escalation.
         """
+        mkt_min = getattr(self, "eod_flatten_market_minutes", 0.0) or 0.0
+        if mkt_min > 0:
+            try:
+                now = get_us_market_time()
+                close_t = get_market_close_time(now)
+                mins_to_close = ((close_t.hour * 60 + close_t.minute)
+                                 - (now.hour * 60 + now.minute))
+                if 0 <= mins_to_close <= mkt_min:
+                    logger.warning(
+                        f"  Close via MARKET (MKT-047 escalation) — {mins_to_close}min "
+                        f"to {close_t.strftime('%H:%M')} close ≤{mkt_min:.0f}min "
+                        f"({side} x{quantity}, attempt {attempt_num})"
+                    )
+                    return self._close_leg_order(
+                        instrument_id=uic, side=side, quantity=quantity,
+                    )
+            except Exception as _e:
+                # Never let the time check block a close — fall through to LMT.
+                logger.debug(f"  MKT-047 escalation check skipped: {_e}")
         quote = self._read_option_quote(uic)
         limit_price = None
         if quote:

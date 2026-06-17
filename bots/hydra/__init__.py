@@ -36,6 +36,24 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- MKT-047 — EOD safety flatten + near-expiry MARKET escalation (2026-06-17).
+  Trading-safety fix for all 0DTE IC variants (A/B/C). Root cause: on the 06-17
+  FOMC selloff, variant C's E#1 put breached its credit+buffer stop at 15:57 but
+  EMERGENCY-001's marketable-limit closes "did not fill" and the 0DTE options
+  then expired ("Order is already expired" ×5) → full put-spread max loss (~$3.1k).
+  Two coupled fixes: (1) _check_eod_flatten/_execute_eod_flatten force-close every
+  open 0DTE short at a cutoff (default 15:50 ET, 15:40 on FOMC announcement days)
+  BEFORE the un-closable final-minutes window — a SAFETY exit, not profit-gated
+  like MKT-018, reusing the MKT-018 leg-closer (books real P&L, B2 naked-short
+  guard, Fix #81 worthless-long skip); idempotent per day; does NOT force
+  DAILY_COMPLETE so a failed leg falls back to normal monitoring/expiry. (2)
+  base_strategy._place_marketable_close escalates straight to a true MARKET order
+  when within eod_flatten_market_minutes (default 6) of the actual close (handles
+  early-close days via get_market_close_time) — a crossing limit chases-and-misses
+  a fast tape near expiry. Config: strategy.eod_flatten {enabled(true), time_et,
+  time_fomc_et, market_order_minutes}. Defaults ON for A/B/C; D/E (calendars)
+  unaffected (no 0DTE expiry, getattr default 0 → no escalation). 17 new tests
+  (tests/test_eod_flatten_safety.py); full suite 1703 passed/15 skipped.
 - Strategy D — live mark for TRANSFORMED positions (2026-06-17). Observability-only;
   A/B/C byte-unchanged, no trading-decision change. A transformed (risk-free, held-to-
   expiry) calendar was never re-marked — _check_stop_losses only managed CALENDAR-phase

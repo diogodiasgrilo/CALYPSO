@@ -611,6 +611,30 @@ class HydraStrategy(MEICStrategy):
         self._early_close_pnl = None    # Net P&L locked in at early close
         logger.info(f"  Early close (MKT-018): {'ENABLED' if self.early_close_enabled else 'DISABLED'} at {self.early_close_roc_threshold*100:.1f}% ROC")
 
+        # MKT-047 (2026-06-17): EOD safety flatten. Force-close every open 0DTE
+        # short BEFORE the un-closable final-minutes window — earlier on FOMC
+        # announcement days — so a late breach can't ride to max loss. On
+        # 2026-06-17 (FOMC) variant C's E#1 put stopped at 15:57 but EMERGENCY-001
+        # could not fill before the 16:00 expiry ("Order is already expired" ×5)
+        # → full put-spread max loss. This is a SAFETY exit (NOT profit-gated like
+        # MKT-018) and pairs with the near-expiry MARKET-order escalation in
+        # base_strategy._place_marketable_close.
+        _eod = strategy_config.get("eod_flatten", {}) or {}
+        self.eod_flatten_enabled = bool(_eod.get("enabled", True))
+        self.eod_flatten_time_et = str(_eod.get("time_et", "15:50"))
+        self.eod_flatten_time_fomc_et = str(_eod.get("time_fomc_et", "15:40"))
+        # When within this many minutes of the actual market close, the emergency
+        # close escalates straight to a true MARKET order (a crossing limit can
+        # chase-and-miss a fast tape near expiry). 0 disables the escalation.
+        self.eod_flatten_market_minutes = float(_eod.get("market_order_minutes", 6.0))
+        self._eod_flatten_done = False  # one-shot latch; reset each new ET day
+        logger.info(
+            f"  EOD safety flatten (MKT-047): "
+            f"{'ENABLED' if self.eod_flatten_enabled else 'DISABLED'} "
+            f"@ {self.eod_flatten_time_et} ET ({self.eod_flatten_time_fomc_et} on FOMC); "
+            f"MARKET-order close inside {self.eod_flatten_market_minutes:.0f}min of close"
+        )
+
         # MKT-021: Pre-entry ROC gate - skip remaining entries if ROC already
         # exceeds early close threshold. Only active when MKT-018 is enabled.
         # Currently disabled (MKT-018 intentionally off).
@@ -2477,6 +2501,16 @@ class HydraStrategy(MEICStrategy):
                 if early_close_result:
                     return early_close_result
 
+        # MKT-047: EOD safety flatten. INTENTIONALLY fires in the final minutes
+        # (after MKT-018's < 15:45 window), force-closing any still-open 0DTE
+        # short before the un-closable expiry race. One-shot per day.
+        if (self.eod_flatten_enabled
+                and not self._eod_flatten_done
+                and len(self.daily_state.active_entries) > 0):
+            flatten_result = self._check_eod_flatten()
+            if flatten_result:
+                return flatten_result
+
         return result
 
     def _check_early_close(self) -> Optional[str]:
@@ -2811,6 +2845,112 @@ class HydraStrategy(MEICStrategy):
         return (
             f"MKT-018 EARLY CLOSE: +${final_net_pnl:.2f} ({roc*100:.1f}% ROC) - "
             f"all positions closed at {now.strftime('%I:%M %p ET')}"
+        )
+
+    def _check_eod_flatten(self) -> Optional[str]:
+        """MKT-047: at the EOD cutoff (earlier on FOMC announcement days),
+        force-close every open 0DTE short so a late breach can't ride to max loss
+        in the un-closable final minutes before expiry. Idempotent per ET day —
+        returns an action string if it flattens, else None."""
+        if not self.eod_flatten_enabled or self._eod_flatten_done:
+            return None
+        if not self.daily_state.active_entries:
+            return None
+        now = get_us_market_time()
+        try:
+            from shared.event_calendar import is_fomc_announcement_day
+            is_fomc = is_fomc_announcement_day(now.date())
+        except Exception:
+            is_fomc = False
+        cutoff = self.eod_flatten_time_fomc_et if is_fomc else self.eod_flatten_time_et
+        try:
+            ch, cm = (int(x) for x in str(cutoff).split(":"))
+        except Exception:
+            ch, cm = 15, 50
+        if (now.hour, now.minute) < (ch, cm):
+            return None  # not yet at the cutoff
+        return self._execute_eod_flatten(cutoff_label=cutoff, is_fomc=is_fomc)
+
+    def _execute_eod_flatten(self, *, cutoff_label: str, is_fomc: bool) -> str:
+        """MKT-047: force-close ALL open legs as a pre-expiry SAFETY flatten,
+        reusing the MKT-018 leg-closer (which books real fill-based P&L, honors
+        the B2 naked-short guard + Fix #81 worthless-long skip). Unlike MKT-018
+        this is NOT profit-gated — it can realize a loss; the point is to exit
+        while the position is still CLOSABLE. Does NOT force DAILY_COMPLETE /
+        settlement-complete: any leg that fails to close stays active and is
+        handled by the normal stop monitoring (now with MARKET escalation) or
+        natural expiry; settlement skips the sides we already marked expired."""
+        now = get_us_market_time()
+        self._eod_flatten_done = True  # one-shot: don't re-flatten (avoid spam)
+
+        logger.warning("=" * 60)
+        logger.warning(
+            f"MKT-047: EOD SAFETY FLATTEN at {now:%H:%M:%S} ET "
+            f"(cutoff {cutoff_label}{', FOMC' if is_fomc else ''}) — "
+            f"force-closing {len(self.daily_state.active_entries)} open entr(ies) "
+            f"before the un-closable final-minutes window"
+        )
+        logger.warning("=" * 60)
+
+        legs_closed = legs_failed = entries_closed = 0
+        deferred_legs: list = []
+        for entry in list(self.daily_state.active_entries):
+            c, f, d = self._close_entry_early(entry)
+            legs_closed += c
+            legs_failed += f
+            deferred_legs.extend(d)
+            if c or f:
+                entries_closed += 1
+
+        if deferred_legs:
+            self._spawn_async_early_close_fill_correction(deferred_legs)
+
+        # Unregister fully-closed sides (mirror MKT-018 Phase 3); a side that
+        # FAILED to close keeps its uic so it stays trackable to expiry.
+        for entry in self.daily_state.entries:
+            for side, legs in (("call", ["short_call", "long_call"]),
+                               ("put", ["short_put", "long_put"])):
+                if (getattr(entry, f"{side}_side_expired", False)
+                        or getattr(entry, f"{side}_side_stopped", False)
+                        or getattr(entry, f"{side}_side_skipped", False)):
+                    for leg in legs:
+                        pid = getattr(entry, f"{leg}_position_id", None)
+                        if pid:
+                            try:
+                                self.registry.unregister(pid)
+                            except Exception:
+                                pass
+                            setattr(entry, f"{leg}_position_id", None)
+                            setattr(entry, f"{leg}_uic", 0)
+
+        final_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
+        self._save_state_to_disk()
+
+        try:
+            self.alert_service.send_alert(
+                alert_type=AlertType.POSITION_CLOSED,
+                title=f"MKT-047 EOD Flatten: {entries_closed} entr(ies) closed",
+                message=(
+                    f"Force-closed open 0DTE positions at {now.strftime('%I:%M %p ET')} "
+                    f"(cutoff {cutoff_label}{', FOMC' if is_fomc else ''}) — pre-expiry safety.\n"
+                    f"{legs_closed} legs closed, {legs_failed} failed | "
+                    f"Net P&L: ${final_net_pnl:.2f}"
+                ),
+                priority=AlertPriority.HIGH if legs_failed else AlertPriority.MEDIUM,
+                contracts=self.contracts_per_entry,
+            )
+        except Exception as e:
+            logger.error(f"MKT-047: Alert failed: {e}")
+
+        logger.warning(
+            f"MKT-047: EOD FLATTEN COMPLETE | {entries_closed} entries, "
+            f"{legs_closed} legs closed, {legs_failed} failed | "
+            f"Net P&L: ${final_net_pnl:.2f}"
+        )
+        return (
+            f"MKT-047 EOD FLATTEN: {entries_closed} entr(ies) closed at "
+            f"{now.strftime('%I:%M %p ET')} | {legs_closed} legs, "
+            f"{legs_failed} failed | Net P&L: ${final_net_pnl:.2f}"
         )
 
     def _book_early_close_side_pnl(self, entry, side_name: str, credit: float,
@@ -11208,6 +11348,7 @@ class HydraStrategy(MEICStrategy):
         self._consecutive_failures = 0
         self._api_results_window.clear()
         self._early_close_triggered = False  # MKT-018: Reset early close
+        self._eod_flatten_done = False  # MKT-047: Reset EOD safety-flatten latch
         self._roc_gate_triggered = False  # MKT-021: Reset ROC gate
         self._vix_gate_resolved = False  # MKT-034: Reset VIX gate
         self._vix_gate_start_slot = 0
