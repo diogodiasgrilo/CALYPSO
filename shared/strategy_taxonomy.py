@@ -102,7 +102,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         structure_family="iron_condor",
         pnl_shape="credit",
         dte_class="0DTE",
-        status="live",  # operational metadata only; confirm on VM
+        status="dry_run_shadow",  # A is dry-run (config dry_run=true; operator-confirmed 2026-06-17). Only C is live-paper.
         bot_name_base="HYDRA",
     ),
     "b": StrategyMeta(
