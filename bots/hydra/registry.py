@@ -31,15 +31,16 @@ _REGISTRY: Dict[str, str] = {
     # "strangle"; dry-run only until paper-verified + an explicit operator flip.
     "strangle": "bots.hydra.strangle_strategy:StrangleStrategy",
     # Strategy D — "DC Time Machine" multi-day double calendar -> risk-free iron
-    # condor (SCAFFOLD). Selected via strategy.name = "double_calendar"; dry-run
-    # LOCKED — the entry/transformer/multi-day-settlement logic is stubbed and a
-    # real-order run requires the coexistence MUST-FIXes (see the module docstring).
+    # condor. Selected via strategy.name = "double_calendar"; dry-run-LOCKED — the
+    # dry-run lifecycle IS implemented; a real-order run requires the coexistence
+    # MUST-FIXes (see the module docstring).
     "double_calendar": "bots.hydra.double_calendar_strategy:DoubleCalendarStrategy",
-    # Strategy E — "SPY Double Calendar" multi-day double calendar (SCAFFOLD),
-    # sibling of D. MANAGED (laddered profit-take + trading-day time-exit, no
-    # transformer, no hard stop). Selected via strategy.name = "spy_double_calendar";
-    # dry-run LOCKED — the class refuses any non-dry_run construction and a real-order
-    # run requires the coexistence MUST-FIXes + SPY American-assignment handling.
+    # Strategy E — "SPY Double Calendar" multi-day double calendar, sibling of D.
+    # MANAGED (laddered profit-take + trading-day time-exit, no transformer, no hard
+    # stop). Selected via strategy.name = "spy_double_calendar"; dry-run-LOCKED — the
+    # dry-run lifecycle IS implemented (the class refuses any non-dry_run
+    # construction); a real-order run requires the coexistence MUST-FIXes + (E) SPY
+    # assignment handling.
     "spy_double_calendar": "bots.hydra.spy_double_calendar_strategy:SpyDoubleCalendarStrategy",
 }
 

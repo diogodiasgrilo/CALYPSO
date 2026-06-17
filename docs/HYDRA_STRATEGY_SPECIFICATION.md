@@ -6,7 +6,7 @@
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
 **Trend Concepts:** From METF (Market EMA Trend Filter)
 **Broker:** Interactive Brokers Web API via [`ibind`](https://github.com/Voyz/ibind) 0.1.23 (OAuth 1.0a, no gateway). See `CLAUDE.md` "IBKR Integration" section for the broker mechanics.
-**Status:** DRY-RUN against IBKR paper since 2026-04-27 — variants A/B/C running in parallel comparison; sole active HYDRA-family bot on the `hydra-ibkr-standalone` branch.
+**Status:** variants A/B/C (this 0DTE iron-condor spec) run in parallel head-to-head comparison on the IBKR paper account — **A and C live (paper), B dry-run shadow** (A/B/C are the `ic_0dte` credit comparability group). This doc specifies the **0DTE iron-condor** family (A/B/C). Two further HydraStrategy subclasses also run on the branch — variant **D** ("DC Time Machine", `double_calendar`) and variant **E** ("SPY Double Calendar", `spy_double_calendar`), both multi-day net-debit calendars in the `calendar_multiday` group, both dry-run-LOCKED, both subclassing the shared `bots/hydra/calendar_strategy_base.py` (`CalendarStrategyBase`). They are a different structural family and are out of scope for this 0DTE-IC spec.
 
 > **2026-05-24 version note**: this spec covers the strategy logic, which
 > survived the Saxo→IBKR broker migration unchanged. The migration replaced

@@ -101,10 +101,10 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
     def __init__(self, *args, **kwargs):
         """Construct, enforcing the dry-run-only lock (mirrors StrangleStrategy).
 
-        The entry/transformer/accounting logic is NOT implemented and the
-        coexistence MUST-FIXes are NOT in place, so a live (real-order)
-        construction is refused BEFORE super().__init__ runs any broker I/O.
-        ``build_strategy`` always passes ``dry_run`` as a kwarg.
+        The entry/transformer/accounting logic IS implemented (Phases 1-7) and runs
+        dry-run-only, but the coexistence MUST-FIXes are NOT in place, so a live
+        (real-order) construction is refused BEFORE super().__init__ runs any broker
+        I/O. ``build_strategy`` always passes ``dry_run`` as a kwarg.
         """
         if not kwargs.get("dry_run", False):
             raise ConfigError(
@@ -128,13 +128,12 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         if not getattr(self, "dry_run", False):
             raise ConfigError(
                 "DoubleCalendarStrategy resolved to dry_run=false after init — "
-                "refusing to arm an unimplemented, coexistence-unsafe strategy. "
+                "refusing to arm a coexistence-unsafe strategy. "
                 "See docs/migration/D_GOLIVE_RUNBOOK.md before attempting go-live."
             )
 
-        # DC-specific knobs (config.strategy.double_calendar.*). Read here so the
-        # config surface is wired even though the entry logic that consumes them
-        # is still stubbed.
+        # DC-specific knobs (config.strategy.double_calendar.*). Read here to wire
+        # the config surface for the entry logic that consumes them.
         cfg = getattr(self, "strategy_config", {}) or {}
         dc = cfg.get("double_calendar", {}) or {}
         self.dc_short_dte_min = int(dc.get("short_dte_min", 6))
@@ -456,8 +455,8 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         """Open the next scheduled double calendar (dry-run simulated).
 
         D is dry-run-LOCKED, so the simulated path always runs — no real order
-        ever reaches the broker. DB recording is Phase 6; the transformer / 20%
-        stop / EOD close (_check_stop_losses) is Phase 4.
+        ever reaches the broker. DB recording (Phase 6) and the transformer / 20%
+        stop / EOD close (_check_stop_losses, Phase 4) are implemented.
         """
         entry_num = self._next_entry_index + 1
         logger.info("[DCTM] initiating entry #%s", entry_num)

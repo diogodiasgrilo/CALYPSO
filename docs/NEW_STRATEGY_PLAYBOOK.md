@@ -41,7 +41,7 @@ external feeds like Polygon). Then answer the one question that governs everythi
 |---|---|---|
 | **Another 0DTE credit structure** (IC/strangle variant, like `strangle`, Brandon B/C) | **Light** | 0, 1, 3, 4, 5, 8, 9, 10 — reuse `IronCondorEntry`, base settlement, and `backtesting.db`. **Skip 2, 6, 7.** |
 | **A different shape** (multi-day, net-debit, calendar, ratio — like `double_calendar`) | **Heavy** | All steps 0–10. Own data model, sidecar persistence, isolated DB. |
-| **A sibling of an existing non-base strategy** (e.g. a second calendar variant alongside `double_calendar`) | **Reuse-driven** | Inherit/reuse the sibling's modules (`calendar_entry`, `calendar_chain`, two-expiry plumbing, recorder/sidecar/observability patterns). Net-new work is usually only the *differing management logic* (Step 5) + entry/strike rules (Steps 3–4). **Inherit 2, 6, 7 — don't rebuild.** If a second sibling lands, extract a shared base (e.g. `CalendarStrategyBase`) both inherit — additive, doesn't disturb the live variants. |
+| **A sibling of an existing non-base strategy** (e.g. a second calendar variant alongside `double_calendar`) | **Reuse-driven** | Inherit/reuse the sibling's modules (`calendar_entry`, `calendar_chain`, two-expiry plumbing, recorder/sidecar/observability patterns). Net-new work is usually only the *differing management logic* (Step 5) + entry/strike rules (Steps 3–4). **Inherit 2, 6, 7 — don't rebuild.** This sibling case **has now landed**: `bots/hydra/calendar_strategy_base.py` (`CalendarStrategyBase`) was extracted from D, and variant E (`spy_double_calendar`) subclasses it (D's `_dc_*` machinery was lifted there verbatim — D byte-identical). The shared base is additive and didn't disturb live variants. |
 
 **Do not cargo-cult D's full weight onto a light strategy.** D needed a data model, sidecar, and
 isolated DB *only because* it is multi-day net-debit — alien to the base. The `strangle` strategy,
@@ -81,9 +81,14 @@ The riskiest step — not because of the new strategy, but because adding a vari
 - [`bots/hydra/registry.py`](../bots/hydra/registry.py) — add one row to `_REGISTRY`:
   `"<name>": "bots.hydra.<name>_strategy:<Name>Strategy"`.
 - `bots/hydra/main.py` — `HYDRA_VARIANT_ID=<e>` detection + startup banner + `bot_name`.
-- `dashboard/backend/config.py` + `dashboard/backend/routers/variants.py` — **exclude** the variant
+- `dashboard/backend/config.py` + `dashboard/backend/routers/variants.py` — exclude the variant
   from the 0DTE `/compare` view and `_VARIANT_IDS` **if its P&L shape is incompatible** (D did — net
-  debit vs net credit is apples-to-oranges). A like-for-like IC variant can stay in `/compare`.
+  debit vs net credit is apples-to-oranges). **Mechanism update (shipped):** comparability is now driven
+  by **taxonomy group membership** (`shared/strategy_taxonomy.py` — `group_id` + the group's `comparable`
+  flag), not a hand-maintained `if vid=="d": continue` exclusion. A new variant joins the right group in
+  the taxonomy table; credit-vs-debit comparison is refused *by construction* (a group carries a single
+  `pnl_shape`) rather than by scattered per-surface guards. A like-for-like IC variant lands in the
+  `ic_0dte` group and is comparable automatically.
 
 **Coexistence safety audit (do this explicitly — it is the load-bearing part of Step 1):**
 - [ ] Telegram `getUpdates` poller is still gated to **variant A only** (D's scaffold fixed a latent
@@ -259,7 +264,7 @@ again before go-live:
 | 5 | Shared-account buying power | Per-variant BP budget before any real order (go-live MUST-FIX). |
 | 6 | STATE-004 overnight guard (account-wide) | Scoped to per-variant conids before a real overnight hold. |
 | 7 | Orphan sweep (account-wide) | Scoped the same way before a real position exists. |
-| 8 | Dashboard `/compare` + `_VARIANT_IDS` | New shape excluded if P&L is incompatible. |
+| 8 | Dashboard `/compare` + `_VARIANT_IDS` | Comparability is taxonomy-group-driven (`shared/strategy_taxonomy.py`): a new shape joins its own group and is refused for credit-vs-debit comparison by construction — not a hand-edited exclusion. |
 | 9 | `base_strategy.py` / `strategy.py` (A/B/C share these) | No destructive edits; subclass + override; any base touch is additive + opt-in. |
 
 ---
@@ -285,7 +290,7 @@ Record each time this playbook is followed or a strategy is audited against it.
 | Date | Strategy (name / variant) | Step / scope audited | Verdict | Notes / findings | Reviewer |
 |---|---|---|---|---|---|
 | 2026-06-16 | `double_calendar` / D | Full build (Steps 0–10) | **NO-GO** (locked) | Worked example this playbook is distilled from; NO-GO per [`D_GOLIVE_SCOPE_AND_AUDIT.md`](migration/D_GOLIVE_SCOPE_AND_AUDIT.md) | — |
-| 2026-06-16 | Theta Profits Double Calendar (Ravish Ahuja) — proposed variant | Step 0 feasibility vs playbook | **GO — playbook applies** | Sibling of `double_calendar` (same family, *no transformer*, simpler defined-exit mgmt). Net-new = Step 5 mgmt logic + Step 3/4 entry/strike rules; inherits D's model/plumbing/persistence/DB/observability. Surfaced + closed the "sibling" classification gap (Step 0 row 3). | Claude |
+| 2026-06-16 | SPY Double Calendar (OptionsKit video) — variant `e` (`spy_double_calendar`) | Steps 0–9 build (sibling of D) | **BUILT (dry-run-locked)** | Sibling of `double_calendar` (same family, *no transformer*, managed laddered-exit + time-exit, no hard stop). Net-new = Step 5 mgmt logic + Step 3/4 entry/strike rules; inherits D's model/plumbing/persistence/DB/observability via the extracted `CalendarStrategyBase`. Built on branch `feat/strategy-grouping-spy-calendar` (`7058980`); dry-run-locked. **NB:** the earlier "Theta Profits Double Calendar (Ravish Ahuja)" spec was a *superseded placeholder* — the shipped strategy is the OptionsKit SPY double calendar. | Claude |
 | | | | | | |
 
 ---

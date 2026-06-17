@@ -1,13 +1,14 @@
-"""Strategy D status reader + Telegram formatter (Phase 7).
+"""Calendar-strategy (D, E) status reader + Telegram formatter (Phase 7).
 
 Pure (stdlib only) so it's unit-testable and importable without the broker stack.
-Reads D's authoritative dry-run artifacts — the open-calendar SIDECAR
-(dc_open_trades.json) + the dc_outcomes table — and renders them. Used by the
-Telegram /calendars command (variant A's poller renders D's files cross-variant).
+Reads a calendar variant's authoritative dry-run artifacts — the open-calendar
+SIDECAR (dc_open_trades.json) + the dc_outcomes table — and renders them. Used by
+the Telegram /calendars command (variant A's poller loops over all calendar-group
+members and renders their files cross-variant).
 
-D is a multi-day net-DEBIT double calendar, so it is deliberately NOT folded into
-the 0DTE iron-condor /compare head-to-head (credit/Sharpe are apples-to-oranges);
-this is its own D-native view.
+A calendar variant is a multi-day net-DEBIT double calendar, so it is deliberately
+NOT folded into the 0DTE iron-condor /compare head-to-head (credit/Sharpe are
+apples-to-oranges); this is the calendar-group native view.
 """
 
 from __future__ import annotations

@@ -38,7 +38,7 @@ The 4 sibling bots (Iron Fly, Delta Neutral, Rolling Put Diagonal, MEIC) were **
 
 ## Project Overview
 
-CALYPSO on this branch is a single 0DTE SPX iron-condor trading bot (**HYDRA**) running on a Google Cloud VM, talking to IBKR via the Web API. Stack:
+CALYPSO on this branch is a multi-strategy 0DTE/multi-day options trading bot (**HYDRA**) running on a Google Cloud VM, talking to IBKR via the Web API. It runs two cohorts of strategies — **0DTE SPX iron-condor strategies A/B/C** and **multi-day net-debit calendar strategies D/E** — clustered by `shared/strategy_taxonomy.py` into **2 comparability groups** (`ic_0dte` = credit; `calendar_multiday` = debit) so that only structurally-comparable strategies share a P&L axis / leaderboard. Stack:
 
 - **Broker:** Interactive Brokers Client Portal Web API via [`ibind`](https://github.com/Voyz/ibind) 0.1.23 (OAuth 1.0a, no gateway/container)
 - **Credentials:** systemd `LoadCredentialEncrypted=` (TPM- or host-key-bound .cred files in `/etc/calypso/ibkr/`). No `token_keeper`-style refresh service is needed — OAuth 1.0a is unattended; the live session token rotates cryptographically and the morning re-auth gate handles the 01:00 ET daily reset.
@@ -51,16 +51,27 @@ CALYPSO on this branch is a single 0DTE SPX iron-condor trading bot (**HYDRA**) 
 ```
 bots/
   __init__.py
-  hydra/                      # the ONLY bot on this branch — sibling bot dirs were deleted in P5a/P5b
+  hydra/                      # the ONLY bot dir on this branch — sibling bot dirs were deleted in P5a/P5b
     main.py                   # entry point, monitoring loop, signal handlers
-    strategy.py               # HydraStrategy subclass (IBKR-aware overrides)
+    registry.py               # strategy-name → "module:Class" registry (hydra/brandon/double_calendar/spy_double_calendar/strangle)
+    strategy.py               # HydraStrategy subclass (IBKR-aware overrides) — A's strategy
     base_strategy.py          # MEICStrategy (HYDRA-owned base, IBKR-native; F1–F7 ports applied)
     brandon/                  # Brandon Trojan Horse variants (B/C only)
-    config/                   # config.json + config_variant_{b,c}.json (config.json gitignored)
+    calendar_strategy_base.py # CalendarStrategyBase — shared two-expiry data layer for D + E (dry-run-locked)
+    calendar_entry.py         # calendar-leg entry dataclass (D/E)
+    calendar_chain.py         # calendar chain/expiry-pair helpers (D/E)
+    double_calendar_strategy.py     # D "DC Time Machine" (registry double_calendar, multi-day SPX net-debit; subclasses CalendarStrategyBase)
+    spy_double_calendar_strategy.py # E "SPY Double Calendar" (registry spy_double_calendar, class SpyDoubleCalendarStrategy, BOT_NAME SPYDC, multi-day SPY net-debit)
+    strangle_strategy.py      # StrangleStrategy (registry strangle — dry-run-locked, not yet wired to a variant)
+    dc_recorder.py            # calendar DataRecorder → isolated dc_calendar.db (separate from the shared backtesting.db)
+    dc_status.py              # calendar status renderer (reads dc_open_trades.json sidecar + dc_outcomes)
+    config/                   # config.json + config_variant_{b,c,d,e}.json (config.json gitignored)
   # On `main` only: iron_fly_0dte/, delta_neutral/, rolling_put_diagonal/, meic/
-  # (kill-switched there). Not on this branch.
+  # (kill-switched there). NOT on this branch. D/E are calendar SUBCLASSES inside
+  # bots/hydra/ (CalendarStrategyBase), NOT restored sibling bots.
 
 shared/
+  strategy_taxonomy.py        # SINGLE SOURCE OF TRUTH — StrategyMeta/GroupMeta: which variants exist, their group + comparability + status
   ib_client.py                # IBClient — OAuth + REST + write path + reconcile (Saxo replacement)
   ib_oauth.py                 # credentials loader; reads $CREDENTIALS_DIRECTORY OR env vars
   ib_retry.py                 # RetryPolicy + per-family CircuitBreaker (oauth/session/portfolio/market/orders)
@@ -96,7 +107,9 @@ dashboard/                    # HYDRA dashboard (read-only monitoring, v2.0.0)
 deploy/
   hydra.service               # main bot (LoadCredentialEncrypted= for 6 IBKR creds, sandboxed)
   hydra_variant_b.service     # parallel dry-run instance (Brandon variant B)
-  hydra_variant_c.service     # parallel dry-run instance (Brandon variant C)
+  hydra_variant_c.service     # parallel instance (Brandon variant C — live, dashboard PRIMARY)
+  hydra_variant_d.service     # parallel dry-run-locked instance (D "DC Time Machine", SPX double calendar)
+  hydra_variant_e.service     # parallel dry-run-locked instance (E "SPY Double Calendar")
   IBKR_CREDENTIALS_SETUP.md   # one-time-setup + pre-start verification runbook
   hermes/apollo/clio/homer/argus .service + .timer  # agent timers
   token_keeper.service.disabled-on-this-branch  # Saxo-only — DEAD on this branch
@@ -213,10 +226,12 @@ Delays entry up to `calm_entry_max_delay_min` (default 5 min) when SPX moved mor
 
 Mid-day restart recovery is broker-driven: `_recover_positions_from_saxo()` (despite the legacy name) reads state file authoritatively, then reconciles with the broker via `_read_open_positions()`.
 
-### Telegram Commands (16 total)
-Background daemon thread polls Telegram `getUpdates` every 5s. Credentials from Secret Manager (`calypso-telegram-credentials`). Responds only to the configured chat_id.
+### Telegram Commands (17 total)
+Background daemon thread polls Telegram `getUpdates` every 5s. Credentials from Secret Manager (`calypso-telegram-credentials`). Responds only to the configured chat_id. The poller runs on **variant A only** (frozen — `shared/strategy_taxonomy.py` `is_primary`).
 
-`/status`, `/snapshot`, `/entry N`, `/lastday`, `/week`, `/account`, `/stops`, `/config`, `/set <key> <value>`, `/hermes`, `/apollo`, `/clio`, `/compare`, `/restart`, `/stop`, `/help`.
+`/status`, `/snapshot`, `/entry N`, `/lastday`, `/week`, `/account`, `/stops`, `/config`, `/set <key> <value>`, `/hermes`, `/apollo`, `/clio`, `/compare`, `/calendars`, `/restart`, `/stop`, `/help`.
+
+`/compare` is **group-scoped**: bare `/compare` compares the poller's own group (variant A → the 0DTE-IC group {A,B,C}); `/compare calendars` compares the calendar group {D,E} (never credit-vs-debit). `/calendars` is an alias for `/compare calendars`.
 
 Long reports (HERMES/APOLLO/CLIO) split at paragraph/line boundaries with `(1/N)` headers instead of truncating at 4096 chars.
 
@@ -379,23 +394,27 @@ Six credentials, all per-environment (paper here):
 
 ## Variant Comparison (Dry-Run Head-to-Head)
 
-A and B/C are 3 parallel HYDRA processes running concurrently. Each variant has its own systemd unit, isolated `data/variant_<id>/*` paths via the `HYDRA_VARIANT_ID` env var, and `alerts.enabled=false` + `google_sheets.enabled=false` so non-A variants don't pollute the canonical record.
+Up to **5 parallel HYDRA processes** run concurrently, clustered into **2 comparability groups** by `shared/strategy_taxonomy.py` — `ic_0dte` (credit, members A/B/C) and `calendar_multiday` (debit, members D/E). Each variant has its own systemd unit, isolated `data/variant_<id>/*` paths via the `HYDRA_VARIANT_ID` env var, and `alerts.enabled=false` + `google_sheets.enabled=false` so non-A variants don't pollute the canonical record. The two groups are **never compared together** — a credit IC's P&L and a net-debit calendar's P&L are apples-to-oranges, so every comparison view / `/compare` command is group-scoped.
 
-**Current scheme (v1.28.x, IBKR-standalone branch):**
+**Current scheme (IBKR-standalone branch):** the table below is **group-scoped** (the `ic_0dte` group, then the `calendar_multiday` group):
 
-| Variant | Service | Strategy | Schedule | Contracts | Widths |
-|---|---|---|---|---|---|
-| A | `hydra.service` | HYDRA baseline (MKT-027 dynamic) | 10:45 / 11:15 (+ E6 14:00 conditional) | 1c | 75pt MKT-027 dynamic |
-| B | `hydra_variant_b.service` | `BrandonHydraStrategy` (Trojan Horse stack LIVE) | 09:45 / 10:45 / 11:15 / 11:45 (+ E6) | 10c | 5pt below VIX 22, 10pt above (narrow) |
-| C | `hydra_variant_c.service` | `BrandonHydraStrategy` (Brandon-faithful baseline) | 10:15 / 10:45 / 11:15 (+ E6) | 10c | Same narrow widths as B |
+| Variant | Group | Service | Strategy | Schedule | Contracts | Widths | Status |
+|---|---|---|---|---|---|---|---|
+| A | `ic_0dte` | `hydra.service` | HYDRA baseline (MKT-027 dynamic) | 10:45 / 11:15 (+ E6 14:00 conditional) | 1c | 75pt MKT-027 dynamic | live |
+| B | `ic_0dte` | `hydra_variant_b.service` | `BrandonHydraStrategy` (Trojan Horse stack LIVE) | 09:45 / 10:45 / 11:15 / 11:45 (+ E6) | 10c | 5pt below VIX 22, 10pt above (narrow) | dry_run_shadow |
+| C | `ic_0dte` | `hydra_variant_c.service` | `BrandonHydraStrategy` (Brandon-faithful baseline) | 10:15 / 10:45 / 11:15 (+ E6) | 10c | Same narrow widths as B | live (dashboard PRIMARY) |
+| D | `calendar_multiday` | `hydra_variant_d.service` | `DoubleCalendarStrategy` ("DC Time Machine", multi-day SPX net-debit) | multi-day (not 0DTE) | — | double calendar | dry_run_locked (NO-GO) |
+| E | `calendar_multiday` | `hydra_variant_e.service` | `SpyDoubleCalendarStrategy` ("SPY Double Calendar", multi-day SPY net-debit, from an OptionsKit video) | multi-day (not 0DTE) | — | double calendar | dry_run_locked |
+
+D and E both subclass `bots/hydra/calendar_strategy_base.py` (`CalendarStrategyBase`); D is byte-identical to its pre-lift body after the extraction. Both are **fully simulated (NOT stubbed)** — the entire entry/monitor/settlement lifecycle runs in dry-run; only the real-order placement path + go-live gates are intentionally absent. They cannot place real orders until a deliberate operator flip (D's verdict is currently NO-GO — see the D go-live docs).
 
 **Brandon Trojan Horse features (LIVE on B/C):** take-profit at 80% credit captured, GEX-aware strike adjuster (skips sides inside accel zones, shifts toward decel walls), GEX breach exit (closes IC after sustained 90s breach of decel wall), defensive overlay (debit spread / butterfly hedge), delta-target strike selection anchored to 8δ from the live Polygon chain (replaces HYDRA's OTM-multiplier).
 
 Only HYDRA's credit+buffer stop runs in `hydra_stop_shadow` on B/C — parallel for head-to-head journal comparison, never acts on B/C.
 
-**Dashboard:** `/comparison` page (gated by `DASHBOARD_COMPARISON_MODE_ENABLED=true` on the dashboard service) auto-discovers running variants via `/api/variants/health`. End-of-day `VARIANT_COMPARISON_DAILY` Telegram alert from variant A + on-demand `/compare` command.
+**Dashboard:** a main-page **strategy picker** (Header, grouped dropdown from `/api/strategies/meta`) switches the live view between variants; **group tabs** at `/comparison/:groupId` render a group-aware head-to-head (the credit-IC renderer for `ic_0dte`, a debit-calendar renderer for `calendar_multiday`). The taxonomy-aware **`/api/strategies`** API (`/meta`, `/{id}/snapshot`, `/groups/{group_id}/comparison`) plus the existing `/api/dc/*` (D's isolated calendar DB) and `/api/variants/health` back these. **EOD auto-update:** the cumulative + end-of-day cards re-fetch automatically at the close (no reload). The legacy `/comparison` page is still gated by `DASHBOARD_COMPARISON_MODE_ENABLED=true`. End-of-day `VARIANT_COMPARISON_DAILY` Telegram alert from variant A + on-demand group-scoped `/compare`.
 
-**Adding a new variant:** (1) add 5 `variant_<id>_*` fields to `dashboard/backend/config.py`; (2) append id to `_VARIANT_IDS` in `dashboard/backend/routers/variants.py`; (3) create `deploy/hydra_variant_<id>.service`; (4) create `bots/hydra/config/config_variant_<id>.json` on the VM. See `docs/HYDRA_VARIANT_TESTING_PLAN.md`.
+**Adding a new variant:** (1) add a `StrategyMeta` row (and a `GroupMeta` if it's a new cohort) to `shared/strategy_taxonomy.py` AND a registry row to `bots/hydra/registry.py` (`name → "module.path:ClassName"`) — this is the single source of truth that retires the old hardcoded `_VARIANT_IDS`; (2) create `bots/hydra/config/config_variant_<id>.json` on the VM; (3) create `deploy/hydra_variant_<id>.service`; (4) dashboard wiring (the `/api/strategies` endpoints + group renderers are taxonomy-driven; add a group renderer only if you introduced a new `pnl_shape`/structure family). Full recipe: `docs/NEW_STRATEGY_PLAYBOOK.md` + design rationale in `docs/STRATEGY_GROUPING_REDESIGN.md` (legacy detail still in `docs/HYDRA_VARIANT_TESTING_PLAN.md`).
 
 **API pacing:** Each variant's config can set `strategy.api_pacing_multiplier` (default 1.0 = A; B=1.5, C=2.0 recommended) to scale monitoring + heartbeat intervals — keeps combined IBKR request rate under the rate-limit ceiling. Vigilant-mode stop checks are NOT scaled (safety-critical).
 
@@ -539,10 +558,12 @@ Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
 
 | Page | Route | Content |
 |---|---|---|
-| Dashboard | `/` | Live entries, SPX chart, cushion bars, P&L w/ comparison context, position heatmap, perf metrics, agents, log feed |
+| Dashboard | `/` | Header **strategy picker** (grouped dropdown, taxonomy-driven) switches the live view across variants; live entries, SPX chart, cushion bars, P&L w/ comparison context, position heatmap, perf metrics, agents, log feed. **EOD auto-update**: cumulative + end-of-day cards re-fetch at the close (no reload). Calendar variants (D/E) render a debit-calendar view instead of the IC view. |
 | History | `/history` | Calendar heat map, week/month summary cards, day drill-down + session replay, CSV export |
 | Analytics | `/analytics` | 4-tab: Performance / Entries / Stops / Market |
-| Comparison | `/comparison` | N-variant panels (gated by env flag) |
+| Group comparison | `/comparison/:groupId` | Group-aware head-to-head — credit-IC renderer for `ic_0dte`, debit-calendar renderer for `calendar_multiday` (never mixes the two) |
+| Double Calendar | `/dc` | D's calendar status from its isolated `dc_calendar.db` (debit-native, not comparable to the IC pages) |
+| Comparison (legacy) | `/comparison` | N-variant panels (gated by `DASHBOARD_COMPARISON_MODE_ENABLED`) |
 
 ### Key API endpoints
 
@@ -559,6 +580,8 @@ Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
 | `GET /api/agents/status` | Agent last-run times |
 | `GET /api/metrics/{comparisons,performance}` | Historical context for the panel |
 | `GET /api/variants/{health,list,comparison,aggregate}` | Variant discovery + cross-day analytics |
+| `GET /api/strategies/{meta,{id}/snapshot,groups/{group_id}/comparison}` | Taxonomy boot payload, per-strategy live snapshot, group-scoped head-to-head (also `groups/{group_id}/aggregate`) |
+| `GET /api/dc/status` | D's isolated calendar status (reads `dc_calendar.db` + `dc_open_trades.json` sidecar) |
 | `GET /api/widget` | Flat JSON for iOS Scriptable |
 | `WS /ws/dashboard` | Real-time updates |
 
@@ -1049,6 +1072,9 @@ For the full 86-fix history including all Saxo-era bugs and resolutions, see `bo
 | Credentials setup | [deploy/IBKR_CREDENTIALS_SETUP.md](deploy/IBKR_CREDENTIALS_SETUP.md) | One-time setup + pre-start checklist |
 | HYDRA strategy spec | [docs/HYDRA_STRATEGY_SPECIFICATION.md](docs/HYDRA_STRATEGY_SPECIFICATION.md) | Full spec: decision flows, MKT rules, stop math |
 | Adding a NEW strategy (playbook + audit) | [docs/NEW_STRATEGY_PLAYBOOK.md](docs/NEW_STRATEGY_PLAYBOOK.md) | Step-by-step (Steps 0–10) distilled from Strategy D; coexistence checklist; go-live gate; audit log |
+| Strategy grouping + new-calendar design | [docs/STRATEGY_GROUPING_REDESIGN.md](docs/STRATEGY_GROUPING_REDESIGN.md) | Why the taxonomy/groups exist; comparability rules; D/E calendar design |
+| Living next-steps tracker | [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) | What's done / in-flight / next across this work |
+| Strategy D go-live (runbook + scope + plan) | [docs/migration/D_GOLIVE_RUNBOOK.md](docs/migration/D_GOLIVE_RUNBOOK.md) | Canonical go-live runbook; [scope+audit (NO-GO verdict)](docs/migration/D_GOLIVE_SCOPE_AND_AUDIT.md); [MVL-D phase-1 plan](docs/migration/D_MVL_PHASE1_PLAN.md) |
 | HYDRA trading journal | [docs/HYDRA_TRADING_JOURNAL.md](docs/HYDRA_TRADING_JOURNAL.md) | Daily results (updated by HOMER) |
 | Buffer optimization | [docs/HYDRA_BUFFER_OPTIMIZATION.md](docs/HYDRA_BUFFER_OPTIMIZATION.md) | Per-VIX-regime buffer study |
 | Early close analysis | [docs/HYDRA_EARLY_CLOSE_ANALYSIS.md](docs/HYDRA_EARLY_CLOSE_ANALYSIS.md) | Why MKT-018 is disabled |
@@ -1072,9 +1098,9 @@ For the full 86-fix history including all Saxo-era bugs and resolutions, see `bo
 ## Important Notes
 
 1. **Git on VM:** must run as `calypso`: `sudo -u calypso bash -c 'cd /opt/calypso && git pull'`
-2. **Service names use underscores:** `hydra`, `hydra_variant_b`, `hydra_variant_c`, `dashboard`
-3. **Log locations:** `/opt/calypso/logs/hydra/bot.log`; variants under `/opt/calypso/logs/hydra_variant_{b,c}/`
-4. **State files:** `data/hydra_state.json`, `data/variant_b/hydra_state.json`, `data/variant_c/hydra_state.json`
+2. **Service names use underscores:** `hydra`, `hydra_variant_b`, `hydra_variant_c`, `hydra_variant_d`, `hydra_variant_e`, `dashboard`
+3. **Log locations:** `/opt/calypso/logs/hydra/bot.log`; variants under `/opt/calypso/logs/hydra_variant_{b,c,d,e}/`
+4. **State files:** `data/hydra_state.json`, `data/variant_{b,c,d,e}/hydra_state.json`. Calendar variants D/E also keep a sidecar `data/variant_{d,e}/dc_open_trades.json` (open calendars) + an isolated `data/variant_{d,e}/dc_calendar.db` (calendar tables, separate from the shared `backtesting.db`).
 5. **Position Registry:** `data/position_registry.json` — vestigial on IBKR (always empty), kept loaded for back-compat
 6. **Token Keeper:** dead on this branch. The `services/token_keeper/` code and the `deploy/token_keeper.service.disabled-on-this-branch` unit (suffixed so no `deploy/*.service` install loop can pick it up) exist only for back-compat with `main` and must never be started. IBKR OAuth 1.0a is unattended.
 7. **All four sibling bots:** **deleted on this branch** (P5a/P5b). `git ls-tree HEAD bots/` shows only `__init__.py` + `hydra/`. The kill-switched versions live on `main`.

@@ -12,12 +12,20 @@ It was lifted verbatim from ``DoubleCalendarStrategy`` on 2026-06-16 (Commit A o
 extracting a shared base so a sibling calendar strategy can inherit it). The
 method BODIES were moved cut-and-paste with NO behavioral change — Strategy D
 (``DoubleCalendarStrategy``) remains byte-identical and its full test suite
-passes unchanged. The D-specific economics (the constructor + its knob reads,
-expiry/strike picking, transformer, stop manager, settlement booking,
-monitoring mode) stay in ``DoubleCalendarStrategy``.
+passes unchanged. Both D (``DoubleCalendarStrategy``) and E
+(``SpyDoubleCalendarStrategy``, BOT_NAME ``SPYDC``) now subclass this base. The
+variant-specific economics (the constructor + its knob reads, expiry/strike
+picking, transformer, stop/profit-take manager, settlement booking, monitoring
+mode) stay in each subclass.
+
+NOTE: the ``[DCTM-*]`` log-tag string literals in this module are SHARED legacy
+labels — they fire for E too (e.g. when E inherits ``_reset_for_new_day`` or
+``check_after_hours_settlement``). They are NOT renamed here because the tags are
+runtime code literals and a rename is a behavior change; a per-variant tag rename
+is a tracked follow-up in docs/NEXT_STEPS.md.
 
 ``CalendarStrategyBase`` deliberately defines NO ``__init__`` — it inherits
-``HydraStrategy``'s, and the concrete calendar strategy (D) keeps its own
+``HydraStrategy``'s, and each concrete calendar strategy keeps its own
 dry-run-locked constructor. ``HydraStrategy`` already concretizes the MEIC
 abstract methods, so this class is instantiable on its own (though it is meant
 to be subclassed).
@@ -44,13 +52,13 @@ _DC_LEG_ABBR = {"short_call": "SC", "long_call": "LC", "short_put": "SP", "long_
 
 
 class CalendarStrategyBase(HydraStrategy):
-    """Shared two-expiry calendar plumbing for the calendar strategies.
+    """Shared two-expiry calendar plumbing for the calendar strategies (D and E).
 
     Holds the generic calendar machinery (multi-day lifecycle, two-expiry data
     layer, dry-run simulation primitives, sidecar persistence, per-expiry
-    settlement) lifted from ``DoubleCalendarStrategy``. The DC-specific economics
-    (transformer, delta-target strike picking, thresholds, monitoring mode) live
-    in the subclass.
+    settlement) lifted from ``DoubleCalendarStrategy``. The variant-specific
+    economics (transformer, delta-target strike picking, thresholds, profit-take /
+    stop manager, monitoring mode) live in each subclass.
     """
 
     # ------------------------------------------------------------------
@@ -66,19 +74,21 @@ class CalendarStrategyBase(HydraStrategy):
         return phase in (DCPhase.CALENDAR, DCPhase.TRANSFORMED)
 
     def _reset_for_new_day(self):
-        """Daily reset that PRESERVES D's open multi-day positions.
+        """Daily reset that PRESERVES a calendar variant's open multi-day positions.
 
         The base reset rebuilds ``daily_state`` from scratch, which would discard
         any double calendar that legitimately spans days. In DRY-RUN (the only
-        mode this class permits) there are NO real broker positions, so the base
-        STATE-004 overnight-position halt does not trigger — the only fix needed
-        is to re-attach D's still-open multi-day entries after the base reset.
+        mode the calendar strategies permit today) there are NO real broker
+        positions, so the base STATE-004 overnight-position halt does not trigger —
+        the only fix needed is to re-attach the still-open multi-day entries after
+        the base reset.
 
-        REAL-ORDER PATH (NOT YET ENABLED): once D places real paper orders, the
-        shared account holds D's legs overnight and the base STATE-004 guard WILL
-        halt (it reads the whole account, unscoped). Do NOT flip dry_run=false
-        until STATE-004 / the orphan sweep are scoped to per-variant ownership and
-        buying power is budgeted (MUST-FIX #1/#2/#3 — see module docstring).
+        REAL-ORDER PATH (NOT YET ENABLED): once a calendar variant places real
+        paper orders, the shared account holds its legs overnight and the base
+        STATE-004 guard WILL halt (it reads the whole account, unscoped). Do NOT
+        flip dry_run=false until STATE-004 / the orphan sweep are scoped to
+        per-variant ownership and buying power is budgeted (MUST-FIX #1/#2/#3 — see
+        the subclass module docstring).
         """
         carried = [e for e in self.daily_state.entries if self._dc_entry_is_open(e)]
         super()._reset_for_new_day()  # dry-run: account flat -> no STATE-004 halt
@@ -110,12 +120,12 @@ class CalendarStrategyBase(HydraStrategy):
             # log_daily_summary. The per-day total_realized_pnl=0 reset is correct.
 
     def _calculate_capital_deployed(self) -> float:
-        """Capital at risk for D = sum of OPEN calendars' net debit (pre-transform
-        the max loss IS the debit; post-risk-free-transform it's ~0). The base
-        method uses spread_width × 100 × contracts — for D's same-strike calendar
-        that is just the wing notional (e.g. $500), LESS than the debit actually
-        paid ($1035), so the heartbeat Capital/Return were computed off the wrong
-        base."""
+        """Capital at risk for a calendar variant = sum of OPEN calendars' net
+        debit (pre-transform the max loss IS the debit; post-risk-free-transform
+        it's ~0). The base method uses spread_width × 100 × contracts — for a
+        same-strike calendar that is just the wing notional (e.g. $500), LESS than
+        the debit actually paid ($1035), so the heartbeat Capital/Return were
+        computed off the wrong base."""
         total = 0.0
         for e in self.daily_state.entries:
             if self._dc_entry_is_open(e):
@@ -132,20 +142,22 @@ class CalendarStrategyBase(HydraStrategy):
         return total
 
     def _calculate_max_loss_catastrophic(self) -> float:
-        """D's worst case if the stop fails = the full debit paid (a long calendar
-        cannot lose more than its debit). Risk-free TRANSFORMED legs excluded."""
+        """The calendar variant's worst case if the stop fails = the full debit
+        paid (a long calendar cannot lose more than its debit). Risk-free
+        TRANSFORMED legs excluded."""
         return self._dc_open_debit_at_risk()
 
     def get_detailed_position_status(self) -> List[str]:
-        """Calendar-native per-entry heartbeat lines. D holds net-DEBIT double
-        calendars, so the inherited IC-style line (Credit/cushion/SV) is garbage
-        for D ('Credit $0', '-469% cushion', an SV that ignores the debit). Render
-        the calendar's real economics: phase, strikes, both expiries, debit,
-        current liquidation value, and unrealized P&L as % of debit."""
+        """Calendar-native per-entry heartbeat lines. A calendar variant holds
+        net-DEBIT double calendars, so the inherited IC-style line
+        (Credit/cushion/SV) is garbage for it ('Credit $0', '-469% cushion', an SV
+        that ignores the debit). Render the calendar's real economics: phase,
+        strikes, both expiries, debit, current liquidation value, and unrealized
+        P&L as % of debit."""
         lines: List[str] = []
         for entry in self.daily_state.active_entries:
             if not isinstance(entry, CalendarEntry):
-                continue  # D only holds calendars; skip anything unexpected
+                continue  # a calendar variant only holds calendars; skip anything unexpected
             phase = getattr(entry.dc_phase, "value", str(entry.dc_phase))
             debit = float(getattr(entry, "net_debit", 0.0) or 0.0)
             value = entry.calendar_value
@@ -166,9 +178,10 @@ class CalendarStrategyBase(HydraStrategy):
 
         The base method assumes any tracked position should settle the same
         session and, until it does, returns False (keeping the daily-summary gate
-        open). A DC position held across days would jam that gate forever. Here:
-        if D is holding open multi-day positions, report settled-for-today so the
-        daily summary proceeds; otherwise defer to the base 0DTE-style logic.
+        open). A calendar position held across days would jam that gate forever.
+        Here: if the strategy is holding open multi-day positions, report
+        settled-for-today so the daily summary proceeds; otherwise defer to the
+        base 0DTE-style logic.
         """
         # Phase 5: settle any position whose SHORT expiry has arrived (the
         # transformed IC / leftover calendar settles at the SPXW PM close), then
@@ -187,16 +200,18 @@ class CalendarStrategyBase(HydraStrategy):
         return True
 
     def get_daily_summary(self) -> dict:
-        """Daily summary with the IC credit-vertical breakdown zeroed for D.
+        """Daily summary with the IC credit-vertical breakdown zeroed for a
+        calendar variant.
 
         The base summary derives ``expired_credits`` from each entry's
         call/put_spread_credit and ``stop_loss_debits`` from the credit-kept
-        identity — both meaningless for a net-DEBIT calendar (D books realized
-        P&L directly into total_realized_pnl at transform/stop/settlement). Left
-        as-is, a settled CalendarEntry's transform-time credit would surface as a
-        bogus expired-credit. Zero those two IC-specific fields and report D's
-        realized P&L from total_realized_pnl; net_pnl/total_pnl are already
-        debit-correct (they derive from total_realized_pnl + unrealized)."""
+        identity — both meaningless for a net-DEBIT calendar (the calendar strategy
+        books realized P&L directly into total_realized_pnl at
+        transform/stop/settlement). Left as-is, a settled CalendarEntry's
+        transform-time credit would surface as a bogus expired-credit. Zero those
+        two IC-specific fields and report the calendar's realized P&L from
+        total_realized_pnl; net_pnl/total_pnl are already debit-correct (they
+        derive from total_realized_pnl + unrealized)."""
         summary = super().get_daily_summary()
         summary["expired_credits"] = 0.0
         summary["stop_loss_debits"] = 0.0
@@ -282,8 +297,8 @@ class CalendarStrategyBase(HydraStrategy):
         """True unless the broker DEFINITIVELY flags the quote as delayed/frozen.
         Wraps HYDRA's _option_quote_is_realtime (IBKR field 6509); defaults to
         True when the check is unavailable/errors so a missing entitlement signal
-        never freezes D's stop/transform entirely — it only rejects a quote we
-        can positively confirm is non-real-time."""
+        never freezes the calendar strategy's stop/transform entirely — it only
+        rejects a quote we can positively confirm is non-real-time."""
         try:
             checker = getattr(self, "_option_quote_is_realtime", None)
             return bool(checker(q)) if checker else True
@@ -330,7 +345,8 @@ class CalendarStrategyBase(HydraStrategy):
     # Entry + dry-run simulation (Phase 3)
     # Pick the 30-40delta two-expiry strikes, open the net-DEBIT double calendar,
     # and SIMULATE the fills from REAL mids (dry-run: no broker order, synthetic
-    # DRY ids). Overridden (not inherited) so D NEVER runs HYDRA's IC entry.
+    # DRY ids). Overridden (not inherited) so a calendar variant NEVER runs
+    # HYDRA's IC entry.
     # ------------------------------------------------------------------
 
     def _min_buying_power_per_unit(self) -> float:
@@ -492,15 +508,17 @@ class CalendarStrategyBase(HydraStrategy):
 
     # ------------------------------------------------------------------
     # Multi-day persistence + per-expiry settlement (Phase 5)
-    # D owns its persistence via a SIDECAR (the Brandon-hedge precedent) so the
-    # 0DTE base save/load stays byte-identical: super() writes the base state
-    # file unchanged; the sidecar carries the multi-day fields (dc_phase,
-    # expiries, debit, transform) the fixed IC schema can't, and lets a calendar
-    # opened on a PRIOR day be re-adopted (the base date!=today guard drops it).
+    # A calendar variant owns its persistence via a SIDECAR (the Brandon-hedge
+    # precedent) so the 0DTE base save/load stays byte-identical: super() writes
+    # the base state file unchanged; the sidecar carries the multi-day fields
+    # (dc_phase, expiries, debit, transform) the fixed IC schema can't, and lets a
+    # calendar opened on a PRIOR day be re-adopted (the base date!=today guard
+    # drops it).
     # ------------------------------------------------------------------
 
     def _dc_state_path(self) -> str:
-        """Sidecar path next to the variant state file (data/variant_d/...)."""
+        """Sidecar path next to the variant state file (data/variant_<letter>/...,
+        d for D, e for E)."""
         return os.path.join(os.path.dirname(self.state_file), "dc_open_trades.json")
 
     def _dc_serialize_entry(self, e) -> dict:
@@ -627,7 +645,7 @@ class CalendarStrategyBase(HydraStrategy):
         return adopted > 0
 
     def _save_state_to_disk(self):
-        """Base state file (unchanged) + the D sidecar with the multi-day fields."""
+        """Base state file (unchanged) + the calendar sidecar with the multi-day fields."""
         super()._save_state_to_disk()
         self._dc_save_sidecar()
 
@@ -680,7 +698,7 @@ class CalendarStrategyBase(HydraStrategy):
         return True
 
     def _record_heartbeat_to_db(self):
-        """Record the market tick (generic SPX/VIX, useful for D) + D's calendar
+        """Record the market tick (generic SPX/VIX) + the calendar variant's
         snapshots. OVERRIDE: does NOT write the base IC-shaped spread_snapshots —
         call/put_spread_value in IC-named columns would mis-describe a debit
         calendar — routing per-entry marks to dc_calendar_snapshots instead."""

@@ -2,9 +2,10 @@
 
 **This file is the single-source-of-truth for the current state of the `hydra-ibkr-standalone` branch.** Any Claude session arriving at this repo should read this file first, before CLAUDE.md. CLAUDE.md is the operator reference (what the bot does, how to deploy, troubleshoot); this file is the *project state* (what's been done, what's in flight, what's blocked).
 
-**Last updated:** 2026-06-02
-**Last commit on branch:** `d83d50b` + the AUD5 remediation commit (use `git rev-parse HEAD` to verify)
-**Commits ahead of `main`:** 153 + the AUD5 remediation commit (use `git log --oneline main..HEAD | wc -l` to verify)
+**Last updated:** 2026-06-16
+**Base branch:** `hydra-ibkr-standalone` — last commit `d83d50b` + the AUD5 remediation commit (use `git rev-parse HEAD` to verify).
+**Active feature branch:** `feat/strategy-grouping-spy-calendar` (commits `f9e7d2a`…`9f9e7ad`, off `hydra-ibkr-standalone`) — strategy taxonomy/grouping + Strategy D go-live work + new Strategy E (SPY double calendar). **NOT merged.** See the "Strategy D go-live + Strategy E + strategy-grouping" section immediately below.
+**Commits ahead of `main`:** 153 + the AUD5 remediation commit (base branch) (use `git log --oneline main..HEAD | wc -l` to verify)
 **Test suite:** unit suite passes; integration/optional tests skipped pending live paper account. Re-run `pytest` for the exact current count (it grew past the old 953 snapshot after the 2026-05-31 30-agent audit, `38ac9d6`); see CI / run `python -m pytest tests/ -q`. The suite is deterministic at any wall-clock hour (the intraday-OHLC tests were time-gated; fixed 2026-05-28).
 **Branch is pushed to `origin`** (github.com/diogodiasgrilo/CALYPSO) as of 2026-05-29 — no longer laptop-only.
 
@@ -23,6 +24,26 @@
 > - **Go-live plan updated 2026-06-02 (`b9e79a4`):** the Monday 2026-06-01 broker paper-smoke ran (one-shot timer) and its `ExecStartPost` ran `flip_a_live.sh`. The operator plan is now to flip **A AND C** to real paper after the **2026-06-02** close (for the 2026-06-03 open) via `scripts/flip_ac_live.sh`; **B stays dry-run.** ⚠️ `flip_ac_live.sh` is **operator-run (manual)** — there is intentionally NO auto-flip timer, and its Guard 2 requires a **same-ET-day** paper-smoke PASS sentinel, so a fresh smoke must run the day of the flip first. Runbook: [`RUNBOOKS.md`](./RUNBOOKS.md) **RB-8**. (AUD5 fixed the flip-script timezone handling + the false "scheduled via timer" comment; see `AUD5_FINDINGS.md` GL-1.)
 > - **AUD5 audit complete (2026-06-02).** 20-agent audit of `38ac9d6..d83d50b` + 3 meta-auditors + 16 backfill agents. Confirmed code findings fixed with regression tests (`tests/test_aud5_fixes.py`): GL-2 (ORDER-004 margin gate was failing open on the IBKR path — `margin_pct=None` formatting), C-1 (real-time market-data gate completed: index Z/Y/N gating, halt detection, `_option_quote_is_realtime` + option-pricing gates), C-2/C-3 (Sheets stale-rows + settlement-metrics throttle). Plus GL-1 flip-script hardening and a doc-staleness sweep (this file, commission spec, MAX_RPS comments, version history). Full register: [`AUD5_FINDINGS.md`](./AUD5_FINDINGS.md).
 > - **Now = Gate 2 paper-smoke watch + 2026-06-02 A+C go-live decision** (today is 2026-06-02). Observe A/B/C + the broker through the session + the morning re-auth gate + entry windows; the AUD5 fixes above land before/with the A+C live-paper flip. Still-open by observation: Telegram command handler responsiveness (`/status`) and full entry evaluation through the broker at the windows (the watchdog flags failures).
+
+---
+
+## Strategy D go-live work + Strategy E (SPY double calendar) + strategy-grouping/taxonomy (2026-06-16, feat branch)
+
+> **All of the below is on the feature branch `feat/strategy-grouping-spy-calendar` (off `hydra-ibkr-standalone`), commits `f9e7d2a`…`9f9e7ad`. NOT merged. Nothing here is live — the two new calendar strategies (D, E) are dry-run-LOCKED, and the taxonomy/dashboard work is additive and does not change A/B/C behavior.**
+
+**State summary:** full test suite green (~1680 tests — re-run `python -m pytest tests/ -q` for the exact count); the dashboard was deployed to the VM for a visual check; **not merged**; **nothing new is live.**
+
+What landed on this branch:
+
+- **Strategy D ("DC Time Machine", `double_calendar`) — fully built + hardened.** Multi-day double calendar → risk-free iron condor; runs in **simulation only** (dry-run-LOCKED; the class refuses any non-dry_run construction). Go-live audit returned an explicit **NO-GO** (correct outcome). All three go-live docs written: [`D_GOLIVE_RUNBOOK.md`](./D_GOLIVE_RUNBOOK.md) (canonical runbook), [`D_GOLIVE_SCOPE_AND_AUDIT.md`](./D_GOLIVE_SCOPE_AND_AUDIT.md) (scope + NO-GO + risk register), [`D_MVL_PHASE1_PLAN.md`](./D_MVL_PHASE1_PLAN.md) (minimum-viable-live phase-1, transformer stripped). Coexistence MUST-FIXes (scope STATE-004 + orphan sweep to per-variant conids; per-variant BP budget) remain go-live gates.
+
+- **Strategy E ("SPY Double Calendar", `spy_double_calendar`, `BOT_NAME` SPYDC) — built, dry-run-LOCKED.** A *managed* SPY double calendar from an **OptionsKit** video (short ≈35 DTE + long ≈+1 week, ±1×expected-move strikes, low-IV entry gate, laddered early profit-take + trading-day time-exit, **no transformer, no hard stop**). Sibling of D: D's shared `_dc_*` machinery was lifted **verbatim** into the new `bots/hydra/calendar_strategy_base.py` (`CalendarStrategyBase`), which both `DoubleCalendarStrategy` (D — byte-identical) and `SpyDoubleCalendarStrategy` (E) subclass. E is fully simulated (NOT stubbed). SPY is American-exercise + dividend-paying, so early-assignment + dividend handling are go-live gates (net-new vs D's European SPXW). *(NB: an earlier "Theta Profits / Ahuja" spec was a superseded placeholder — the shipped strategy is the OptionsKit SPY double calendar.)*
+
+- **Strategy taxonomy + comparability groups** — new `shared/strategy_taxonomy.py` (stdlib-only) is the single source of truth: **5 variants / 2 groups** — `ic_0dte` (credit; **a** live, **b** dry-run-shadow, **c** live/primary) + `calendar_multiday` (debit; **d**, **e** both dry-run-locked). The letter stays the stable internal key; human display-names + groups are a presentation overlay. Credit-vs-debit comparison is refused **by construction** (a group carries a single `pnl_shape`), replacing the scattered `if vid=="d": continue` / `_VARIANT_IDS` exclusions. A startup fail-stop validates the static table against the runtime resolver; unknown letters degrade to a safe sentinel.
+
+- **Dashboard** — main-page **strategy picker** (grouped dropdown, dispatches IC vs calendar layout by `data_kind`), **group tabs** replacing A/B/C/D tabs (`/comparison/:groupId`; legacy `/comparison` + `/dc` redirect into it), a group-aware `/api/strategies` API + a **shape-distinct** calendar DB reader (debit-native; no IC-field leakage), and **EOD auto-update** (cumulative/summary widgets refresh live at the close, no page reload). Group-scoped `/compare` in Telegram + taxonomy display-names in alert/Telegram/email rendering (alert-wire `bot_name` + HOMER anchors FROZEN).
+
+**Status:** on the feature branch only, full suite green, dashboard deployed for a visual check, **NOT merged, nothing new is live.** Living **what's-left** tracker: [`docs/NEXT_STEPS.md`](../NEXT_STEPS.md) (remaining steps + Strategy D & E deployment paths). Design + as-shipped detail: [`docs/STRATEGY_GROUPING_REDESIGN.md`](../STRATEGY_GROUPING_REDESIGN.md) (§§1–8) and the [`docs/NEW_STRATEGY_PLAYBOOK.md`](../NEW_STRATEGY_PLAYBOOK.md) audit log.
 
 ---
 
@@ -226,6 +247,11 @@ Read these for context as needed:
 | `docs/migration/DEFERRED_WORK.md` | DEF-1..DEF-7 explicitly-deferred items | When evaluating "should we fix X now?" |
 | `docs/migration/F*_DESIGN.md` | Per-phase design docs | When you need to understand a specific migration phase |
 | `docs/migration/P7_GO_LIVE_PLAN.md` | The original 6-step go-live sequence | Background only — superseded by Gates 1-5 above |
+| `docs/migration/D_GOLIVE_RUNBOOK.md` | Strategy D ("DC Time Machine") canonical go-live runbook — arm-gate, flip/rollback/flatten, smoke, DG-1..DG-11 readiness | When working Strategy D go-live (D is dry-run-LOCKED) |
+| `docs/migration/D_GOLIVE_SCOPE_AND_AUDIT.md` | Strategy D go-live scope + audit with the explicit **NO-GO** verdict + risk register | When you need D's go/no-go rationale |
+| `docs/migration/D_MVL_PHASE1_PLAN.md` | Strategy D minimum-viable-live phase-1 plan (transformer stripped) | When planning D's first live phase |
+| `docs/NEW_STRATEGY_PLAYBOOK.md` | Repeatable, auditable procedure for adding a new dry-run-locked strategy variant (Steps 0–10) + audit log | When adding or auditing a new strategy variant |
+| `docs/STRATEGY_GROUPING_REDESIGN.md` | Design + as-shipped state of the strategy taxonomy, comparability groups, dashboard picker/group tabs, and the second calendar (E) | When you need the grouping/taxonomy + variant-E design |
 | `docs/HYDRA_STRATEGY_SPECIFICATION.md` | Strategy spec (entry rules, stops, VIX regime) | When you need strategy details |
 | `docs/HYDRA_TRADING_JOURNAL.md` | HOMER-maintained daily journal | When you need historical session data |
 | `docs/HYDRA_BUFFER_OPTIMIZATION.md` | Per-VIX-regime buffer study | When tuning stop buffers |

@@ -18,9 +18,12 @@ Real-time monitoring dashboard for the HYDRA trading bot. Built with React 19 + 
 
 | Page | Route | Purpose |
 |------|-------|---------|
-| Dashboard | `/` | Live entries, P&L, SPX chart, cushion bars, agent status, log feed |
+| Dashboard | `/` | Live entries, P&L, SPX chart, cushion bars, agent status, log feed. Carries a **strategy picker** (Header dropdown, grouped by comparability group) so it can render any strategy — IC layout vs calendar layout dispatched by `data_kind`. EOD auto-update refreshes the cumulative/summary widgets live at the close. |
 | History | `/history` | Calendar heat map of daily P&L, day drill-down |
 | Analytics | `/analytics` | Entry time performance, VIX correlation, stop analysis, day-of-week P&L |
+| Group Comparison | `/comparison/:groupId` | N-variant head-to-head per comparability **group** (one tab per group; `ic_0dte` credit vs `calendar_multiday` debit), shape-aware renderer. Gated by the dashboard's comparison-mode env flag. |
+| Comparison (legacy) | `/comparison` | Redirects to the first comparable IC (credit) group's `/comparison/:groupId`. |
+| Double Calendar (legacy) | `/dc` | Redirects to the calendar (debit) group's `/comparison/:groupId`. |
 
 ## Color System
 

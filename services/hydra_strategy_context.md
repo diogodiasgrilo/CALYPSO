@@ -1,12 +1,27 @@
 # HYDRA Strategy Context (Shared)
 
 **Shared by:** APOLLO, HERMES, HOMER, CLIO
-**Last updated:** 2026-05-13
+**Last updated:** 2026-06-16
 **HYDRA version:** v1.23.0 (deployed 2026-04-19 — Downday-035 + MKT-045 + MKT-046)
 **Schema version:** v7
 **Source of truth:** `bots/hydra/config/config.json` on VM
+**Broker:** Interactive Brokers Web API (ibind OAuth 1.0a) — the Saxo→IBKR migration is complete on the
+`hydra-ibkr-standalone` branch. Any "Saxo" mention below is **historical** (the reason a rule exists); the
+live broker is IBKR. Field names like `*_uic` now hold the IBKR conid.
 
 This file is the single source of truth for HYDRA strategy parameters across all Claude API agents. When HYDRA's strategy or config changes, update this file ONCE and all agents automatically pick up the change.
+
+**Strategy roster (2026-06-16).** Five variants in two comparability groups (see
+`shared/strategy_taxonomy.py`):
+
+- **0DTE Iron Condor group (`ic_0dte`, credit):** **A** (HYDRA baseline) = **LIVE (paper)**, **B**
+  (Brandon narrow) = **dry-run shadow**, **C** (Brandon narrow) = **LIVE (paper, primary)**.
+- **Multi-day Calendar group (`calendar_multiday`, debit):** **D** ("DC Time Machine", `double_calendar`)
+  and **E** ("SPY Double Calendar", `spy_double_calendar`) — both **dry-run-LOCKED** (fully simulated;
+  the class refuses any non-dry_run construction). D and E subclass the shared
+  `bots/hydra/calendar_strategy_base.py`. These are multi-day net-debit calendars — a different structural
+  family from the 0DTE credit IC below, and are NOT P&L-comparable to A/B/C. The rest of this doc describes
+  the 0DTE IC family (A/B/C).
 
 ---
 
@@ -124,10 +139,11 @@ Override applied **once per day at first entry** via `_apply_vix_regime_override
 
 ## Variant Comparison & Directional Pivot Strategy (2026-05-01 onward)
 
-Three HYDRA variants run in parallel in dry-run mode for head-to-head A/B/C
-comparison. All three: 75pt × 2c, FOMC bypass active, real Saxo quotes for
-credit estimation but no real orders. Same MKT-024 / VIX-regime / stop
-buffers. The **only** difference is in entry-schedule + close behavior:
+Three HYDRA 0DTE-IC variants run in parallel for head-to-head A/B/C
+comparison. **A and C are LIVE on the IBKR paper account; B stays dry-run
+(shadow).** All three use real IBKR quotes for credit estimation. Same
+MKT-024 / VIX-regime / stop buffers. The **only** difference is in
+entry-schedule + close behavior:
 
 | Variant | Entry times | Contracts | Spread width | Brandon stack | Close behavior |
 |---------|-------------|-----------|--------------|---------------|----------------|
@@ -135,7 +151,9 @@ buffers. The **only** difference is in entry-schedule + close behavior:
 | **B (Brandon narrow, 4-slot grid)** | 09:45, 10:45, 11:15, 11:45 (2026-05-13 trim from 7-slot — dropped 09:31 whipsaw, 10:15 between-slot, 12:15 late) | 10c | Brandon `narrow_spread`: 5pt at VIX<22, 10pt at VIX≥22 | All Brandon features **LIVE** (TP@80%, GEX adjuster, GEX breach exit, defensive overlay) + delta-target strike selection (8δ from Polygon chain) with BS-recompute at live spot. HYDRA tighteners (MKT-020/022) DISABLED. GEX-adjuster SKIP is peak-localized (±25pt from |GEX| peak, not full cluster range). | Brandon TP@80% closes IC when mark ≤ 20% of credit. Brandon GEX breach exit closes after sustained 90s breach of decel wall. HYDRA credit+buffer stop runs in `hydra_stop_shadow` (parallel comparison only). |
 | **C (Brandon, narrow 5/10pt)** | 10:15, 10:45, 11:15 + conditional 14:00 (mirrors A's grid) | 10c | Same as B | Same as B (all LIVE + delta-target with BS-recompute + peak-localized SKIP) | Same as B |
 
-All three variants run **dry-run** (`dry_run: true` in config). Pivot strategy
+**A and C run live on IBKR paper (`dry_run: false`); B stays dry-run
+(`dry_run: true`).** (This table was authored when all three were dry-run; A+C
+were flipped to live paper at the 2026-06-02 close.) Pivot strategy
 (`directional_pivot.enabled`) is **disabled across all variants** since v1.27
 — Brandon's GEX-breach exit replaces it on B/C (now LIVE).
 

@@ -51,11 +51,12 @@ router = APIRouter(prefix="/api/variants", tags=["variants"])
 # variant_a_* fields. (Pre-2026-06-02, A was special-cased to the main paths
 # because the live bot WAS variant A; C is now primary.)
 
-# NOTE: variant "d" (Strategy D — DC Time Machine) is deliberately NOT listed
-# yet. Its config paths are pre-staged in config.py, but it is a multi-day
-# net-DEBIT double calendar that the IC-shaped comparison/aggregate math would
-# mis-render (debit shown as credit) — add "d" here in Phase 7 alongside the
-# D-aware (structure-tagged) rendering.
+# NOTE: the calendar group — variant "d" (Strategy D — DC Time Machine) and "e"
+# (Strategy E — SPY Double Calendar) — is intentionally EXCLUDED from this legacy
+# IC-only list. They are multi-day net-DEBIT double calendars that the IC-shaped
+# comparison/aggregate math here would mis-render (debit shown as credit).
+# Group-scoped comparison for the calendar group is served by /api/strategies via
+# the taxonomy (shared/strategy_taxonomy.py), not by this legacy endpoint.
 _VARIANT_IDS: list[str] = ["a", "b", "c"]
 
 

@@ -1,6 +1,6 @@
 # Strategy Grouping Redesign + Second Calendar Strategy — Design
 
-> **Status:** DESIGN / pending approval + audit. No code written yet.
+> **Status:** IMPLEMENTED on branch `feat/strategy-grouping-spy-calendar` (commits `f9e7d2a`…`9f9e7ad`); not merged.
 > **Date:** 2026-06-16.
 > **Why:** (1) Add a second multi-day calendar strategy (a sibling of Strategy D), and (2) stop
 > identifying strategies by bare letters A/B/C/D/E everywhere — replace with human names + *comparability
@@ -55,11 +55,11 @@ helpers: variant_id(), is_default_variant(), meta(vid), group(vid), members(grou
 
 | id | display_name | strategy_class | group | structure_family | pnl_shape | dte_class | status |
 |---|---|---|---|---|---|---|---|
-| a | HYDRA Baseline | hydra | ic_0dte | iron_condor | credit | 0DTE | dry_run_shadow |
+| a | HYDRA Baseline | hydra | ic_0dte | iron_condor | credit | 0DTE | live |
 | b | Brandon Narrow (4-slot) | brandon | ic_0dte | iron_condor | credit | 0DTE | dry_run_shadow |
 | c | Brandon Narrow (live) | brandon | ic_0dte | iron_condor | credit | 0DTE | live |
 | d | DC Time Machine | double_calendar | calendar_multiday | double_calendar | debit | multi_day | dry_run_locked |
-| e | *(new — TBD name)* | *(new class)* | calendar_multiday | double_calendar | debit | multi_day | dry_run_locked |
+| e | SPY Double Calendar | spy_double_calendar | calendar_multiday | double_calendar | debit | multi_day | dry_run_locked |
 
 This **replaces ~5 scattered hardcoded "is this strategy comparable?" checks** (the `if vid=="d": continue`
 guards in `strategy.py`, the `_VARIANT_IDS=["a","b","c"]` list, the `main.py` banner `if variant=="d"`,
@@ -313,8 +313,10 @@ tests stay green under a faithful lift):
 2. **Management rules — RESOLVED** (transcript): double calendar; short ≈35 DTE, long +~1wk; ±1×EM strikes;
    low-IV entry gate; laddered early profit-taking; no hard stop; never hold to expiry. (Superseded the earlier
    Theta-Profits/Ahuja placeholder numbers, which were a different creator.)
-3. **New strategy name + registry key + `BOT_NAME`** — proposal pending the source (avoid "Theta" if it's
-   OptionsKit). Variant letter `e`.
+3. **New strategy name + registry key + `BOT_NAME`** — **RESOLVED (shipped):** display name
+   **"SPY Double Calendar"**, registry key **`spy_double_calendar`**, `BOT_NAME` **`SPYDC`** (short tag
+   `SPYDC-E`). Variant letter `e`. ("Theta" deliberately avoided — the source is the OptionsKit video,
+   not Theta Profits/Ahuja.)
 4. **Group id label** — `calendar_multiday` ("Multi-day Calendar") chosen; confirm.
 5. **Recorder** — reuse `DCDataRecorder` with transformer table kept-empty + distinct `structure` (chosen),
    vs a trimmed recorder.

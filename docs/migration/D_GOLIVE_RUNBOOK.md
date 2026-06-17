@@ -317,12 +317,21 @@ Must prove:
 
 **Key files**
 - `bots/hydra/double_calendar_strategy.py` — D strategy; dry-run lock + arm-gate (`__init__`), exec stubs to replace.
+  > **Note (post-`f9e7d2a` lift):** D's *shared* `_dc_*` machinery (two-expiry data layer, entry-sim
+  > skeleton, sidecar persistence, multi-day lifecycle, close/settlement primitives) was lifted **verbatim**
+  > into `bots/hydra/calendar_strategy_base.py` (`CalendarStrategyBase`), which `DoubleCalendarStrategy` now
+  > subclasses (D byte-identical; variant E `spy_double_calendar` is the second subclass). `file:line`
+  > references in this runbook that point at `double_calendar_strategy.py` for those **shared** methods are
+  > stale — look in `calendar_strategy_base.py` instead. D-specific logic (transformer, `_manage_calendar`,
+  > delta-band strike search, DTE-window picker, TRANSFORMED settlement) remains in `double_calendar_strategy.py`.
+- `bots/hydra/calendar_strategy_base.py` — `CalendarStrategyBase`, the shared calendar base (lifted from D).
 - `bots/hydra/calendar_entry.py` — CalendarEntry + risk-free invariant.
 - `bots/hydra/strategy.py` — C-side account-wide guards (`_reset_for_new_day` STATE-004, `_reconcile_orphan_sweep`, `_read_open_positions`, `_expected_position_quantities`).
 - `bots/hydra/base_strategy.py` — `_check_buying_power` (BP gate), `_execute_entry`/`_unwind_partial_entry` (patterns to copy), `_place_leg_order`.
 - `shared/ib_client.py` — `place_and_wait_for_fill`, `cancel_order`, `what_if_naked_margin`, `_ensure_coid`; `shared/broker_service.py` — RPC allowlist.
 - `scripts/flip_ac_live.sh` / `broker_paper_smoke.py` — clone these for the D flip + smoke (D versions are net-new).
-- `deploy/hydra_variant_d.service`, `bots/hydra/config/config_variant_d.json` (VM, gitignored/skip-worktree).
+- `deploy/hydra_variant_d.service`, `bots/hydra/config/config_variant_d.json` — both **committed/tracked**
+  (the per-variant configs are committed; only the root `bots/hydra/config/config.json` is gitignored).
 
 **Provenance:** built from a 5-agent independent scope + a 5-agent adversarial audit (2026-06-16),
 synthesized in `D_GOLIVE_SCOPE_AND_AUDIT.md`. Every file:line claim spot-checked against the working

@@ -17,6 +17,9 @@ Supported commands:
     /hermes   — Latest HERMES daily report
     /apollo   — Latest APOLLO morning briefing
     /clio     — Latest CLIO weekly analysis
+    /compare  — Group-scoped variant head-to-head (bare = the poller's group, e.g.
+                the 0DTE iron condors A/B/C; "/compare calendars" = D/E)
+    /calendars — Multi-day calendar (D, E) status (alias of "/compare calendars")
     /restart  — Restart the HYDRA service
     /stop     — Stop the HYDRA service (warns if active positions)
     /help     — List all commands
