@@ -1,5 +1,5 @@
 {
-  "_comment_variant": "HYDRA Variant E — Strategy E 'SPY Double Calendar' (OptionsKit, video GuI-hH_jhlg): a multi-day SPY double calendar (net-debit call calendar above spot + put calendar below spot, same strike per leg). MANAGED, not transformed — laddered early profit-taking + a trading-day time-exit, NO hard stop (defined risk = the debit). DRY-RUN-LOCKED. The strategy class (bots/hydra/spy_double_calendar_strategy.py:SpyDoubleCalendarStrategy) refuses any non-dry_run construction; the dry-run lifecycle IS implemented (opens calendars simulated from real mids, scales out on the profit ladder, time-exits before the short expiry, persists across restarts, settles as a backstop) but places NO real orders. brandon.enabled=false so E runs its own (CalendarStrategyBase-derived) path. alerts + google_sheets are OFF so E never pollutes the canonical record or pages the operator. Do NOT flip dry_run=false next to a live C until the coexistence MUST-FIXes ship AND SPY American early-assignment + dividend handling is built (go-live gates) — see the module docstring.",
+  "_comment_variant": "HYDRA Variant E \u2014 Strategy E 'SPY Double Calendar' (OptionsKit, video GuI-hH_jhlg): a multi-day SPY double calendar (net-debit call calendar above spot + put calendar below spot, same strike per leg). MANAGED, not transformed \u2014 laddered early profit-taking + a trading-day time-exit, NO hard stop (defined risk = the debit). DRY-RUN-LOCKED. The strategy class (bots/hydra/spy_double_calendar_strategy.py:SpyDoubleCalendarStrategy) refuses any non-dry_run construction; the dry-run lifecycle IS implemented (opens calendars simulated from real mids, scales out on the profit ladder, time-exits before the short expiry, persists across restarts, settles as a backstop) but places NO real orders. brandon.enabled=false so E runs its own (CalendarStrategyBase-derived) path. alerts + google_sheets are OFF so E never pollutes the canonical record or pages the operator. Do NOT flip dry_run=false next to a live C until the coexistence MUST-FIXes ship AND SPY American early-assignment + dividend handling is built (go-live gates) \u2014 see the module docstring.",
   "bot_name": "HYDRA",
   "dry_run": true,
   "_comment_credentials": "IBKR OAuth credentials are loaded from systemd $CREDENTIALS_DIRECTORY on the VM, or env vars in dev. Not in this file.",
@@ -11,10 +11,10 @@
     "underlying_symbol": "SPY",
     "volatility_symbol": "VIX",
     "trading_class": "SPY",
-    "exchange": "NYSE",
+    "exchange": "SMART",
     "sec_type": "STK",
     "strike_increment": 1,
-    "_comment_spy_double_calendar": "Strategy-E-specific knobs (consumed by SpyDoubleCalendarStrategy). Short leg ~35 DTE (± tolerance), long leg = short + ~7 days (± tolerance), same strike per leg. Strikes are expected-move based: call ≈ spot + em_fraction×EM, put ≈ spot − em_fraction×EM (em_fraction 1.0 = ±1 SD). Low-IV entry gate: enter only when VIX <= max_vix_entry (a proxy — true IV-rank vs a 1-yr median is a go-live refinement). Management: laddered profit-taking (close a cumulative share of the original contracts as the return-on-risk crosses each rung), plus a trading-day time-exit that closes ALL remaining contracts within time_exit_days_before trading days of the short expiry (never hold through expiry). NO hard stop.",
+    "_comment_spy_double_calendar": "Strategy-E-specific knobs (consumed by SpyDoubleCalendarStrategy). Short leg ~35 DTE (\u00b1 tolerance), long leg = short + ~7 days (\u00b1 tolerance), same strike per leg. Strikes are expected-move based: call \u2248 spot + em_fraction\u00d7EM, put \u2248 spot \u2212 em_fraction\u00d7EM (em_fraction 1.0 = \u00b11 SD). Low-IV entry gate: enter only when VIX <= max_vix_entry (a proxy \u2014 true IV-rank vs a 1-yr median is a go-live refinement). Management: laddered profit-taking (close a cumulative share of the original contracts as the return-on-risk crosses each rung), plus a trading-day time-exit that closes ALL remaining contracts within time_exit_days_before trading days of the short expiry (never hold through expiry). NO hard stop.",
     "spy_double_calendar": {
       "short_dte_target": 35,
       "short_dte_tolerance": 5,
@@ -23,10 +23,22 @@
       "em_fraction": 1.0,
       "max_vix_entry": 22.0,
       "profit_ladder": [
-        {"ror": 0.20, "frac": 0.25},
-        {"ror": 0.50, "frac": 0.25},
-        {"ror": 1.00, "frac": 0.25},
-        {"ror": 2.00, "frac": 0.25}
+        {
+          "ror": 0.2,
+          "frac": 0.25
+        },
+        {
+          "ror": 0.5,
+          "frac": 0.25
+        },
+        {
+          "ror": 1.0,
+          "frac": 0.25
+        },
+        {
+          "ror": 2.0,
+          "frac": 0.25
+        }
       ],
       "time_exit_days_before": 2,
       "max_concurrent": 1,
@@ -34,7 +46,9 @@
       "require_realtime_quotes": false,
       "entry_time_et": "10:00"
     },
-    "entry_times": ["10:00"],
+    "entry_times": [
+      "10:00"
+    ],
     "entry_window_minutes": 5,
     "spread_vix_multiplier": 6.0,
     "min_spread_width": 25,
@@ -103,14 +117,53 @@
     "min_entries_before_roc_gate": 3,
     "vix_regime": {
       "enabled": false,
-      "breakpoints": [18.0, 22.0, 28.0],
-      "max_entries": [1, 1, 1, 1],
-      "put_stop_buffer": [null, 2.50, 1.50, null],
-      "call_stop_buffer": [null, 1.50, 1.00, null],
-      "min_call_credit": [0.10, 0.05, 0.05, 0.05],
-      "min_put_credit": [0.15, 0.10, 0.05, 0.05],
-      "shadow_call_otm": [40.0, 50.0, 75.0, 75.0],
-      "shadow_put_otm": [50.0, 75.0, 110.0, 90.0]
+      "breakpoints": [
+        18.0,
+        22.0,
+        28.0
+      ],
+      "max_entries": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "put_stop_buffer": [
+        null,
+        2.5,
+        1.5,
+        null
+      ],
+      "call_stop_buffer": [
+        null,
+        1.5,
+        1.0,
+        null
+      ],
+      "min_call_credit": [
+        0.1,
+        0.05,
+        0.05,
+        0.05
+      ],
+      "min_put_credit": [
+        0.15,
+        0.1,
+        0.05,
+        0.05
+      ],
+      "shadow_call_otm": [
+        40.0,
+        50.0,
+        75.0,
+        75.0
+      ],
+      "shadow_put_otm": [
+        50.0,
+        75.0,
+        110.0,
+        90.0
+      ]
     },
     "directional_pivot": {
       "enabled": false,
@@ -119,7 +172,7 @@
       "pre_entry_defer_minutes": 15
     },
     "brandon": {
-      "_comment": "OFF on E — E is its own (CalendarStrategyBase-derived) multi-day strategy, not the Brandon iron-condor stack. Disabling here makes the registry resolve strategy.name='spy_double_calendar'.",
+      "_comment": "OFF on E \u2014 E is its own (CalendarStrategyBase-derived) multi-day strategy, not the Brandon iron-condor stack. Disabling here makes the registry resolve strategy.name='spy_double_calendar'.",
       "enabled": false
     }
   },
@@ -155,7 +208,7 @@
     "enabled": true
   },
   "google_sheets": {
-    "_comment": "OFF on E (scaffold/dry-run) — E must not write to the canonical Sheets record.",
+    "_comment": "OFF on E (scaffold/dry-run) \u2014 E must not write to the canonical Sheets record.",
     "enabled": false,
     "credentials_file": "config/google_credentials.json",
     "spreadsheet_name": "Calypso_HYDRA_Variant_E",
@@ -163,7 +216,7 @@
     "strategy_type": "hydra"
   },
   "alerts": {
-    "_comment": "OFF on E (scaffold/dry-run) — avoids alert spam and operator paging. NOTE: CRITICAL/HIGH alerts still publish via the L-C2 severity bypass even when disabled; E's dry-run path emits none, but keep this in mind before enabling real-order E.",
+    "_comment": "OFF on E (scaffold/dry-run) \u2014 avoids alert spam and operator paging. NOTE: CRITICAL/HIGH alerts still publish via the L-C2 severity bypass even when disabled; E's dry-run path emits none, but keep this in mind before enabling real-order E.",
     "enabled": false,
     "phone_number": "+1XXXXXXXXXX",
     "email": "your@email.com"
@@ -175,6 +228,6 @@
     "spreadsheet_name": "Calypso_HYDRA_Variant_E",
     "strategy_type": "hydra_spy_double_calendar"
   },
-  "_comment_api_pacing": "2.5 (gentler than C's 2.0) because a real double-calendar would fetch TWO-expiration chains + intraday monitoring — extra load on the shared calypso-broker session. Conservative for the dry-run shadow.",
+  "_comment_api_pacing": "2.5 (gentler than C's 2.0) because a real double-calendar would fetch TWO-expiration chains + intraday monitoring \u2014 extra load on the shared calypso-broker session. Conservative for the dry-run shadow.",
   "api_pacing_multiplier": 2.5
 }
