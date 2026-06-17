@@ -41,6 +41,10 @@ def read_open_calendars(sidecar_path: str) -> list:
             "contracts": r.get("contracts"),
             "net_debit": r.get("net_debit"),
             "transform_credit": r.get("transform_credit"),
+            # Live mark-to-market (refreshed each tick by the bot; absent on
+            # sidecars written before the 2026-06-17 live-mark fix -> None).
+            "unrealized_pnl": r.get("unrealized_pnl"),
+            "pnl_pct": r.get("pnl_pct"),
             "call_strike": sc.get("strike"),
             "put_strike": sp.get("strike"),
             "short_expiry": sc.get("expiry"),
@@ -112,9 +116,15 @@ def format_calendars_telegram(status: dict, title: str = "Strategy D — DC Time
             basis = f"debit {_fmt_money(c.get('net_debit'))} → credit {_fmt_money(c.get('transform_credit'))}"
         else:
             basis = f"debit {_fmt_money(c.get('net_debit'))}"
+        mtm = ""
+        pnl = c.get("unrealized_pnl")
+        if pnl is not None:
+            pct = c.get("pnl_pct")
+            pct_s = f" ({pct:+.1f}%)" if pct is not None else ""
+            mtm = f"\n  MTM ${float(pnl):+,.0f}{pct_s}"
         lines.append(
             f"\n*E#{c.get('entry_number')}* [{phase}{rf}] {c.get('contracts')}c\n"
-            f"  C {c.get('call_strike')} / P {c.get('put_strike')}  ({basis})\n"
+            f"  C {c.get('call_strike')} / P {c.get('put_strike')}  ({basis}){mtm}\n"
             f"  short {c.get('short_expiry')} / long {c.get('long_expiry')}"
         )
     outs = status.get("recent_outcomes", [])

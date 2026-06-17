@@ -538,6 +538,14 @@ class CalendarStrategyBase(HydraStrategy):
             "is_complete": e.is_complete,
             "call_spread_credit": e.call_spread_credit,
             "put_spread_credit": e.put_spread_credit,
+            # Live MTM (computed from the CURRENT leg prices, phase-aware) so the
+            # sidecar-backed dashboard/Telegram view shows a real-time mark — esp.
+            # for TRANSFORMED positions, which hold to expiry and would otherwise
+            # render a frozen transform-time value. Output-only; deserialize
+            # recomputes from the legs and ignores these keys.
+            "unrealized_pnl": round(e.unrealized_pnl, 2),
+            "pnl_pct": (round(100.0 * e.unrealized_pnl / e.net_debit, 1)
+                        if e.net_debit else None),
             "flags": {
                 f: getattr(e, f, False) for f in (
                     "call_side_stopped", "put_side_stopped",

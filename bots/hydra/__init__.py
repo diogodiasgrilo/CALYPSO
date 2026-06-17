@@ -36,6 +36,18 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy D — live mark for TRANSFORMED positions (2026-06-17). Observability-only;
+  A/B/C byte-unchanged, no trading-decision change. A transformed (risk-free, held-to-
+  expiry) calendar was never re-marked — _check_stop_losses only managed CALENDAR-phase
+  entries — so its MTM (CalendarEntry.unrealized_pnl) stayed pinned at the transform-time
+  leg prices (e.g. frozen at +$310 for 44+ min while SPX moved). Now _check_stop_losses
+  refreshes the legs of TRANSFORMED entries each tick (no management action) and persists
+  the sidecar, so the heartbeat + Telegram /calendars + dashboard DC card show a LIVE mark
+  converging toward the locked floor (transform_credit − net_debit). Sidecar now carries
+  unrealized_pnl + pnl_pct (output-only; deserialize ignores them); both readers
+  (bots.hydra.dc_status + dashboard dc_reader) expose them; the DC card renders a "Live MTM"
+  row. Costs 4 quote reads + 1 small sidecar write per tick while a transformed calendar is
+  held (D's api_pacing_multiplier governs cadence). E unaffected (E never transforms).
 - Strategy E (SPY double calendar) + strategy-grouping/naming redesign (2026-06-16).
   All dry-run / additive — A/B/C/D byte-unchanged. Feature branch.
   - New strategy E: SpyDoubleCalendarStrategy (registry "spy_double_calendar", "SPY Double

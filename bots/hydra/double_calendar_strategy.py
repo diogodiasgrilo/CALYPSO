@@ -513,9 +513,15 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
     # ------------------------------------------------------------------
 
     def _check_stop_losses(self):
-        """Manage every open double calendar (CALENDAR phase). Returns a summary
-        of actions taken this tick, or None."""
+        """Manage every open double calendar. CALENDAR-phase entries run the
+        transform/stop/EOD logic; TRANSFORMED (held-to-expiry) entries take NO
+        action but are re-marked each tick so the heartbeat + dashboard show a
+        LIVE mark converging to the locked profit, not the frozen transform-time
+        snapshot (2026-06-17 fix — transformed marks were never refreshed, so
+        ``unrealized_pnl`` stayed pinned at the transform-time leg prices).
+        Returns a summary of actions taken this tick, or None."""
         actions = []
+        remarked = False
         for entry in list(self.daily_state.active_entries):
             if not isinstance(entry, CalendarEntry):
                 continue
@@ -523,7 +529,15 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
                 act = self._dc_manage_calendar(entry)
                 if act:
                     actions.append(act)
-            # TRANSFORMED positions hold to expiry — settled in Phase 5.
+            elif entry.dc_phase == DCPhase.TRANSFORMED:
+                # Held to expiry — no management action; just refresh the leg
+                # mids so the MTM (entry.unrealized_pnl) tracks live, not frozen.
+                self._dc_refresh_marks(entry)
+                remarked = True
+        if remarked:
+            # Persist the refreshed leg prices + computed MTM so the sidecar-backed
+            # dashboard/Telegram view is live too (the heartbeat reads it in-memory).
+            self._dc_save_sidecar()
         return "; ".join(actions) if actions else None
 
     def _dc_manage_calendar(self, entry) -> Optional[str]:

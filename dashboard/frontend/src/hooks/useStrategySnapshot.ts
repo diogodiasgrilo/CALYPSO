@@ -150,6 +150,10 @@ export interface DCOpenCalendar {
   contracts: number | null;
   net_debit: number | null;
   transform_credit: number | null;
+  /** Live mark-to-market P&L (dollars); null on pre-2026-06-17 sidecars. */
+  unrealized_pnl: number | null;
+  /** Live P&L as a percent of net debit; null if unavailable. */
+  pnl_pct: number | null;
   call_strike: number | null;
   put_strike: number | null;
   short_expiry: string | null;

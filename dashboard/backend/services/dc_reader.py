@@ -38,6 +38,10 @@ def _read_open_calendars(sidecar_path: Optional[str]) -> list:
             "contracts": r.get("contracts"),
             "net_debit": r.get("net_debit"),
             "transform_credit": r.get("transform_credit"),
+            # Live mark-to-market (refreshed each tick by the bot; absent on
+            # sidecars written before the 2026-06-17 live-mark fix -> None).
+            "unrealized_pnl": r.get("unrealized_pnl"),
+            "pnl_pct": r.get("pnl_pct"),
             "call_strike": sc.get("strike"),
             "put_strike": sp.get("strike"),
             "short_expiry": sc.get("expiry"),

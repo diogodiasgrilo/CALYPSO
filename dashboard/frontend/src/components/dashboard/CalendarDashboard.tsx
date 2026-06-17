@@ -86,9 +86,26 @@ function CalendarCard({ c }: { c: DCOpenCalendar }) {
         )}
       </div>
 
+      {c.unrealized_pnl != null && (
+        <div className="flex items-baseline justify-between border-t border-border-dim pt-2">
+          <span className="text-[11px] uppercase tracking-wide text-text-secondary">
+            Live MTM
+          </span>
+          <span className="font-mono text-sm" style={{ color: pnlColor(c.unrealized_pnl) }}>
+            {formatPnL(c.unrealized_pnl)}
+            {c.pnl_pct != null && (
+              <span className="text-text-dim text-xs">
+                {" "}({c.pnl_pct > 0 ? "+" : ""}
+                {c.pnl_pct.toFixed(1)}%)
+              </span>
+            )}
+          </span>
+        </div>
+      )}
+
       {lockedDelta != null && (
         <div className="text-[11px] text-text-secondary">
-          Locked vs debit:{" "}
+          {transformed ? "Locked floor vs debit" : "Locked vs debit"}:{" "}
           <span className="font-mono" style={{ color: pnlColor(lockedDelta) }}>
             {formatPnL(lockedDelta)}
           </span>
