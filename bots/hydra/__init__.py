@@ -36,6 +36,23 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Calendar dry-run REALISM — spread-crossing fill model for D + E (2026-06-17).
+  The calendar sim priced EVERY simulated fill at the bid/ask MID (entry debit,
+  transform credit, mark-to-market, liquidation), which made D's transform look
+  risk-free far cheaper + faster than crossing 4–6 real spreads allows (the
+  "+$845 locked in 47 min" artifact). New CalendarStrategyBase._dc_fill_price
+  crosses the spread — BUY toward ask, SELL toward bid — scaled by
+  config strategy.dry_run_fill_model.aggressiveness (default 1.0 = full touch,
+  the honest worst case for a marketable order; 0.0 = old mid; + an optional
+  extra_slippage_per_leg). Applied at: entry debit (_dc_simulate_entry, longs@ask
+  / shorts@bid → HIGHER debit), the live mark + every value-driven decision
+  (_dc_refresh_marks now marks at the LIQUIDATION fill — longs@bid / shorts@ask →
+  honest unrealized_pnl, profit-take ladder, %-stop, transform trigger, and the
+  daily close P&L), and D's transform credit (_dc_attempt_transform sells longs@bid
+  / buys wings@ask → LOWER credit, so the risk-free gate is honest and can now
+  DEFER when the spread eats the cushion). Covers D AND E (shared base). 11 new
+  tests (tests/test_calendar_fill_model.py); suite 1723 passed/15 skipped. Note:
+  E still can't ENTER until its EM-strike-on-both-expiries selection is fixed.
 - IBKR-audit #5b — settlement SPX fallback so an ITM-settled short isn't mis-booked
   as worthless on a post-close restart (2026-06-17). Sibling bug to MKT-047: after C's
   stop-close FAILED (leaving the ITM put unbooked), a post-close RESTART ran settlement

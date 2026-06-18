@@ -155,6 +155,14 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
         self.spy_dc_time_exit_days_before = int(e.get("time_exit_days_before", 2))
         self.spy_dc_max_concurrent = int(e.get("max_concurrent", 1))
         self.spy_dc_max_deployed_debit = float(e.get("max_deployed_debit", 5000.0))
+        # Realistic dry-run fill model (2026-06-17, shared with D): price every
+        # simulated fill across the bid/ask spread, not the mid. aggressiveness 1.0
+        # = full touch (buy@ask / sell@bid). Read by the inherited _dc_fill_price,
+        # so E's entry debit, liquidation marks, and laddered profit-takes are all
+        # honest about the spread instead of mid-optimistic.
+        _fm = cfg.get("dry_run_fill_model", {}) or {}
+        self._dc_fill_agg = float(_fm.get("aggressiveness", 1.0))
+        self._dc_fill_slippage = float(_fm.get("extra_slippage_per_leg", 0.0))
 
         # ── Attributes the INHERITED base methods read (so D is untouched) ──
         # E never transforms, so there is no IC wing. _dc_simulate_entry stamps

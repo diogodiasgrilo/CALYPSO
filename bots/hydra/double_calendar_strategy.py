@@ -181,6 +181,13 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         # deploys across OPEN calendars so it can't starve the shared account's BP
         # (the LIVE variant C draws on the same account). 0 disables.
         self.dc_max_deployed_debit = float(dc.get("max_deployed_debit", 5000.0))
+        # Realistic dry-run fill model (2026-06-17): price every simulated fill
+        # across the bid/ask spread instead of the mid. aggressiveness 1.0 = full
+        # touch (buy@ask / sell@bid) — the honest worst case for a marketable order;
+        # 0.0 = the old mid pricing. Applied at entry, transform, mark + close.
+        _fm = cfg.get("dry_run_fill_model", {}) or {}
+        self._dc_fill_agg = float(_fm.get("aggressiveness", 1.0))
+        self._dc_fill_slippage = float(_fm.get("extra_slippage_per_leg", 0.0))
         # entry_number -> first-breach time, for the stop-confirmation window.
         self._dc_stop_breach: Dict[int, datetime] = {}
 
@@ -617,13 +624,19 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
             )
             return False
 
-        # Sell the back-dated longs; buy the wings on the short expiry.
+        # Sell the back-dated longs (toward BID); buy the wings (toward ASK) — the
+        # REALISTIC transform fills (2026-06-17), not the mid. Crossing the spread
+        # on these 4 legs is exactly the cost an optimistic mid hid, and it's what
+        # makes the risk-free gate honest (the mid made the transform look risk-free
+        # cheaper + faster than real fills would allow).
         lq = self._dc_read_leg_quotes({"long_call": entry.long_call_uic, "long_put": entry.long_put_uic})
         wq = self._dc_read_leg_quotes({"wing_call": wing_call_conid, "wing_put": wing_put_conid})
-        lc, lp = lq["long_call"]["mid"], lq["long_put"]["mid"]
-        wc, wp = wq["wing_call"]["mid"], wq["wing_put"]["mid"]
+        lc = self._dc_fill_price(lq["long_call"], "sell")
+        lp = self._dc_fill_price(lq["long_put"], "sell")
+        wc = self._dc_fill_price(wq["wing_call"], "buy")
+        wp = self._dc_fill_price(wq["wing_put"], "buy")
         if any(m is None or m <= 0 for m in (lc, lp, wc, wp)):
-            logger.info("[DCTM] transform deferred — incomplete mids (lc=%s lp=%s wc=%s wp=%s)", lc, lp, wc, wp)
+            logger.info("[DCTM] transform deferred — incomplete fills (lc=%s lp=%s wc=%s wp=%s)", lc, lp, wc, wp)
             return False
 
         transform_credit = (lc + lp - wc - wp) * 100 * n

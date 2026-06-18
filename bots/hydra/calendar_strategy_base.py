@@ -293,6 +293,34 @@ class CalendarStrategyBase(HydraStrategy):
             out[name] = {"mid": self._quote_mid(q), "raw": q, "realtime": self._dc_quote_is_realtime(q)}
         return out
 
+    def _dc_fill_price(self, qrow: dict, action: str) -> Optional[float]:
+        """Realistic dry-run fill for ONE leg — model the bid/ask spread instead of
+        the optimistic MID (2026-06-17). A real marketable order BUYS toward the ASK
+        and SELLS toward the BID; ``aggressiveness`` (config dry_run_fill_model,
+        default 1.0 = full touch) scales how far across the half-spread, and
+        ``extra_slippage_per_leg`` adds a fixed per-leg buffer for wide/fast markets.
+
+        Without this, entry debits / transform credits / liquidations were all priced
+        at the mid, which made D's transform look risk-free far cheaper and faster
+        than it would be after crossing 4–6 real spreads (the "too good to be true"
+        artifact). Falls back to the mid when a side is missing. ``action`` is
+        ``"buy"`` or ``"sell"``. Returns None if there is no usable mid.
+        """
+        mid = qrow.get("mid")
+        if mid is None or mid <= 0:
+            return None
+        raw = qrow.get("raw") or {}
+        bid, ask = raw.get("bid"), raw.get("ask")
+        agg = float(getattr(self, "_dc_fill_agg", 1.0))
+        slip = float(getattr(self, "_dc_fill_slippage", 0.0))
+        if action == "buy":
+            px = mid + agg * (ask - mid) if (ask and ask >= mid) else mid
+            px += slip
+        else:  # sell
+            px = mid - agg * (mid - bid) if (bid and 0 < bid <= mid) else mid
+            px -= slip
+        return max(0.0, px)
+
     def _dc_quote_is_realtime(self, q: dict) -> bool:
         """True unless the broker DEFINITIVELY flags the quote as delayed/frozen.
         Wraps HYDRA's _option_quote_is_realtime (IBKR field 6509); defaults to
@@ -386,9 +414,30 @@ class CalendarStrategyBase(HydraStrategy):
             logger.warning("[DCTM] incomplete mids %s — cannot price calendar", mids)
             return False
         n = self.contracts_per_entry
-        # Net DEBIT = cost of longs (bought) - credit from shorts (sold).
+        # Realistic OPEN fills (2026-06-17): BUY the longs toward the ask, SELL the
+        # shorts toward the bid — you pay the spread opening, just like a real
+        # marketable order (full-touch by default). open_fill = the cost basis;
+        # mark_fill = the immediate LIQUIDATION value (you'd pay the spread again to
+        # close), so the position starts down the round-trip cost, not flat-at-mid.
+        open_fill = {
+            "long_call": self._dc_fill_price(quotes["long_call"], "buy"),
+            "long_put": self._dc_fill_price(quotes["long_put"], "buy"),
+            "short_call": self._dc_fill_price(quotes["short_call"], "sell"),
+            "short_put": self._dc_fill_price(quotes["short_put"], "sell"),
+        }
+        mark_fill = {
+            "long_call": self._dc_fill_price(quotes["long_call"], "sell"),
+            "long_put": self._dc_fill_price(quotes["long_put"], "sell"),
+            "short_call": self._dc_fill_price(quotes["short_call"], "buy"),
+            "short_put": self._dc_fill_price(quotes["short_put"], "buy"),
+        }
+        if any(p is None or p <= 0 for p in open_fill.values()):
+            logger.warning("[DCTM] incomplete fills %s — cannot price calendar", open_fill)
+            return False
+        # Net DEBIT = cost of longs (bought at ask) - credit from shorts (sold at bid).
         net_debit = (
-            mids["long_call"] + mids["long_put"] - mids["short_call"] - mids["short_put"]
+            open_fill["long_call"] + open_fill["long_put"]
+            - open_fill["short_call"] - open_fill["short_put"]
         ) * 100 * n
         # A double calendar is a net-DEBIT structure by definition. An inverted
         # term structure (shorts richer than longs) yields net_debit <= 0 — that
@@ -404,8 +453,8 @@ class CalendarStrategyBase(HydraStrategy):
         for name, conid in leg_conids.items():
             leg = entry.legs[name]
             leg.uic = conid
-            leg.fill_price = mids[name]
-            leg.price = mids[name]
+            leg.fill_price = open_fill[name]   # entry cost basis (spread-crossed)
+            leg.price = mark_fill[name]        # immediate liquidation mark (round-trip cost)
             leg.position_id = f"DRY_{base_id}_{_DC_LEG_ABBR[name]}"
         entry.net_debit = net_debit
         entry.dc_phase = DCPhase.CALENDAR
@@ -450,7 +499,14 @@ class CalendarStrategyBase(HydraStrategy):
             # crossed mid OR a confirmed-stale quote leaves the prior price and
             # marks the tick not-fresh (so value-driven stop/transform skip it).
             if mid and mid > 0 and rt_ok:
-                entry.legs[name].price = mid
+                # Mark at the LIQUIDATION fill, not the mid (2026-06-17): to close
+                # NOW you SELL the longs (toward bid) and BUY BACK the shorts
+                # (toward ask). calendar_value/ic_cost are (long_price-short_price),
+                # so this makes unrealized_pnl — and every value-driven decision
+                # (profit-take ladder, %-stop, transform trigger) plus the daily
+                # close P&L — honest about the spread instead of mid-optimistic.
+                action = "buy" if name.startswith("short") else "sell"
+                entry.legs[name].price = self._dc_fill_price(qrow, action) or mid
             else:
                 fresh = False
         return fresh
