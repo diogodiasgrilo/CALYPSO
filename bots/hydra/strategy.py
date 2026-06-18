@@ -2851,7 +2851,17 @@ class HydraStrategy(MEICStrategy):
         """MKT-047: at the EOD cutoff (earlier on FOMC announcement days),
         force-close every open 0DTE short so a late breach can't ride to max loss
         in the un-closable final minutes before expiry. Idempotent per ET day —
-        returns an action string if it flattens, else None."""
+        returns an action string if it flattens, else None.
+
+        0DTE-ONLY (2026-06-18 fix): this is meaningless — and HARMFUL — for the
+        multi-day calendar variants (D/E), which inherit this monitoring path but
+        hold positions for DAYS, not to a 4pm expiry. On 06-18 it force-closed D's
+        calendar at 15:50; on a day D transforms it would flatten the risk-free IC
+        the same afternoon and destroy the multi-day hold. Calendars set
+        requires_protective_wings=False (the 0DTE ICs keep it True), so gate on it
+        and let the calendars manage their own EOD via _dc_manage_calendar."""
+        if not getattr(self, "requires_protective_wings", True):
+            return None  # multi-day calendar — never EOD-flatten (D/E own their close)
         if not self.eod_flatten_enabled or self._eod_flatten_done:
             return None
         if not self.daily_state.active_entries:

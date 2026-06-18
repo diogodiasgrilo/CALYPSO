@@ -36,6 +36,15 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- MKT-047 gate — never EOD-flatten the multi-day calendars (2026-06-18). MKT-047
+  (the 0DTE expiry-window EOD flatten) is inherited by the calendar variants D/E
+  via the shared `_handle_monitoring`, and on 06-18 it WRONGLY force-closed D's
+  multi-day calendar at 15:50 ($-9.20) and left its sidecar stale. On a day D
+  transforms, it would flatten the risk-free IC the same afternoon and destroy the
+  multi-day hold. Fix: `_check_eod_flatten` returns None when
+  `requires_protective_wings` is False (the calendars set it False; the 0DTE ICs
+  keep it True) — D/E manage their own EOD via `_dc_manage_calendar`. 1 new test
+  (test_eod_flatten_safety.py::test_calendar_strategy_never_flattens); suite 1724.
 - Calendar dry-run REALISM — spread-crossing fill model for D + E (2026-06-17).
   The calendar sim priced EVERY simulated fill at the bid/ask MID (entry debit,
   transform credit, mark-to-market, liquidation), which made D's transform look

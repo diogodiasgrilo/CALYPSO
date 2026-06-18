@@ -91,6 +91,16 @@ class TestEodFlattenGate:
         assert self._run(s, _et(15, 55)) is None
         s._execute_eod_flatten.assert_not_called()
 
+    def test_calendar_strategy_never_flattens(self):
+        # Multi-day calendars (D/E) set requires_protective_wings=False — MKT-047
+        # (a 0DTE expiry-window flatten) must NEVER fire on them, even past the
+        # cutoff with an open position. 2026-06-18: it wrongly closed D's calendar
+        # at 15:50; on a transform day it would destroy the multi-day hold.
+        s = self._strat()
+        s.requires_protective_wings = False
+        assert self._run(s, _et(15, 58)) is None
+        s._execute_eod_flatten.assert_not_called()
+
 
 # ─────────────────────────── _execute_eod_flatten ────────────────────────────
 class TestEodFlattenExecute:
