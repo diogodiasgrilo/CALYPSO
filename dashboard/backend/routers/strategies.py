@@ -251,30 +251,37 @@ def _header_chrome(vid: str, m: tax.StrategyMeta) -> dict:
 
 
 def _read_variant_ohlc(db_path: Optional[Path]) -> list:
-    """Today's 1-min SPX OHLC bars for a variant, from its OWN backtesting DB.
+    """Today's 1-min SPX OHLC bars for a strategy's candle chart.
 
-    Mirrors the WS broadcaster / ``/api/market/ohlc`` priority so the polled
-    SPXChart gets the SAME ``{timestamp, open, high, low, close, vix}`` shape:
+    The SPX is the SAME index for every strategy, so the bars are read from the
+    SHARED main market-data DB (``settings.market_data_db``), NOT the per-variant
+    DB. Per-variant DBs record market data at a THROTTLED cadence
+    (``api_pacing_multiplier``) and only variant A derives ``market_ohlc_1min`` at
+    all — so a per-variant read gives a sparse/empty candle series (the 06-18
+    "dotted afternoon" on the B/C views). The dense shared series fixes that; each
+    strategy's ENTRY MARKERS (which DO differ) are overlaid separately. ``db_path``
+    is intentionally ignored here (kept for the caller's signature). 2026-06-18 fix.
+
+    Priority mirrors the WS broadcaster / ``/api/market/ohlc``:
       1. HOMER's authoritative ``market_ohlc_1min`` (post-close), else
-      2. dense bars computed live from that DB's ``market_ticks`` (intraday).
+      2. dense bars computed live from ``market_ticks`` (intraday).
     Returns ``[]`` on missing DB / empty table (never raises). Read-only.
 
     NOTE: the BacktestingDBReader methods are async (``to_thread`` wrapped); this
-    snapshot path is sync, so we drive them through a private event loop. The
-    reads are tiny (one day of 1-min bars) and infrequent (2s poll), so the
-    per-call loop is cheap and keeps this helper callable from the sync snapshot.
+    snapshot path is sync, so we drive them through a private event loop.
     """
-    if db_path is None:
+    main_db = getattr(settings, "market_data_db", None)
+    if not main_db:
         return []
     try:
-        if not Path(db_path).exists():
+        if not Path(main_db).exists():
             return []
     except OSError:
         return []
 
     from dashboard.backend.services.db_reader import BacktestingDBReader
 
-    reader = BacktestingDBReader(Path(db_path))
+    reader = BacktestingDBReader(Path(main_db))
     today = get_today_et()
 
     async def _go() -> list:

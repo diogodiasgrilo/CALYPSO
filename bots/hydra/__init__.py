@@ -36,6 +36,19 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- E strike-snap to the short∩long grid + shared-SPX dashboard chart (2026-06-18).
+  (1) Strategy E never entered because it rounded the ±EM target to a fixed $1 grid
+  then required that exact strike on BOTH expiries — but SPY monthlies use a $5
+  far-OTM grid vs the weeklies' $1, so it was unlisted on one leg and skipped every
+  day. Fix: new CalendarStrategyBase._dc_strikes_for_expiry lists each expiry's
+  strikes; E._calculate_strikes now snaps each EM target to the NEAREST strike in
+  the short∩long INTERSECTION (a listed-grid strike near ±EM beats a perfect-EM
+  strike that doesn't exist). (2) Per-strategy SPX candle charts were sparse/dotted
+  (esp. on no-trade days) because they read each variant's THROTTLED DB (only A
+  derives market_ohlc_1min; B/C ticks are api_pacing-thinned). Fix: the dashboard
+  snapshot now reads SPX bars from the SHARED main market-data DB (SPX is the same
+  index for all), so every view gets the dense series; entry markers stay
+  per-strategy. 4 E-strike tests + 2 snapshot-mirror tests updated; suite 1726.
 - MKT-047 gate — never EOD-flatten the multi-day calendars (2026-06-18). MKT-047
   (the 0DTE expiry-window EOD flatten) is inherited by the calendar variants D/E
   via the shared `_handle_monitoring`, and on 06-18 it WRONGLY force-closed D's

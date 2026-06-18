@@ -156,6 +156,9 @@ def client(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "variant_a_backtesting_db", va / "backtesting.db", raising=False)
     monkeypatch.setattr(settings, "variant_a_metrics_file", va / "hydra_metrics.json", raising=False)
     monkeypatch.setattr(settings, "variant_a_baseline_date", "", raising=False)
+    # The SPX candle chart reads the SHARED main market-data DB (SPX is the same
+    # index for every strategy); in production market_data_db == variant A's DB.
+    monkeypatch.setattr(settings, "market_data_db", va / "backtesting.db", raising=False)
 
     # Variant B: a state file ONLY (no DB, no metrics) → enrichment must degrade
     # to empty structures, never 500.
@@ -190,7 +193,9 @@ class TestICSnapshotMirror:
         assert "cumulative" in body
         assert "performance" in body
 
-    def test_ohlc_is_the_variants_own_bars_in_spxchart_shape(self, client):
+    def test_ohlc_is_the_shared_spx_bars_in_spxchart_shape(self, client):
+        # SPX is the same index for every strategy → bars come from the SHARED main
+        # market-data DB (dense), not each variant's throttled DB (2026-06-18 fix).
         body = client.get("/api/strategies/a/snapshot", headers=_h()).json()["body"]
         ohlc = body["ohlc"]
         assert isinstance(ohlc, list) and len(ohlc) == 3
@@ -233,7 +238,9 @@ class TestICSnapshotMirror:
         assert r.status_code == 200
         body = r.json()["body"]
         assert body["available"] is True
-        assert body["ohlc"] == []
+        # OHLC is the SHARED SPX (main market DB), so B shows the candle chart even
+        # with no OWN db — only its cumulative/performance degrade to empty.
+        assert len(body["ohlc"]) == 3
         # cumulative degrades to the baseline-echo-only dict (no DB override).
         assert isinstance(body["cumulative"], dict)
         assert body["performance"]["daily_pnls"] == []

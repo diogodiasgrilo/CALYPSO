@@ -311,11 +311,16 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
 
     def _calculate_strikes(self, entry) -> bool:
         """Pick the two expiries and the ±em_fraction×EM call/put strikes (same
-        strike per leg), listed on BOTH expiries, and stamp them onto the entry.
-        Tries the long candidates in order so a thin long expiry doesn't skip the
-        entry when another long works. Reuses the base _dc_em_otm_distance for the
-        EM (1-SD distance × em_fraction) and _dc_resolve_calendar_legs to confirm
-        both expiries list the chosen strikes."""
+        strike per leg), SNAPPED to the intersection of strikes listed on BOTH
+        expiries, and stamp them onto the entry.
+
+        Fix (2026-06-18): the old code rounded the EM target to a fixed $1 grid and
+        then required that exact strike on both expiries — but SPY monthlies use a
+        $5 far-OTM grid while weeklies use $1, so the strike was frequently unlisted
+        on one leg and the entry skipped every day. We now fetch each expiry's
+        actual strike list, take the short∩long intersection, and snap each EM
+        target to the NEAREST strike present on both — guaranteeing the legs resolve
+        (a listed-grid strike near ±EM beats a perfect-EM strike that doesn't exist)."""
         spot = self.current_price
         if not spot or spot <= 0:
             logger.error("[SPYDC] no SPY price — cannot calculate strikes")
@@ -324,16 +329,27 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
         if not picked:
             return False
         short_exp, longs = picked
-        inc = getattr(self, "strike_increment", 1) or 1
-        # ±em_fraction×EM (dc_delta_otm_fraction == em_fraction, so this is the
-        # raw scaled expected move at the short expiry).
+        # ±em_fraction×EM (dc_delta_otm_fraction == em_fraction → the raw scaled EM).
         em = self._dc_em_otm_distance(spot, short_exp)
-        call_strike = round((spot + em) / inc) * inc
-        put_strike = round((spot - em) / inc) * inc
-        if put_strike <= 0:
-            logger.warning("[SPYDC] put strike non-positive (%.2f) — skipping", put_strike)
+        call_target, put_target = spot + em, spot - em
+        short_strikes = self._dc_strikes_for_expiry(short_exp)
+        if not short_strikes:
+            logger.warning("[SPYDC] no strikes listed for short %s — skipping", short_exp)
             return False
-        for long_exp in longs[:2]:  # try the nearest 2 long candidates
+        for long_exp in longs[:3]:  # try the nearest few long candidates
+            common = short_strikes & self._dc_strikes_for_expiry(long_exp)
+            # Snap each EM target to the NEAREST strike listed on BOTH expiries,
+            # keeping the call OTM-above-spot and the put OTM-below-spot.
+            call_strike = min((s for s in common if s > spot),
+                              key=lambda s: abs(s - call_target), default=None)
+            put_strike = min((s for s in common if 0 < s < spot),
+                             key=lambda s: abs(s - put_target), default=None)
+            if call_strike is None or put_strike is None or call_strike <= put_strike:
+                logger.info(
+                    "[SPYDC] long %s — no both-sides strike in the short∩long grid "
+                    "(common=%d) near ±EM; trying next", long_exp, len(common),
+                )
+                continue
             legs = self._dc_resolve_calendar_legs(call_strike, put_strike, short_exp, long_exp)
             if legs:
                 entry.short_call_strike = entry.long_call_strike = float(call_strike)
@@ -343,17 +359,17 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
                 entry.legs["short_put"].expiry = short_exp
                 entry.legs["long_put"].expiry = long_exp
                 logger.info(
-                    "[SPYDC] strikes Kc=%.0f Kp=%.0f (spot %.2f, EM ±%.2f) | short=%s long=%s",
-                    call_strike, put_strike, spot, em, short_exp, long_exp,
+                    "[SPYDC] strikes Kc=%.0f Kp=%.0f (spot %.2f, EM ±%.0f, snapped to short∩long) "
+                    "| short=%s long=%s", call_strike, put_strike, spot, em, short_exp, long_exp,
                 )
                 return True
             logger.info(
-                "[SPYDC] long %s — Kc=%.0f/Kp=%.0f not listed on both expiries; trying next",
+                "[SPYDC] long %s — intersection Kc=%.0f/Kp=%.0f failed to resolve; trying next",
                 long_exp, call_strike, put_strike,
             )
         logger.warning(
-            "[SPYDC] ±%.2f×EM strikes (Kc=%.0f Kp=%.0f) not listed on both short %s + any long %s",
-            self.spy_dc_em_fraction, call_strike, put_strike, short_exp, longs[:2],
+            "[SPYDC] no both-expiry strike pair near ±%.2f×EM (short %s + longs %s)",
+            self.spy_dc_em_fraction, short_exp, longs[:3],
         )
         return False
 

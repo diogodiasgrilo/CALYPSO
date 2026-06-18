@@ -187,33 +187,76 @@ def test_calculate_strikes_em_based(monkeypatch):
     s.current_vix = 16.0
     short_exp, long_exp = "2026-07-20", "2026-07-27"
     monkeypatch.setattr(s, "_pick_expiries", lambda: (short_exp, [long_exp]))
-    # Resolve always succeeds (legs listed on both expiries).
+    # Both expiries list the full $1 grid → intersection is the whole grid, so the
+    # snap lands on the integer nearest the EM target (== the old round behavior).
+    grid = {float(x) for x in range(540, 661)}
+    monkeypatch.setattr(s, "_dc_strikes_for_expiry", lambda exp: grid)
     monkeypatch.setattr(
         s, "_dc_resolve_calendar_legs",
         lambda kc, kp, se, le: {"short_call": 1, "long_call": 2, "short_put": 3, "long_put": 4},
     )
     entry = CalendarEntry(entry_number=1)
     assert s._calculate_strikes(entry) is True
-    # EM at ~16 VIX, ~34 DTE: spot*(vix/100)*sqrt(dte/365) ~ 600*0.16*0.305 ~ 29pt.
     em = s._dc_em_otm_distance(600.0, short_exp)
-    assert entry.short_call_strike == round((600.0 + em) / 1) * 1
-    assert entry.short_put_strike == round((600.0 - em) / 1) * 1
-    assert entry.short_call_strike > 600.0  # call above spot
-    assert entry.short_put_strike < 600.0   # put below spot
-    # $1 grid (SPY): strikes are whole numbers.
-    assert entry.short_call_strike == int(entry.short_call_strike)
-    assert entry.short_put_strike == int(entry.short_put_strike)
-    # Same strike per leg; both expiries stamped.
+    assert entry.short_call_strike == float(round(600.0 + em))
+    assert entry.short_put_strike == float(round(600.0 - em))
+    assert entry.short_call_strike > 600.0 > entry.short_put_strike
     assert entry.short_call_strike == entry.long_call_strike
     assert entry.short_put_strike == entry.long_put_strike
     assert entry.legs["short_call"].expiry == short_exp
     assert entry.legs["long_call"].expiry == long_exp
 
 
-def test_calculate_strikes_skips_when_not_listed_on_both(monkeypatch):
+def test_calculate_strikes_snaps_to_short_long_intersection(monkeypatch):
+    # The real-world bug: SPY monthly uses a $5 far-OTM grid, the weekly a $1 grid.
+    # The EM target (~782/706) isn't on the $5 monthly, but the INTERSECTION is the
+    # $5 multiples — so the snap must pick those, not skip.
+    s = _strat(em_fraction=1.0)
+    s.current_price = 744.0
+    s.current_vix = 17.0
+    short_exp, long_exp = "2026-07-20", "2026-07-24"
+    monkeypatch.setattr(s, "_pick_expiries", lambda: (short_exp, [long_exp]))
+    monthly = {float(x) for x in range(600, 901, 5)}   # $5 grid (short)
+    weekly = {float(x) for x in range(600, 901, 1)}    # $1 grid (long) ⊇ monthly
+    monkeypatch.setattr(s, "_dc_strikes_for_expiry",
+                        lambda exp: monthly if exp == short_exp else weekly)
+    monkeypatch.setattr(
+        s, "_dc_resolve_calendar_legs",
+        lambda kc, kp, se, le: {"short_call": 1, "long_call": 2, "short_put": 3, "long_put": 4},
+    )
+    entry = CalendarEntry(entry_number=1)
+    em = s._dc_em_otm_distance(744.0, short_exp)
+    assert s._calculate_strikes(entry) is True
+    # Chosen strikes must be on the $5 intersection grid (multiples of 5) and the
+    # nearest of those to the ±EM target.
+    assert entry.short_call_strike % 5 == 0 and entry.short_put_strike % 5 == 0
+    assert entry.short_call_strike in monthly and entry.short_put_strike in monthly
+    assert abs(entry.short_call_strike - (744.0 + em)) <= 2.5
+    assert abs(entry.short_put_strike - (744.0 - em)) <= 2.5
+    assert entry.short_call_strike > 744.0 > entry.short_put_strike
+
+
+def test_calculate_strikes_skips_when_no_common_grid(monkeypatch):
+    # Disjoint strike grids on the two expiries → empty intersection → skip.
     s = _strat()
-    monkeypatch.setattr(s, "_pick_expiries", lambda: ("2026-07-20", ["2026-07-27", "2026-07-28"]))
-    monkeypatch.setattr(s, "_dc_resolve_calendar_legs", lambda *a, **k: None)  # never listed
+    s.current_price = 600.0
+    s.current_vix = 16.0
+    monkeypatch.setattr(s, "_pick_expiries",
+                        lambda: ("2026-07-20", ["2026-07-27", "2026-07-28"]))
+    monkeypatch.setattr(
+        s, "_dc_strikes_for_expiry",
+        lambda exp: {610.0, 620.0} if exp == "2026-07-20" else {615.0, 625.0},
+    )
+    entry = CalendarEntry(entry_number=1)
+    assert s._calculate_strikes(entry) is False
+
+
+def test_calculate_strikes_skips_when_short_chain_empty(monkeypatch):
+    s = _strat()
+    s.current_price = 600.0
+    s.current_vix = 16.0
+    monkeypatch.setattr(s, "_pick_expiries", lambda: ("2026-07-20", ["2026-07-27"]))
+    monkeypatch.setattr(s, "_dc_strikes_for_expiry", lambda exp: set())  # chain fetch failed
     entry = CalendarEntry(entry_number=1)
     assert s._calculate_strikes(entry) is False
 

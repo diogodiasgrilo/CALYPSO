@@ -248,6 +248,34 @@ class CalendarStrategyBase(HydraStrategy):
             return None
         return legs
 
+    def _dc_strikes_for_expiry(self, expiry_iso: str) -> set:
+        """The set of listed strikes (floats) for ONE expiry. Used to snap a
+        calendar's strikes to the INTERSECTION of strikes available on BOTH the
+        short and long expiries — monthlies and weeklies don't share the same
+        far-OTM grid (e.g. a $1-grid expected-move strike on the weekly isn't on
+        the $5-grid monthly), so a fixed-grid round is often unlisted on one leg
+        and the whole entry skips (the 06-17/06-18 SPY skips). Empty set on any
+        failure → the caller falls back / skips that long."""
+        from datetime import date as _date
+        try:
+            chain = self.broker.get_option_chain(
+                self.underlying_symbol, _date.fromisoformat(expiry_iso),
+                trading_class=self.trading_class, exchange=self.exchange,
+            )
+        except Exception as exc:  # noqa: BLE001 — never let a chain fetch crash entry
+            logger.warning("[DCTM-STRIKES] chain fetch failed for %s: %s", expiry_iso, exc)
+            return set()
+        raw = chain if isinstance(chain, list) else (
+            chain.get("strikes", []) if isinstance(chain, dict) else []
+        )
+        out = set()
+        for s in raw:
+            try:
+                out.add(round(float(s), 2))
+            except (TypeError, ValueError):
+                continue
+        return out
+
     def _dc_read_iv(self, conid: int) -> Optional[float]:
         """Per-option implied vol from the broker greeks snapshot. Returns None
         (NOT 0.0) on a missing/None/non-positive IV so a flaky read reads as
