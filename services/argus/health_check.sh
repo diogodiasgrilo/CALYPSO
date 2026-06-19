@@ -123,9 +123,15 @@ is_market_holiday() {
 import sys
 sys.path.insert(0, '${CALYPSO_DIR}')
 try:
-    from shared.event_calendar import is_market_holiday as ih
-    from shared.market_hours import get_us_market_time
-    sys.exit(0 if ih(get_us_market_time().date()) else 1)
+    # 2026-06-19 fix: shared.event_calendar NEVER exported is_market_holiday, so
+    # this import always raised -> except -> exit 1 ('not a holiday'). ARGUS thus
+    # treated EVERY market holiday (e.g. Juneteenth, a Friday) as a trading day and
+    # spammed stale-heartbeat FAILs every 15 min (the bots are idle on a closed
+    # market and stop writing last_heartbeat_at). Use the AUTHORITATIVE holiday
+    # calendar in shared.market_hours (get_holiday_name — the same source the bots
+    # use to decide the market is closed). Defaults to now-ET.
+    from shared.market_hours import get_holiday_name
+    sys.exit(0 if get_holiday_name() else 1)
 except Exception:
     sys.exit(1)
 " 2>/dev/null
