@@ -36,6 +36,16 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- E Friday-only expiries — the ACTUAL root cause of E never entering (2026-06-18).
+  A live broker probe (post strike-snap) showed E STILL skipped: get_option_chain
+  returns a generic, non-expiry-validated strike list for ANY weekday, so the old
+  prefer_friday=False picked an UNLISTED Monday/Wednesday short (e.g. 07-20) whose
+  conids never resolve (only Friday/monthly SPY expiries exist at 30+ DTE). Fix:
+  _pick_expiries filters candidates to Fridays (weekday==FRIDAY; the monthly 3rd
+  Friday is included) + prefer_friday=True, so both legs resolve. The strike-snap
+  below is kept as a secondary guard for monthly($5)-vs-weekly($1) grid mismatches.
+  Lesson (again): a LIVE entry-path probe is mandatory — unit tests with mocked
+  chains can't see that get_option_chain lists strikes the conid lookup won't qualify.
 - E strike-snap to the short∩long grid + shared-SPX dashboard chart (2026-06-18).
   (1) Strategy E never entered because it rounded the ±EM target to a fixed $1 grid
   then required that exact strike on BOTH expiries — but SPY monthlies use a $5

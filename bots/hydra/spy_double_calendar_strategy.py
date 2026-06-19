@@ -59,6 +59,7 @@ from typing import List, Optional, Tuple
 from bots.hydra.base_strategy import ConfigError, MEICState
 from bots.hydra.calendar_entry import CalendarEntry, DCPhase  # noqa: F401
 from bots.hydra.calendar_chain import (
+    FRIDAY,
     generate_candidate_expiries,
     pick_calendar_expiries,
     trading_days_until,
@@ -273,14 +274,22 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
         gap_min = self.spy_dc_long_gap_days - self.spy_dc_long_gap_tolerance
         gap_max = self.spy_dc_long_gap_days + self.spy_dc_long_gap_tolerance
         horizon = short_max + gap_max + 3
-        candidates = generate_candidate_expiries(today_iso, horizon)
-        # Reuse D's pure picker: nearest-the-target short (prefer_friday False — E
-        # uses an absolute-DTE target, not a following-week-Friday convention), then
-        # the smallest valid long gap. Backtracks across shorts.
+        # FRIDAY-ONLY (2026-06-18 fix): at 30+ DTE, SPY lists ONLY Friday/monthly
+        # option expiries — the Monday/Wednesday weeklies don't exist that far out.
+        # A live probe proved get_option_chain returns a generic (non-expiry-
+        # validated) strike list for ANY weekday, so the old prefer_friday=False
+        # picked an unlisted Monday short (e.g. 07-20) whose conids never resolved →
+        # E skipped EVERY day. Restricting candidates to Fridays (the monthly 3rd
+        # Friday is included) makes both legs resolvable.
+        from datetime import date as _date
+        candidates = [
+            c for c in generate_candidate_expiries(today_iso, horizon)
+            if _date.fromisoformat(c).weekday() == FRIDAY
+        ]
         picked = pick_calendar_expiries(
             candidates, today_iso,
             short_min, short_max, gap_min, gap_max,
-            prefer_friday=False,
+            prefer_friday=True,
         )
         if picked is None:
             logger.warning(
