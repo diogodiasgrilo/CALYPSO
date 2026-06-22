@@ -15,6 +15,31 @@ router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 metrics_reader = MetricsFileReader(settings.hydra_metrics_file)
 db_reader = BacktestingDBReader(settings.backtesting_db)
 
+# The canonical reader (settings.backtesting_db) IS the live primary's DB, and
+# `_live_state` tracks that same variant's state file — so today-from-live-state
+# augmentation is only valid for the canonical id. Per-variant readers are built
+# lazily so a missing settings field just makes that variant fall back, never
+# crashes import.
+_PRIMARY_ID = "c"
+_variant_db_readers: dict[str, BacktestingDBReader] = {}
+
+
+def _reader_for(strategy_id: str) -> tuple[BacktestingDBReader, bool]:
+    """Return ``(reader, is_canonical)`` for a strategy id (History/Analytics
+    per-strategy support). Empty / unknown / the primary id → the canonical
+    reader (is_canonical=True, so today's live-state augmentation applies). A
+    known non-primary variant → its own DB reader (is_canonical=False; we do
+    NOT graft the primary's live `today` onto another variant's history)."""
+    sid = (strategy_id or "").strip().lower()
+    if not sid or sid == _PRIMARY_ID:
+        return db_reader, True
+    path = getattr(settings, f"variant_{sid}_backtesting_db", None)
+    if path is None:
+        return db_reader, True
+    if sid not in _variant_db_readers:
+        _variant_db_readers[sid] = BacktestingDBReader(path)
+    return _variant_db_readers[sid], False
+
 # Set by main.py at startup
 _live_state: LiveStateProvider | None = None
 
@@ -66,26 +91,30 @@ async def get_cumulative():
 async def get_daily(
     days: int = Query(default=0, ge=0, le=9999),
     year: int = Query(default=0, ge=0, le=2099),
+    strategy_id: str = Query(default=""),
 ):
-    """Daily summaries for calendar heat map."""
+    """Daily summaries for calendar heat map (per-strategy)."""
+    reader, is_canonical = _reader_for(strategy_id)
     if year >= 2020:
-        summaries = await db_reader.get_daily_summaries_by_year(year)
+        summaries = await reader.get_daily_summaries_by_year(year)
     elif days > 0:
-        summaries = await db_reader.get_daily_summaries(limit=days)
+        summaries = await reader.get_daily_summaries(limit=days)
     else:
-        summaries = await db_reader.get_daily_summaries(limit=365)
+        summaries = await reader.get_daily_summaries(limit=365)
 
-    summaries = _append_today_summary(summaries)
+    if is_canonical:
+        summaries = _append_today_summary(summaries)
     return {"days": len(summaries), "summaries": summaries}
 
 
 @router.get("/entries")
-async def get_all_entries():
-    """All historical entries for analytics."""
-    entries = await db_reader.get_all_entries()
+async def get_all_entries(strategy_id: str = Query(default="")):
+    """All historical entries for analytics (per-strategy)."""
+    reader, is_canonical = _reader_for(strategy_id)
+    entries = await reader.get_all_entries()
 
-    # Append today's entries from state file only after market close
-    if _live_state and is_after_market_close():
+    # Append today's entries from state file only after market close (canonical only)
+    if is_canonical and _live_state and is_after_market_close():
         today = get_today_et()
         has_today = any(e.get("date") == today for e in entries)
         if not has_today:
@@ -97,12 +126,13 @@ async def get_all_entries():
 
 
 @router.get("/stops")
-async def get_all_stops():
-    """All historical stops for analytics."""
-    stops = await db_reader.get_all_stops()
+async def get_all_stops(strategy_id: str = Query(default="")):
+    """All historical stops for analytics (per-strategy)."""
+    reader, is_canonical = _reader_for(strategy_id)
+    stops = await reader.get_all_stops()
 
-    # Append today's stops from state file only after market close
-    if _live_state and is_after_market_close():
+    # Append today's stops from state file only after market close (canonical only)
+    if is_canonical and _live_state and is_after_market_close():
         today = get_today_et()
         has_today = any(s.get("date") == today for s in stops)
         if not has_today:
@@ -114,12 +144,13 @@ async def get_all_stops():
 
 
 @router.get("/comparisons")
-async def get_comparisons():
-    """Comparison statistics (averages across all trading days)."""
-    data = await db_reader.get_comparison_stats()
+async def get_comparisons(strategy_id: str = Query(default="")):
+    """Comparison statistics (averages across all trading days, per-strategy)."""
+    reader, is_canonical = _reader_for(strategy_id)
+    data = await reader.get_comparison_stats()
 
-    # If we have DB data, augment with today's values only after market close
-    if data and _live_state and is_after_market_close():
+    # If we have DB data, augment with today's values only after market close (canonical only)
+    if data and is_canonical and _live_state and is_after_market_close():
         today_summary = _live_state.get_today_summary()
         today_entries = _live_state.get_today_entries()
         if today_summary:
@@ -147,20 +178,22 @@ async def get_comparisons():
 
 
 @router.get("/performance")
-async def get_performance():
-    """Daily P&L values for client-side performance metric calculations.
+async def get_performance(strategy_id: str = Query(default="")):
+    """Daily P&L values for client-side performance metric calculations
+    (per-strategy).
 
     Rebased to settings.baseline_date so Sharpe/drawdown match the rebased card.
     """
-    pnls = await db_reader.get_daily_pnls(settings.baseline_date)
+    reader, is_canonical = _reader_for(strategy_id)
+    pnls = await reader.get_daily_pnls(settings.baseline_date)
 
-    # Append today's net P&L only after market close
-    if _live_state and is_after_market_close():
+    # Append today's net P&L only after market close (canonical only)
+    if is_canonical and _live_state and is_after_market_close():
         today_pnl = _live_state.get_today_net_pnl()
         if today_pnl is not None:
             # Check if today is already in DB by comparing count
             # (DB returns ordered by date, today would be last)
-            summaries = await db_reader.get_daily_summaries(limit=1)
+            summaries = await reader.get_daily_summaries(limit=1)
             today = get_today_et()
             if not summaries or summaries[0].get("date") != today:
                 pnls = list(pnls) + [today_pnl]

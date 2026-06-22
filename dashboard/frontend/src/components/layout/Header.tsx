@@ -23,10 +23,11 @@ export function Header() {
   const selectedSnapshot = useSelectedSnapshotStore((s) => s.snapshot);
   const location = useLocation();
 
-  // The picker is the DASHBOARD tab's control (audit AUD-3-F4). On other tabs
-  // (History/Analytics — still primary-bound) we hide it and show a note so it
-  // never silently lies about what those pages show.
-  const onDashboardTab = location.pathname === "/";
+  // The picker drives the Dashboard live view AND (since 2026-06-22) the
+  // per-strategy History/Analytics tabs. It's hidden on tabs it does NOT
+  // control (e.g. /comparison, /dc), which instead show a note so the picker
+  // never silently lies about what those pages display.
+  const onPickerTab = ["/", "/history", "/analytics"].includes(location.pathname);
 
   // ── Header chrome source resolution (audit AUD-3-F1) ──
   // When a NON-primary strategy is selected AND its snapshot has arrived, the
@@ -93,11 +94,11 @@ export function Header() {
     setMuted(isMuted());
   };
 
-  const showPicker = onDashboardTab && !meta.loading;
-  // Off-dashboard note: name the primary so History/Analytics never imply the
-  // picker's selection applies to them.
+  const showPicker = onPickerTab && !meta.loading;
+  // Note only on tabs the picker does NOT control (e.g. /comparison, /dc), so
+  // they never imply the picker's selection applies to them.
   const primaryName = meta.byId[meta.primaryId]?.display_name;
-  const showOffTabNote = !onDashboardTab && !meta.loading && !!strategy && !isPrimarySelected && !!primaryName;
+  const showOffTabNote = !onPickerTab && !meta.loading && !!strategy && !isPrimarySelected && !!primaryName;
 
   return (
     <>

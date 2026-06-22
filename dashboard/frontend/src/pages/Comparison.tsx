@@ -521,8 +521,11 @@ function ConfigDelta({
   variants: Record<string, VariantPayload>;
 }) {
   // Surface the actual config differences so a viewer who lands on the page
-  // immediately sees what's being tested. Variant A is the "control"; rows
-  // are bolded where ANY variant differs from variant A's value.
+  // immediately sees what's being tested. The group's baseline (the first
+  // member — variantIds[0], matching the backend's members[0]) is the
+  // "control"; rows are bolded where ANY variant differs from it. (Derived,
+  // not hardcoded to "A", so calendar groups baseline on D and any future
+  // re-ordering just works.)
   const rows: Array<{ key: keyof VariantConfig; label: string }> = [
     { key: "max_spread_width", label: "Spread width cap (pt)" },
     { key: "contracts_per_entry", label: "Contracts/entry" },
@@ -546,6 +549,8 @@ function ConfigDelta({
     { key: "dry_run", label: "Dry-run" },
   ];
 
+  const baselineId = variantIds[0];
+
   return (
     <div className="rounded border border-border-dim bg-card p-3">
       <div className="text-xs uppercase tracking-wide text-text-secondary mb-2">
@@ -568,9 +573,11 @@ function ConfigDelta({
         </thead>
         <tbody>
           {rows.map(({ key, label }) => {
-            const aValRaw =
-              (variants["A"]?.config as Record<string, unknown> | undefined)?.[key as string];
-            const aValStr = JSON.stringify(aValRaw);
+            const baseValRaw =
+              (variants[baselineId]?.config as Record<string, unknown> | undefined)?.[
+                key as string
+              ];
+            const baseValStr = JSON.stringify(baseValRaw);
             return (
               <tr key={key}>
                 <td className="py-0.5">{label}</td>
@@ -578,7 +585,7 @@ function ConfigDelta({
                   const v = (variants[vid]?.config as Record<string, unknown> | undefined)?.[
                     key as string
                   ];
-                  const differs = vid !== "A" && JSON.stringify(v) !== aValStr;
+                  const differs = vid !== baselineId && JSON.stringify(v) !== baseValStr;
                   // Format display based on field type — array → join, threshold
                   // → %, null → em-dash, everything else → String().
                   let display: string;

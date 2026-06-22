@@ -1,4 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
+import { useSelectedStrategy } from "../hooks/useSelectedStrategy";
 import {
   BarChart,
   Bar,
@@ -189,12 +190,16 @@ export function Analytics() {
   const [summaries, setSummaries] = useState<DaySummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<AnalyticsTab>("performance");
+  // Analytics follows the picker's selected strategy (empty = canonical primary).
+  const { strategy } = useSelectedStrategy();
+  const strategyId = strategy?.id ?? "";
 
   useEffect(() => {
+    const sid = `strategy_id=${strategyId}`;
     Promise.all([
-      fetch("/api/metrics/entries").then((r) => r.json()),
-      fetch("/api/metrics/stops").then((r) => r.json()),
-      fetch("/api/metrics/daily?days=365").then((r) => r.json()),
+      fetch(`/api/metrics/entries?${sid}`).then((r) => r.json()),
+      fetch(`/api/metrics/stops?${sid}`).then((r) => r.json()),
+      fetch(`/api/metrics/daily?days=365&${sid}`).then((r) => r.json()),
     ])
       .then(([entryData, stopData, summaryData]) => {
         setEntries(entryData.entries ?? []);
@@ -203,7 +208,7 @@ export function Analytics() {
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, []);
+  }, [strategyId]);
 
   // ── Computed data (shared across tabs) ──
 

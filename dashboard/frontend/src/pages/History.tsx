@@ -6,6 +6,7 @@ import { DayDetailModal } from "../components/history/DayDetailModal";
 import { PeriodSummary } from "../components/history/PeriodSummary";
 import { exportDailySummariesCSV } from "../lib/exportUtils";
 import type { DaySummary } from "../components/history/types";
+import { useSelectedStrategy } from "../hooks/useSelectedStrategy";
 
 export function History() {
   const [summaries, setSummaries] = useState<DaySummary[]>([]);
@@ -14,17 +15,20 @@ export function History() {
     new Date().getFullYear()
   );
   const [selectedDate, setSelectedDate] = useState<string | null>(null);
+  // History follows the picker's selected strategy (empty = canonical primary).
+  const { strategy } = useSelectedStrategy();
+  const strategyId = strategy?.id ?? "";
 
   useEffect(() => {
     setLoading(true);
-    fetch(`/api/metrics/daily?year=${selectedYear}`)
+    fetch(`/api/metrics/daily?year=${selectedYear}&strategy_id=${strategyId}`)
       .then((r) => r.json())
       .then((data) => {
         setSummaries(data.summaries ?? []);
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, [selectedYear]);
+  }, [selectedYear, strategyId]);
 
   const currentYear = new Date().getFullYear();
   const startYear = 2026;
