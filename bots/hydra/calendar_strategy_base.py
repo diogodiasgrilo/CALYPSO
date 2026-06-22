@@ -18,11 +18,13 @@ variant-specific economics (the constructor + its knob reads, expiry/strike
 picking, transformer, stop/profit-take manager, settlement booking, monitoring
 mode) stay in each subclass.
 
-NOTE: the ``[DCTM-*]`` log-tag string literals in this module are SHARED legacy
-labels — they fire for E too (e.g. when E inherits ``_reset_for_new_day`` or
-``check_after_hours_settlement``). They are NOT renamed here because the tags are
-runtime code literals and a rename is a behavior change; a per-variant tag rename
-is a tracked follow-up in docs/NEXT_STEPS.md.
+NOTE: log-tag string literals in this SHARED module use a neutral ``[CAL-*]``
+prefix (CAL = calendar) precisely because this code runs for BOTH D and E (e.g.
+when E inherits ``_reset_for_new_day`` or ``check_after_hours_settlement``). A
+``[CAL-*]`` prefix here would mis-attribute E's calendar plumbing to D's "DC
+Time Machine" name. Strategy-specific files keep their own distinctive tags
+(D's ``double_calendar_strategy.py`` legitimately uses ``[CAL-*]``). Nothing
+parses these tags (verified 2026-06-22), so the prefix is display-only.
 
 ``CalendarStrategyBase`` deliberately defines NO ``__init__`` — it inherits
 ``HydraStrategy``'s, and each concrete calendar strategy keeps its own
@@ -106,7 +108,7 @@ class CalendarStrategyBase(HydraStrategy):
                     readopted += 1
             if readopted:
                 logger.info(
-                    "[DCTM-CARRY] carried %d open multi-day position(s) across the new-day "
+                    "[CAL-CARRY] carried %d open multi-day position(s) across the new-day "
                     "reset (not wiped, not flagged as an overnight 0DTE fault).",
                     readopted,
                 )
@@ -193,7 +195,7 @@ class CalendarStrategyBase(HydraStrategy):
         if not open_md:
             return super().check_after_hours_settlement()
         logger.info(
-            "[DCTM-HOLD] %d multi-day position(s) held past the close — normal for a "
+            "[CAL-HOLD] %d multi-day position(s) held past the close — normal for a "
             "calendar, not pending settlement; daily summary may proceed.",
             len(open_md),
         )
@@ -242,7 +244,7 @@ class CalendarStrategyBase(HydraStrategy):
         missing = [k for k, v in legs.items() if not v]
         if missing:
             logger.warning(
-                "[DCTM-LEGS] unresolved conids %s (C %s / P %s, short %s / long %s)",
+                "[CAL-LEGS] unresolved conids %s (C %s / P %s, short %s / long %s)",
                 missing, call_strike, put_strike, short_expiry, long_expiry,
             )
             return None
@@ -263,7 +265,7 @@ class CalendarStrategyBase(HydraStrategy):
                 trading_class=self.trading_class, exchange=self.exchange,
             )
         except Exception as exc:  # noqa: BLE001 — never let a chain fetch crash entry
-            logger.warning("[DCTM-STRIKES] chain fetch failed for %s: %s", expiry_iso, exc)
+            logger.warning("[CAL-STRIKES] chain fetch failed for %s: %s", expiry_iso, exc)
             return set()
         raw = chain if isinstance(chain, list) else (
             chain.get("strikes", []) if isinstance(chain, dict) else []
@@ -283,7 +285,7 @@ class CalendarStrategyBase(HydraStrategy):
         try:
             g = self.broker.get_option_greeks(conid) or {}
         except Exception as exc:
-            logger.warning("[DCTM-IV] greeks read failed for conid %s: %s", conid, exc)
+            logger.warning("[CAL-IV] greeks read failed for conid %s: %s", conid, exc)
             return None
         try:
             iv = float(g.get("iv"))
@@ -305,7 +307,7 @@ class CalendarStrategyBase(HydraStrategy):
         back_iv = self._dc_read_iv(back_conid)
         if front_iv is None or back_iv is None:
             logger.info(
-                "[DCTM-IV] term-structure unavailable (front=%s back=%s) — no signal",
+                "[CAL-IV] term-structure unavailable (front=%s back=%s) — no signal",
                 front_iv, back_iv,
             )
             return None
@@ -372,12 +374,12 @@ class CalendarStrategyBase(HydraStrategy):
             return False
         short_exp, longs = picked  # _dc_pick_expiries returns (short, [long candidates])
         if not longs:
-            logger.warning("[DCTM-PROBE] no long candidate for short %s", short_exp)
+            logger.warning("[CAL-PROBE] no long candidate for short %s", short_exp)
             return False
         long_exp = longs[0]
         spx = self.current_price
         if not spx or spx <= 0:
-            logger.warning("[DCTM-PROBE] no SPX price — cannot probe")
+            logger.warning("[CAL-PROBE] no SPX price — cannot probe")
             return False
         inc = getattr(self, "strike_increment", 5) or 5
         atm = round(spx / inc) * inc
@@ -391,7 +393,7 @@ class CalendarStrategyBase(HydraStrategy):
             and iv_call is not None
         )
         logger.info(
-            "[DCTM-PROBE] ATM %s | short_call mid=%.2f long_call mid=%.2f | front/back IV=%s | %s",
+            "[CAL-PROBE] ATM %s | short_call mid=%.2f long_call mid=%.2f | front/back IV=%s | %s",
             atm, quotes["short_call"]["mid"], quotes["long_call"]["mid"],
             iv_call, "OK" if ok else "INCOMPLETE (entitlement/warmup?)",
         )
@@ -439,7 +441,7 @@ class CalendarStrategyBase(HydraStrategy):
         quotes = self._dc_read_leg_quotes(leg_conids)
         mids = {k: quotes[k]["mid"] for k in leg_conids}
         if any(m is None or m <= 0 for m in mids.values()):
-            logger.warning("[DCTM] incomplete mids %s — cannot price calendar", mids)
+            logger.warning("[CAL] incomplete mids %s — cannot price calendar", mids)
             return False
         n = self.contracts_per_entry
         # Realistic OPEN fills (2026-06-17): BUY the longs toward the ask, SELL the
@@ -460,7 +462,7 @@ class CalendarStrategyBase(HydraStrategy):
             "short_put": self._dc_fill_price(quotes["short_put"], "buy"),
         }
         if any(p is None or p <= 0 for p in open_fill.values()):
-            logger.warning("[DCTM] incomplete fills %s — cannot price calendar", open_fill)
+            logger.warning("[CAL] incomplete fills %s — cannot price calendar", open_fill)
             return False
         # Net DEBIT = cost of longs (bought at ask) - credit from shorts (sold at bid).
         net_debit = (
@@ -473,7 +475,7 @@ class CalendarStrategyBase(HydraStrategy):
         # and leave the position unmanaged. Skip it rather than open an anomaly.
         if net_debit <= 0:
             logger.warning(
-                "[DCTM] skipping entry #%s — net credit/zero (%.2f); a calendar must be a net debit",
+                "[CAL] skipping entry #%s — net credit/zero (%.2f); a calendar must be a net debit",
                 entry.entry_number, net_debit,
             )
             return False
@@ -493,7 +495,7 @@ class CalendarStrategyBase(HydraStrategy):
         entry.wing_width = self.dc_wing_width
         entry.is_complete = True
         logger.info(
-            "[DCTM-OPEN] entry #%s DEBIT $%.2f | Kc=%s Kp=%s | short=%s long=%s | %dc",
+            "[CAL-OPEN] entry #%s DEBIT $%.2f | Kc=%s Kp=%s | short=%s long=%s | %dc",
             entry.entry_number, net_debit, entry.short_call_strike,
             entry.short_put_strike, short_exp, long_exp, n,
         )
@@ -573,7 +575,7 @@ class CalendarStrategyBase(HydraStrategy):
         else:
             entry.call_side_pivot_closed = entry.put_side_pivot_closed = True
         self._dc_clear_leg_conids(entry)
-        tag = "DCTM-STOP" if loss else "DCTM-EOD-CLOSE"
+        tag = "CAL-STOP" if loss else "CAL-EOD-CLOSE"
         logger.warning(
             "[%s] E#%s closed (%s): P&L $%.2f on debit $%.2f",
             tag, entry.entry_number, reason, pnl, entry.net_debit,
@@ -698,7 +700,7 @@ class CalendarStrategyBase(HydraStrategy):
         try:
             self._atomic_write_json(self._dc_state_path(), records)
         except Exception as exc:
-            logger.error("[DCTM] sidecar save failed: %s", exc)
+            logger.error("[CAL] sidecar save failed: %s", exc)
 
     def _dc_load_sidecar(self) -> bool:
         """Re-adopt open multi-day calendars from the sidecar (survives restarts
@@ -715,7 +717,7 @@ class CalendarStrategyBase(HydraStrategy):
             with open(path) as f:
                 records = json.load(f)
         except Exception as exc:
-            logger.error("[DCTM] sidecar read failed: %s", exc)
+            logger.error("[CAL] sidecar read failed: %s", exc)
             return False
         if not records:
             return False
@@ -731,9 +733,9 @@ class CalendarStrategyBase(HydraStrategy):
                 self.daily_state.entries.append(self._dc_deserialize_entry(r))
                 adopted += 1
             except Exception as exc:
-                logger.error("[DCTM] could not rebuild calendar from sidecar: %s", exc)
+                logger.error("[CAL] could not rebuild calendar from sidecar: %s", exc)
         if adopted:
-            logger.info("[DCTM-RECOVER] re-adopted %d multi-day calendar(s) from sidecar", adopted)
+            logger.info("[CAL-RECOVER] re-adopted %d multi-day calendar(s) from sidecar", adopted)
         return adopted > 0
 
     def _save_state_to_disk(self):
@@ -780,7 +782,7 @@ class CalendarStrategyBase(HydraStrategy):
             return False
         spx = self._dc_settlement_spx()
         if spx is None:
-            logger.warning("[DCTM-SETTLE] %d position(s) due but SPX unreadable — deferring", len(due))
+            logger.warning("[CAL-SETTLE] %d position(s) due but SPX unreadable — deferring", len(due))
             return False
         for e in due:
             self._dc_settle_entry(e, spx)
@@ -809,11 +811,11 @@ class CalendarStrategyBase(HydraStrategy):
                     active_count=len(self.daily_state.active_entries),
                 )
             except Exception as e:
-                logger.debug("DCTM heartbeat tick failed: %s", e)
+                logger.debug("CAL heartbeat tick failed: %s", e)
         if getattr(self, "_dc_recorder", None):
             for entry in self.daily_state.active_entries:
                 if isinstance(entry, CalendarEntry):
                     try:
                         self._dc_recorder.record_snapshot(entry, timestamp)
                     except Exception as e:
-                        logger.debug("DCTM snapshot failed: %s", e)
+                        logger.debug("CAL snapshot failed: %s", e)
