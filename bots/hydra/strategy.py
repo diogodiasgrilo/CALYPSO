@@ -673,6 +673,25 @@ class HydraStrategy(MEICStrategy):
         else:
             logger.info(f"  One-sided entries: DISABLED (skip if either side non-viable)")
 
+        # MKT-048 (2026-06-22): fillability gate. MKT-011 decides viability on
+        # MID prices, but real fills are long@ask / short@bid — so a side can
+        # clear the mid threshold yet be UNFILLABLE as a credit spread (its
+        # short_bid − long_ask is a debit). That side then fails at leg 3 when
+        # the placement net-credit floor refuses to leg into a debit, AFTER
+        # buying the protective long: 3 retries, long-leg bleed, a HIGH
+        # watchdog alert, and put-only anyway (2026-06-22 C Entry#1). When
+        # enabled (default), the gate vetoes such a side UP FRONT so the
+        # existing one-sided routing books it cleanly with zero retries. The
+        # veto is FAIL-OPEN — it only fires on a CONFIRMED debit, never on a
+        # missing / crossed quote. Set false to restore pure mid-based gating.
+        self.mkt011_fillability_gate_enabled = bool(
+            strategy_config.get("mkt011_fillability_gate_enabled", True)
+        )
+        logger.info(
+            f"  MKT-048 fillability gate: "
+            f"{'ENABLED' if self.mkt011_fillability_gate_enabled else 'DISABLED'}"
+        )
+
         # Override min credit from base class $0.50 for HYDRA.
         # NOTE: These base values are effectively dead when vix_regime is enabled and all
         # regime slots are filled (live config as of 2026-04-14). _apply_vix_regime_overrides()
@@ -3919,6 +3938,48 @@ class HydraStrategy(MEICStrategy):
                         f"at fallback ${fallback / 100:.2f}"
                     )
                     break
+
+        # MKT-048 (2026-06-22): fillability veto. The checks above all use the
+        # MID estimate; but a side fills as long@ask / short@bid, so a side can
+        # be mid-viable yet UNFILLABLE as a credit spread (short_bid − long_ask
+        # is a debit). _estimate_entry_credit stashed each side's per-share
+        # fillable credit on the entry. If a still-viable side can't clear the
+        # placement net-credit floor (the same floor _sell_credit_floor_price
+        # enforces at leg 3), flip it non-viable HERE so the one-sided routing
+        # below books it cleanly — no protective-long bleed, no leg-3 retries,
+        # no HIGH watchdog alert (the 2026-06-22 C Entry#1 failure). FAIL-OPEN:
+        # only vetoes on a CONFIRMED debit (fillable is not None and < floor);
+        # a missing / crossed quote (None) never vetoes.
+        if self.mkt011_fillability_gate_enabled:
+            floor_ps = self.min_net_credit_per_contract  # per-share $, e.g. 0.05
+            fill_call_ps = getattr(entry, "_fillable_call_ps", None)
+            fill_put_ps = getattr(entry, "_fillable_put_ps", None)
+            if call_viable and fill_call_ps is not None and fill_call_ps < floor_ps:
+                call_viable = False
+                logger.warning(
+                    f"MKT-048: Entry #{entry.entry_number} call side unfillable — "
+                    f"fillable ${fill_call_ps:.2f}/sh < net-credit floor ${floor_ps:.2f}/sh "
+                    f"(mid est ${estimated_call / 100:.2f} passed, but short_bid−long_ask "
+                    f"is a debit) → vetoing call (would fail at leg 3)"
+                )
+                self._log_safety_event(
+                    "MKT-048_CALL_UNFILLABLE",
+                    f"Entry #{entry.entry_number}: call fillable ${fill_call_ps:.2f}/sh "
+                    f"< floor ${floor_ps:.2f}/sh (mid ${estimated_call / 100:.2f})"
+                )
+            if put_viable and fill_put_ps is not None and fill_put_ps < floor_ps:
+                put_viable = False
+                logger.warning(
+                    f"MKT-048: Entry #{entry.entry_number} put side unfillable — "
+                    f"fillable ${fill_put_ps:.2f}/sh < net-credit floor ${floor_ps:.2f}/sh "
+                    f"(mid est ${estimated_put / 100:.2f} passed, but short_bid−long_ask "
+                    f"is a debit) → vetoing put (would fail at leg 3)"
+                )
+                self._log_safety_event(
+                    "MKT-048_PUT_UNFILLABLE",
+                    f"Entry #{entry.entry_number}: put fillable ${fill_put_ps:.2f}/sh "
+                    f"< floor ${floor_ps:.2f}/sh (mid ${estimated_put / 100:.2f})"
+                )
 
         if call_viable and put_viable:
             logger.info(
