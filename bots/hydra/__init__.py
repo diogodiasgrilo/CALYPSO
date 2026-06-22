@@ -36,6 +36,24 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- MKT-048 credit-gate fillability veto (2026-06-22). The 2026-06-22 variant-C
+  Entry#1 failed all 3 retries at leg 3 ("Short Call order failed", a HIGH
+  entry-window watchdog alert) while variant B "worked" — but only because B is
+  dry_run_shadow (simulated fills never test fillability). Root cause: MKT-011
+  decides side viability on MID prices, yet an IC side fills as long@ask /
+  short@bid, so a side can clear the mid threshold while its fillable credit
+  (short_bid − long_ask) is a debit. The placement net-credit floor
+  (_sell_credit_floor_price) then correctly refuses to leg into a debit — but
+  only AFTER buying the protective long, so C bled the longs across 3 retries
+  and ended put-only anyway. Fix: _estimate_entry_credit_ib now stashes each
+  side's per-share fillable credit on the entry (in the quote read it already
+  does — no extra IBKR calls), and _check_credit_gate vetoes a still-viable but
+  unfillable side UP FRONT so the existing one-sided routing books it cleanly
+  (put-only / call-only / skip) with zero retries and no false alarm. FAIL-OPEN
+  (vetoes only on a CONFIRMED debit; a missing/crossed quote never vetoes),
+  gated by mkt011_fillability_gate_enabled (default true). Correct for A/B/C —
+  only ever triggers on a side that would have failed at leg 3 anyway. Tests:
+  tests/test_mkt048_fillability_gate.py (13).
 - E Friday-only expiries — the ACTUAL root cause of E never entering (2026-06-18).
   A live broker probe (post strike-snap) showed E STILL skipped: get_option_chain
   returns a generic, non-expiry-validated strike list for ANY weekday, so the old
