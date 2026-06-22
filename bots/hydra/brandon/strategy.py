@@ -153,6 +153,36 @@ class BrandonHydraStrategy(HydraStrategy):
         # points OTM; a $0 nearer the money is treated as a stale/missing quote
         # and TP is deferred (the 2026-06-15 worthless-leg-blocks-TP fix).
         self.brandon_tp_worthless_otm_pts = float(tp.get("worthless_otm_pts", 20.0))
+        # MKT-049 (2026-06-22): net-of-cost TP gate. evaluate_iron_condor decides
+        # on the MID mark (entry.*_spread_value), but a thin 0DTE credit spread
+        # CLOSES at short_ask − long_bid, which can be many times the mid. On
+        # 2026-06-22 variant-C E#2 the mid said "SV $17.50 → 87.5% captured" but
+        # the real close cost was $105 (25% captured); after commission the $140
+        # credit netted +$2.80 — the TP gave back ~75% to slippage it never saw.
+        # When enabled, before firing a TP we recompute the REAL net capture from
+        # live bid/ask (buy the short at ask, sell the long at bid) minus the
+        # close commission, and HOLD if it's below `min_net_capture` — the
+        # comfortably-OTM short then rides to expiry (100%, no close cost), still
+        # backstopped by the GEX breach-exit + credit-buffer stop. FAIL-OPEN: a
+        # missing / crossed quote falls back to the mid decision (current
+        # behavior), so a flaky quote never blocks a legitimate close.
+        self.brandon_tp_net_of_cost_gate_enabled = bool(
+            tp.get("net_of_cost_gate_enabled", True)
+        )
+        # The real net-capture bar a TP must clear to actually close. Defaults to
+        # the same threshold as the mid trigger, so "close at 80% captured" means
+        # a REAL 80% net of slippage + commission. Lower it if the gate defers too
+        # much (thin 0DTE spreads will then mostly ride to expiry — usually the
+        # better outcome, see the 2026-06-22 post-mortem).
+        self.brandon_tp_min_net_capture = float(
+            tp.get("min_net_capture", self.brandon_take_profit_threshold)
+        )
+        if self.brandon_take_profit_enabled:
+            logger.info(
+                "  MKT-049 TP net-of-cost gate: %s (min real net capture %.0f%%)",
+                "ENABLED" if self.brandon_tp_net_of_cost_gate_enabled else "DISABLED",
+                self.brandon_tp_min_net_capture * 100,
+            )
 
         gex = bcfg.get("gex") or {}
         self.brandon_gex_enabled = bool(gex.get("enabled", False))
@@ -781,6 +811,40 @@ class BrandonHydraStrategy(HydraStrategy):
         if not decision.should_close:
             return None
 
+        # MKT-049 (2026-06-22): net-of-cost gate. The decision above used the MID
+        # mark; re-check against the REAL closeable cost (short_ask − long_bid)
+        # net of close commission. If the real net capture is below the bar,
+        # DEFER — closing here would give the gain back to slippage + fees (the
+        # 2026-06-22 C E#2: mid "87.5% captured", real 25%, +$2.80 net). The
+        # comfortably-OTM short then rides to expiry, still protected by the GEX
+        # breach-exit + credit-buffer stop. FAIL-OPEN: None (missing/crossed
+        # quotes) falls through to the mid decision.
+        if getattr(self, "brandon_tp_net_of_cost_gate_enabled", True):
+            min_net = getattr(
+                self, "brandon_tp_min_net_capture",
+                getattr(self, "brandon_take_profit_threshold", 0.80),
+            )
+            real_capture = self._brandon_real_close_capture(entry, call_alive, put_alive)
+            if real_capture is not None and real_capture < min_net:
+                if not getattr(entry, "_mkt049_deferred", False):
+                    entry._mkt049_deferred = True
+                    logger.info(
+                        "MKT-049 E#%s: TP DEFERRED — real net capture %.0f%% < %.0f%% "
+                        "bar (mid mark said %.0f%%, but short_ask−long_bid + commission "
+                        "give the gain back). Holding to expiry / stop / GEX exit.",
+                        entry.entry_number, real_capture * 100,
+                        min_net * 100, decision.profit_captured_pct * 100,
+                    )
+                else:
+                    logger.debug(
+                        "MKT-049 E#%s: TP still deferred — real %.0f%% < %.0f%%",
+                        entry.entry_number, real_capture * 100, min_net * 100,
+                    )
+                return None
+            # Cleared (or unavailable) — reset so a later genuine deferral logs again.
+            if getattr(entry, "_mkt049_deferred", False):
+                entry._mkt049_deferred = False
+
         # Don't re-fire a doomed close every tick: if every still-alive side is
         # cooling down from a recent 0-leg close, wait. The side(s) stay alive
         # and monitored; the L-C2 credit+buffer backstop + expiry still protect.
@@ -870,6 +934,78 @@ class BrandonHydraStrategy(HydraStrategy):
             f"({legs_failed} failed) — {decision.profit_captured_pct:.1%} captured, "
             f"close_cost call=${entry.actual_call_stop_debit:.2f} put=${entry.actual_put_stop_debit:.2f}"
         )
+
+    def _brandon_real_close_capture(
+        self, entry, call_alive: bool, put_alive: bool
+    ) -> Optional[float]:
+        """Fraction of credit a TP would ACTUALLY net if closed right now, from
+        live fillable prices instead of the mid mark (MKT-049).
+
+        For each still-alive side we close by BUYING the short back at its ask
+        and SELLING the long at its bid, so the real per-share close cost is
+        ``short_ask − long_bid``; net capture =
+        ``(Σcredit − Σreal_close_cost − close_commission) / Σcredit``.
+
+        Returns the net-capture fraction, or ``None`` when any needed leg is
+        unquoted, its book is crossed (bid > ask), or the cross-leg cost is
+        negative — so the caller FAILS OPEN to the mid decision rather than
+        blocking a close on a flaky quote. Mirrors the entry-side MKT-048.
+        """
+        try:
+            sides = []  # (short_conid, long_conid, credit_dollars)
+            if call_alive and float(getattr(entry, "call_spread_credit", 0) or 0) > 0:
+                sides.append((entry.short_call_uic, entry.long_call_uic,
+                              float(entry.call_spread_credit)))
+            if put_alive and float(getattr(entry, "put_spread_credit", 0) or 0) > 0:
+                sides.append((entry.short_put_uic, entry.long_put_uic,
+                              float(entry.put_spread_credit)))
+            if not sides:
+                return None
+
+            conids = [c for s in sides for c in (s[0], s[1])]
+            # Every leg must be a real (positive int) conid — reject None / 0 /
+            # non-numeric (e.g. a MagicMock in tests) → fail open.
+            if not all(isinstance(c, int) and c > 0 for c in conids):
+                return None
+            quotes = self._read_option_quotes_batch(conids) or {}
+
+            contracts = int(getattr(entry, "contracts", 0) or self.contracts_per_entry)
+            if contracts <= 0:
+                return None
+
+            total_credit = 0.0
+            total_close_cost = 0.0
+            for short_cid, long_cid, credit in sides:
+                sq, lq = quotes.get(short_cid), quotes.get(long_cid)
+                if not isinstance(sq, dict) or not isinstance(lq, dict):
+                    return None  # unquoted → fail open
+                short_ask, long_bid = sq.get("ask"), lq.get("bid")
+                if short_ask is None or long_bid is None:
+                    return None
+                # Reject crossed books (bid > ask) per leg — garbage must not
+                # drive a hold/close decision.
+                sb, sa = sq.get("bid"), sq.get("ask")
+                lb, la = lq.get("bid"), lq.get("ask")
+                if (sb is not None and sa is not None and float(sb) > float(sa)) or \
+                   (lb is not None and la is not None and float(lb) > float(la)):
+                    return None
+                close_cost_ps = float(short_ask) - float(long_bid)
+                if close_cost_ps < 0:
+                    return None  # long bid above short ask → crossed across legs
+                total_close_cost += close_cost_ps * 100.0 * contracts
+                total_credit += credit
+
+            if total_credit <= 0:
+                return None
+            # Close commission: 2 legs per live side at the configured per-leg rate.
+            close_commission = 2 * len(sides) * self.commission_per_leg * contracts
+            return (total_credit - total_close_cost - close_commission) / total_credit
+        except Exception as exc:
+            # A quote-fetch / data error during a TP decision must never crash
+            # the monitoring loop — fail open to the mid decision.
+            logger.debug("MKT-049 E#%s: real-capture check errored (%s) — failing open",
+                         getattr(entry, "entry_number", "?"), exc)
+            return None
 
     # ------------------------------------------------------------------
     # GEX breach exit (LIVE) — Brandon's stop

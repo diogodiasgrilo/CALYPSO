@@ -36,6 +36,22 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- MKT-049 net-of-cost take-profit gate (Brandon, 2026-06-22). The exit-side
+  mirror of MKT-048. Brandon's take-profit fires on the MID mark
+  (entry.*_spread_value), but a thin 0DTE credit spread CLOSES at
+  short_ask − long_bid, which can be many times the mid. On 2026-06-22 variant-C
+  E#2 the mid said "SV $17.50 → 87.5% captured", but the real close cost was
+  $105 (25% captured); after commission the $140 credit netted only +$2.80 — the
+  TP gave back ~75% to slippage it never saw, when holding the comfortably-OTM
+  put to expiry would have kept ~$140. Fix: _brandon_real_close_capture recomputes
+  the REAL net capture from live bid/ask (buy the short at ask, sell the long at
+  bid) minus close commission, and _brandon_check_take_profit DEFERS the close
+  when it's below brandon_tp_min_net_capture (default = the TP threshold, 0.80) —
+  the short then rides to expiry (100%, no close cost), still backstopped by the
+  GEX breach-exit + credit-buffer stop. FAIL-OPEN: a missing / crossed quote (or
+  any data error) returns None → falls back to the mid decision, so a flaky quote
+  never blocks a legitimate close. Gated by brandon_tp_net_of_cost_gate_enabled
+  (default true). Tests: tests/test_mkt049_tp_net_of_cost.py (13).
 - MKT-048 credit-gate fillability veto (2026-06-22). The 2026-06-22 variant-C
   Entry#1 failed all 3 retries at leg 3 ("Short Call order failed", a HIGH
   entry-window watchdog alert) while variant B "worked" — but only because B is
