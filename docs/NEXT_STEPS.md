@@ -133,3 +133,51 @@ the VM (per its memory/journal). To take D live:
 - [ ] Per-command Telegram name selectors (`/status <name>`, etc.) — deferred (needs 4 handler-signature changes).
 - [ ] Genericize the `[DCTM-*]` runtime log tags in `CalendarStrategyBase` to a neutral/variant-derived prefix
       so E's logs aren't mis-attributed to DCTM (doc note added in §1; the tag rename itself is the code change).
+
+## 6. Brandon viability + fill-quality (from the 2026-06-22 review)
+
+Two fixes shipped 2026-06-22 (live on B/C): **MKT-048** (entry fillability gate — don't open a side whose
+`short_bid − long_mid` can't clear the net-credit floor) and **MKT-049** (exit net-of-cost TP gate — don't
+take profit on a mid mark when the real `short_ask − long_bid` + commission gives the gain back; defer to
+expiry instead). See `bots/hydra/__init__.py` version history.
+
+- [ ] **CONFIRM LIVE (P2.5):** over the next few live days, verify MKT-048 eliminates the leg-3 entry bleed and
+      MKT-049 cuts the close drag on C. Look for `MKT-048: … vetoing` and `MKT-049 … DEFERRED` in C's logs.
+- [ ] **Commission ratio (P2):** commission/gross is **invariant to contract count** (both scale with size);
+      it's driven by **credit-per-spread**. Over the live period ~45% of gross credit is lost to commission +
+      close slippage. Biggest recovered chunk = holding thin spreads to expiry (MKT-049). Keep measuring.
+- [ ] **FUTURE TEST (parked — Lever 2, do NOT start yet):** test a **thicker-credit-per-spread** strike config
+      (wider / closer-to-money shorts → more credit per leg → lower commission ratio) on **B (dry-run shadow)**
+      for ~2 weeks, compare commission ratio + win rate vs C, THEN decide whether to bring to C. This is a
+      risk/reward change to Brandon's 8δ delta-target — parked until explicitly requested.
+
+## 7. MVL-D vs Strategy E (2026-06-22 — IMPORTANT realization)
+
+**Strategy E already IS the "transformer-less managed double calendar" that an MVL-D would be** — just on SPY
+(not SPX) and with *better* management (laddered partial profit-take + time-exit before short expiry, no hard
+stop) than D's crude `−20% stop + EOD-close`. D's transformer is the only thing E lacks, and the transformer
+is exactly the unproven/illusory part (see `docs/migration/D_GOLIVE_SCOPE_AND_AUDIT.md`). So:
+
+- [ ] **DECIDE before building MVL-D:** do we even need an SPX plain-calendar test when E already runs the SPY
+      one? E answers "is a plain managed double calendar +EV?" today. MVL-D's only *unique* value is (a) SPX
+      underlying (cash-settled, no assignment, bigger notional, different liquidity/tax) and (b) hard-stop vs
+      E's ladder as a management comparison.
+- [ ] **If we do build it:** don't re-derive "D minus transform with a crude stop." Instead scope MVL-D as
+      **"E-style management ported onto an SPX double calendar"** (reuse E's proven ladder + time-exit; swap
+      underlying SPX↔SPY in `CalendarStrategyBase`). Cheaper and strictly better-managed than gutting D.
+- [ ] Either way: **gate behind E proving +EV first** in dry-run. Building a second unproven calendar before
+      the first one shows an edge is premature.
+
+## 8. Dashboard — make take-profits visible on the Intraday P&L line
+
+The Intraday P&L line plots `realized − commission + Σ(live mark-to-market of open positions)` (a mark-to-market
+equity curve), so a take-profit is a near-no-op on the curve (the gain was already "in" as unrealized before
+the close). It's NOT a bug — B's "smooth" line and C's "stepped" look are the same code at different P&L scales.
+To actually *show* TPs:
+
+- [ ] **Preferred — TP/close event markers:** backend exposes each entry's close events (timestamp + reason +
+      realized); frontend overlays dots/annotations on `PnLCurve.tsx` at those timestamps. Keeps the live
+      mark-to-market line AND shows where TPs fired (works at any scale). Read-only dashboard change.
+- [ ] **Alternative — realized-only line:** plot only `realized − commission` (no open-position mark), so the
+      line is flat between closes and steps up at each TP. Crisp TP steps, but you lose the intraday
+      mark-to-market "how are open positions doing right now" view. Design choice; would apply to all variants.

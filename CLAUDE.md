@@ -400,7 +400,7 @@ Up to **5 parallel HYDRA processes** run concurrently, clustered into **2 compar
 
 | Variant | Group | Service | Strategy | Schedule | Contracts | Widths | Status |
 |---|---|---|---|---|---|---|---|
-| A | `ic_0dte` | `hydra.service` | HYDRA baseline (MKT-027 dynamic) | 10:45 / 11:15 (+ E6 14:00 conditional) | 1c | 75pt MKT-027 dynamic | live |
+| A | `ic_0dte` | `hydra.service` | HYDRA baseline (MKT-027 dynamic) | 10:45 / 11:15 (+ E6 14:00 conditional) | 1c | 75pt MKT-027 dynamic | dry_run_shadow (config `dry_run=true`; only C is live-paper) |
 | B | `ic_0dte` | `hydra_variant_b.service` | `BrandonHydraStrategy` (Trojan Horse stack LIVE) | 09:45 / 10:45 / 11:15 / 11:45 (+ E6) | 10c | 5pt below VIX 22, 10pt above (narrow) | dry_run_shadow |
 | C | `ic_0dte` | `hydra_variant_c.service` | `BrandonHydraStrategy` (Brandon-faithful baseline) | 10:15 / 10:45 / 11:15 (+ E6) | 10c | Same narrow widths as B | live (dashboard PRIMARY) |
 | D | `calendar_multiday` | `hydra_variant_d.service` | `DoubleCalendarStrategy` ("DC Time Machine", multi-day SPX net-debit) | multi-day (not 0DTE) | — | double calendar | dry_run_locked (NO-GO) |
