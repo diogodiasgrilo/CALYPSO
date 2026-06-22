@@ -175,10 +175,13 @@ def _wire_quotes(s, quote_by_conid, chain_map=None):
 
 
 class TestStashMath:
-    def test_stash_is_short_bid_minus_long_ask(self):
+    def test_stash_is_short_bid_minus_long_mid(self):
+        # The protective long fills at ~its MID (its buy-limit starts at mid),
+        # so fillable = short_bid − long_mid (review F1: NOT short_bid − long_ask,
+        # which over-states the long cost and false-vetoes fillable spreads).
         s = _estimator_strat()
-        # call: short(7550) bid 0.35, long(7555) ask 0.45 → fillable −0.10
-        # put : short(7410) bid 2.40, long(7405) ask 2.10 → fillable +0.30
+        # call: short(7550) bid 0.35, long(7555) mid 0.35 → fillable 0.00
+        # put : short(7410) bid 2.40, long(7405) mid 2.00 → fillable +0.40
         _wire_quotes(s, {
             1: {"bid": 0.35, "ask": 0.65, "mid": 0.50},
             2: {"bid": 0.25, "ask": 0.45, "mid": 0.35},
@@ -187,8 +190,40 @@ class TestStashMath:
         })
         e = _est_entry()
         s._estimate_entry_credit_ib(e)
-        assert e._fillable_call_ps == 0.35 - 0.45
-        assert e._fillable_put_ps == 2.40 - 2.10
+        assert e._fillable_call_ps == 0.0       # 0.35 − 0.35
+        assert e._fillable_put_ps == 0.40       # 2.40 − 2.00
+
+    def test_long_ask_would_have_false_vetoed_but_long_mid_does_not(self):
+        # Concrete F1 regression: short_bid clears long_MID but not long_ASK.
+        # Old criterion (short_bid − long_ask = −0.05) vetoes; new (short_bid −
+        # long_mid = +0.05) does not — and the real placement (long fills ≤ mid)
+        # WOULD have filled, so the old veto was false.
+        s = _estimator_strat()
+        _wire_quotes(s, {
+            1: {"bid": 0.50, "ask": 0.70, "mid": 0.60},
+            2: {"bid": 0.35, "ask": 0.55, "mid": 0.45},  # long mid 0.45, ask 0.55
+            3: {"bid": 2.40, "ask": 2.70, "mid": 2.55},
+            4: {"bid": 1.90, "ask": 2.10, "mid": 2.00},
+        })
+        e = _est_entry()
+        s._estimate_entry_credit_ib(e)
+        assert e._fillable_call_ps == 0.05      # 0.50 − 0.45 (mid); long_ask gives −0.05
+
+    def test_penny_rounding_kills_float_boundary_veto(self):
+        # review F3: 0.35 − 0.30 == 0.04999999999999999 as a raw float would trip
+        # `< 0.05` and spuriously veto a spread that fills exactly at the floor.
+        # The stash is penny-rounded → 0.05, which does NOT veto.
+        s = _estimator_strat()
+        _wire_quotes(s, {
+            1: {"bid": 0.35, "ask": 0.55, "mid": 0.45},
+            2: {"bid": 0.20, "ask": 0.40, "mid": 0.30},  # long mid 0.30
+            3: {"bid": 2.40, "ask": 2.70, "mid": 2.55},
+            4: {"bid": 1.90, "ask": 2.10, "mid": 2.00},
+        })
+        e = _est_entry()
+        s._estimate_entry_credit_ib(e)
+        assert e._fillable_call_ps == 0.05      # NOT 0.04999999999999999
+        assert (0.35 - 0.30) < 0.05             # prove the raw float would have vetoed
 
     def test_unquoted_leg_leaves_stash_none(self):
         s = _estimator_strat()
@@ -202,9 +237,9 @@ class TestStashMath:
         e = _est_entry()
         s._estimate_entry_credit_ib(e)
         assert e._fillable_call_ps is None      # fail open
-        assert e._fillable_put_ps == 2.40 - 2.10
+        assert e._fillable_put_ps == 0.40       # 2.40 − 2.00
 
-    def test_missing_bidask_field_leaves_stash_none(self):
+    def test_missing_bid_field_leaves_stash_none(self):
         s = _estimator_strat()
         # short call quoted but with NO bid field → call fillable None.
         _wire_quotes(s, {
@@ -217,6 +252,37 @@ class TestStashMath:
         s._estimate_entry_credit_ib(e)
         assert e._fillable_call_ps is None
         assert e._fillable_put_ps is not None
+
+    def test_crossed_short_book_fails_open(self):
+        # review F2: a crossed short book (bid > ask) is garbage — its raw bid
+        # must NOT produce a stash (else the gate could veto off a nonsense
+        # quote). _sane_bid returns None → fillable None → fail open.
+        s = _estimator_strat()
+        _wire_quotes(s, {
+            1: {"bid": 0.80, "ask": 0.20, "mid": None},  # crossed short call
+            2: {"bid": 0.25, "ask": 0.45, "mid": 0.35},
+            3: {"bid": 2.40, "ask": 2.70, "mid": 2.55},
+            4: {"bid": 1.90, "ask": 2.10, "mid": 2.00},
+        })
+        e = _est_entry()
+        s._estimate_entry_credit_ib(e)
+        assert e._fillable_call_ps is None      # crossed → fail open, never veto
+        assert e._fillable_put_ps == 0.40
+
+    def test_long_zero_mid_fails_open(self):
+        # An unusable long (mid collapses to 0 — no bid/ask/last/mark) must not
+        # inflate the fillable; leave None → fail open.
+        s = _estimator_strat()
+        _wire_quotes(s, {
+            1: {"bid": 0.35, "ask": 0.55, "mid": 0.45},
+            2: {"bid": None, "ask": None, "mid": None, "last": None, "mark": None},
+            3: {"bid": 2.40, "ask": 2.70, "mid": 2.55},
+            4: {"bid": 1.90, "ask": 2.10, "mid": 2.00},
+        })
+        e = _est_entry()
+        s._estimate_entry_credit_ib(e)
+        assert e._fillable_call_ps is None
+        assert e._fillable_put_ps == 0.40
 
     def test_stash_reset_to_none_each_call(self):
         # A prior call's stash must never leak into a no-expiry early return.

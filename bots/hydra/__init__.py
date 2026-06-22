@@ -40,9 +40,10 @@ Version History:
   Entry#1 failed all 3 retries at leg 3 ("Short Call order failed", a HIGH
   entry-window watchdog alert) while variant B "worked" — but only because B is
   dry_run_shadow (simulated fills never test fillability). Root cause: MKT-011
-  decides side viability on MID prices, yet an IC side fills as long@ask /
-  short@bid, so a side can clear the mid threshold while its fillable credit
-  (short_bid − long_ask) is a debit. The placement net-credit floor
+  decides side viability on MID prices, yet an IC side fills with the short at
+  its BID and the protective long at ~its MID (its buy-limit starts at mid), so
+  a side can clear the mid threshold while its fillable credit
+  (short_bid − long_mid) is a debit. The placement net-credit floor
   (_sell_credit_floor_price) then correctly refuses to leg into a debit — but
   only AFTER buying the protective long, so C bled the longs across 3 retries
   and ended put-only anyway. Fix: _estimate_entry_credit_ib now stashes each
@@ -50,10 +51,16 @@ Version History:
   does — no extra IBKR calls), and _check_credit_gate vetoes a still-viable but
   unfillable side UP FRONT so the existing one-sided routing books it cleanly
   (put-only / call-only / skip) with zero retries and no false alarm. FAIL-OPEN
-  (vetoes only on a CONFIRMED debit; a missing/crossed quote never vetoes),
-  gated by mkt011_fillability_gate_enabled (default true). Correct for A/B/C —
-  only ever triggers on a side that would have failed at leg 3 anyway. Tests:
-  tests/test_mkt048_fillability_gate.py (13).
+  (vetoes only on a debit the data CONFIRMS; a missing/crossed quote never
+  vetoes), gated by mkt011_fillability_gate_enabled (default true). Hardened by
+  an independent adversarial review: predict the long cost with its MID not its
+  ASK (long fills ≤ mid, so ASK over-vetoed fillable spreads — F1); _sane_bid
+  drops crossed books so a nonsense quote can't veto (F2); the per-share stash
+  is penny-rounded so a float-subtraction artefact can't trip `< floor` (F3);
+  and a tightened-put call-only retry re-checks fillability before committing
+  to a full IC (F4). Correct for A/B/C — only ever triggers on a side that
+  would have failed at leg 3/4 anyway. Tests:
+  tests/test_mkt048_fillability_gate.py (17).
 - E Friday-only expiries — the ACTUAL root cause of E never entering (2026-06-18).
   A live broker probe (post strike-snap) showed E STILL skipped: get_option_chain
   returns a generic, non-expiry-validated strike list for ANY weekday, so the old

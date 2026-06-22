@@ -2113,9 +2113,10 @@ class MEICStrategy(abc.ABC):
         total dollars, ``(0.0, 0.0)`` on failure.
 
         SIDE EFFECT (MKT-048, 2026-06-22): stashes the per-share *fillable*
-        credit of each side — ``short_bid − long_ask`` — on the entry as
+        credit of each side — ``short_bid − long_mid`` — on the entry as
         ``_fillable_call_ps`` / ``_fillable_put_ps`` (``None`` when a leg is
-        unquotable). The returned MID estimate can clear MKT-011's threshold
+        unquotable / crossed). The returned MID estimate can clear MKT-011's
+        threshold
         on a spread whose ACTUAL fillable credit is a debit (fills are
         long@ask / short@bid). ``_check_credit_gate`` reads the stash to veto
         a structurally-unfillable side UP FRONT instead of discovering it at
@@ -2156,19 +2157,22 @@ class MEICStrategy(abc.ABC):
             def _mid(cid) -> float:
                 return self._quote_mid(quotes.get(cid)) if cid else 0.0
 
-            def _bid(cid) -> Optional[float]:
-                """Raw bid of a leg (the price a SHORT realistically sells
-                into). None when unquoted — MKT-048 fillability fails open."""
+            def _sane_bid(cid) -> Optional[float]:
+                """The bid a SHORT leg realistically sells into, but ONLY off a
+                SANE (uncrossed) book. None when the leg is unquoted, has no
+                bid, OR the book is crossed (bid > ask) — so MKT-048 fails open
+                on garbage rather than vetoing off a crossed quote (the raw
+                bid of a crossed book is nonsense; _parse_quote_row keeps it,
+                only nulling `mid`). Mirrors the L9 crossed-market guard."""
                 q = quotes.get(cid) if cid else None
-                b = q.get("bid") if q else None
-                return float(b) if b is not None else None
-
-            def _ask(cid) -> Optional[float]:
-                """Raw ask of a leg (the price a LONG realistically pays).
-                None when unquoted — MKT-048 fillability fails open."""
-                q = quotes.get(cid) if cid else None
-                a = q.get("ask") if q else None
-                return float(a) if a is not None else None
+                if not q:
+                    return None
+                b, a = q.get("bid"), q.get("ask")
+                if b is None:
+                    return None
+                if a is not None and float(b) > float(a):
+                    return None  # crossed book — not a usable bid
+                return float(b)
 
             def _quoted(cid) -> bool:
                 """True iff the batch actually returned a quote row for
@@ -2218,21 +2222,27 @@ class MEICStrategy(abc.ABC):
                 else:
                     estimated_put_credit = (_mid(sp) - _mid(lp)) * 100
 
-            # MKT-048: per-share fillable credit = short_bid − long_ask. This
-            # is exactly what the placement net-credit floor enforces
-            # (_sell_credit_floor_price: a SHORT fills only if its bid clears
-            # long_fill + min_net_credit, and the long fills ≈ at its ask). A
-            # side is only checkable when BOTH legs are genuinely quoted with
-            # the needed side of the book; otherwise leave None → gate fails
-            # open (never veto on a missing / crossed quote).
+            # MKT-048: per-share fillable credit = short_bid − long_MID. The
+            # placement net-credit floor (_sell_credit_floor_price) fills the
+            # short only when its bid clears (long_FILL + min_net_credit). The
+            # long is a BUY whose limit STARTS at mid (PROGRESSIVE_RETRY_SEQUENCE
+            # attempt 1 = 0% slippage) and a mid-limit buy fills at ≤ mid, so
+            # long_fill ≈ long_mid (≤ mid in the common case). Predicting with
+            # long_ASK over-states the long's cost and false-vetoes fillable
+            # spreads (adversarial review F1, 2026-06-22); long_mid is the
+            # unbiased estimate. Penny-rounded so a float-subtraction artefact
+            # (0.35−0.30=0.04999…) can't spuriously trip the gate's `< floor`
+            # (review F3). A side is checkable only when both legs are quoted
+            # and the short has a SANE (uncrossed) bid + the long a positive
+            # mid; otherwise None → gate fails open.
             if need_call and sc and lc and _quoted(sc) and _quoted(lc):
-                sc_bid, lc_ask = _bid(sc), _ask(lc)
-                if sc_bid is not None and lc_ask is not None:
-                    entry._fillable_call_ps = sc_bid - lc_ask
+                sc_bid, lc_mid = _sane_bid(sc), _mid(lc)
+                if sc_bid is not None and lc_mid > 0:
+                    entry._fillable_call_ps = round(sc_bid - lc_mid, 2)
             if need_put and sp and lp and _quoted(sp) and _quoted(lp):
-                sp_bid, lp_ask = _bid(sp), _ask(lp)
-                if sp_bid is not None and lp_ask is not None:
-                    entry._fillable_put_ps = sp_bid - lp_ask
+                sp_bid, lp_mid = _sane_bid(sp), _mid(lp)
+                if sp_bid is not None and lp_mid > 0:
+                    entry._fillable_put_ps = round(sp_bid - lp_mid, 2)
 
             logger.debug(
                 f"Credit estimation (IB) for Entry #{entry.entry_number}: "

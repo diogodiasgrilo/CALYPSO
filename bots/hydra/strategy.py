@@ -3940,16 +3940,18 @@ class HydraStrategy(MEICStrategy):
                     break
 
         # MKT-048 (2026-06-22): fillability veto. The checks above all use the
-        # MID estimate; but a side fills as long@ask / short@bid, so a side can
-        # be mid-viable yet UNFILLABLE as a credit spread (short_bid − long_ask
-        # is a debit). _estimate_entry_credit stashed each side's per-share
-        # fillable credit on the entry. If a still-viable side can't clear the
-        # placement net-credit floor (the same floor _sell_credit_floor_price
-        # enforces at leg 3), flip it non-viable HERE so the one-sided routing
-        # below books it cleanly — no protective-long bleed, no leg-3 retries,
-        # no HIGH watchdog alert (the 2026-06-22 C Entry#1 failure). FAIL-OPEN:
-        # only vetoes on a CONFIRMED debit (fillable is not None and < floor);
-        # a missing / crossed quote (None) never vetoes.
+        # MID estimate; but the short fills at its BID and the protective long
+        # at ~its MID (its buy-limit starts at mid), so a side can be mid-viable
+        # yet UNFILLABLE as a credit spread (short_bid − long_mid is a debit).
+        # _estimate_entry_credit stashed each side's per-share fillable credit
+        # on the entry (penny-rounded, off a SANE uncrossed book). If a
+        # still-viable side can't clear the placement net-credit floor (the
+        # same floor _sell_credit_floor_price enforces at leg 3), flip it
+        # non-viable HERE so the one-sided routing below books it cleanly — no
+        # protective-long bleed, no leg-3 retries, no HIGH watchdog alert (the
+        # 2026-06-22 C Entry#1 failure). FAIL-OPEN: only vetoes on a debit the
+        # data CONFIRMS (fillable is not None and < floor); a missing / crossed
+        # quote (None) never vetoes.
         if self.mkt011_fillability_gate_enabled:
             floor_ps = self.min_net_credit_per_contract  # per-share $, e.g. 0.05
             fill_call_ps = getattr(entry, "_fillable_call_ps", None)
@@ -6084,6 +6086,28 @@ class HydraStrategy(MEICStrategy):
                                     f"credit ${est_put / 100:.2f}"
                                 )
                                 break
+
+                        # MKT-048 (review F4): a tightened put can be mid-viable
+                        # yet still UNFILLABLE. The re-estimate inside the loop
+                        # re-stashed _fillable_put_ps — if it's a confirmed debit,
+                        # don't proceed to a full IC (it would fail at leg 4 the
+                        # same way the call did); drop back to call-only so the
+                        # entry books cleanly.
+                        if put_retry_succeeded and self.mkt011_fillability_gate_enabled:
+                            fill_put_ps = getattr(entry, "_fillable_put_ps", None)
+                            if fill_put_ps is not None and fill_put_ps < self.min_net_credit_per_contract:
+                                logger.warning(
+                                    f"MKT-048: Entry #{entry_num} tightened put mid-viable "
+                                    f"(${est_put / 100:.2f}) but unfillable "
+                                    f"(${fill_put_ps:.2f}/sh < ${self.min_net_credit_per_contract:.2f}/sh) "
+                                    f"→ call-only instead of full IC"
+                                )
+                                self._log_safety_event(
+                                    "MKT-048_PUT_UNFILLABLE_RETRY",
+                                    f"Entry #{entry_num}: tightened put unfillable "
+                                    f"${fill_put_ps:.2f}/sh → call-only"
+                                )
+                                put_retry_succeeded = False
 
                         if put_retry_succeeded:
                             # Re-run strike conflict checks after changing put strikes
