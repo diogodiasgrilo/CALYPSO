@@ -48,10 +48,16 @@ Version History:
   active side's conids + the REAL estimated credit (mirror _simulate_entry), so
   the heartbeat marks from real quotes exactly like a full IC. Fix 2: the
   fallback's initial leg prices now make the spread value start at the credit
-  (not 7×), so the rare no-conid case (and an already-open entry on restart)
-  re-marks sanely. DRY-RUN ONLY — variant C (live) places real orders with real
-  conids and was never affected; the bug only polluted B's dry-run head-to-head
-  display. Tests: tests/test_one_sided_dryrun_mark.py (5).
+  (not 7×) — for the one-sided AND the full-IC branch (the same units bug lived
+  in `total_credit/200`; it surfaced as a ~−$1378 phantom on a full IC whose
+  conids were dropped by a restart-recovery). Fix 3 (the proper one): the
+  heartbeat now RE-RESOLVES missing leg conids from the persisted strikes
+  (`_repopulate_dry_conids`), so a dry-run entry that came back conid-less after
+  a restart marks from REAL quotes again instead of the crude fallback — the
+  fallback is now only a genuine last resort. DRY-RUN ONLY — variant C (live)
+  places real orders with real conids and was never affected; the bug only
+  polluted B's dry-run head-to-head display. Tests:
+  tests/test_one_sided_dryrun_mark.py (10).
 - Backlog polish batch (2026-06-22). (item 2) CalendarStrategyBase now logs a
   neutral [CAL-*] prefix instead of [DCTM-*] — the base runs for BOTH D and E, so
   the DCTM (DC Time Machine = D) tag mis-attributed E's calendar plumbing to D;

@@ -7730,6 +7730,37 @@ class HydraStrategy(MEICStrategy):
     # OVERRIDE: Price updates for one-sided entries (Fix #41, 2026-02-05)
     # =========================================================================
 
+    def _repopulate_dry_conids(self, entry) -> None:
+        """Dry-run: re-resolve any MISSING leg conids from the entry's persisted
+        strikes, so the heartbeat marks from REAL quotes rather than the crude
+        moneyness-blind _simulate_hydra_entry_prices fallback. Needed because the
+        state file doesn't carry live conids, so every entry comes back conid-
+        less after a restart-recovery (and the legacy one-sided sim never set
+        them at all). Only resolves legs whose strike is set (skips
+        inactive/skipped sides). `_get_option_uic` is conid-cached so repeated
+        calls are cheap; a resolution failure leaves the leg None → fallback.
+        """
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            return
+        legs = (
+            ("short_call", getattr(entry, "short_call_strike", 0), "Call"),
+            ("long_call", getattr(entry, "long_call_strike", 0), "Call"),
+            ("short_put", getattr(entry, "short_put_strike", 0), "Put"),
+            ("long_put", getattr(entry, "long_put_strike", 0), "Put"),
+        )
+        for leg, strike, right in legs:
+            if getattr(entry, f"{leg}_uic", 0):
+                continue  # already resolved
+            if not strike or strike <= 0:
+                continue  # inactive / skipped side
+            try:
+                uic = self._get_option_uic(strike, right, expiry)
+                if uic:
+                    setattr(entry, f"{leg}_uic", uic)
+            except Exception as e:
+                logger.debug(f"[DRY RUN] conid re-resolve failed for {leg} @ {strike}: {e}")
+
     def _batch_update_entry_prices(self):
         """
         Override parent to handle Hydra one-sided entry simulation in dry-run
@@ -7753,6 +7784,14 @@ class HydraStrategy(MEICStrategy):
                 if call_done and put_done:
                     continue
                 has_uic = any(getattr(entry, f"{leg}_uic", 0) for leg in LEG_NAMES)
+                if not has_uic:
+                    # An entry can lack conids after a restart-recovery (state
+                    # doesn't carry live conids) or from the legacy one-sided
+                    # sim. Re-resolve them from the persisted strikes so we mark
+                    # from REAL quotes instead of the moneyness-blind fallback
+                    # (2026-06-23 — the variant-B put-only / restart marks bug).
+                    self._repopulate_dry_conids(entry)
+                    has_uic = any(getattr(entry, f"{leg}_uic", 0) for leg in LEG_NAMES)
                 if has_uic:
                     for leg in LEG_NAMES:
                         uic = getattr(entry, f"{leg}_uic", 0)
@@ -7877,9 +7916,14 @@ class HydraStrategy(MEICStrategy):
             entry.long_put_price = initial_short_price * decay_factor * 0.3
 
         else:
-            # Full IC - use parent's simulation
-            # But call our parent's method for consistency
-            initial_short_price = entry.total_credit / 200  # Per contract
+            # Full IC. Each side starts at ~half the total credit and decays, so
+            # call_value + put_value ≈ total_credit at entry. short × 0.7 × 100 ×
+            # c = total_credit/2 → short = total_credit/(140×c). 2026-06-23 FIX:
+            # the old `/200` ignored the contract count (and the 0.7 factor), so
+            # at 10c it inflated the value ~7× → a fabricated deep-negative P&L
+            # on any full IC that hit this fallback (e.g. after a restart-recovery
+            # dropped its conids — the variant-B regression).
+            initial_short_price = entry.total_credit / (140.0 * c)
             entry.short_call_price = initial_short_price * decay_factor
             entry.short_put_price = initial_short_price * decay_factor
             entry.long_call_price = initial_short_price * decay_factor * 0.3

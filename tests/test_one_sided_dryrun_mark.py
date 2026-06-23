@@ -125,3 +125,71 @@ class TestFallbackMark:
         assert 0.0 <= v <= 130.0, f"expected ~credit ($125), got ${v:.0f}"
         # ...and it is NOT the old 7× value.
         assert v < 300.0
+
+    def test_full_ic_fallback_total_value_near_credit_not_7x(self):
+        # The same units bug lived in the full-IC fallback (total_credit/200) and
+        # surfaced when a restart-recovery dropped a full IC's conids (the −$1378
+        # regression). Total IC value should start ≈ total credit, not ~7×.
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.contracts_per_entry = 10
+        e = HydraIronCondorEntry(entry_number=1)
+        e.put_only = False
+        e.call_only = False
+        e.call_spread_credit = 200.0
+        e.put_spread_credit = 200.0   # total_credit = $400
+        e.contracts = 10
+        e.short_call_strike = 7480.0
+        e.long_call_strike = 7485.0
+        e.short_put_strike = 7320.0
+        e.long_put_strike = 7315.0
+        e.entry_time = get_us_market_time()
+        s._simulate_hydra_entry_prices(e)
+        total = e.call_spread_value + e.put_spread_value
+        assert 0.0 <= total <= 430.0, f"expected ~$400, got ${total:.0f}"  # not ~$2800
+
+
+class TestConidReResolve:
+    """_repopulate_dry_conids: recovered / legacy entries get their conids back
+    from the persisted strikes so the heartbeat marks from REAL quotes."""
+
+    def _ns(self, **kw):
+        base = dict(
+            short_call_strike=0.0, long_call_strike=0.0,
+            short_put_strike=0.0, long_put_strike=0.0,
+            short_call_uic=0, long_call_uic=0, short_put_uic=0, long_put_uic=0,
+        )
+        base.update(kw)
+        return types.SimpleNamespace(**base)
+
+    def test_resolves_all_missing_conids_from_strikes(self):
+        s = _strat()
+        e = self._ns(short_call_strike=7480.0, long_call_strike=7475.0,
+                     short_put_strike=7325.0, long_put_strike=7320.0)
+        s._repopulate_dry_conids(e)
+        assert (e.short_call_uic, e.long_call_uic) == (211, 212)
+        assert (e.short_put_uic, e.long_put_uic) == (111, 112)
+
+    def test_skips_inactive_side(self):
+        # put-only: call strikes 0 → call legs left untouched
+        s = _strat()
+        e = self._ns(short_put_strike=7325.0, long_put_strike=7320.0,
+                     short_put_uic=None, long_put_uic=None)
+        s._repopulate_dry_conids(e)
+        assert (e.short_call_uic, e.long_call_uic) == (0, 0)
+        assert (e.short_put_uic, e.long_put_uic) == (111, 112)
+
+    def test_skips_already_resolved(self):
+        s = _strat()
+        s._get_option_uic = lambda *a: (_ for _ in ()).throw(AssertionError("called"))
+        e = self._ns(short_put_strike=7325.0, long_put_strike=7320.0,
+                     short_put_uic=999, long_put_uic=998)
+        s._repopulate_dry_conids(e)  # all set / inactive → _get_option_uic unused
+        assert e.short_put_uic == 999
+
+    def test_no_expiry_is_noop(self):
+        s = _strat()
+        s._get_todays_expiry = lambda: None
+        e = self._ns(short_put_strike=7325.0, long_put_strike=7320.0,
+                     short_put_uic=None, long_put_uic=None)
+        s._repopulate_dry_conids(e)
+        assert e.short_put_uic is None
