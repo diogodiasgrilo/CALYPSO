@@ -818,7 +818,7 @@ class BrandonHydraStrategy(HydraStrategy):
             hold_window,
             call_otm,
             put_otm,
-            getattr(self, "brandon_tp_hold_safe_cushion_pts", 25.0),
+            getattr(self, "brandon_tp_hold_safe_cushion_pts", 50.0),
         ):
             logger.debug(
                 "BRANDON-TP E#%s: holding to expiry (safe OTM, within %.0fm of close)",
