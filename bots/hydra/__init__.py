@@ -36,6 +36,15 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Hold-if-safe cushion 25 → 50pt (2026-06-23, Brandon B/C). Data-derived: 84
+  trading days of SPX 1-min paths show a short held to expiry from the final hour
+  is TOUCHED 26.5% of the time at a 25pt cushion but only ~4-5% at 50pt. Riding
+  to expiry instead of taking the ~80% TP gains only ~20% of a thin credit
+  (~$12/contract) against a near-max-loss stop on a breach, so it is +EV only
+  below a ~3-7% reversal rate — making the old 25pt decisively −EV and 50pt the
+  break-even threshold. Code default raised (B/C leave the knob unset); the
+  time-window widening, a shadow logger, and VIX-scaling were all considered and
+  rejected (see docs/HYDRA_HOLD_IF_SAFE_ANALYSIS.md). +1 regression-guard test.
 - MKT-049 fail-CLOSED + POS-003 recent-close orphan suppression (2026-06-23).
   Two live-C fixes after a market-hours review. (1) MKT-049 take-profit gate
   SUPERSEDES its 2026-06-22 fail-OPEN behavior: it now FAILS CLOSED. The

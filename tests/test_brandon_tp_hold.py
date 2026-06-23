@@ -5,7 +5,18 @@ to $0 (110pt OTM), which the old `value==0` guard mistook for a stale quote and
 permanently blocked TP. With the new rules, the $0 far-OTM value is trusted, but
 near close a comfortably-OTM IC is held to expiry (100%) instead of TP'd at 80%.
 """
+import inspect
+
 from bots.hydra.brandon.strategy import BrandonHydraStrategy as B
+
+
+def test_hold_safe_cushion_default_is_data_derived_50pt():
+    # 2026-06-23: the hold-if-safe cushion default was raised 25 -> 50pt, the
+    # EMPIRICAL break-even from 84 days of SPX paths (riding to expiry is +EV only
+    # below a ~3-7% reversal rate; 25pt reverses 26.5% of the time, 50pt ~4-5%).
+    # See docs/HYDRA_HOLD_IF_SAFE_ANALYSIS.md. Guard against a silent revert.
+    src = inspect.getsource(B.__init__)
+    assert 'tp.get("hold_safe_cushion_pts", 50.0)' in src
 
 
 # ---- staleness fix: trust a $0 only when genuinely worthless (far OTM) --------

@@ -162,8 +162,17 @@ class BrandonHydraStrategy(HydraStrategy):
         # over an 80% TP that pays slippage + commission. The credit+buffer stop
         # still backstops a reversal (this only suppresses the early TP, never the
         # stop). hold_to_expiry_minutes=0 disables it.
+        #
+        # cushion default 25 → 50pt (2026-06-23): an EMPIRICAL break-even from 84
+        # trading days of SPX 1-min paths (Feb–Jun 2026). Riding to expiry instead
+        # of taking the ~80% TP gains only ~20% of a thin credit (~$12/contract)
+        # but risks a near-max-loss stop if a short is breached, so it is +EV ONLY
+        # when the final-hour reversal (touch) rate is below ~3–7%. That rate is
+        # 26.5% at a 25pt cushion (decisively −EV) but ~4–5% at 50pt — so 50pt is
+        # the data-derived threshold at which holding is genuinely safe. Full
+        # analysis + EV math: docs/HYDRA_HOLD_IF_SAFE_ANALYSIS.md.
         self.brandon_tp_hold_to_expiry_minutes = float(tp.get("hold_to_expiry_minutes", 60.0))
-        self.brandon_tp_hold_safe_cushion_pts = float(tp.get("hold_safe_cushion_pts", 25.0))
+        self.brandon_tp_hold_safe_cushion_pts = float(tp.get("hold_safe_cushion_pts", 50.0))
         # A side whose spread VALUE is $0 is trusted as genuinely worthless (so
         # the IC's TP can still fire) only when its short is at least this many
         # points OTM; a $0 nearer the money is treated as a stale/missing quote
