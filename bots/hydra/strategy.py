@@ -7449,6 +7449,13 @@ class HydraStrategy(MEICStrategy):
         Returns:
             float — summed unrealized P&L of the entry's open legs.
         """
+        # DRY-RUN coexistence (2026-06-23): a dry-run bot holds NO real broker
+        # positions — the SHARED IBKR account carries the LIVE variant's (C's)
+        # positions. Matching this simulated entry's conids against that account
+        # returns C's P&L (the variant-B contamination, exposed once conids were
+        # re-resolved to strikes overlapping C's). Use the SIMULATED mark.
+        if self.dry_run:
+            return entry.unrealized_pnl
         try:
             if positions is None:
                 positions = self._read_open_positions()

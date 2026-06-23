@@ -193,3 +193,39 @@ class TestConidReResolve:
                      short_put_uic=None, long_put_uic=None)
         s._repopulate_dry_conids(e)
         assert e.short_put_uic is None
+
+
+class TestDryRunBrokerPnlGuard:
+    """Fix 4 (2026-06-23): a DRY-RUN bot shares the IBKR account with the LIVE
+    variant (C). `_get_broker_pnl_for_entry` must NOT match a simulated entry's
+    conids against that shared account — it would return C's real (losing) P&L.
+    Dry-run returns the SIMULATED mark (`entry.unrealized_pnl`) instead."""
+
+    def _entry(self):
+        # put-only entry: short_put 7325 / long_put 7320, conids overlap C's
+        return types.SimpleNamespace(
+            entry_number=1, call_side_stopped=True, put_side_stopped=False,
+            short_call_uic=None, long_call_uic=None,
+            short_put_uic=111, long_put_uic=112,
+            unrealized_pnl=75.0,   # the simulated mark
+        )
+
+    def test_dry_run_ignores_shared_account_positions(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.dry_run = True
+        # C's real losing positions sit at the SAME conids in the shared account
+        s._read_open_positions = lambda: [
+            {"instrument_id": 111, "unrealized_pnl": -1450.0},
+            {"instrument_id": 112, "unrealized_pnl": -2.0},
+        ]
+        assert s._get_broker_pnl_for_entry(self._entry()) == 75.0  # sim mark, NOT −1452
+
+    def test_live_still_reads_broker(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.dry_run = False
+        s._read_open_positions = lambda: [
+            {"instrument_id": 111, "unrealized_pnl": -1450.0},
+            {"instrument_id": 112, "unrealized_pnl": -2.0},
+        ]
+        # live: real broker P&L of the entry's (own) positions
+        assert s._get_broker_pnl_for_entry(self._entry()) == -1452.0
