@@ -91,8 +91,13 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
-*.bak
+# Backups operators/agents leave on the VM. `*.bak*` (not just `*.bak`) so it
+# also catches the timestamp/label-suffixed ones the deploy + config-edit flows
+# create, e.g. config_variant_c.json.bak-livetest-1120, dist.bak.20260427-…
+*.bak*
 *.backup
+# Old dashboard build snapshots (the live build dir `dist/` is already ignored).
+dist_old/
 
 # Test coverage
 .coverage
@@ -115,10 +120,14 @@ dmypy.json
 # Agent config (has alert credentials — created from template on VM)
 services/agents_config.json
 
-# Agent runtime reports (VM-only, regenerated daily)
+# Agent runtime reports (VM-only, regenerated daily). HOMER's deliverable is
+# docs/HYDRA_TRADING_JOURNAL.md; the dated intel/homer/*.md + journal_backup_*
+# are VM-only intermediates (older May files are still TRACKED from the
+# pre-2026-06-16 `git add -A` bug — optional untrack noted in docs/NEXT_STEPS).
 intel/argus/
 intel/hermes/
 intel/apollo/
+intel/homer/
 .odysseus_last_audit
 
 # Backup files from editors
