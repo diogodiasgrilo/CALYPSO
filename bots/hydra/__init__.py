@@ -36,6 +36,18 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Backlog polish batch (2026-06-22). (item 2) CalendarStrategyBase now logs a
+  neutral [CAL-*] prefix instead of [DCTM-*] — the base runs for BOTH D and E, so
+  the DCTM (DC Time Machine = D) tag mis-attributed E's calendar plumbing to D;
+  D's own double_calendar_strategy.py keeps its legitimate [DCTM-*] tags, nothing
+  parses the tags. (item 6) Per-command Telegram variant selectors: /status,
+  /snapshot and /stops accept an optional variant token (e.g. `/status c`) and
+  render that NON-primary variant from its own state file via one unified view
+  (reuses _load_variant_state + _build_variant_summary); D/E point at /calendars,
+  A falls through to the full view. The dashboard-side items from the same review
+  (per-strategy History/Analytics, ConfigDelta baseline) and the decision to keep
+  the non-primary WebSocket on polling are tracked in docs/NEXT_STEPS.md §5.
+  Tests: tests/test_telegram_variant_selector.py (10).
 - MKT-049 net-of-cost take-profit gate (Brandon, 2026-06-22). The exit-side
   mirror of MKT-048. Brandon's take-profit fires on the MID mark
   (entry.*_spread_value), but a thin 0DTE credit spread CLOSES at

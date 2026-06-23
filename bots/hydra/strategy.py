@@ -8485,16 +8485,20 @@ class HydraStrategy(MEICStrategy):
             ]
         return "\n".join(lines)
 
-    def build_telegram_snapshot(self) -> str:
+    def build_telegram_snapshot(self, variant_id: Optional[str] = None) -> str:
         """
         Build a formatted Telegram message showing current HYDRA position snapshot.
 
         Sent every 30 minutes during market hours after first entry.
         Uses Telegram legacy Markdown: *bold* only (no _ ` [ in message body).
+        ``variant_id`` (item 6) routes ``/snapshot <name>`` to the named
+        variant's unified view; None / "a" renders this (A) bot.
 
         Returns:
             str: Formatted Markdown message for Telegram
         """
+        if variant_id and variant_id.strip().lower() != strategy_taxonomy.DEFAULT_ID:
+            return self._build_telegram_variant_view(variant_id)
         lines = []
 
         # Market data header
@@ -8784,6 +8788,46 @@ class HydraStrategy(MEICStrategy):
             "put_stops": state.get("put_stops_triggered", 0),
             "entries": entries,
         }
+
+    def _build_telegram_variant_view(self, vid: str) -> str:
+        """Pragmatic per-variant status for ``/status <name>`` (item 6, 2026-06-22).
+
+        Renders a NAMED variant from its OWN state file (read off disk) so you
+        can check B/C from Telegram without the dashboard. The poller's own
+        variant (A) falls through to the full status view; the calendar group
+        (D/E) points at ``/calendars`` (its debit-native renderer). One unified
+        view — same shape regardless of which command (``/status`` / ``/snapshot``
+        / ``/stops``) carried the name.
+        """
+        vid = (vid or "").strip().lower()
+        meta = strategy_taxonomy.STRATEGIES.get(vid)
+        if meta is None:
+            valid = "/".join(strategy_taxonomy.STRATEGIES.keys())
+            return f"Unknown variant '{vid}'. Valid: {valid} (or /calendars for D/E)."
+        if vid == strategy_taxonomy.DEFAULT_ID:
+            return self.build_telegram_status()  # this bot IS variant A
+        if meta.group_id == "calendar_multiday":
+            return (
+                f"\U0001f4c5 {meta.display_name} ({vid.upper()}) is a multi-day "
+                f"calendar — use /calendars for the D/E view."
+            )
+        state = self._load_variant_state(vid)
+        if not state:
+            return (
+                f"{meta.display_name} ({vid.upper()}): no fresh state today "
+                f"(variant stopped, or hasn't traded yet)."
+            )
+        s = self._build_variant_summary(state)
+        return "\n".join([
+            f"\U0001f4ca *{meta.display_name}* ({vid.upper()}) — _{meta.status}_",
+            f"Date: {s.get('date', '?')}",
+            f"Entries: {s.get('entries_completed', 0)} | "
+            f"Credit: ${float(s.get('total_credit') or 0):.0f}",
+            f"Realized: ${float(s.get('total_pnl') or 0):.2f} | "
+            f"Comm: ${float(s.get('total_commission') or 0):.2f}",
+            f"*Net P&L: ${float(s.get('net_pnl') or 0):.2f}*",
+            f"Stops: {s.get('call_stops', 0)} call / {s.get('put_stops', 0)} put",
+        ])
 
     def _read_variant_spread_width(self, vid: str) -> Optional[int]:
         """Read a non-A variant's actual max_spread_width from its config so
@@ -9382,15 +9426,19 @@ class HydraStrategy(MEICStrategy):
     # TELEGRAM NEW COMMANDS (v1.7.0)
     # =========================================================================
 
-    def build_telegram_status(self) -> str:
+    def build_telegram_status(self, variant_id: Optional[str] = None) -> str:
         """
         Build a formatted Telegram message showing current HYDRA bot status.
 
-        All data is in-memory — zero I/O, zero API calls.
+        All data is in-memory — zero I/O, zero API calls. ``variant_id`` (item
+        6) routes ``/status <name>`` to the named variant's unified view (read
+        from its state file); None / "a" renders this (A) bot.
 
         Returns:
             str: Formatted Markdown message for Telegram
         """
+        if variant_id and variant_id.strip().lower() != strategy_taxonomy.DEFAULT_ID:
+            return self._build_telegram_variant_view(variant_id)
         # State & mode
         state_str = self.state.value if self.state else "UNKNOWN"
         mode_str = "DRY-RUN" if self.dry_run else "LIVE"
@@ -9840,15 +9888,19 @@ class HydraStrategy(MEICStrategy):
 
         return self._with_contracts_footer(lines)
 
-    def build_telegram_stops(self) -> str:
+    def build_telegram_stops(self, variant_id: Optional[str] = None) -> str:
         """
         Build a formatted Telegram message showing stop loss analysis.
 
         Today's data from in-memory daily_state. Historical from Google Sheets.
+        ``variant_id`` (item 6) routes ``/stops <name>`` to the named variant's
+        unified view; None / "a" renders this (A) bot.
 
         Returns:
             str: Formatted Markdown message for Telegram
         """
+        if variant_id and variant_id.strip().lower() != strategy_taxonomy.DEFAULT_ID:
+            return self._build_telegram_variant_view(variant_id)
         lines = ["\U0001f6d1 *HYDRA* | Stop Analysis"]
 
         # Today's stops

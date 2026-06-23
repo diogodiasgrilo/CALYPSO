@@ -322,16 +322,16 @@ class TelegramCommandHandler:
         self._offset: Optional[int] = None
         self._running = False
         self._thread: Optional[threading.Thread] = None
-        self._snapshot_callback: Optional[Callable[[], str]] = None
+        self._snapshot_callback: Optional[Callable[..., str]] = None
         self._lastday_callback: Optional[Callable[[], str]] = None
         self._account_callback: Optional[Callable[[], str]] = None
-        self._status_callback: Optional[Callable[[], str]] = None
+        self._status_callback: Optional[Callable[..., str]] = None
         self._hermes_callback: Optional[Callable[[], str]] = None
         self._apollo_callback: Optional[Callable[[], str]] = None
         self._clio_callback: Optional[Callable[[], str]] = None
         self._week_callback: Optional[Callable[[], str]] = None
         self._entry_callback: Optional[Callable[[int], str]] = None
-        self._stops_callback: Optional[Callable[[], str]] = None
+        self._stops_callback: Optional[Callable[..., str]] = None
         self._config_callback: Optional[Callable[[], str]] = None
         # /compare accepts an OPTIONAL group selector (e.g. "calendars"); a
         # bare call (no arg) keeps the legacy behavior. _handle_compare calls it
@@ -486,9 +486,9 @@ class TelegramCommandHandler:
                 continue
 
             if text.startswith("/snapshot"):
-                self._handle_snapshot(chat_id)
+                self._handle_snapshot(chat_id, text)
             elif text.startswith("/status"):
-                self._handle_status(chat_id)
+                self._handle_status(chat_id, text)
             elif text.startswith("/entry"):
                 self._handle_entry(chat_id, text)
             elif text.startswith("/lastday"):
@@ -498,7 +498,7 @@ class TelegramCommandHandler:
             elif text.startswith("/account"):
                 self._handle_account(chat_id)
             elif text.startswith("/stops"):
-                self._handle_stops(chat_id)
+                self._handle_stops(chat_id, text)
             elif text.startswith("/stop"):
                 self._handle_stop(chat_id, text)
             elif text.startswith("/set"):
@@ -524,9 +524,20 @@ class TelegramCommandHandler:
     # COMMAND HANDLERS
     # =========================================================================
 
-    def _handle_snapshot(self, chat_id: str):
-        """Handle /snapshot command."""
+    def _handle_snapshot(self, chat_id: str, text: str = ""):
+        """Handle /snapshot [variant] command."""
         now_et = get_us_market_time()
+
+        # A named (non-A) variant reads from its state file — works any time, so
+        # skip the market-open gate (item 6).
+        vid = self._variant_arg(text)
+        if vid and vid != "a" and self._snapshot_callback:
+            try:
+                self._send_message(chat_id, self._snapshot_callback(vid))
+            except Exception as e:
+                logger.error("Failed /snapshot %s: %s", vid, e)
+                self._send_message(chat_id, "Snapshot temporarily unavailable. Try again in a minute.")
+            return
 
         if not is_market_open():
             # Build market-closed message
@@ -564,14 +575,23 @@ class TelegramCommandHandler:
             logger.error("Failed to build snapshot for /snapshot command: %s", e)
             self._send_message(chat_id, "Snapshot temporarily unavailable. Try again in a minute.")
 
-    def _handle_status(self, chat_id: str):
-        """Handle /status command — bot state, market data, filters."""
+    @staticmethod
+    def _variant_arg(text: str) -> Optional[str]:
+        """Optional variant token from a command (e.g. '/status c' → 'c'), or
+        None when there's no second token. Validation is the strategy's job
+        (item 6, 2026-06-22)."""
+        parts = (text or "").split()
+        return parts[1].strip().lower() if len(parts) > 1 else None
+
+    def _handle_status(self, chat_id: str, text: str = ""):
+        """Handle /status [variant] — bot state, market data, filters.
+        With a variant name, shows that variant's unified view."""
         if not self._status_callback:
             self._send_message(chat_id, "Status not available (bot still initializing).")
             return
 
         try:
-            msg = self._status_callback()
+            msg = self._status_callback(self._variant_arg(text))
             self._send_message(chat_id, msg)
         except Exception as e:
             logger.error("Failed to build /status response: %s", e)
@@ -640,14 +660,15 @@ class TelegramCommandHandler:
             logger.error("Failed to build /account response: %s", e)
             self._send_message(chat_id, "Failed to retrieve account data. Try again shortly.")
 
-    def _handle_stops(self, chat_id: str):
-        """Handle /stops command — stop loss analysis."""
+    def _handle_stops(self, chat_id: str, text: str = ""):
+        """Handle /stops [variant] — stop loss analysis. With a variant name,
+        shows that variant's unified view."""
         if not self._stops_callback:
             self._send_message(chat_id, "Stop data not available (bot still initializing).")
             return
 
         try:
-            msg = self._stops_callback()
+            msg = self._stops_callback(self._variant_arg(text))
             self._send_message(chat_id, msg)
         except Exception as e:
             logger.error("Failed to build /stops response: %s", e)
@@ -1169,13 +1190,13 @@ class TelegramCommandHandler:
         # Commands (all existing names kept; /compare gains the calendar group).
         lines += [
             "\n*Monitoring*",
-            "/status \u2014 Bot state, market data, filters",
-            "/snapshot \u2014 Live position snapshot",
+            "/status [variant] \u2014 Bot state, market, filters (add b/c/d/e for that variant)",
+            "/snapshot [variant] \u2014 Live position snapshot (add b/c/d/e for that variant)",
             "/entry N \u2014 Details for entry #N",
             "/lastday \u2014 Last complete trading day",
             "/week \u2014 Current week summary",
             "/account \u2014 Lifetime performance",
-            "/stops \u2014 Stop loss analysis",
+            "/stops [variant] \u2014 Stop loss analysis (add b/c/d/e for that variant)",
             "\n*Configuration*",
             "/config \u2014 View current config",
             "/set \u2014 Edit config parameter",

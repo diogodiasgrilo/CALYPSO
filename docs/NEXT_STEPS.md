@@ -126,13 +126,22 @@ the VM (per its memory/journal). To take D live:
 
 ## 5. Backlog / nice-to-haves (from the audit + design)
 
-- [ ] Per-strategy History/Analytics (currently primary-bound; the picker is scoped to the Dashboard tab).
-- [ ] WebSocket per-strategy subscribe (non-primary main view uses polling today).
-- [ ] IC `ConfigDelta` table still hardcodes `variants["A"]` as the control column (cosmetic; fine while the
-      IC baseline is A).
-- [ ] Per-command Telegram name selectors (`/status <name>`, etc.) — deferred (needs 4 handler-signature changes).
-- [ ] Genericize the `[DCTM-*]` runtime log tags in `CalendarStrategyBase` to a neutral/variant-derived prefix
-      so E's logs aren't mis-attributed to DCTM (doc note added in §1; the tag rename itself is the code change).
+- [x] **Per-strategy History/Analytics (item 3, 2026-06-22).** Both tabs now follow the strategy picker:
+      `/api/metrics/{daily,entries,stops,comparisons,performance}` take an optional `strategy_id` and read that
+      variant's own DB (today-from-live-state gated to the canonical id); the picker shows on /history + /analytics.
+- [x] **WebSocket per-strategy subscribe — DECIDED 2026-06-22: keep polling.** The non-primary main view already
+      works via 2s polling; a true WS multiplex (per-connection strategy channels) was judged not worth the
+      live-dashboard risk (cross-strategy message bleed) for the marginal latency gain. Polling is the accepted
+      non-primary path. Revisit only if real-time non-primary becomes a felt need.
+- [x] **IC `ConfigDelta` control column (item 5, 2026-06-22).** No longer hardcodes `variants["A"]` — derives the
+      baseline from `variantIds[0]` (the group's first member, matching the backend's `members[0]`).
+- [x] **Per-command Telegram name selectors (item 6, 2026-06-22).** `/status [variant]`, `/snapshot [variant]`,
+      `/stops [variant]` render a named NON-primary variant from its own state file via one unified view (reuses
+      `_load_variant_state` + `_build_variant_summary`). Pragmatic scope: D/E point at `/calendars`; A falls
+      through to the full view.
+- [x] **Genericize the `[DCTM-*]` log tags (item 2, 2026-06-22).** The shared `CalendarStrategyBase` now logs a
+      neutral `[CAL-*]` (D's own file keeps its legitimate `[DCTM-*]`), so E's calendar plumbing is no longer
+      mis-attributed to D.
 
 ## 6. Brandon viability + fill-quality (from the 2026-06-22 review)
 
