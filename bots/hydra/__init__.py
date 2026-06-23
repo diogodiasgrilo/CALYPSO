@@ -54,10 +54,19 @@ Version History:
   heartbeat now RE-RESOLVES missing leg conids from the persisted strikes
   (`_repopulate_dry_conids`), so a dry-run entry that came back conid-less after
   a restart marks from REAL quotes again instead of the crude fallback — the
-  fallback is now only a genuine last resort. DRY-RUN ONLY — variant C (live)
-  places real orders with real conids and was never affected; the bug only
+  fallback is now only a genuine last resort. Fix 4 (the shared-account leak):
+  the JOURNAL per-entry P&L (`_get_broker_pnl_for_entry`) summed BROKER positions
+  whose conid matched the entry's legs — but a dry-run bot holds NO real
+  positions; the SHARED IBKR account carries the LIVE variant's (C's) positions.
+  Once Fix 3 re-resolved B's conids to strikes overlapping C's, B's journal P&L
+  picked up C's real LOSING positions (Entry #3 read −$1452 against a $0 spread
+  value). Dry-run now returns the SIMULATED mark (`entry.unrealized_pnl`) and
+  never touches the shared account; live (C) keeps the real broker lookup.
+  Verified live post-deploy: B's four entries read +$125 / +$450 / +$400 / +$125,
+  each satisfying P&L = credit − (call_SV + put_SV). DRY-RUN ONLY — variant C
+  (live) places real orders with real conids and was never affected; the bug only
   polluted B's dry-run head-to-head display. Tests:
-  tests/test_one_sided_dryrun_mark.py (10).
+  tests/test_one_sided_dryrun_mark.py (12).
 - Backlog polish batch (2026-06-22). (item 2) CalendarStrategyBase now logs a
   neutral [CAL-*] prefix instead of [DCTM-*] — the base runs for BOTH D and E, so
   the DCTM (DC Time Machine = D) tag mis-attributed E's calendar plumbing to D;
