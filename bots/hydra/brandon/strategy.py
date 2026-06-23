@@ -1,12 +1,18 @@
 """BrandonHydraStrategy — HYDRA + Trojan Horse additions, fully live.
 
 Subclassing keeps variant A's HydraStrategy completely untouched. Variants
-B and C load this class instead. As of v1.27.1 there is exactly ONE
-shadow-only behavior: HYDRA's existing credit+buffer stop is computed every
-tick in parallel for comparison and Telegrammed when it would have fired,
-but it never closes positions in B/C. Every other Brandon feature acts.
+B and C load this class instead. The ONLY shadow-only behavior left is the
+%-of-width stop STUDY (`_brandon_check_pctwidth_shadow_stop`) — it logs the
+tighter would-fire trigger for the eventual flip decision but never closes a
+position. Every other feature ACTS — including HYDRA's credit+buffer stop:
+since the L-C2 backstop fix (2026-06-10, commit c0281d9) it ACTS as a live
+floor beneath the GEX breach-exit in BOTH GEX states (the per-tick
+`BRANDON-HYDRA-SHADOW … would fire` line is now just a head-to-head heads-up;
+`super()._check_stop_losses()` is what actually closes the side, MKT-046-
+confirmed). NOTE (pre-2026-06-10 this docstring said the credit+buffer "never
+acts" — that was the bug the 06-10 C max-loss incident exposed and L-C2 fixed).
 
-Feature matrix (v1.27.1, both B and C):
+Feature matrix (both B and C):
 
     take_profit         LIVE     close IC at threshold% of credit captured
     narrow_spread       LIVE     5/10pt widths in C (overrides MKT-027); off in B
@@ -27,9 +33,19 @@ Feature matrix (v1.27.1, both B and C):
                                  unlimited). force_refresh at entry time
                                  pulls a fresh chain regardless of TTL.
                                  Failure cooldown: 60s before retry.
-    HYDRA_stop_shadow   SHADOW   credit+buffer stop computed but never acts;
-                                 Telegram alert when each side would fire
-                                 with expected loss
+    credit+buffer_stop  LIVE     HYDRA's credit+buffer stop ACTS as the floor
+                                 beneath the GEX breach-exit, in BOTH GEX states
+                                 (L-C2, 2026-06-10): GEX breach is PRIMARY (fires
+                                 at the wall), credit+buffer is the backstop when
+                                 the breach exit can't fire (no decel wall near
+                                 the short, or GEX down). MKT-046-confirmed,
+                                 mutually exclusive per tick → no double-stop.
+                                 A per-tick "would-fire" line still logs for the
+                                 head-to-head record (that part is shadow/alert).
+    pctwidth_stop       SHADOW   tighter %-of-width stop — logs the would-fire
+                                 trigger only (A2-SHADOW), never acts. Data for
+                                 the "is the credit+buffer too wide for narrow
+                                 spreads?" flip decision.
 """
 
 from __future__ import annotations
