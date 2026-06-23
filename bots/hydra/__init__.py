@@ -36,6 +36,31 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Calendar (D/E) dry-run EDGE reader + settle-commission fix (2026-06-23). Built
+  the tool that answers the MVL-D audit's gating question ("V1 — edge sanity")
+  from D/E's forward dry-run record alone, so the build-or-don't-build decision
+  for MVL-D becomes data-gated instead of a guess: is a debit double calendar +
+  20%-debit stop NON-NEGATIVE EV, NET of commission, over a meaningful window?
+  New pure-stdlib module bots/hydra/dc_edge.py (+ thin CLI
+  scripts/analyze_calendar_edge.py) reads a variant's isolated dc_calendar.db
+  (dc_outcomes) and renders a verdict. Audit-hardened (2 independent adversarial
+  passes): (1) TRANSFORM SEGMENTATION — transformed outcomes are excluded from
+  the verdict (their dry-run P&L is a mid-pricing artifact that won't survive
+  real fills, audit §0.3); detection keys on per-outcome transform_credit>0, NOT
+  a join to dc_transformations (whose `date` is the transform day, not the entry
+  day, and would mis-match a multi-day transform). (2) COMMISSION-NET — the
+  verdict gates on realized_pnl − 2×close_commission (realized_pnl is booked
+  gross; the round trip is 2× the recorded close side). (3) Student-t (not z) CI,
+  gated on the usable return-series size, with a degenerate-sample guard + a
+  non-independence caveat (overlapping multi-day trades). (4) "DB not found" is
+  distinguished from "0 outcomes." Verdict tiers: INSUFFICIENT_DATA (<10
+  trustworthy trades — TODAY's state: n=1) → PRELIMINARY_* (<30) → EDGE_POSITIVE
+  / EDGE_NEGATIVE / INCONCLUSIVE / DEGENERATE_SAMPLE. The settle-path fix: D's +
+  E's `_dc_settle_entry` leftover-close backstop now stamps entry.close_commission
+  (4 legs, mirroring _dc_close_calendar) so that rare path records commission
+  instead of $0 — otherwise the reader would over-state the edge on it. DRY-RUN
+  ONLY (D/E remain dry-run-locked); recording-only change, no trading behavior
+  altered. +30 tests (tests/test_dc_edge.py); full calendar/dc set 188 passed.
 - One-sided dry-run mark fix (2026-06-23). Put-only / call-only DRY-RUN entries
   showed a deep-negative P&L even as SPX moved AWAY from the short (so they
   should have been profitable — the reported variant-B bug). Root cause:

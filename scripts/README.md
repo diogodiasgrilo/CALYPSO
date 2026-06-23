@@ -77,6 +77,24 @@ gcloud compute ssh calypso-bot --zone=us-east1-b \
   --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python scripts/<name>.py'"
 ```
 
+## Calendar (D/E) edge analysis
+
+`analyze_calendar_edge.py` — reads a calendar variant's dry-run record
+(`data/variant_<v>/dc_calendar.db`) and renders a commission-net, transform-segmented,
+sample-size-honest verdict on the MVL-D audit's gating question ("is a debit double
+calendar + 20% stop non-negative EV?"). Read-only. Run on the VM from `/opt/calypso`:
+
+```bash
+# Strategy D (default), human-readable
+sudo -u calypso /opt/calypso/.venv/bin/python scripts/analyze_calendar_edge.py
+# Strategy E, or raw JSON
+sudo -u calypso /opt/calypso/.venv/bin/python scripts/analyze_calendar_edge.py --variant e
+sudo -u calypso /opt/calypso/.venv/bin/python scripts/analyze_calendar_edge.py --json
+```
+
+Transformed outcomes are EXCLUDED from the verdict (mid-priced "risk-free" artifact).
+Logic lives in the unit-tested `bots/hydra/dc_edge.py`; this is a thin CLI.
+
 ## Formal test suite
 
 ```bash
@@ -84,4 +102,4 @@ pytest tests/            # all tests
 pytest tests/ -q         # quiet
 ```
 
-**Last Updated:** 2026-05-22
+**Last Updated:** 2026-06-23

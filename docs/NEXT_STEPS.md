@@ -101,8 +101,15 @@ the VM (per its memory/journal). To take D live:
 - [ ] Build the real-order execution path (D is fully simulated today).
 - [ ] Ship the **coexistence MUST-FIXes** (shared with E — STATE-004 / orphan sweep scoping + per-variant BP).
 - [ ] Validate the edge (backtest/soak) and confirm the risk-free transform invariant survives real fills.
+- [x] **Edge-read instrument BUILT (2026-06-23).** `scripts/analyze_calendar_edge.py` (logic in the unit-tested
+      `bots/hydra/dc_edge.py`, 2 adversarial audit passes) answers the MVL-D "V1 — edge sanity" question from
+      D/E's dry-run record: commission-net, transform-segmented (transformed = excluded), Student-t CI,
+      sample-size-honest. **The MVL-D build is now data-gated, not a guess.** Current verdict: **INSUFFICIENT_DATA
+      (D n=1, E n=0)** — keep recording; re-run as outcomes accrue. Decision rule: only EDGE_POSITIVE on the
+      trustworthy (non-transformed) segment justifies SCOPING Micro-MVL-D; EDGE_NEGATIVE/INCONCLUSIVE → don't build.
 - [ ] Consider the **MVL-D** first phase (drop the transformer; defined-risk debit calendar + stop) per
-      [`D_MVL_PHASE1_PLAN.md`](migration/D_MVL_PHASE1_PLAN.md).
+      [`D_MVL_PHASE1_PLAN.md`](migration/D_MVL_PHASE1_PLAN.md) — **only if** the edge reader crosses to
+      EDGE_POSITIVE (see §7; E may answer the same question first).
 - [ ] NOTE: D's go-live docs predate the `CalendarStrategyBase` extraction — their file:line refs to
       `double_calendar_strategy.py` are stale for the shared `_dc_*` methods (now in the base). Update them (§1).
 

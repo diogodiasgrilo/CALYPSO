@@ -706,6 +706,14 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
             self._dc_refresh_marks(entry)
             realized = entry.unrealized_pnl  # calendar mark - debit
             tag = "CALENDAR-leftover"
+            # Stamp the close-side commission so this leftover-close path records
+            # it in dc_outcomes (and the edge reader charges it) like any other
+            # close — instead of $0. Mirrors _dc_close_calendar (4 legs). Only the
+            # CALENDAR branch: a TRANSFORMED IC cash-settles at expiry (no closing
+            # trade) and is excluded from the edge verdict anyway. (2026-06-23 audit.)
+            close_comm = 4 * self.commission_per_leg * n
+            self.daily_state.total_commission += close_comm
+            entry.close_commission = getattr(entry, "close_commission", 0.0) + close_comm
         self.daily_state.total_realized_pnl += realized
         entry.dc_phase = DCPhase.CLOSED
         entry.call_side_expired = entry.put_side_expired = True  # settled at expiry
