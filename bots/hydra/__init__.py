@@ -36,6 +36,22 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- One-sided dry-run mark fix (2026-06-23). Put-only / call-only DRY-RUN entries
+  showed a deep-negative P&L even as SPX moved AWAY from the short (so they
+  should have been profitable — the reported variant-B bug). Root cause:
+  _simulate_put_spread_only / _simulate_call_spread_only never populated the leg
+  conids, so the heartbeat couldn't fetch real quotes and fell back to
+  _simulate_hydra_entry_prices — a moneyness-BLIND model whose units bug
+  (credit/100 instead of credit/(70×contracts)) started the spread VALUE at ~7×
+  the credit, i.e. an instant deep-negative P&L that then only time-decayed
+  (nothing to do with SPX direction). Fix 1: the one-sided sims now populate the
+  active side's conids + the REAL estimated credit (mirror _simulate_entry), so
+  the heartbeat marks from real quotes exactly like a full IC. Fix 2: the
+  fallback's initial leg prices now make the spread value start at the credit
+  (not 7×), so the rare no-conid case (and an already-open entry on restart)
+  re-marks sanely. DRY-RUN ONLY — variant C (live) places real orders with real
+  conids and was never affected; the bug only polluted B's dry-run head-to-head
+  display. Tests: tests/test_one_sided_dryrun_mark.py (5).
 - Backlog polish batch (2026-06-22). (item 2) CalendarStrategyBase now logs a
   neutral [CAL-*] prefix instead of [DCTM-*] — the base runs for BOTH D and E, so
   the DCTM (DC Time Machine = D) tag mis-attributed E's calendar plumbing to D;

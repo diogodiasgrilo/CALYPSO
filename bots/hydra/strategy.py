@@ -6575,16 +6575,37 @@ class HydraStrategy(MEICStrategy):
         """
         Simulate a put-only entry (dry-run mode).
 
+        2026-06-23: populate the put leg conids + the REAL estimated credit
+        (mirror _simulate_entry's put side) so the heartbeat marks this entry
+        from REAL quotes — like a full IC — instead of the moneyness-BLIND
+        _simulate_hydra_entry_prices fallback, which time-decayed a credit-
+        derived value and so showed a far-OTM put-only entry as deeply negative
+        even as SPX moved away from the short (the reported B bug).
+
         Args:
             entry: HydraIronCondorEntry with put_only=True
 
         Returns:
             True if simulation successful
         """
-        spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "put")
-        credit_ratio = 0.025  # 2.5% of spread width
-        entry.put_spread_credit = spread_width * credit_ratio * 100 * self.contracts_per_entry
         entry.call_spread_credit = 0
+        expiry = self._get_todays_expiry()
+        if expiry and entry.short_put_strike and entry.long_put_strike:
+            try:
+                entry.short_put_uic = self._get_option_uic(entry.short_put_strike, "Put", expiry) or 0
+                entry.long_put_uic = self._get_option_uic(entry.long_put_strike, "Put", expiry) or 0
+                _, est_put = self._estimate_entry_credit(entry)
+                if est_put > 0:
+                    entry.put_spread_credit = est_put * self.contracts_per_entry
+            except Exception as e:
+                logger.warning(
+                    f"[DRY RUN] Put-only quote/credit lookup failed for Entry "
+                    f"#{entry.entry_number}: {e}"
+                )
+        if not entry.put_spread_credit:
+            # Crude fallback ONLY when the real estimate didn't populate a credit.
+            spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "put")
+            entry.put_spread_credit = spread_width * 0.025 * 100 * self.contracts_per_entry
 
         base_id = int(datetime.now().timestamp() * 1000)
         entry.short_put_position_id = f"DRY_{base_id}_SP"
@@ -6592,7 +6613,8 @@ class HydraStrategy(MEICStrategy):
 
         logger.info(
             f"[DRY RUN] Simulated Put-Only Entry #{entry.entry_number}: "
-            f"Put credit ${entry.put_spread_credit:.2f}"
+            f"Put credit ${entry.put_spread_credit:.2f} "
+            f"(UICs SP={entry.short_put_uic} LP={entry.long_put_uic})"
         )
 
         return True
@@ -6730,16 +6752,34 @@ class HydraStrategy(MEICStrategy):
         """
         Simulate a call-only entry (dry-run mode).
 
+        2026-06-23: populate the call leg conids + REAL estimated credit (mirror
+        _simulate_entry) so the heartbeat marks from REAL quotes, not the
+        moneyness-blind fallback (see _simulate_put_spread_only).
+
         Args:
             entry: HydraIronCondorEntry with call_only=True
 
         Returns:
             True if simulation successful
         """
-        spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "call")
-        credit_ratio = 0.010  # 1.0% of spread width (calls have lower premium)
-        entry.call_spread_credit = spread_width * credit_ratio * 100 * self.contracts_per_entry
         entry.put_spread_credit = 0
+        expiry = self._get_todays_expiry()
+        if expiry and entry.short_call_strike and entry.long_call_strike:
+            try:
+                entry.short_call_uic = self._get_option_uic(entry.short_call_strike, "Call", expiry) or 0
+                entry.long_call_uic = self._get_option_uic(entry.long_call_strike, "Call", expiry) or 0
+                est_call, _ = self._estimate_entry_credit(entry)
+                if est_call > 0:
+                    entry.call_spread_credit = est_call * self.contracts_per_entry
+            except Exception as e:
+                logger.warning(
+                    f"[DRY RUN] Call-only quote/credit lookup failed for Entry "
+                    f"#{entry.entry_number}: {e}"
+                )
+        if not entry.call_spread_credit:
+            # Crude fallback ONLY when the real estimate didn't populate a credit.
+            spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "call")
+            entry.call_spread_credit = spread_width * 0.010 * 100 * self.contracts_per_entry
 
         base_id = int(datetime.now().timestamp() * 1000)
         entry.short_call_position_id = f"DRY_{base_id}_SC"
@@ -6747,7 +6787,8 @@ class HydraStrategy(MEICStrategy):
 
         logger.info(
             f"[DRY RUN] Simulated Call-Only Entry #{entry.entry_number}: "
-            f"Call credit ${entry.call_spread_credit:.2f}"
+            f"Call credit ${entry.call_spread_credit:.2f} "
+            f"(UICs SC={entry.short_call_uic} LC={entry.long_call_uic})"
         )
 
         return True
@@ -7813,15 +7854,25 @@ class HydraStrategy(MEICStrategy):
 
         is_hydra_entry = isinstance(entry, HydraIronCondorEntry)
 
+        # Set the legs so the spread VALUE starts at the credit and decays with
+        # theta. spread_value = (short − long) × 100 × c, and long = short × 0.3,
+        # so short × 0.7 × 100 × c = credit at decay=1 → short = credit/(70×c).
+        # 2026-06-23 FIX: the old `credit / 100` ignored the contract count AND
+        # the 0.7 spread factor, so the value STARTED at ~7× the credit → an
+        # instant deep-negative P&L that then only time-decayed (the reported B
+        # put-only bug). This fallback is still moneyness-BLIND — the real mark
+        # comes from real quotes once conids are populated (Fix 1 above) — but
+        # it at least no longer fabricates a 7× loss.
+        c = max(1, int(getattr(entry, "contracts", 0) or self.contracts_per_entry or 1))
         if is_hydra_entry and entry.call_only:
             # Only simulate call side
-            initial_short_price = entry.call_spread_credit / 100  # Per contract
+            initial_short_price = entry.call_spread_credit / (70.0 * c)
             entry.short_call_price = initial_short_price * decay_factor
             entry.long_call_price = initial_short_price * decay_factor * 0.3
 
         elif is_hydra_entry and entry.put_only:
             # Only simulate put side
-            initial_short_price = entry.put_spread_credit / 100  # Per contract
+            initial_short_price = entry.put_spread_credit / (70.0 * c)
             entry.short_put_price = initial_short_price * decay_factor
             entry.long_put_price = initial_short_price * decay_factor * 0.3
 
