@@ -10,6 +10,7 @@ import {
   CrosshairMode,
 } from "lightweight-charts";
 import { colors } from "../../lib/tradingColors";
+import { withCandleContinuity } from "../../lib/candles";
 import type { OHLCBar, DayEntry, DayStop } from "./types";
 
 /**
@@ -160,7 +161,9 @@ export function DayDetailChart({
   useEffect(() => {
     if (!candleSeriesRef.current || bars.length === 0) return;
 
-    const data = bars.map((bar) => ({
+    // Carry-forward continuity so a flat (single-tick) minute draws a connected
+    // candle body instead of a floating dash/"cross" (same fix as SPXChart).
+    const data = withCandleContinuity(bars).map((bar) => ({
       time: parseET(bar.timestamp) as Time,
       open: bar.open,
       high: bar.high,

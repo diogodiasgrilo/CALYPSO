@@ -12,6 +12,7 @@ import {
 } from "lightweight-charts";
 import { useHydraStore, type HydraEntry, type OHLCBar } from "../../store/hydraStore";
 import { colors } from "../../lib/tradingColors";
+import { withCandleContinuity } from "../../lib/candles";
 
 type SeriesType = "candle" | "line";
 // Generic series handle — markers + price lines work on both candle and line.
@@ -251,7 +252,9 @@ export function SPXChart({ ohlc: ohlcProp, entries: entriesProp, date: dateProp 
       }));
       (seriesRef.current as ISeriesApi<"Line">).setData(data);
     } else {
-      const data = todayOHLC.map((bar) => ({
+      // Carry-forward continuity so a flat (single-tick, late-day idle) minute
+      // draws a connected candle body instead of a floating dash/"cross".
+      const data = withCandleContinuity(todayOHLC).map((bar) => ({
         time: parseET(bar.timestamp) as Time,
         open: bar.open,
         high: bar.high,
