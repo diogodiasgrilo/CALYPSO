@@ -190,3 +190,16 @@ To actually *show* TPs:
 - [ ] **Alternative — realized-only line:** plot only `realized − commission` (no open-position mark), so the
       line is flat between closes and steps up at each TP. Crisp TP steps, but you lose the intraday
       mark-to-market "how are open positions doing right now" view. Design choice; would apply to all variants.
+
+## 9. Repo hygiene (2026-06-22)
+
+- [x] **`.gitignore` hardened against stray `git add -A`.** The VM accumulated ~28 untracked artifacts not
+      covered by ignore rules; now `*.bak*` (was `*.bak`), `dist_old/`, `intel/homer/`, and the `.cache/`
+      `.config/` `.gsutil/` tool-cache dirs are ignored. Verified the VM `git status` is now clean. HOMER is
+      already path-scoped, so this defends mainly against a human/script `add -A`.
+- [ ] **Optional — untrack the legacy `intel/homer/2026-05-*.md`.** Those dated reports are TRACKED (swept in
+      by the pre-2026-06-16 `git add -A` HOMER bug); the dir is now ignored so new ones won't be added, but the
+      old tracked ones remain (cosmetic "tracked-but-ignored"). `git rm --cached intel/homer/2026-05-*.md`
+      cleans it up (keeps the files on disk). Not done automatically — it removes them from the repo.
+- [ ] **Optional — delete stale disk clutter on the VM** (old `dist.bak.*` from April, ancient config `.bak`s).
+      Pure disk cleanup; left alone since some config backups may be intentional safety copies.
