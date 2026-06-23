@@ -98,6 +98,12 @@ Thumbs.db
 *.backup
 # Old dashboard build snapshots (the live build dir `dist/` is already ignored).
 dist_old/
+# Tool/cache dirs that leak into the repo root when gcloud / gsutil / pip run
+# with /opt/calypso as cwd on the VM — never part of the project (may hold auth
+# state, so they're ignored, not deleted).
+.cache/
+.config/
+.gsutil/
 
 # Test coverage
 .coverage
