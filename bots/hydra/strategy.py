@@ -139,6 +139,13 @@ ALL_ENTRY_SLOTS = [
 VIX_GATE_CHECK_SECONDS_BEFORE = 30  # Check VIX 30s before entry
 VIX_GATE_FLOOR_SLOT = 2  # Index into ALL_ENTRY_SLOTS that always enters
 
+# POS-003 (2026-06-23): how long a conid the bot ITSELF just closed is exempt
+# from the orphan sweep — IBKR's positions feed can keep showing a closed leg
+# for >80s (a TP-closed leg lingered 83s, outlasting the 30s confirm window and
+# firing a spurious CRITICAL on live C). A close that persists past this grace is
+# a real problem (the close didn't take) and is still surfaced.
+RECON_CLOSE_SETTLE_GRACE_S = 300
+
 # Configure module logger
 logger = logging.getLogger(__name__)
 
@@ -7454,7 +7461,7 @@ class HydraStrategy(MEICStrategy):
         # positions. Matching this simulated entry's conids against that account
         # returns C's P&L (the variant-B contamination, exposed once conids were
         # re-resolved to strikes overlapping C's). Use the SIMULATED mark.
-        if self.dry_run:
+        if getattr(self, "dry_run", False):
             return entry.unrealized_pnl
         try:
             if positions is None:
@@ -11311,6 +11318,37 @@ class HydraStrategy(MEICStrategy):
         """Broker positions at conids HYDRA does not track (untracked legs)."""
         return {conid: qty for conid, qty in actual.items() if qty and conid not in expected}
 
+    def _recon_suppress_recent_closes(
+        self, orphans: Dict[Any, int], now
+    ) -> Dict[Any, int]:
+        """Drop orphan conids the bot ITSELF closed within RECON_CLOSE_SETTLE_GRACE_S.
+
+        Those are the bot's own close still lagging out of IBKR's positions feed,
+        not an external/crash orphan (2026-06-23: a TP-closed leg lingered 83s,
+        outlasting the 30s confirm window → a false CRITICAL on live C). An orphan
+        at a conid the bot NEVER closed — or one that PERSISTS past the grace (the
+        close didn't actually take) — is kept and still alerts.
+        """
+        recent = getattr(self, "_recent_close_conids", None) or {}
+        if not recent or not orphans:
+            return orphans
+        kept: Dict[Any, int] = {}
+        suppressed = []
+        for conid, qty in orphans.items():
+            ts = recent.get(conid)
+            if ts is not None and (now - ts).total_seconds() <= RECON_CLOSE_SETTLE_GRACE_S:
+                suppressed.append(conid)
+            else:
+                kept[conid] = qty
+        if suppressed:
+            logger.info(
+                "POS-003: suppressed %d orphan(s) at recently-closed conid(s) %s "
+                "(the bot's own close still lagging IBKR's positions feed, within "
+                "the %ds settle grace)",
+                len(suppressed), suppressed, RECON_CLOSE_SETTLE_GRACE_S,
+            )
+        return kept
+
     @staticmethod
     def _recon_should_defer(has_findings: bool, is_confirm_pass: bool) -> bool:
         """Confirm-before-alarm gate: defer the FIRST time a discrepancy is seen
@@ -11348,7 +11386,10 @@ class HydraStrategy(MEICStrategy):
         if not is_market_open():
             return
 
-        RECON_CONFIRM_DELAY_S = 30  # settle window before alerting on a discrepancy
+        RECON_CONFIRM_DELAY_S = 60  # settle window before alerting on a discrepancy
+        # (bumped 30→60 on 2026-06-23: IBKR's positions feed lagged a close ~83s;
+        # the recent-close suppression below is the targeted fix, this is margin
+        # for any OTHER feed lag on the mismatch path).
 
         now = get_us_market_time()
 
@@ -11388,7 +11429,9 @@ class HydraStrategy(MEICStrategy):
 
             actual = self._actual_position_quantities(actual_positions)
             discrepant = self._recon_diff_quantities(expected, actual)
-            orphans = self._recon_detect_orphans(expected, actual)
+            orphans = self._recon_suppress_recent_closes(
+                self._recon_detect_orphans(expected, actual), now
+            )
 
             # Confirm-before-alarm: defer the first detection one settle window.
             if self._recon_should_defer(bool(discrepant or orphans), is_confirm_pass):
@@ -11461,7 +11504,9 @@ class HydraStrategy(MEICStrategy):
         startup (the hourly gate is skipped when _last_reconciliation_time was
         None) — so this doubles as a post-crash startup sweep. Returns the count.
         """
-        orphans = self._recon_detect_orphans(expected, actual)
+        orphans = self._recon_suppress_recent_closes(
+            self._recon_detect_orphans(expected, actual), get_us_market_time()
+        )
         if not orphans:
             return 0
         detail = ", ".join(
@@ -11506,6 +11551,10 @@ class HydraStrategy(MEICStrategy):
         # base_strategy._emergency_close_alert_once.
         if hasattr(self, "_emergency_close_alerted"):
             self._emergency_close_alerted.clear()
+
+        # POS-003: a fresh day starts with no recently-closed conids (conids differ
+        # day-to-day; this also bounds the dict's growth).
+        self._recent_close_conids = {}
 
         # STATE-004: Check for overnight 0DTE positions (should NEVER happen).
         #

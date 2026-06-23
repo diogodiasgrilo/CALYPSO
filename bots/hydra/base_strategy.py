@@ -4154,10 +4154,32 @@ class MEICStrategy(abc.ABC):
             return True, None, None
 
         # F6.3 — closes the leg via the IBClient write path.
-        return self._close_position_with_retry_ib(
+        result = self._close_position_with_retry_ib(
             position_id, leg_name, uic=uic, entry_number=entry_number,
             contracts=contracts,
         )
+        # POS-003 (2026-06-23): record a SUCCESSFUL real close so the hourly
+        # orphan sweep can suppress it while IBKR's positions feed lags the close
+        # out — a TP-closed leg lingered 83s past the 30s confirm window and fired
+        # a spurious CRITICAL on live C. A close that PERSISTS past the settle
+        # grace is still surfaced.
+        try:
+            if uic and result and result[0]:
+                self._note_recent_close(uic)
+        except Exception:
+            pass
+        return result
+
+    def _note_recent_close(self, conid) -> None:
+        """Record a conid the bot just closed at the broker, timestamped, so
+        POS-003's orphan sweep can distinguish 'the bot's own close still lagging
+        out of IBKR's positions feed' from a genuine untracked/crash orphan.
+        Reset daily in :meth:`_reset_for_new_day`."""
+        if not conid:
+            return
+        if getattr(self, "_recent_close_conids", None) is None:
+            self._recent_close_conids = {}
+        self._recent_close_conids[conid] = get_us_market_time()
 
     def _place_marketable_close(self, *, uic: int, side: str, quantity: int,
                                 attempt_num: int) -> dict:

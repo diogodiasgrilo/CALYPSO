@@ -829,35 +829,49 @@ class BrandonHydraStrategy(HydraStrategy):
 
         # MKT-049 (2026-06-22): net-of-cost gate. The decision above used the MID
         # mark; re-check against the REAL closeable cost (short_ask − long_bid)
-        # net of close commission. If the real net capture is below the bar,
-        # DEFER — closing here would give the gain back to slippage + fees (the
-        # 2026-06-22 C E#2: mid "87.5% captured", real 25%, +$2.80 net). The
-        # comfortably-OTM short then rides to expiry, still protected by the GEX
-        # breach-exit + credit-buffer stop. FAIL-OPEN: None (missing/crossed
-        # quotes) falls through to the mid decision.
+        # net of close commission. Close ONLY when the real net capture
+        # POSITIVELY clears the bar.
+        #
+        # FAIL CLOSED (2026-06-23): hold unless we can confirm the bar is cleared.
+        # `real_capture is None` means a SHORT leg is unquoted/crossed (cost
+        # unpriceable) — the old code fell through to the optimistic mid there,
+        # and that is exactly how C E#1/E#2 fired TPs at ~50% real capture once a
+        # worthless long leg went unquoted near expiry. A held winner is still
+        # protected by the GEX breach-exit + credit+buffer stop + expiry, so
+        # holding is the safe default for a DISCRETIONARY profit-take.
         if getattr(self, "brandon_tp_net_of_cost_gate_enabled", True):
             min_net = getattr(
                 self, "brandon_tp_min_net_capture",
                 getattr(self, "brandon_take_profit_threshold", 0.80),
             )
             real_capture = self._brandon_real_close_capture(entry, call_alive, put_alive)
-            if real_capture is not None and real_capture < min_net:
+            if real_capture is None or real_capture < min_net:
                 if not getattr(entry, "_mkt049_deferred", False):
                     entry._mkt049_deferred = True
-                    logger.info(
-                        "MKT-049 E#%s: TP DEFERRED — real net capture %.0f%% < %.0f%% "
-                        "bar (mid mark said %.0f%%, but short_ask−long_bid + commission "
-                        "give the gain back). Holding to expiry / stop / GEX exit.",
-                        entry.entry_number, real_capture * 100,
-                        min_net * 100, decision.profit_captured_pct * 100,
-                    )
+                    if real_capture is None:
+                        logger.info(
+                            "MKT-049 E#%s: TP HELD — real close cost unpriceable (a "
+                            "short leg is unquoted/crossed); NOT closing on the "
+                            "optimistic mid. Protected by stop + GEX exit + expiry.",
+                            entry.entry_number,
+                        )
+                    else:
+                        logger.info(
+                            "MKT-049 E#%s: TP DEFERRED — real net capture %.0f%% < %.0f%% "
+                            "bar (mid mark said %.0f%%, but short_ask−long_bid + commission "
+                            "give the gain back). Holding to expiry / stop / GEX exit.",
+                            entry.entry_number, real_capture * 100,
+                            min_net * 100, decision.profit_captured_pct * 100,
+                        )
                 else:
                     logger.debug(
-                        "MKT-049 E#%s: TP still deferred — real %.0f%% < %.0f%%",
-                        entry.entry_number, real_capture * 100, min_net * 100,
+                        "MKT-049 E#%s: TP still held — real %s vs %.0f%% bar",
+                        entry.entry_number,
+                        "unpriceable" if real_capture is None else f"{real_capture * 100:.0f}%",
+                        min_net * 100,
                     )
                 return None
-            # Cleared (or unavailable) — reset so a later genuine deferral logs again.
+            # Cleared — reset so a later genuine hold logs again.
             if getattr(entry, "_mkt049_deferred", False):
                 entry._mkt049_deferred = False
 
@@ -962,10 +976,20 @@ class BrandonHydraStrategy(HydraStrategy):
         ``short_ask − long_bid``; net capture =
         ``(Σcredit − Σreal_close_cost − close_commission) / Σcredit``.
 
-        Returns the net-capture fraction, or ``None`` when any needed leg is
-        unquoted, its book is crossed (bid > ask), or the cross-leg cost is
-        negative — so the caller FAILS OPEN to the mid decision rather than
-        blocking a close on a flaky quote. Mirrors the entry-side MKT-048.
+        Returns the net-capture fraction, or ``None`` ONLY when a SHORT leg (the
+        cost driver — you must buy it back) is unquoted or its book is crossed,
+        so the real cost genuinely can't be determined. The caller then FAILS
+        CLOSED (holds), never closing on the optimistic mid.
+
+        A worthless / unquoted / crossed LONG leg is NOT a None — the long is
+        recovery only, so we treat its bid as $0 (you recover nothing) and still
+        price the side from the short. This stops a single dead long leg from
+        blinding the gate to a still-wide short side (2026-06-23: a worthless
+        long_call near expiry was unquoted → the old code returned None → the
+        caller fail-OPENed → the optimistic mid TP fired at ~50% real capture on
+        C E#1/E#2). $0 recovery is CONSERVATIVE — it over-states the close cost,
+        understates capture, and biases toward HOLDING, the safe direction for a
+        discretionary profit-take. Mirrors the entry-side MKT-048.
         """
         try:
             sides = []  # (short_conid, long_conid, credit_dollars)
@@ -978,11 +1002,17 @@ class BrandonHydraStrategy(HydraStrategy):
             if not sides:
                 return None
 
-            conids = [c for s in sides for c in (s[0], s[1])]
-            # Every leg must be a real (positive int) conid — reject None / 0 /
-            # non-numeric (e.g. a MagicMock in tests) → fail open.
-            if not all(isinstance(c, int) and c > 0 for c in conids):
+            # The SHORT conids are MANDATORY (you must price the buy-back) — a
+            # missing/invalid short → unpriceable → None (caller HOLDS). A missing
+            # LONG conid (e.g. a long independently salvaged while its short stays
+            # alive) is treated like a worthless long: $0 recovery, side priced
+            # from the short (the per-side loop handles lq=None below). Only fetch
+            # the conids that are real, so an invalid long can't poison the batch.
+            short_conids = [s[0] for s in sides]
+            if not all(isinstance(c, int) and c > 0 for c in short_conids):
                 return None
+            conids = [c for s in sides for c in (s[0], s[1])
+                      if isinstance(c, int) and c > 0]
             quotes = self._read_option_quotes_batch(conids) or {}
 
             contracts = int(getattr(entry, "contracts", 0) or self.contracts_per_entry)
@@ -993,21 +1023,29 @@ class BrandonHydraStrategy(HydraStrategy):
             total_close_cost = 0.0
             for short_cid, long_cid, credit in sides:
                 sq, lq = quotes.get(short_cid), quotes.get(long_cid)
-                if not isinstance(sq, dict) or not isinstance(lq, dict):
-                    return None  # unquoted → fail open
-                short_ask, long_bid = sq.get("ask"), lq.get("bid")
-                if short_ask is None or long_bid is None:
+                # SHORT leg drives the cost (buy it back). Unquoted or crossed →
+                # the close is unpriceable → None (caller FAILS CLOSED = holds).
+                if not isinstance(sq, dict):
                     return None
-                # Reject crossed books (bid > ask) per leg — garbage must not
-                # drive a hold/close decision.
+                short_ask = sq.get("ask")
+                if short_ask is None:
+                    return None
                 sb, sa = sq.get("bid"), sq.get("ask")
-                lb, la = lq.get("bid"), lq.get("ask")
-                if (sb is not None and sa is not None and float(sb) > float(sa)) or \
-                   (lb is not None and la is not None and float(lb) > float(la)):
-                    return None
-                close_cost_ps = float(short_ask) - float(long_bid)
-                if close_cost_ps < 0:
-                    return None  # long bid above short ask → crossed across legs
+                if sb is not None and sa is not None and float(sb) > float(sa):
+                    return None  # crossed short book — garbage, can't price
+                # LONG leg is recovery only (sell it). A worthless / unquoted /
+                # crossed long, or one whose bid illogically exceeds the short ask,
+                # recovers ~nothing → treat its bid as $0 and STILL price the side
+                # from the short, instead of aborting the whole entry on one dead
+                # leg. $0 recovery is conservative (over-states cost → holds).
+                long_bid = lq.get("bid") if isinstance(lq, dict) else None
+                if long_bid is not None and isinstance(lq, dict):
+                    lb, la = lq.get("bid"), lq.get("ask")
+                    if lb is not None and la is not None and float(lb) > float(la):
+                        long_bid = None  # crossed long book — distrust the quote
+                if long_bid is None or float(long_bid) > float(short_ask):
+                    long_bid = 0.0
+                close_cost_ps = float(short_ask) - float(long_bid)  # >= 0 by construction
                 total_close_cost += close_cost_ps * 100.0 * contracts
                 total_credit += credit
 
@@ -1017,9 +1055,10 @@ class BrandonHydraStrategy(HydraStrategy):
             close_commission = 2 * len(sides) * self.commission_per_leg * contracts
             return (total_credit - total_close_cost - close_commission) / total_credit
         except Exception as exc:
-            # A quote-fetch / data error during a TP decision must never crash
-            # the monitoring loop — fail open to the mid decision.
-            logger.debug("MKT-049 E#%s: real-capture check errored (%s) — failing open",
+            # A quote-fetch / data error during a TP decision must never crash the
+            # monitoring loop — return None so the caller FAILS CLOSED (holds the
+            # winner) rather than closing on the unverified mid.
+            logger.debug("MKT-049 E#%s: real-capture check errored (%s) — holding (fail closed)",
                          getattr(entry, "entry_number", "?"), exc)
             return None
 

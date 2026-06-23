@@ -36,6 +36,31 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- MKT-049 fail-CLOSED + POS-003 recent-close orphan suppression (2026-06-23).
+  Two live-C fixes after a market-hours review. (1) MKT-049 take-profit gate
+  SUPERSEDES its 2026-06-22 fail-OPEN behavior: it now FAILS CLOSED. The
+  net-of-cost gate (brandon/strategy.py _brandon_real_close_capture) returns None
+  ONLY when a SHORT leg (the cost driver) is unquoted/crossed; a worthless /
+  unquoted / crossed LONG leg is priced as $0 recovery and the side is still
+  computed from the short — so one dead long leg can't blind the gate to a
+  still-wide short side. And when real_capture is None the gate now HOLDS the TP
+  (protected by the GEX breach-exit + credit+buffer stop + expiry) instead of
+  closing on the optimistic mid. Why: on 2026-06-23 C E#1/E#2 fired TPs logging
+  ~88% MID capture but only ~46-50% REAL (E#2's call side closed at a −$30 loss)
+  because a worthless long_call went unquoted near expiry → the old fail-OPEN let
+  the mid TP through. The B/C-shared Brandon class means both variants get this.
+  (2) POS-003 hourly reconciliation no longer false-CRITICALs on the bot's OWN
+  just-closed legs while IBKR's positions feed lags them out: every successful
+  real close records its conid (_note_recent_close in base_strategy's
+  _close_position_with_retry chokepoint), and the orphan sweep
+  (_recon_suppress_recent_closes) suppresses orphans at conids closed within
+  RECON_CLOSE_SETTLE_GRACE_S (300s) — a close that PERSISTS past the grace (the
+  close didn't take) is still surfaced. The settle-confirm window was also bumped
+  30→60s. Dry-run variants never populate the recent-close set (the dry-run
+  early-return precedes the hook) and never reconcile. 2026-06-23: a TP-closed
+  leg lingered 83s, past the old 30s window → spurious CRITICAL + Telegram on C.
+  +13 tests (test_mkt049_tp_net_of_cost.py 17, test_reconciliation_settle_delay.py
+  +5); full suite 1817 passed.
 - Calendar (D/E) dry-run EDGE reader + settle-commission fix (2026-06-23). Built
   the tool that answers the MVL-D audit's gating question ("V1 — edge sanity")
   from D/E's forward dry-run record alone, so the build-or-don't-build decision

@@ -28,6 +28,10 @@ def _make_instance(**brandon_attrs):
     defaults = dict(
         brandon_take_profit_enabled=False,
         brandon_take_profit_threshold=0.80,
+        # MKT-049 net-of-cost gate OFF by default — these exercise TP DISPATCH;
+        # the gate has its own suite (test_mkt049_tp_net_of_cost.py). With it on,
+        # the fail-CLOSED path would (correctly) hold when no quotes are wired.
+        brandon_tp_net_of_cost_gate_enabled=False,
         brandon_gex_enabled=False,
         brandon_polygon_api_key_env="POLYGON_API_KEY",
         brandon_polygon_underlying="SPX",
