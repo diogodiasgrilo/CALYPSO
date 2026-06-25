@@ -2943,6 +2943,12 @@ class HydraStrategy(MEICStrategy):
             deferred_legs.extend(d)
             if c or f:
                 entries_closed += 1
+                # Dashboard (2026-06-25): tag the EOD-flatten close so the UI
+                # renders it as "flattened", NOT a spurious "expired" (the
+                # early-close reuses *_side_expired) or a red stop dot. Don't
+                # overwrite a real close reason already set by TP/breach.
+                if not getattr(entry, "close_reason", ""):
+                    entry.close_reason = "EOD_FLATTEN"
 
         if deferred_legs:
             self._spawn_async_early_close_fill_correction(deferred_legs)

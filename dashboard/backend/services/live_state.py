@@ -225,6 +225,13 @@ class LiveStateProvider:
             ]:
                 if not e.get(flag):
                     continue
+                # A managed close (Brandon TP/breach, MKT-047 EOD flatten, MKT-018)
+                # reuses *_side_stopped as a generic "side closed" flag — it is NOT
+                # a stop. Don't emit a stop marker/event for it (the entry's status
+                # badge already renders TP/Breach/Flattened). Genuine credit+buffer
+                # stops never set early_closed. (2026-06-25 dashboard fix.)
+                if e.get("early_closed"):
+                    continue
                 credit_key = f"{side}_spread_credit"
                 side_credit = e.get(credit_key, 0) or 0
                 stop_level = e.get(stop_key, 0) or 0

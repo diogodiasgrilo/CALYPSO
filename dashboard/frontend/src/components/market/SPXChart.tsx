@@ -99,6 +99,10 @@ function entriesHash(entries: HydraEntry[]): string {
 function stopEventsFromEntries(entries: HydraEntry[]): StopEventLike[] {
   const out: StopEventLike[] = [];
   for (const e of entries) {
+    // A managed close (TP/breach/EOD-flatten) reuses *_side_stopped as a generic
+    // "closed" flag — it is NOT a stop, so it must not draw a red "S" stop marker
+    // (2026-06-25). Genuine credit+buffer stops never set early_closed.
+    if (e.early_closed) continue;
     if (e.call_side_stopped && e.call_stop_time) {
       out.push({ entry_number: e.entry_number, side: "call", stop_time: e.call_stop_time });
     }

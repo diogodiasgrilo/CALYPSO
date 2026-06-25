@@ -44,3 +44,19 @@ def test_today_summary_spx_vix_from_market_data_ohlc():
 def test_today_summary_none_without_entries():
     # 0-entry day (e.g. today's dry-run) → no row, as designed.
     assert _provider({"entries": [], "market_data_ohlc": {}}).get_today_summary() is None
+
+
+def test_get_today_stops_excludes_early_closed():
+    """2026-06-25: a managed close (EOD flatten / Brandon TP) reuses
+    *_side_stopped as a generic "closed" flag — it must NOT be emitted as a stop
+    (else the chart draws a red 'S' marker). A genuine stop still is."""
+    state = {"entries": [
+        {"entry_number": 1, "put_side_stopped": True, "put_stop_time": "2026-06-25 13:00",
+         "put_spread_credit": 200, "put_side_stop": 800, "actual_put_stop_debit": 900},
+        {"entry_number": 2, "put_side_stopped": True, "early_closed": True,
+         "put_spread_credit": 210, "actual_put_stop_debit": 35},
+    ]}
+    stops = _provider(state).get_today_stops()
+    nums = {s["entry_number"] for s in stops}
+    assert 1 in nums       # genuine credit+buffer stop → emitted
+    assert 2 not in nums   # EOD-flatten early-close → NOT a stop

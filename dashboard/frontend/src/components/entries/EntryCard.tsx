@@ -29,6 +29,11 @@ function getEntryStatus(e: HydraEntry): {
   const reason = (e.close_reason || "").toUpperCase();
   if (reason === "TP") return { status: "take_profit" };
   if (reason === "BREACH") return { status: "breach" };
+  // EOD safety flatten / generic early-close reuses *_side_expired (and may set
+  // *_side_stopped), so without this it mislabels as "expired"/"stopped". Render
+  // a managed "Flattened" close: close_reason EOD_FLATTEN (new) OR early_closed
+  // with no TP/BREACH reason (covers entries flattened before that tag existed).
+  if (reason === "EOD_FLATTEN" || e.early_closed) return { status: "flattened" };
 
   const callStopped = e.call_side_stopped;
   const putStopped = e.put_side_stopped;

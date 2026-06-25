@@ -51,7 +51,7 @@ export function cushionColor(pct: number): string {
 
 /** Entry status badge colors. */
 export function statusColor(
-  status: "active" | "expired" | "stopped" | "stopped_single" | "skipped" | "pending" | "placing" | "take_profit" | "breach"
+  status: "active" | "expired" | "flattened" | "stopped" | "stopped_single" | "skipped" | "pending" | "placing" | "take_profit" | "breach"
 ): string {
   switch (status) {
     case "active":
@@ -60,6 +60,8 @@ export function statusColor(
       return colors.warning;
     case "expired":
       return colors.profit;
+    case "flattened":
+      return colors.info; // EOD safety flatten = a managed close, not a stop/expiry
     case "take_profit":
       return colors.profit; // Brandon TP = profitable close = green (NOT a stop)
     case "breach":
