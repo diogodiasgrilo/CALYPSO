@@ -283,3 +283,18 @@ class TestGroupAggregate:
         body = r.json()
         assert body["pnl_shape"] == "credit"
         assert "variants" in body and "head_to_head" in body
+
+
+def test_entry_realized_pnl_early_close_nets_the_close_cost():
+    """2026-06-25: an EOD-flatten/TP early-close records its close cost in
+    actual_*_stop_debit but reuses *_side_expired — realized must be
+    credit - debit, NOT the full credit (which over-counted C E#2 as $210 vs $175)."""
+    from dashboard.backend.routers.variants import _entry_realized_pnl
+    flat = {"call_spread_credit": 0, "put_spread_credit": 210, "actual_put_stop_debit": 35,
+            "actual_call_stop_debit": 0, "put_side_expired": True, "put_side_stopped": False,
+            "call_side_expired": False, "call_side_stopped": False, "early_closed": True}
+    assert _entry_realized_pnl(flat) == 175  # 210 - 35, not 210
+    worthless = {"call_spread_credit": 0, "put_spread_credit": 210, "actual_put_stop_debit": 0,
+                 "actual_call_stop_debit": 0, "put_side_expired": True, "put_side_stopped": False,
+                 "call_side_expired": False, "call_side_stopped": False, "early_closed": False}
+    assert _entry_realized_pnl(worthless) == 210  # true worthless expiry keeps full credit

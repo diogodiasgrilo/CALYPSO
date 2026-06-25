@@ -407,12 +407,19 @@ def _entry_realized_pnl(entry: dict) -> float:
     call_expired = entry.get("call_side_expired") and not call_stopped
     put_expired = entry.get("put_side_expired") and not put_stopped
 
+    # A managed early-close (Brandon TP/breach, MKT-047 EOD flatten) records its
+    # close cost in actual_*_stop_debit but may reuse *_side_expired (not
+    # *_side_stopped). So a side that closed for a COST is credit − debit even when
+    # only the expired flag is set — NOT "full credit kept" (which over-counted the
+    # EOD-flatten realized by the close cost, e.g. $210 vs the true $175 on
+    # 2026-06-25 C E#2). Only a TRUE worthless expiry (no debit) keeps full credit.
+    early = entry.get("early_closed")
     realized = 0.0
-    if call_stopped:
+    if call_stopped or (early and cd):
         realized += cc - cd
     elif call_expired:
         realized += cc  # expired worthless = full credit kept
-    if put_stopped:
+    if put_stopped or (early and pd):
         realized += pc - pd
     elif put_expired:
         realized += pc
