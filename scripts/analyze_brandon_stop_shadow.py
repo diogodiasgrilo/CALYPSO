@@ -36,12 +36,15 @@ def main(argv=None) -> int:
                    help="comma-separated %-of-width thresholds to evaluate")
     p.add_argument("--width-max", type=float, default=None,
                    help="only analyze entry-sides with spread width <= this (pt) — e.g. 10 for narrow")
+    p.add_argument("--confirm-snaps", type=int, default=0,
+                   help="persistence-confirmed variant: require the breach to persist this many "
+                        "extra consecutive ~10s snapshots before firing (1 ≈ a 10s confirm). 0 = raw.")
     p.add_argument("--json", action="store_true")
     args = p.parse_args(argv)
 
     db = args.db or os.path.join(args.data_dir, f"variant_{args.variant}", "backtesting.db")
     pcts = tuple(float(x) for x in args.pcts.split(",") if x.strip())
-    result = analyze(db, pcts=pcts, width_max=args.width_max)
+    result = analyze(db, pcts=pcts, width_max=args.width_max, confirm_snaps=args.confirm_snaps)
     if args.json:
         print(json.dumps(result, indent=2, default=str))
     else:

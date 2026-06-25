@@ -20,7 +20,31 @@ from bots.hydra.stop_shadow import (  # noqa: E402
     analyze_pct,
     format_report,
     simulate_side,
+    _confirmed_cross_sv,
 )
+
+
+class TestConfirmedCross:
+    def test_raw_fires_on_first_crossing(self):
+        assert _confirmed_cross_sv([100, 900, 200], trigger=875, confirm_snaps=0) == 900
+
+    def test_confirm1_needs_two_consecutive(self):
+        # one tick over then drops → confirm_snaps=1 never confirmed
+        assert _confirmed_cross_sv([100, 900, 200, 100], 875, 1) is None
+        # two consecutive over → fires at the 2nd
+        assert _confirmed_cross_sv([100, 900, 950, 100], 875, 1) == 950
+
+    def test_spike_resets_the_run(self):
+        # 900,(drop),900,950 → only the trailing run of 2 confirms → 950
+        assert _confirmed_cross_sv([900, 100, 900, 950], 875, 1) == 950
+
+    def test_confirmed_filters_a_whipsaw_in_simulate_side(self):
+        # SV spikes one tick over the trigger then recovers; actual rode to +20.
+        # RAW would fire (premature loss); CONFIRMED (snaps=1) does NOT fire.
+        raw = simulate_side(70, 5, 7, [100, 945, 200, 50], None, 0.25, confirm_snaps=0)
+        conf = simulate_side(70, 5, 7, [100, 945, 200, 50], None, 0.25, confirm_snaps=1)
+        assert raw["fired"] is True and raw["impact"] < 0       # premature loss
+        assert conf["fired"] is False and conf["impact"] == 0   # whipsaw filtered out
 
 
 # ── per-side counterfactual ───────────────────────────────────────────────────

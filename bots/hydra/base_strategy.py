@@ -2684,6 +2684,7 @@ class MEICStrategy(abc.ABC):
         filled_so_far = 0
         weighted_fill_sum = 0.0  # Σ (chunk fill_price × chunk qty) → blended avg
         first_fill_mid = None    # mid of the first filling chunk (slippage ref)
+        bid = ask = spread = 0.0  # ORDER-DIAG: always defined for the failure log
 
         # Progressive retry sequence (same as the Saxo path).
         for attempt, (slippage_percent, is_market) in enumerate(
@@ -2734,6 +2735,16 @@ class MEICStrategy(abc.ABC):
                     )
 
             mid_price = (bid + ask) / 2 if bid and ask else (ask or bid)
+
+            # ORDER-DIAG (2026-06-25): the exact conid + the quote this attempt is
+            # priced against, so a fill failure on a LIQUID book is diagnosable
+            # (06-25 C long-call 0/7 even at MARKET while the strike showed
+            # bid 0.20/ask 0.25 ×450 live → NOT liquidity; confirm the conid is the
+            # live contract and compare the seen quote to the real market).
+            logger.info(
+                "  ORDER-DIAG %s a%d: conid=%s bid=$%.2f ask=$%.2f spread=$%.2f mid=$%.2f",
+                leg_description, attempt + 1, conid, bid, ask, spread, mid_price,
+            )
 
             # SELL-leg net-credit floor: a short vertical leg must clear at least
             # (paired long fill + min net credit), else the spread legs into a net
@@ -2947,7 +2958,10 @@ class MEICStrategy(abc.ABC):
 
         logger.error(
             f"  ✗ {leg_description} failed all "
-            f"{len(PROGRESSIVE_RETRY_SEQUENCE)} attempts (IBKR)"
+            f"{len(PROGRESSIVE_RETRY_SEQUENCE)} attempts (IBKR) "
+            f"— conid={conid}, last quote bid=${bid:.2f}/ask=${ask:.2f}. "
+            f"If the conid is the live contract and bid/ask look fillable, this is "
+            f"order-routing/transient, NOT liquidity (see ORDER-DIAG lines above)."
         )
         return None
 

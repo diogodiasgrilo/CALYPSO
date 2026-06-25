@@ -94,14 +94,35 @@ def _clamp(x, lo, hi):
     return lo if x < lo else (hi if x > hi else x)
 
 
+def _confirmed_cross_sv(clean: list, trigger: float, confirm_snaps: int) -> Optional[float]:
+    """SV at the snapshot where the breach FIRST persists `confirm_snaps`+1
+    consecutive ticks ≥ trigger (a spike that drops back first resets the run).
+    confirm_snaps=0 → the raw first-crossing. None if never (confirmed-)crossed.
+
+    ~10s snapshot cadence, so confirm_snaps=1 ≈ a 10s persistence requirement —
+    the MKT-046-style filter the live A2-SHADOW-CONFIRMED variant applies."""
+    run = 0
+    for sv in clean:
+        if sv >= trigger:
+            run += 1
+            if run >= confirm_snaps + 1:
+                return sv
+        else:
+            run = 0
+    return None
+
+
 def simulate_side(credit: float, width: float, contracts: int,
                   sv_list: list, actual_net_pnl: Optional[float],
-                  pct: float) -> Optional[dict]:
+                  pct: float, confirm_snaps: int = 0) -> Optional[dict]:
     """Counterfactual for one entry-side at threshold `pct`.
 
-    Returns None when the side has no credit/width or no snapshots (nothing to
-    reconstruct). When the %-width stop never fires (SV never crosses), returns a
-    row with fired=False and impact=0 (it changes nothing vs actual).
+    `confirm_snaps` (default 0 = raw) requires the %-width breach to persist that
+    many ADDITIONAL consecutive snapshots before the shadow fires — the
+    persistence-confirmed variant that filters whipsaw spikes.
+
+    Returns None when the side has no credit/width or no snapshots. When the
+    %-width stop never (confirmed-)fires, returns fired=False, impact=0.
     """
     if credit <= 0 or width <= 0 or contracts <= 0 or not sv_list:
         return None
@@ -119,7 +140,7 @@ def simulate_side(credit: float, width: float, contracts: int,
     else:
         actual = credit - clean[-1]
 
-    shadow_sv = next((sv for sv in clean if sv >= trigger), None)
+    shadow_sv = _confirmed_cross_sv(clean, trigger, confirm_snaps)
     if shadow_sv is None:
         return {"fired": False, "shadow": actual, "actual": actual, "impact": 0.0,
                 "actual_stopped": actual_net_pnl is not None}
@@ -133,7 +154,8 @@ def simulate_side(credit: float, width: float, contracts: int,
 # Aggregate
 # ──────────────────────────────────────────────────────────────────────────────
 
-def analyze_pct(entries, sv_series, stops, pct: float, *, width_max: Optional[float] = None) -> dict:
+def analyze_pct(entries, sv_series, stops, pct: float, *,
+                width_max: Optional[float] = None, confirm_snaps: int = 0) -> dict:
     """Aggregate the flip impact across every entry-side at one `pct`."""
     rows = []
     for key, e in entries.items():
@@ -147,7 +169,7 @@ def analyze_pct(entries, sv_series, stops, pct: float, *, width_max: Optional[fl
                 continue
             sv_list = [pair[i] for pair in svs]
             r = simulate_side(s["credit"], s["width"], e["contracts"], sv_list,
-                              stops.get((date, en, side)), pct)
+                              stops.get((date, en, side)), pct, confirm_snaps)
             if r is None:
                 continue
             r.update({"date": date, "entry": en, "side": side})
@@ -174,16 +196,18 @@ def analyze_pct(entries, sv_series, stops, pct: float, *, width_max: Optional[fl
 
 
 def analyze(db_path: str, *, pcts=(0.25, 0.40, 0.50, 0.65),
-            width_max: Optional[float] = None) -> dict:
-    """Full report: the flip impact at several `pct` thresholds. Never raises."""
+            width_max: Optional[float] = None, confirm_snaps: int = 0) -> dict:
+    """Full report: the flip impact at several `pct` thresholds. `confirm_snaps`>0
+    evaluates the persistence-confirmed variant (filters whipsaw spikes). Never raises."""
     entries, sv_series, stops, status = _load(db_path)
     dates = sorted({d for (d, _) in entries})
-    results = [analyze_pct(entries, sv_series, stops, p, width_max=width_max) for p in pcts]
+    results = [analyze_pct(entries, sv_series, stops, p, width_max=width_max,
+                           confirm_snaps=confirm_snaps) for p in pcts]
     return {
         "db_path": db_path, "db_status": status,
         "n_entries": len(entries), "n_actual_stops": len(stops),
         "date_min": dates[0] if dates else None, "date_max": dates[-1] if dates else None,
-        "width_max": width_max,
+        "width_max": width_max, "confirm_snaps": confirm_snaps,
         "by_pct": results,
     }
 
@@ -197,12 +221,16 @@ def _m(v):
 
 
 def format_report(result: dict, title: str = "Variant C") -> str:
+    cs = result.get("confirm_snaps") or 0
+    mode = (f"CONFIRMED (breach must persist {cs} extra snap(s) ≈ {cs * 10}s)"
+            if cs else "RAW (fire on first crossing)")
     lines = [
         f"=== {title} — %-of-width stop SHADOW vs acting credit+buffer ===",
         f"DB: {result['db_path']}  [{result['db_status']}]",
         f"History: {result['date_min']} → {result['date_max']}  "
         f"({result['n_entries']} entries, {result['n_actual_stops']} recorded side-closes)"
         + (f"  width≤{result['width_max']:.0f}pt" if result.get("width_max") else ""),
+        f"Mode: {mode}",
         "",
         "Net $ the %-of-width stop WOULD have added (+) or cost (−) vs the actual",
         "credit+buffer outcome, by threshold. 'tail-capping' = bigger loss the actual",

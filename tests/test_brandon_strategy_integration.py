@@ -405,6 +405,8 @@ class TestPctWidthShadowStop:
             narrow_spread_stop_pct=pct,
             contracts_per_entry=7,
             _brandon_pctwidth_shadow_fired=set(),
+            _brandon_pctwidth_breach_at={},
+            _brandon_pctwidth_confirmed_fired=set(),
         )
         inst._brandon_side_alive = lambda e, s: True
         return inst
@@ -458,6 +460,38 @@ class TestPctWidthShadowStop:
         entry = self._entry(call_sv=1500.0, put_sv=1500.0)
         inst._brandon_check_pctwidth_shadow_stop(entry)  # must not raise
         inst._close_entry_early.assert_not_called()
+
+    def test_confirmed_fires_only_after_persistence(self, caplog):
+        # 2026-06-25: CONFIRMED variant fires only after the breach persists the
+        # confirm window — the first tick starts the timer but does NOT confirm.
+        import logging as _logging
+        from datetime import timedelta
+        from shared.market_hours import get_us_market_time
+        inst = self._inst()
+        entry = self._entry(call_sv=1500.0, put_sv=500.0)  # call over $1400 trigger
+        inst._brandon_check_pctwidth_shadow_stop(entry)
+        assert (2, "call") in inst._brandon_pctwidth_shadow_fired           # raw fired
+        assert (2, "call") not in inst._brandon_pctwidth_confirmed_fired    # NOT yet confirmed
+        assert (2, "call") in inst._brandon_pctwidth_breach_at             # timer started
+        # backdate the breach past the 10s confirm window, tick again → confirmed
+        inst._brandon_pctwidth_breach_at[(2, "call")] = get_us_market_time() - timedelta(seconds=11)
+        with caplog.at_level(_logging.INFO):
+            inst._brandon_check_pctwidth_shadow_stop(entry)
+        assert (2, "call") in inst._brandon_pctwidth_confirmed_fired
+        assert any("A2-SHADOW-CONFIRMED" in r.getMessage() and "WOULD fire" in r.getMessage()
+                   for r in caplog.records)
+
+    def test_whipsaw_recovery_clears_breach_and_does_not_confirm(self, caplog):
+        import logging as _logging
+        inst = self._inst()
+        inst._brandon_check_pctwidth_shadow_stop(self._entry(call_sv=1500.0, put_sv=500.0))
+        assert (2, "call") in inst._brandon_pctwidth_breach_at
+        # SV recovers below the trigger before the confirm window → breach cleared
+        with caplog.at_level(_logging.INFO):
+            inst._brandon_check_pctwidth_shadow_stop(self._entry(call_sv=100.0, put_sv=500.0))
+        assert (2, "call") not in inst._brandon_pctwidth_breach_at
+        assert (2, "call") not in inst._brandon_pctwidth_confirmed_fired
+        assert any("whipsaw avoided" in r.getMessage() for r in caplog.records)
 
 
 class TestOrphanCloseAlertDedup:

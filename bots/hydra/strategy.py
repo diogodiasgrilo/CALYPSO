@@ -386,6 +386,12 @@ class HydraStrategy(MEICStrategy):
         # the LIVE variant C before flipping the %-of-width stop on. The
         # Brandon monitoring loop calls _brandon_check_pctwidth_shadow_stop.
         self.narrow_spread_stop_shadow = bool(_nss.get("shadow", False))
+        # CONFIRMED shadow (2026-06-25): a SECOND shadow variant that requires the
+        # %-of-width breach to PERSIST this many seconds before it "would fire"
+        # (MKT-046-style), to filter the whipsaw spikes that recover — the
+        # premature stops that made the raw %-width shadow net-negative over C's
+        # history. Logged as A2-SHADOW-CONFIRMED; never acts.
+        self.narrow_spread_stop_confirm_seconds = float(_nss.get("confirm_seconds", 10.0))
         _sh = _nss.get("settlement_hold", {}) or {}
         self.settlement_hold_enabled = bool(_sh.get("enabled", True))
         self.settlement_hold_itm_pct = float(_sh.get("itm_pct_of_width", 0.70))

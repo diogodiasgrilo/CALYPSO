@@ -125,6 +125,13 @@ class BrandonHydraStrategy(HydraStrategy):
         # today (one head-to-head datapoint per side per day; see
         # _brandon_check_pctwidth_shadow_stop). Cleared in _reset_for_new_day.
         self._brandon_pctwidth_shadow_fired: set[tuple[int, str]] = set()
+        # CONFIRMED %-of-width shadow (2026-06-25): when a side's SV FIRST crossed
+        # the %-width trigger ({(entry, side): datetime}), and which (entry, side)
+        # have logged the persistence-confirmed would-fire today. Both cleared in
+        # _reset_for_new_day. The confirmed variant only "fires" if the breach
+        # PERSISTS narrow_spread_stop_confirm_seconds — filtering whipsaw spikes.
+        self._brandon_pctwidth_breach_at: dict = {}
+        self._brandon_pctwidth_confirmed_fired: set[tuple[int, str]] = set()
         # Cooldown after a TP/BREACH close that transacted 0 legs (a doomed
         # close — e.g. a worthless far-OTM leg the broker won't fill). Keyed by
         # (entry_number, side); value is the ET timestamp of the last failed
@@ -1301,19 +1308,27 @@ class BrandonHydraStrategy(HydraStrategy):
         """SHADOW (logs only, never acts): what the %-of-width stop WOULD do.
 
         Enabled via narrow_spread_stop.shadow=true (with .enabled=false so it
-        does NOT override the acting credit+buffer stop). The first tick a side's
-        live cost-to-close (spread_value) crosses pct×width×100×contracts, log a
-        head-to-head datapoint vs the acting credit+buffer trigger — so we can
-        measure, over a couple of weeks on the LIVE variant, whether %-of-width
-        would fire EARLIER (tighter cap) and how often those positions then
-        recover (whipsaw) before deciding to flip it live. LOG ONLY — no Telegram
-        (keeps the shadow out of the inbox); pull the 'A2-SHADOW' lines from the
-        bot log / the spread_snapshots table for the analysis. Dedup: once per
-        side per day (matches _brandon_check_hydra_shadow_stop)."""
+        does NOT override the acting credit+buffer stop). LOG ONLY — pull the
+        'A2-SHADOW' / 'A2-SHADOW-CONFIRMED' lines (and the spread_snapshots table)
+        for the analysis (bots/hydra/stop_shadow.py).
+
+        TWO shadow variants run head-to-head against the acting credit+buffer stop:
+        - RAW (A2-SHADOW): "would fire" the first tick a side's cost-to-close
+          (spread_value) crosses pct×width×100×contracts. Once per side per day.
+        - CONFIRMED (A2-SHADOW-CONFIRMED, 2026-06-25): only "would fire" if that
+          breach PERSISTS narrow_spread_stop_confirm_seconds (MKT-046-style) — a
+          spike that drops back below the trigger first is a "whipsaw avoided" and
+          does NOT fire. This is the variant that should keep the trend-day tail-
+          capping WITHOUT the premature-stop cost that made the RAW %-width stop
+          net-negative over C's history (see docs analysis). Once per side per day.
+        """
         if not getattr(self, "narrow_spread_stop_shadow", False):
             return
+        from shared.market_hours import get_us_market_time
         pct = getattr(self, "narrow_spread_stop_pct", 0.40)
         contracts = getattr(self, "contracts_per_entry", 1) or 1
+        confirm_s = getattr(self, "narrow_spread_stop_confirm_seconds", 10.0)
+        now = get_us_market_time()
         for side in ("call", "put"):
             if not self._brandon_side_alive(entry, side):
                 continue
@@ -1328,21 +1343,52 @@ class BrandonHydraStrategy(HydraStrategy):
             if not width or width <= 0:
                 continue
             shadow_trigger = pct * width * 100 * contracts
-            if shadow_trigger <= 0 or sv < shadow_trigger:
+            if shadow_trigger <= 0:
                 continue
             key = (entry.entry_number, side)
-            if key in self._brandon_pctwidth_shadow_fired:
+
+            if sv < shadow_trigger:
+                # Below the trigger: a pending CONFIRMED breach recovered before
+                # the confirm window → whipsaw avoided (the case the confirmed
+                # variant exists to filter). Log it once, then clear the timer.
+                ba = self._brandon_pctwidth_breach_at.pop(key, None)
+                if ba is not None and key not in self._brandon_pctwidth_confirmed_fired:
+                    logger.info(
+                        "A2-SHADOW-CONFIRMED E#%s %s: breach recovered after %.0fs "
+                        "(< %.0fs confirm) — whipsaw avoided, would NOT have fired.",
+                        entry.entry_number, side,
+                        (now - ba).total_seconds(), confirm_s,
+                    )
                 continue
-            self._brandon_pctwidth_shadow_fired.add(key)
+
+            # At/above the %-width trigger.
             earlier = acting and shadow_trigger < acting
-            logger.info(
-                "A2-SHADOW E#%s %s: %%-of-width stop WOULD fire — SV $%.0f >= "
-                "%.0f%%×%.0fpt×%dc trigger $%.0f (acting credit+buffer trigger $%.0f, "
-                "%s). SHADOW ONLY — not acting.",
-                entry.entry_number, side, sv, pct * 100, width, contracts, shadow_trigger,
-                acting or 0.0,
-                "%-width is TIGHTER" if earlier else "credit+buffer is tighter/equal",
-            )
+            # RAW: log once on the first crossing.
+            if key not in self._brandon_pctwidth_shadow_fired:
+                self._brandon_pctwidth_shadow_fired.add(key)
+                logger.info(
+                    "A2-SHADOW E#%s %s: %%-of-width stop WOULD fire — SV $%.0f >= "
+                    "%.0f%%×%.0fpt×%dc trigger $%.0f (acting credit+buffer trigger $%.0f, "
+                    "%s). SHADOW ONLY — not acting.",
+                    entry.entry_number, side, sv, pct * 100, width, contracts, shadow_trigger,
+                    acting or 0.0,
+                    "%-width is TIGHTER" if earlier else "credit+buffer is tighter/equal",
+                )
+            # CONFIRMED: fire only after the breach persists confirm_s.
+            if key not in self._brandon_pctwidth_confirmed_fired:
+                ba = self._brandon_pctwidth_breach_at.get(key)
+                if ba is None:
+                    self._brandon_pctwidth_breach_at[key] = now
+                elif (now - ba).total_seconds() >= confirm_s:
+                    self._brandon_pctwidth_confirmed_fired.add(key)
+                    logger.info(
+                        "A2-SHADOW-CONFIRMED E#%s %s: %%-of-width stop WOULD fire "
+                        "(breach held %.0fs >= %.0fs confirm) — SV $%.0f >= trigger "
+                        "$%.0f (acting credit+buffer trigger $%.0f). SHADOW ONLY — "
+                        "not acting.",
+                        entry.entry_number, side, (now - ba).total_seconds(), confirm_s,
+                        sv, shadow_trigger, acting or 0.0,
+                    )
 
     def _brandon_alert_gex_fallback(self) -> None:
         """L-C1: announce (once per ET day) that GEX/Polygon is unavailable so
@@ -2142,6 +2188,8 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_overlay_placed.clear()
         self._brandon_hydra_shadow_fired.clear()
         self._brandon_pctwidth_shadow_fired.clear()
+        self._brandon_pctwidth_breach_at.clear()
+        self._brandon_pctwidth_confirmed_fired.clear()
         self._brandon_failed_close_store().clear()
         if hasattr(self, "_brandon_orphan_alerted"):
             self._brandon_orphan_alerted.clear()
