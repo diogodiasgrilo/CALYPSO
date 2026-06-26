@@ -36,6 +36,22 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- MKT-047 OTM-skip + dashboard EOD-flatten labeling (2026-06-25). (1) The EOD
+  safety flatten now LEAVES a 0DTE entry whose every alive short is >= 25pt OTM
+  (config eod_flatten.skip_otm_pts) to cash-settle worthless for FREE, instead of
+  paying to buy it back in the un-closable window. Data-derived: over 84 days SPX
+  never moved >= 20pt in the final 10 min (max 18.4), so a >= 25pt-OTM SPXW short
+  (cash-settled, no assignment) has ~0% settlement risk while closing it burns the
+  close cost + commission — 2026-06-25 variant C E#2 gave back ~$43 of a $210
+  credit closing a 53pt-OTM put. A skipped entry stays fully monitored (the stop
+  net is unchanged) and is booked solely by settlement, which books the rare ITM
+  tail as a real loss (audited PASS). An entry with ANY alive short within the
+  cushion is still fully closed; skip_otm_pts=0 restores the always-close behavior.
+  (2) Dashboard: an EOD-flatten was mislabeled as "Expired"/a red stop dot (the
+  early-close reuses *_side_expired); now rendered as a distinct "Flattened"
+  status with stop markers/realized-P&L gated on early_closed, and the backend
+  stamps close_reason="EOD_FLATTEN". DISPLAY-only. +12 tests (eod-flatten 26 incl.
+  10 OTM-skip; dashboard); full suite 1847 passed.
 - Hold-if-safe cushion 25 → 50pt (2026-06-23, Brandon B/C). Data-derived: 84
   trading days of SPX 1-min paths show a short held to expiry from the final hour
   is TOUCHED 26.5% of the time at a 25pt cushion but only ~4-5% at 50pt. Riding

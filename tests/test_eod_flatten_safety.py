@@ -213,3 +213,82 @@ class TestNearExpiryMarketEscalation:
         del s.eod_flatten_market_minutes
         self._call(s, _et(15, 59))
         s._place_leg_order.assert_called_once()      # safe default: limit path
+
+
+# ─────────────────────── MKT-047 OTM-skip (2026-06-25) ────────────────────────
+class TestEodFlattenOtmSkip:
+    """A comfortably-OTM 0DTE short cash-settles worthless — don't pay to close it
+    in the un-closable window. Final-10-min reversal study: ~0% touch at >= 20pt."""
+
+    def _strat(self, *, spot=7348.0, skip_pts=25.0):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.eod_flatten_enabled = True
+        s._eod_flatten_done = False
+        s.contracts_per_entry = 7
+        s.eod_flatten_skip_otm_pts = skip_pts
+        s.current_price = spot
+        s.registry = MagicMock()
+        s.alert_service = MagicMock()
+        s._save_state_to_disk = MagicMock()
+        s._spawn_async_early_close_fill_correction = MagicMock()
+        s._close_entry_early = MagicMock(return_value=(2, 0, []))
+        s.daily_state = base_mod.MEICDailyState()
+        s.daily_state.total_realized_pnl = 0.0
+        s.daily_state.total_commission = 0.0
+        return s
+
+    def _put_only(self, *, short_put=7295.0):
+        e = base_mod.IronCondorEntry(entry_number=2)
+        e.contracts = 7
+        e.short_put_strike = short_put
+        e.short_put_uic = 111
+        e.is_complete = False
+        e.call_side_skipped = True  # put-only
+        return e
+
+    def test_can_skip_comfortably_otm(self):
+        s = self._strat(spot=7348.0)  # short put 7295 → 53pt OTM
+        assert s._eod_flatten_can_skip(self._put_only()) is True
+
+    def test_cannot_skip_near_money(self):
+        s = self._strat(spot=7310.0)  # 15pt OTM (< 25)
+        assert s._eod_flatten_can_skip(self._put_only()) is False
+
+    def test_full_ic_needs_both_sides_safe(self):
+        s = self._strat(spot=7400.0)
+        e = base_mod.IronCondorEntry(entry_number=1)
+        e.contracts = 7
+        e.short_call_strike, e.short_put_strike = 7460.0, 7340.0  # both 60pt OTM
+        e.short_call_uic, e.short_put_uic = 1, 2
+        e.is_complete = False
+        assert s._eod_flatten_can_skip(e) is True
+        s.current_price = 7445.0  # call 7460 now 15pt OTM
+        assert s._eod_flatten_can_skip(e) is False
+
+    def test_disabled_when_pts_zero(self):
+        assert self._strat(skip_pts=0.0)._eod_flatten_can_skip(self._put_only()) is False
+
+    def test_no_spot_is_conservative_close(self):
+        s = self._strat()
+        s.current_price = None
+        assert s._eod_flatten_can_skip(self._put_only()) is False
+
+    def test_no_alive_short_does_not_skip(self):
+        s = self._strat()
+        e = self._put_only()
+        e.put_side_expired = True  # no alive short left
+        assert s._eod_flatten_can_skip(e) is False
+
+    def test_flatten_skips_comfortably_otm_entry(self):
+        s = self._strat(spot=7348.0)
+        s.daily_state.entries = [self._put_only(short_put=7295.0)]
+        with patch.object(strat_mod, "get_us_market_time", return_value=_et(15, 50)):
+            s._execute_eod_flatten(cutoff_label="15:50", is_fomc=False)
+        s._close_entry_early.assert_not_called()  # 53pt OTM → ride to worthless expiry
+
+    def test_flatten_closes_near_money_entry(self):
+        s = self._strat(spot=7305.0)  # short put 7295 → 10pt OTM
+        s.daily_state.entries = [self._put_only(short_put=7295.0)]
+        with patch.object(strat_mod, "get_us_market_time", return_value=_et(15, 50)):
+            s._execute_eod_flatten(cutoff_label="15:50", is_fomc=False)
+        s._close_entry_early.assert_called_once()  # within cushion → closed

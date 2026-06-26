@@ -640,12 +640,22 @@ class HydraStrategy(MEICStrategy):
         # close escalates straight to a true MARKET order (a crossing limit can
         # chase-and-miss a fast tape near expiry). 0 disables the escalation.
         self.eod_flatten_market_minutes = float(_eod.get("market_order_minutes", 6.0))
+        # OTM-skip (2026-06-25): leave an entry whose every alive SHORT is at least
+        # this many points OTM to cash-settle worthless for FREE, instead of paying
+        # to close it in the un-closable window. Data-derived: over 84 days SPX
+        # never moved >=20pt in the final 10 min (max 18.4), so a >=25pt-OTM short's
+        # settlement risk is ~0% while closing it burns the close cost + commission
+        # (the 06-25 C E#2 gave back ~$43 of a $210 credit). 0 disables the skip
+        # (always close — the pre-2026-06-25 behavior). Full analysis:
+        # docs/HYDRA_HOLD_IF_SAFE_ANALYSIS.md + the final-10-min reversal study.
+        self.eod_flatten_skip_otm_pts = float(_eod.get("skip_otm_pts", 25.0))
         self._eod_flatten_done = False  # one-shot latch; reset each new ET day
         logger.info(
             f"  EOD safety flatten (MKT-047): "
             f"{'ENABLED' if self.eod_flatten_enabled else 'DISABLED'} "
             f"@ {self.eod_flatten_time_et} ET ({self.eod_flatten_time_fomc_et} on FOMC); "
-            f"MARKET-order close inside {self.eod_flatten_market_minutes:.0f}min of close"
+            f"MARKET-order close inside {self.eod_flatten_market_minutes:.0f}min of close; "
+            f"skip shorts >= {self.eod_flatten_skip_otm_pts:.0f}pt OTM"
         )
 
         # MKT-021: Pre-entry ROC gate - skip remaining entries if ROC already
@@ -2913,6 +2923,40 @@ class HydraStrategy(MEICStrategy):
             return None  # not yet at the cutoff
         return self._execute_eod_flatten(cutoff_label=cutoff, is_fomc=is_fomc)
 
+    def _eod_flatten_can_skip(self, entry) -> bool:
+        """OTM-skip gate (MKT-047, 2026-06-25): True iff EVERY still-alive SHORT in
+        ``entry`` is at least ``eod_flatten_skip_otm_pts`` OTM, so the entry will
+        cash-settle worthless and need NOT be closed in the un-closable window
+        (it just reverts to the normal ride-to-expiry + settlement path).
+
+        Conservative — returns False (i.e. CLOSE the entry) when the skip is
+        disabled (pts <= 0), the spot/strikes are unreadable, OR any alive short is
+        within the cushion. Requires >= 1 alive short (nothing to skip otherwise).
+        SPXW is cash-settled (no assignment risk) and the final-10-min reversal
+        study shows ~0% touch at >= 20pt, so a >= 25pt-OTM short settles worthless
+        safely; closing it only burns the close cost + commission."""
+        cushion = getattr(self, "eod_flatten_skip_otm_pts", 25.0)
+        if cushion <= 0:
+            return False  # skip disabled → always close (pre-2026-06-25 behavior)
+        spot = getattr(self, "current_price", None)
+        if not (isinstance(spot, (int, float)) and spot > 0):
+            return False  # no usable spot → can't assess → close to be safe
+        any_alive_short = False
+        for side, strike_attr in (("call", "short_call_strike"), ("put", "short_put_strike")):
+            if (getattr(entry, f"{side}_side_stopped", False)
+                    or getattr(entry, f"{side}_side_expired", False)
+                    or getattr(entry, f"{side}_side_skipped", False)
+                    or getattr(entry, f"{side}_side_pivot_closed", False)):
+                continue  # not an alive short (incl. a directional-pivot close)
+            strike = getattr(entry, strike_attr, None)
+            if not (isinstance(strike, (int, float)) and strike > 0):
+                return False  # unreadable short strike → close to be safe
+            any_alive_short = True
+            otm = (strike - spot) if side == "call" else (spot - strike)
+            if otm < cushion:
+                return False  # a short within the cushion → close the whole entry
+        return any_alive_short
+
     def _execute_eod_flatten(self, *, cutoff_label: str, is_fomc: bool) -> str:
         """MKT-047: force-close ALL open legs as a pre-expiry SAFETY flatten,
         reusing the MKT-018 leg-closer (which books real fill-based P&L, honors
@@ -2934,9 +2978,20 @@ class HydraStrategy(MEICStrategy):
         )
         logger.warning("=" * 60)
 
-        legs_closed = legs_failed = entries_closed = 0
+        legs_closed = legs_failed = entries_closed = entries_skipped_otm = 0
         deferred_legs: list = []
         for entry in list(self.daily_state.active_entries):
+            # OTM-skip: a comfortably-OTM entry cash-settles worthless for free —
+            # don't pay to close it in the un-closable window (it reverts to the
+            # normal ride-to-expiry + settlement path, exactly as before MKT-047).
+            if self._eod_flatten_can_skip(entry):
+                entries_skipped_otm += 1
+                logger.info(
+                    "  MKT-047: SKIP flatten of E#%s — every alive short >= %.0fpt OTM "
+                    "(cash-settles worthless; saves the close cost). Rides to expiry.",
+                    entry.entry_number, self.eod_flatten_skip_otm_pts,
+                )
+                continue
             c, f, d = self._close_entry_early(entry)
             legs_closed += c
             legs_failed += f
@@ -2990,10 +3045,12 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             logger.error(f"MKT-047: Alert failed: {e}")
 
+        _skip_pts = getattr(self, "eod_flatten_skip_otm_pts", 25.0)
         logger.warning(
             f"MKT-047: EOD FLATTEN COMPLETE | {entries_closed} entries, "
             f"{legs_closed} legs closed, {legs_failed} failed | "
-            f"Net P&L: ${final_net_pnl:.2f}"
+            f"{entries_skipped_otm} skipped (>= {_skip_pts:.0f}pt OTM, "
+            f"ride to worthless expiry) | Net P&L: ${final_net_pnl:.2f}"
         )
         return (
             f"MKT-047 EOD FLATTEN: {entries_closed} entr(ies) closed at "
