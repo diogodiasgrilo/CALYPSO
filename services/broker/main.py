@@ -28,7 +28,7 @@ from shared.alert_service import AlertService
 from shared.broker_service import BrokerDispatcher, create_app
 from shared.ib_client import IBClient, IBConfig
 from shared.ib_oauth import load_credentials
-from shared.market_hours import get_us_market_time
+from shared.market_hours import get_us_market_time, is_market_open
 
 try:
     from zoneinfo import ZoneInfo
@@ -78,6 +78,27 @@ PORT = int(os.environ.get("CALYPSO_BROKER_PORT", "8788"))
 # recovery while staying well clear of the rate ceiling. Override via env.
 SESSION_CHECK_S = int(os.environ.get("CALYPSO_BROKER_SESSION_CHECK_S", "180"))
 ALERT_POLL_S = int(os.environ.get("CALYPSO_BROKER_ALERT_POLL_S", "10"))
+# Re-auth-failure alert throttle: at most one alert per this many WALL-CLOCK
+# seconds (NOT per cycle — SESSION_CHECK_S is 180s, so the old per-4th-cycle
+# throttle fired every ~12 min, flooding ~30 HIGH emails over a single Saturday
+# on 2026-06-27). Off-hours failures are also suppressed entirely (see below).
+REAUTH_ALERT_INTERVAL_S = float(os.environ.get("CALYPSO_BROKER_REAUTH_ALERT_INTERVAL_S", "3600"))
+
+
+def _should_alert_reauth(consec_failures: int, in_market_hours: bool,
+                         now: float, last_alert, interval: float) -> bool:
+    """Whether to emit a broker re-auth-failure alert this cycle.
+
+    Alert only when the failure has PERSISTED past the routine reset
+    (>= 2 consecutive cycles — the first failure is almost always the benign
+    ~01:00 ET IBKR reset), AND it is during market hours (off-hours failures are
+    benign: nothing trades and the next daily reset clears them — the 2026-06-27
+    weekend flood), AND not more than once per `interval` WALL-CLOCK seconds
+    (decoupled from the short SESSION_CHECK_S cycle). `last_alert` is the monotonic
+    timestamp of the previous alert this outage, or None if none yet."""
+    if consec_failures < 2 or not in_market_hours:
+        return False
+    return last_alert is None or (now - last_alert) >= interval
 
 
 def main() -> None:
@@ -112,9 +133,12 @@ def main() -> None:
         # Consecutive re-auth failures. The routine ~01:00 ET IBKR reset (and
         # brief blips) clear in a SINGLE cycle, so the first failure must NOT
         # alert — that was a nightly false HIGH ("IBKR session lost"). We only
-        # escalate once it PERSISTS (≥2 cycles ≈ 30+ min), then re-remind every
-        # ~4th cycle so a genuine RTH outage keeps nagging without spamming.
+        # escalate once it PERSISTS (>=2 cycles), and then ONLY during market
+        # hours and at most hourly (wall-clock) — see _should_alert_reauth. The
+        # old per-4th-cycle throttle flooded ~30 HIGH emails on a single Saturday
+        # (2026-06-27) because SESSION_CHECK_S is 180s → an alert every ~12 min.
         consec_reauth_failures = 0
+        last_reauth_alert = None  # monotonic ts of the last re-auth alert this outage
         while not stop.wait(ALERT_POLL_S):
             try:
                 today = get_us_market_time().date()
@@ -139,6 +163,7 @@ def main() -> None:
                         logger.info("session re-auth recovered after %d failed cycle(s)",
                                     consec_reauth_failures)
                     consec_reauth_failures = 0
+                    last_reauth_alert = None  # next outage alerts immediately
                 else:
                     consec_reauth_failures += 1
                     if consec_reauth_failures == 1:
@@ -146,8 +171,18 @@ def main() -> None:
                                        "~01:00 ET IBKR reset; retrying next cycle, no alert yet")
                     else:
                         logger.error("session re-auth FAILED x%d consecutive", consec_reauth_failures)
-                        if consec_reauth_failures % 4 == 2:  # cycles 2, 6, 10, …
+                        try:
+                            in_rth = is_market_open()
+                        except Exception:  # noqa: BLE001 — unsure → alert (fail toward visibility)
+                            in_rth = True
+                        if _should_alert_reauth(consec_reauth_failures, in_rth, now,
+                                                last_reauth_alert, REAUTH_ALERT_INTERVAL_S):
+                            last_reauth_alert = now
                             alert_hooks.on_ensure_connected_failed(fail_reason, will_restart=False)
+                        elif not in_rth:
+                            logger.info("session re-auth still failing (x%d) but market is "
+                                        "closed — suppressing alert (benign off-hours; the "
+                                        "next daily reset should clear it)", consec_reauth_failures)
 
     maintain_thread = threading.Thread(
         target=_maintain, name="broker-maintain", daemon=True

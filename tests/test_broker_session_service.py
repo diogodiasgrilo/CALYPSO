@@ -263,3 +263,42 @@ class TestBrokerContract:
         }
         h3 = BrokerDispatcher(ib3).health()
         assert h3["status"] == "degraded" and h3["connected"] is False
+
+
+class TestReauthAlertThrottle:
+    """services.broker.main._should_alert_reauth — the 2026-06-27 weekend-flood fix.
+
+    The old throttle alerted on every 4th failed cycle; with SESSION_CHECK_S=180s
+    that fired a HIGH email every ~12 min all Saturday. The new policy: alert only
+    when the failure has PERSISTED (>=2 cycles), only DURING market hours (off-hours
+    failures are benign + self-clear at the daily reset), and at most ONCE PER HOUR
+    (wall-clock, decoupled from the cycle cadence)."""
+
+    from services.broker.main import _should_alert_reauth
+    _fn = staticmethod(_should_alert_reauth)
+    HOUR = 3600.0
+
+    def test_first_failure_never_alerts(self):
+        # Cycle 1 is almost always the benign ~01:00 ET reset.
+        assert self._fn(1, True, 1000.0, None, self.HOUR) is False
+
+    def test_off_hours_never_alerts_even_when_persisted(self):
+        # The exact weekend-flood case: persisted failure, market closed → silent.
+        assert self._fn(5, False, 1_000_000.0, None, self.HOUR) is False
+
+    def test_persisted_failure_in_market_hours_alerts_first_time(self):
+        assert self._fn(2, True, 1000.0, None, self.HOUR) is True
+
+    def test_throttled_within_the_hour(self):
+        # Already alerted 10 min ago → stay quiet (no 12-min spam).
+        last = 1000.0
+        assert self._fn(6, True, last + 600.0, last, self.HOUR) is False
+
+    def test_re_nags_after_the_hour_during_a_genuine_rth_outage(self):
+        last = 1000.0
+        assert self._fn(20, True, last + self.HOUR + 1.0, last, self.HOUR) is True
+
+    def test_recovery_resets_then_next_outage_alerts_immediately(self):
+        # After recovery the loop sets last_reauth_alert=None, so a fresh outage
+        # in market hours alerts on its 2nd cycle without waiting an hour.
+        assert self._fn(2, True, 9_999_999.0, None, self.HOUR) is True
