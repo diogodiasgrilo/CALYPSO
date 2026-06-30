@@ -29,6 +29,21 @@ INSUFFICIENT rather than ranked on noise. The CI assumes independent entries.
 
 Pure stdlib (sqlite3 + statistics), read-only (``mode=ro``), importable without the
 broker stack — same contract as dc_edge.py / dc_status.py.
+
+⚠ KNOWN DATA CAVEAT — the Brandon variants (B, C) are NOT yet analyzable here.
+On B/C the credit+buffer HYDRA stop runs in SHADOW (it never acts — Brandon
+closes via take-profit / GEX-breach / overlay / expiry). But the shadow stop's
+*hypothetical* fills are written to ``trade_stops`` with a real-looking
+``net_pnl``, so reconstruction sees phantom losses: e.g. 2026-06-12 booked
+``entries_stopped=4, net_pnl=+1732`` (a PROFITABLE day) yet trade_stops shows all
+8 sides "stopped" at ~-1760 (-13.4k). Brandon's REAL per-entry outcome is not
+recorded anywhere — only the daily total (``daily_summaries.net_pnl``) is. So a
+trustworthy per-SLOT ranking for B/C is blocked until each Brandon close records
+its real realized P&L per entry (then this analyzer consumes it directly). The
+reconstruction logic here is correct and is validated for variants whose
+``trade_stops`` are REAL acted stops; the ``daily_summaries`` cross-check in the
+report is what surfaces the B/C pollution (a large drift = do not trust the
+absolute P&L OR the ranking).
 """
 
 from __future__ import annotations
