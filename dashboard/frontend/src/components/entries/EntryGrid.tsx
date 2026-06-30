@@ -17,6 +17,20 @@ function findEntryByNumber(
   return null;
 }
 
+/** A fully-skipped entry (MKT-011 credit gate, MKT-010 illiquidity, …) is NOT a
+ *  position. The bot records it so the dashboard can show WHAT was skipped and
+ *  WHY, but it must never be presented as an open/real entry — that made a
+ *  $0-capital skip read as a 10:45 "entry" (2026-06-30). A legitimate one-sided
+ *  entry skips only ONE side, so a true skip requires BOTH sides skipped. */
+function isFullySkipped(e: HydraEntry): boolean {
+  return Boolean(e.call_side_skipped && e.put_side_skipped);
+}
+
+/** Compact "HH:MM" from the bot-stamped entry_time (ISO, ET). */
+function entryHm(e: HydraEntry): string {
+  return e.entry_time ? String(e.entry_time).slice(11, 16) : "—";
+}
+
 interface EntryGridProps {
   /** Polled non-primary snapshot's entries. When provided, the grid renders
    *  THESE instead of the WS store's. The schedule still comes from the bot
@@ -47,23 +61,62 @@ export function EntryGrid({ entries: entriesProp }: EntryGridProps = {}) {
     const sorted = [...entriesProp].sort(
       (a, b) => (a.entry_number ?? 0) - (b.entry_number ?? 0)
     );
+    // Separate real positions from fully-skipped attempts: a skip is NOT a
+    // position and must not occupy a position card / inflate the count. Real
+    // positions render as cards; skips collapse into a compact reason strip.
+    const positions = sorted.filter((e) => !isFullySkipped(e));
+    const skips = sorted.filter(isFullySkipped);
     return (
       <div>
         <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
-          Entries
+          Entries{positions.length ? ` (${positions.length})` : ""}
         </h3>
         {sorted.length === 0 ? (
           <div className="text-sm text-text-secondary py-2">No entries today.</div>
         ) : (
-          <div className="grid gap-2 max-sm:grid-cols-1 grid-cols-2 lg:grid-cols-3">
-            {sorted.map((entry, i) => (
-              <EntryCard
-                key={entry.entry_number ?? i}
-                entry={entry}
-                label={`#${entry.entry_number ?? i + 1}`}
-              />
-            ))}
-          </div>
+          <>
+            {positions.length > 0 ? (
+              <div className="grid gap-2 max-sm:grid-cols-1 grid-cols-2 lg:grid-cols-3">
+                {positions.map((entry, i) => (
+                  <EntryCard
+                    key={entry.entry_number ?? i}
+                    entry={entry}
+                    label={`#${entry.entry_number ?? i + 1}`}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm text-text-secondary py-2">
+                No positions opened today.
+              </div>
+            )}
+            {skips.length > 0 && (
+              <div className="mt-2 rounded border border-border-dim bg-bg px-3 py-2">
+                <div
+                  className="text-[10px] font-semibold uppercase tracking-wider mb-1"
+                  style={{ color: colors.textDim }}
+                >
+                  Skipped — no position ({skips.length})
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  {skips.map((e, i) => (
+                    <div
+                      key={e.entry_number ?? `s${i}`}
+                      className="text-xs font-mono text-text-secondary"
+                    >
+                      <span style={{ color: colors.textDim }}>
+                        #{e.entry_number ?? "?"}
+                      </span>{" "}
+                      {entryHm(e)}{" "}
+                      <span style={{ color: colors.textDim }}>
+                        · {e.skip_reason || "credit gate"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
         )}
       </div>
     );
