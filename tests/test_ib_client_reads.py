@@ -1210,6 +1210,35 @@ class TestGetChartData:
         assert kw["period"] == "1d"
         assert kw["outside_rth"] is False
 
+    def test_chart_data_failure_trips_history_breaker_not_market(self, connected_client):
+        """Decoupling (2026-06-29): a flaky chart-data endpoint (IBKR 500
+        "Chart data unavailable") must trip the 'history' breaker ONLY — never
+        'market', which guards the trading-critical quote/snapshot/chain path
+        that stops depend on. Before this split, a history-500 burst opened the
+        shared 'market' breaker and refused live get_quote/snapshot calls."""
+        from shared.ib_retry import CircuitState
+        client, mock_ibkr = connected_client
+        client._conid_cache[("SPX", None, None, None, "SPXW", "IND")] = 416904
+        client.retry_policy.max_attempts = 1  # no backoff sleeps in the test
+
+        class _Boom(Exception):
+            status_code = 500  # ibind's structured 5xx → retryable, records a failure
+
+        mock_ibkr.marketdata_history_by_conid.side_effect = _Boom(
+            'IbkrClient: response error :: 500 :: Internal Server Error :: '
+            '{"error":"Chart data unavailable"}'
+        )
+        market = client.circuit_breakers["market"]
+        history = client.circuit_breakers["history"]
+        # Drive exactly enough failures to trip the history breaker.
+        for _ in range(history.consecutive_failures_threshold):
+            with pytest.raises(_Boom):
+                client.get_chart_data("SPX", bar="1min", period="1d")
+        # 'history' tripped OPEN; 'market' is UNTOUCHED and still admits calls.
+        assert history.state == CircuitState.OPEN
+        assert market.state == CircuitState.CLOSED
+        assert market.allow_request() is True
+
 
 # ─── get_closed_position_price (F5.2) ──────────────────────────────────────
 

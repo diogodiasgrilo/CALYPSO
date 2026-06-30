@@ -417,19 +417,21 @@ class TestRetryAndCircuitBreakers:
     operator-reset path works end-to-end.
     """
 
-    def test_breaker_registry_has_all_five_families(
+    def test_breaker_registry_has_all_six_families(
         self, paper_config, mock_ibkr_client,
     ):
-        """Five canonical families: oauth/session/portfolio/market/orders.
-        Production code routes via _ib_call(family, ...) — adding a new
-        family without registering it here would IBClientError."""
+        """Six canonical families: oauth/session/portfolio/market/history/
+        orders. Production code routes via _ib_call(family, ...) — adding a new
+        family without registering it here would IBClientError. 'history' is
+        separate from 'market' so chart-data flakiness can't block live quotes
+        (2026-06-29)."""
         from shared.ib_retry import CircuitBreaker
         with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
             client = IBClient(paper_config)
             client.connect()
             breakers = client.circuit_breakers
             assert set(breakers.keys()) == {
-                "oauth", "session", "portfolio", "market", "orders",
+                "oauth", "session", "portfolio", "market", "history", "orders",
             }
             for name, br in breakers.items():
                 assert isinstance(br, CircuitBreaker)

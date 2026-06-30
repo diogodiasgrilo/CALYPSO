@@ -767,9 +767,17 @@ class IBClient:
         # Exposed via the retry_policy / circuit_breakers properties so
         # tests + operators can introspect or force_reset.
         self._retry_policy = RetryPolicy()
+        # 'history' is DELIBERATELY a separate family from 'market': IBKR's
+        # marketdata/history endpoint returns transient 500 "Chart data
+        # unavailable" bursts (e.g. 2026-06-29 15:04 ET) that used to trip the
+        # shared 'market' breaker and, while OPEN, also refuse the trading-
+        # critical get_quote/snapshot/chain calls that stops depend on. Chart
+        # data is non-critical (OHLC chart + informational indicators), so it
+        # gets its own breaker — a flaky history endpoint can no longer block
+        # live quotes.
         self._breakers: dict[str, CircuitBreaker] = {
             family: CircuitBreaker(name=f"ib.{family}")
-            for family in ("oauth", "session", "portfolio", "market", "orders")
+            for family in ("oauth", "session", "portfolio", "market", "history", "orders")
         }
         # Global request-rate gate (opt-in via CALYPSO_IBKR_MAX_RPS). IBKR's
         # Client Portal Web API caps each authenticated SESSION at ~10 req/s
@@ -1309,8 +1317,12 @@ class IBClient:
                           NOT wrapped — see connect() docstring)
             'session'   — auth/status, tickle (high-frequency keep-alive)
             'portfolio' — accounts, summary, positions, ledger, FX
-            'market'    — quotes, snapshots, chains, greeks, history,
+            'market'    — quotes, snapshots, chains, greeks,
                           contract search (secdef)
+            'history'   — historical OHLC bars (chart data) ONLY. Kept
+                          separate from 'market' so a flaky chart-data
+                          endpoint (IBKR 500 "Chart data unavailable")
+                          can't trip the breaker guarding live quotes.
             'orders'    — place, cancel, modify, status, live_orders,
                           whatif
 
@@ -2864,8 +2876,13 @@ class IBClient:
         # symbols like 'SPX' / 'VIX' return no match. Resolve the conid
         # ourselves first (sec_type='IND') and call the by-conid variant.
         conid = self.qualify_contract(symbol, sec_type="IND")
+        # 'history' family (NOT 'market'): a flaky/unavailable chart-data
+        # endpoint must never trip the breaker guarding live quotes/snapshots/
+        # chains (the trading-critical path). The qualify_contract above is a
+        # 'market' call but conids are cached, so it's a no-op after the first
+        # resolve and won't couple chart flakiness back onto 'market'.
         data = self._ib_call(
-            "market", self._client.marketdata_history_by_conid,
+            "history", self._client.marketdata_history_by_conid,
             conid=str(conid),
             bar=bar,
             period=period,

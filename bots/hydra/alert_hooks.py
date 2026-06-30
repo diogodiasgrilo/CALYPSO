@@ -316,9 +316,12 @@ class IBKRAlertHooks:
         count = self._stuck_open_reminders_today.get(family, 0)
         if count >= STUCK_OPEN_REMINDERS_PER_DAY:
             return
-        # Fire reminder.
+        # Fire reminder. 'history' is non-trading-critical (chart/indicator
+        # data only — see _fire_breaker_opened), so its reminders stay LOW
+        # (Telegram-only) rather than escalating to a HIGH email.
         try:
             elapsed_min = int((now - since) / 60)
+            reminder_priority = "LOW" if family == "history" else "HIGH"
             self._alerts.send_alert(
                 alert_type=_alert_type("API_ERROR"),
                 title=f"HYDRA — {family} breaker still degraded ({elapsed_min}m)",
@@ -329,7 +332,7 @@ class IBKRAlertHooks:
                     f"{count + 1}/{STUCK_OPEN_REMINDERS_PER_DAY} today. "
                     f"See RUNBOOKS.md RB-2."
                 ),
-                priority=_alert_priority("HIGH"),
+                priority=_alert_priority(reminder_priority),
             )
         except Exception as e:
             logger.exception("stuck-OPEN reminder alert failed: %s", e)
@@ -349,6 +352,23 @@ class IBKRAlertHooks:
                 "intervention may be required — see RUNBOOKS.md RB-2."
             )
             alert_type = _alert_type("CIRCUIT_BREAKER")
+        elif family == "history":
+            # Chart-data/indicator endpoint only — NOT the trading-critical
+            # quote/snapshot path (that is the separate 'market' breaker). A
+            # history outage means a stale OHLC chart + informational
+            # indicators; live quotes, stops and entries are UNAFFECTED. LOW so
+            # it's a Telegram glance, not a HIGH email — it self-recovers and
+            # needs no action (2026-06-29: a history-500 burst used to email a
+            # HIGH "market breaker OPEN"; now decoupled + downgraded).
+            priority = _alert_priority("LOW")
+            title = "HYDRA — chart-data degraded (history breaker OPEN)"
+            message = (
+                "The IBKR `history` circuit breaker is OPEN. Historical chart "
+                "bars / indicators may be stale. Live quotes, stops and entries "
+                "are UNAFFECTED (separate `market` breaker). No action needed — "
+                "it self-recovers."
+            )
+            alert_type = _alert_type("API_ERROR")
         else:
             priority = _alert_priority("HIGH")
             title = f"HYDRA — Broker degraded ({family} breaker OPEN)"

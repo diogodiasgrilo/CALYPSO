@@ -42,7 +42,7 @@ class MockBrokerWithState:
     def __init__(self):
         self.circuit_breakers: dict[str, CircuitBreaker] = {
             family: CircuitBreaker(name=f"ib.{family}")
-            for family in ("oauth", "session", "portfolio", "market", "orders")
+            for family in ("oauth", "session", "portfolio", "market", "history", "orders")
         }
         self.snapshot_warmup_exhausted_count: int = 0
 
@@ -119,6 +119,22 @@ class TestBreakerOpenedAlerts:
         assert "HIGH" in str(kwargs["priority"]) or \
                str(kwargs["priority"]) == "HIGH"
         assert "market" in kwargs["title"].lower() or "market" in kwargs["message"].lower()
+
+    def test_history_family_fires_low_not_email(self, broker, alert_svc):
+        """2026-06-29: the 'history' (chart-data) breaker is non-trading-
+        critical — live quotes/stops/entries are unaffected. Its open fires a
+        LOW (Telegram-only) alert, NOT the HIGH email that 'market' fires, so a
+        benign chart-data 500 burst no longer emails a scary HIGH."""
+        hook = IBKRAlertHooks(broker, alert_svc)
+        broker.set_breaker_state("history", CircuitState.OPEN)
+        hook.poll()
+
+        alert_svc.send_alert.assert_called_once()
+        kwargs = alert_svc.send_alert.call_args.kwargs
+        assert "LOW" in str(kwargs["priority"]) or str(kwargs["priority"]) == "LOW"
+        assert "history" in kwargs["title"].lower() or "history" in kwargs["message"].lower()
+        # The message must make clear trading is unaffected.
+        assert "unaffected" in kwargs["message"].lower()
 
     def test_transition_fires_once_not_per_poll(self, broker, alert_svc):
         """Idempotence (A1): polling N times with the breaker stuck
