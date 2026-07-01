@@ -375,6 +375,22 @@ class IronCondorEntry:
     actual_call_stop_debit: float = 0.0
     actual_put_stop_debit: float = 0.0
 
+    # Real realized NET P&L for THIS entry (account dollars, contract-scaled).
+    # Accumulated incrementally as each side closes via ANY path (credit+buffer
+    # stop, Brandon TP/breach, MKT-025, salvage, worthless/ITM expiry) by
+    # MEICStrategy._book_realized_pnl, which mirrors the EXACT amount booked to
+    # the day aggregate daily_state.total_realized_pnl — so per-entry sums equal
+    # the day total BY CONSTRUCTION (a settlement reconciliation guard logs any
+    # drift). Persisted to the state file + booked to trade_entries.realized_pnl
+    # at settlement. This is the per-entry P&L slot_edge.py needs; before this the
+    # Brandon variants recorded real per-entry P&L nowhere (only the daily total).
+    # GROSS of commission (matches the aggregate; commission accrues separately in
+    # total_commission). LIMITATION: Brandon defensive-overlay hedge P&L is tracked
+    # separately (_brandon_hedge_settlements) and is in NEITHER the day aggregate
+    # NOR this field — so reconciliation still holds, but a hedged entry's P&L here
+    # omits the overlay leg (a known scope boundary, not a drift).
+    realized_pnl: float = 0.0
+
     # Current option prices (updated every heartbeat for P&L / cushion) —
     # bridge properties over legs[*].price
     # Fill prices at entry (option points; ×100 for dollars). Set in
@@ -3769,6 +3785,25 @@ class MEICStrategy(abc.ABC):
     # STOP LOSS MONITORING
     # =========================================================================
 
+    def _book_realized_pnl(self, amount: float, entry=None) -> None:
+        """Book ``amount`` to the day's realized-P&L aggregate AND mirror it onto
+        the specific entry's ``realized_pnl`` (per-entry attribution).
+
+        The aggregate booking is IDENTICAL to the old direct
+        ``daily_state.total_realized_pnl += amount`` — this method never changes
+        the day total; it only ADDS per-entry attribution so ``sum(e.realized_pnl)``
+        equals ``daily_state.total_realized_pnl`` by construction. Every close
+        path that books a specific entry's realized P&L routes through here (the
+        aggregate-only expiry sweep books per entry at its own call sites, then
+        the sum into the aggregate). A settlement reconciliation guard logs any
+        drift, which would flag a booking site that forgot to pass ``entry``.
+        Introduced so the slot_edge analyzer has a trustworthy per-entry P&L —
+        the Brandon variants recorded it nowhere before (only the daily total).
+        """
+        self.daily_state.total_realized_pnl += amount
+        if entry is not None:
+            entry.realized_pnl = getattr(entry, "realized_pnl", 0.0) + amount
+
     def _execute_stop_loss(self, entry: IronCondorEntry, side: str) -> str:
         """
         Execute a stop loss for one side of an IC.
@@ -4076,7 +4111,7 @@ class MEICStrategy(abc.ABC):
                 f"net_loss=${net_loss:.2f} (may be inaccurate!)"
             )
 
-        self.daily_state.total_realized_pnl -= net_loss
+        self._book_realized_pnl(-net_loss, entry)
 
         # Track close commission — Fix #83a: use actual legs closed, not hardcoded 2
         # When worthless long legs are skipped (bid=$0), no trade = no commission

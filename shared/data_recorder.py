@@ -46,7 +46,7 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 11
+SCHEMA_VERSION = 12
 
 # ============================================================================
 # Schema Migration SQL
@@ -156,6 +156,20 @@ MIGRATION_V10_SQL = [
 # net_pnl sign for them. Kept in sync with services/homer/db_manager.py.
 MIGRATION_V11_SQL = [
     "ALTER TABLE trade_stops ADD COLUMN exit_reason TEXT",
+]
+
+# v12 (2026-06-30): first-class per-ENTRY realized net P&L on trade_entries.
+# Before this the bot recorded per-SIDE stop P&L (trade_stops.net_pnl) and the
+# per-DAY total (daily_summaries.net_pnl) but NO per-entry realized P&L — so the
+# Brandon variants' real per-entry outcome (which closes via TP/breach/overlay/
+# expiry, not the recorded credit+buffer stop) was reconstructable nowhere, and
+# the per-slot edge analyzer (bots/hydra/slot_edge.py) could not rank slots. The
+# strategy now accumulates entry.realized_pnl via _book_realized_pnl (mirroring
+# the exact amount booked to daily_state.total_realized_pnl) and writes it here
+# at settlement, reconciled to sum to the day total. Additive + nullable —
+# historical rows stay NULL. Kept in sync with services/homer/db_manager.py.
+MIGRATION_V12_SQL = [
+    "ALTER TABLE trade_entries ADD COLUMN realized_pnl REAL",
 ]
 
 # v7: shadow entries table — records what OTM-based selection WOULD have chosen
@@ -381,6 +395,9 @@ class DataRecorder:
                 if current_version < 11:
                     # v11: exit_reason discriminator on trade_stops
                     migration_sql += MIGRATION_V11_SQL
+                if current_version < 12:
+                    # v12: per-entry realized P&L on trade_entries
+                    migration_sql += MIGRATION_V12_SQL
 
                 for sql in migration_sql:
                     try:
@@ -556,6 +573,25 @@ class DataRecorder:
                 conn.commit()
 
         return self._safe_write("record_entry", _write)
+
+    def update_entry_realized_pnl(self, date: str, entry_number: int,
+                                  realized_pnl: float) -> bool:
+        """Set trade_entries.realized_pnl for one settled entry (schema v12).
+
+        UPDATE-by-(date, entry_number) — the same pattern the Greeks follow-up
+        uses. The row is written at entry time with realized_pnl NULL; this fills
+        it in at settlement once the entry's real net P&L is known. Idempotent
+        (a re-run overwrites with the same final value)."""
+        def _write():
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE trade_entries SET realized_pnl = ? "
+                    "WHERE date = ? AND entry_number = ?",
+                    (realized_pnl, date, entry_number),
+                )
+                conn.commit()
+
+        return self._safe_write("update_entry_realized_pnl", _write)
 
     # ========================================================================
     # Stop Loss Writes (after position closed, 0-5 per day)

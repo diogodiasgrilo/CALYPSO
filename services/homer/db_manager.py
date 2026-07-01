@@ -410,6 +410,17 @@ class BacktestingDB:
                 conn.execute("ROLLBACK")
                 raise
 
+        # v12 parity (2026-06-30): the per-entry realized_pnl column. The main
+        # DataRecorder (shared/data_recorder.py, schema v12) is the schema
+        # authority and adds this on every run; mirror it here idempotently and
+        # UN-gated (not tied to HOMER's own version counter, which lags at 8) so
+        # HOMER never fails if it touches the DB first and a HOMER-initialized DB
+        # still has the column. Historical rows stay NULL.
+        try:
+            conn.execute("ALTER TABLE trade_entries ADD COLUMN realized_pnl REAL")
+        except sqlite3.OperationalError:
+            pass  # column already exists (idempotent)
+
     def _connect(self) -> sqlite3.Connection:
         """Create a new connection with WAL mode.
 

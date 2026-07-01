@@ -3076,7 +3076,7 @@ class HydraStrategy(MEICStrategy):
         if side_close_cost != 0:
             # side_close_cost is positive when we spent more buying back the
             # short than we received selling the long (net outflow to close).
-            self.daily_state.total_realized_pnl += credit - side_close_cost
+            self._book_realized_pnl(credit - side_close_cost, entry)
             logger.info(
                 f"  Entry #{entry.entry_number} {side_name} side early-closed: "
                 f"credit=${credit:.2f}, close_cost=${side_close_cost:.2f}, "
@@ -3085,7 +3085,7 @@ class HydraStrategy(MEICStrategy):
         else:
             # No close fill yet — book the credit (any sign); the deferred fill
             # lookup corrects the close cost later.
-            self.daily_state.total_realized_pnl += credit
+            self._book_realized_pnl(credit, entry)
             logger.info(
                 f"  Entry #{entry.entry_number} {side_name} side early-closed: "
                 f"credit=${credit:.2f} (fill prices deferred)"
@@ -3704,10 +3704,10 @@ class HydraStrategy(MEICStrategy):
             # Estimate realized loss as credit + buffer (worst-case stop-equivalent)
             buffer = (self.call_stop_buffer if side == "call" else self.put_stop_buffer) * contracts
             realized_loss = -buffer  # net P&L = credit kept - close_cost; estimated as -buffer
-            self.daily_state.total_realized_pnl += credit_received - (credit_received + buffer)
+            self._book_realized_pnl(credit_received - (credit_received + buffer), entry)
         else:
             realized_loss = credit_received - actual_close_cost
-            self.daily_state.total_realized_pnl += realized_loss
+            self._book_realized_pnl(realized_loss, entry)
 
         # Commission: 2 legs × commission_per_leg × contracts
         commission_added = 2 * self.commission_per_leg * contracts
@@ -5587,6 +5587,11 @@ class HydraStrategy(MEICStrategy):
                 "contracts_per_entry": self.contracts_per_entry,
             })
 
+            # Per-entry realized P&L: reconcile the per-entry attribution against
+            # the authoritative day total, then persist each entry's realized_pnl
+            # to trade_entries (the number slot_edge.py reads).
+            self._record_entry_realized_pnl(date_str)
+
             # Compute MAE/MFE from spread_snapshots
             self._data_recorder.compute_mae_mfe(date_str)
 
@@ -5595,6 +5600,47 @@ class HydraStrategy(MEICStrategy):
 
         except Exception as e:
             logger.debug(f"DataRecorder daily summary failed: {e}")
+
+    def _record_entry_realized_pnl(self, date_str: str) -> None:
+        """Reconcile per-entry realized P&L to the day total, then persist it to
+        trade_entries.realized_pnl (schema v12) — the per-entry P&L slot_edge.py
+        reads. RECONCILIATION IS THE CORRECTNESS GUARD: sum(entry.realized_pnl)
+        must equal daily_state.total_realized_pnl because every booking mirrors via
+        _book_realized_pnl; a drift means a booking site did not pass ``entry`` and
+        is logged loudly (per-entry P&L would then be under-attributed). Values are
+        still written best-effort so the miss is visible in the data too. Applies
+        uniformly to A/B/C — real-order and dry-run settle P&L via the same paths."""
+        if not self._data_recorder:
+            return
+        try:
+            entries = list(self.daily_state.entries)
+            per_entry_sum = sum(getattr(e, "realized_pnl", 0.0) for e in entries)
+            agg = self.daily_state.total_realized_pnl
+            drift = per_entry_sum - agg
+            if abs(drift) > 0.01:
+                logger.warning(
+                    "RECONCILE realized_pnl DRIFT on %s: per-entry sum $%.2f != "
+                    "total_realized_pnl $%.2f (drift $%.2f) — a booking site likely "
+                    "did not route through _book_realized_pnl(entry=...); per-entry "
+                    "P&L is under-attributed. Investigate before trusting slot_edge.",
+                    date_str, per_entry_sum, agg, drift,
+                )
+            else:
+                logger.info(
+                    "RECONCILE realized_pnl OK on %s: per-entry sum $%.2f == "
+                    "total_realized_pnl $%.2f (%d entries)",
+                    date_str, per_entry_sum, agg, len(entries),
+                )
+            for e in entries:
+                # Fully-skipped entries opened no position — leave realized_pnl NULL.
+                if (getattr(e, "call_side_skipped", False)
+                        and getattr(e, "put_side_skipped", False)):
+                    continue
+                self._data_recorder.update_entry_realized_pnl(
+                    date_str, e.entry_number, round(getattr(e, "realized_pnl", 0.0), 2),
+                )
+        except Exception as ex:
+            logger.debug(f"per-entry realized_pnl record/reconcile failed: {ex}")
 
     def _get_spx_price_minutes_ago(self, minutes: int) -> float:
         """Get SPX price from approximately N minutes ago using heartbeat price history."""
@@ -7121,7 +7167,7 @@ class HydraStrategy(MEICStrategy):
                     f"net_loss=${net_loss:.2f} (may be inaccurate!)"
                 )
 
-        self.daily_state.total_realized_pnl -= net_loss
+        self._book_realized_pnl(-net_loss, entry)
 
         # MKT-025: Commission for 1 close leg only (~$1.15 instead of ~$2.30 at
         # the IBKR commission_per_leg rate).
@@ -7243,7 +7289,7 @@ class HydraStrategy(MEICStrategy):
                     # not current config (important when config flipped mid-day).
                     close_commission = self.commission_per_leg * entry.contracts
 
-                    self.daily_state.total_realized_pnl += revenue
+                    self._book_realized_pnl(revenue, entry)
                     self.daily_state.total_commission += close_commission
                     entry.close_commission += close_commission
 
@@ -7363,7 +7409,7 @@ class HydraStrategy(MEICStrategy):
             revenue = actual_fill * 100 * entry.contracts
 
             # Update P&L (revenue is pure recovery — long cost already in spread credit)
-            self.daily_state.total_realized_pnl += revenue
+            self._book_realized_pnl(revenue, entry)
 
             # Commission for closing 1 leg
             # v8: use entry.contracts (stamped at entry creation) not current config —
@@ -10966,6 +11012,10 @@ class HydraStrategy(MEICStrategy):
                     # happens. Read by the dashboard to label DONE entries
                     # with what actually happened instead of just "DONE".
                     "close_reason": getattr(entry, "close_reason", ""),
+                    # Real per-entry realized net P&L (accumulated by
+                    # _book_realized_pnl). Persist so a mid-day restart keeps the
+                    # per-entry attribution consistent with total_realized_pnl.
+                    "realized_pnl": getattr(entry, "realized_pnl", 0.0),
                     # Status
                     "is_complete": entry.is_complete,
                     "call_side_stopped": entry.call_side_stopped,
@@ -11347,7 +11397,7 @@ class HydraStrategy(MEICStrategy):
                     if close_px is not None and close_px > 0:
                         close_debit = float(close_px) * 100 * contracts
                         realized = side_credit - close_debit
-                        self.daily_state.total_realized_pnl += realized
+                        self._book_realized_pnl(realized, entry)
                         setattr(entry, f"{side}_side_pnl_booked_external", True)
                         if not getattr(entry, "close_reason", ""):
                             entry.close_reason = "EXTERNAL"
@@ -12136,6 +12186,11 @@ class HydraStrategy(MEICStrategy):
                     )
                     if booked != 0:
                         expired_call_credit += booked
+                        # Per-entry mirror of this settlement booking. The AGGREGATE
+                        # daily total is booked once below (+= total_expired_credit),
+                        # so mirror per-entry ONLY here (do not route through
+                        # _book_realized_pnl, which would double-book the aggregate).
+                        entry.realized_pnl = getattr(entry, "realized_pnl", 0.0) + booked
                     if worthless and booked > 0:
                         logger.info(
                             f"  Entry #{entry.entry_number} call side EXPIRED worthless: "
@@ -12175,6 +12230,8 @@ class HydraStrategy(MEICStrategy):
                     )
                     if booked != 0:
                         expired_put_credit += booked
+                        # Per-entry mirror (aggregate booked once below) — see call side.
+                        entry.realized_pnl = getattr(entry, "realized_pnl", 0.0) + booked
                     if worthless and booked > 0:
                         logger.info(
                             f"  Entry #{entry.entry_number} put side EXPIRED worthless: "
@@ -12322,7 +12379,7 @@ class HydraStrategy(MEICStrategy):
                     close_commission = self.commission_per_leg * entry.contracts
 
                     # Record exactly as MKT-033 does
-                    self.daily_state.total_realized_pnl += revenue
+                    self._book_realized_pnl(revenue, entry)
                     self.daily_state.total_commission += close_commission
                     entry.close_commission += close_commission
 
@@ -12925,6 +12982,9 @@ class HydraStrategy(MEICStrategy):
 
                 # Fix #49: Restore override_reason for correct logging
                 restored_entry.override_reason = entry_data.get("override_reason", None)
+                # Restore per-entry realized P&L so post-restart bookings keep
+                # summing to total_realized_pnl (which is itself restored).
+                restored_entry.realized_pnl = entry_data.get("realized_pnl", 0.0)
                 # Fix #59: Restore EMA values for Trades tab logging
                 restored_entry.ema_20_at_entry = entry_data.get("ema_20_at_entry", None)
                 restored_entry.ema_40_at_entry = entry_data.get("ema_40_at_entry", None)

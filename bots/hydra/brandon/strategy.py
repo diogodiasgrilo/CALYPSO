@@ -945,7 +945,7 @@ class BrandonHydraStrategy(HydraStrategy):
             if not getattr(entry, "actual_call_stop_debit", 0):
                 entry.actual_call_stop_debit = close_cost_call
             if self.dry_run:
-                self.daily_state.total_realized_pnl -= close_cost_call
+                self._book_realized_pnl(-close_cost_call, entry)
         elif call_alive:
             logger.critical(
                 "BRANDON-TP E#%s: call close returned 0 legs but the call legs are STILL OPEN "
@@ -962,7 +962,7 @@ class BrandonHydraStrategy(HydraStrategy):
             if not getattr(entry, "actual_put_stop_debit", 0):
                 entry.actual_put_stop_debit = close_cost_put
             if self.dry_run:
-                self.daily_state.total_realized_pnl -= close_cost_put
+                self._book_realized_pnl(-close_cost_put, entry)
         elif put_alive:
             logger.critical(
                 "BRANDON-TP E#%s: put close returned 0 legs but the put legs are STILL OPEN "
@@ -1225,7 +1225,7 @@ class BrandonHydraStrategy(HydraStrategy):
                     entry.call_side_stopped = True
                     entry.actual_call_stop_debit = close_cost_call_real
                     if self.dry_run:
-                        self.daily_state.total_realized_pnl -= close_cost_call_real
+                        self._book_realized_pnl(-close_cost_call_real, entry)
                     setattr(entry, "call_side_pivot_closed", True)
                 elif call_alive_pre:
                     logger.critical(
@@ -1239,7 +1239,7 @@ class BrandonHydraStrategy(HydraStrategy):
                     entry.put_side_stopped = True
                     entry.actual_put_stop_debit = close_cost_put_real
                     if self.dry_run:
-                        self.daily_state.total_realized_pnl -= close_cost_put_real
+                        self._book_realized_pnl(-close_cost_put_real, entry)
                     setattr(entry, "put_side_pivot_closed", True)
                 elif put_alive_pre:
                     logger.critical(

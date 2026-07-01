@@ -30,20 +30,25 @@ INSUFFICIENT rather than ranked on noise. The CI assumes independent entries.
 Pure stdlib (sqlite3 + statistics), read-only (``mode=ro``), importable without the
 broker stack — same contract as dc_edge.py / dc_status.py.
 
-⚠ KNOWN DATA CAVEAT — the Brandon variants (B, C) are NOT yet analyzable here.
-On B/C the credit+buffer HYDRA stop runs in SHADOW (it never acts — Brandon
-closes via take-profit / GEX-breach / overlay / expiry). But the shadow stop's
-*hypothetical* fills are written to ``trade_stops`` with a real-looking
-``net_pnl``, so reconstruction sees phantom losses: e.g. 2026-06-12 booked
-``entries_stopped=4, net_pnl=+1732`` (a PROFITABLE day) yet trade_stops shows all
-8 sides "stopped" at ~-1760 (-13.4k). Brandon's REAL per-entry outcome is not
-recorded anywhere — only the daily total (``daily_summaries.net_pnl``) is. So a
-trustworthy per-SLOT ranking for B/C is blocked until each Brandon close records
-its real realized P&L per entry (then this analyzer consumes it directly). The
-reconstruction logic here is correct and is validated for variants whose
-``trade_stops`` are REAL acted stops; the ``daily_summaries`` cross-check in the
-report is what surfaces the B/C pollution (a large drift = do not trust the
-absolute P&L OR the ranking).
+DATA SOURCE — as of schema v12 (2026-06-30) each settled entry records a
+RECONCILED per-entry realized P&L in ``trade_entries.realized_pnl`` (the strategy
+accumulates it via ``_book_realized_pnl``, mirroring the exact amount booked to
+the day aggregate ``daily_state.total_realized_pnl``, so per-entry sums equal that
+GROSS day total by construction — commission accrues separately, so this and the
+``daily_summaries.gross_pnl`` cross-check are both gross of commission; a slot's
+gross P&L ranks winners fine since commission is ~uniform per entry). This
+analyzer PREFERS that column whenever present and only falls back to the older
+trade_stops reconstruction for pre-v12 rows (NULL realized_pnl).
+
+Why the fallback is untrustworthy for the Brandon variants (B, C): they close via
+take-profit / GEX-breach / overlay / expiry, but the credit+buffer HYDRA stop
+also ACTS as a backstop and — on dry-run B — "fires" with SIMULATED fills that
+still land in ``trade_stops`` with a real-looking ``net_pnl``. So reconstruction
+saw phantom losses: e.g. 2026-06-12 booked a PROFITABLE ``net_pnl=+1732`` yet
+trade_stops showed 8 sides "stopped" at ~-1760 (-13.4k). The report discloses how
+many rows use the trustworthy recorded value vs the reconstruction, so a B/C
+history dominated by reconstructed rows is visibly flagged (and its drift shown);
+once v12 rows accumulate, B/C become fully rankable.
 """
 
 from __future__ import annotations
@@ -175,9 +180,16 @@ def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int
         return {"ok": False, "error": f"no db at {db_path}"}
     con = _connect_ro(db_path)
     try:
+        # realized_pnl (schema v12) is the RECONCILED per-entry net P&L — prefer it
+        # whenever present; only historical (pre-v12) rows are NULL and fall back to
+        # the trade_stops reconstruction below. Guard the column for old DBs.
+        has_realized = any(
+            r[1] == "realized_pnl" for r in con.execute("PRAGMA table_info(trade_entries)")
+        )
+        rcol = "realized_pnl" if has_realized else "NULL AS realized_pnl"
         entries = con.execute(
-            "SELECT date, entry_number, entry_time, call_credit, put_credit, "
-            "total_credit, contracts FROM trade_entries"
+            f"SELECT date, entry_number, entry_time, call_credit, put_credit, "
+            f"total_credit, contracts, {rcol} FROM trade_entries"
         ).fetchall()
         # stops keyed by (date, entry_number) -> {side: {net_pnl, stop_time}}
         stops_by_entry: dict = {}
@@ -189,7 +201,7 @@ def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int
             }
 
         slots: dict = {s: {"pnls": [], "credits": [], "n": 0, "unscored": 0,
-                           "stopped": 0} for s in _SLOT_ORDER}
+                           "stopped": 0, "recorded": 0} for s in _SLOT_ORDER}
         scored_total = 0.0
         for e in entries:
             key = (e["date"], e["entry_number"])
@@ -200,16 +212,26 @@ def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int
             s["credits"].append(e["total_credit"] or 0.0)
             if stops:
                 s["stopped"] += 1
-            pnl, scored = reconstruct_entry_pnl(e["call_credit"], e["put_credit"], stops)
+            recorded = e["realized_pnl"]
+            if recorded is not None:
+                # v12 reconciled per-entry P&L — trust it directly.
+                pnl, scored = round(float(recorded), _CENT), True
+                s["recorded"] += 1
+            else:
+                pnl, scored = reconstruct_entry_pnl(e["call_credit"], e["put_credit"], stops)
             if scored:
                 s["pnls"].append(pnl)
                 scored_total += pnl
             else:
                 s["unscored"] += 1
 
-        # daily_summaries cross-check
+        # daily-total cross-check. Per-entry realized_pnl mirrors the GROSS day
+        # aggregate (daily_state.total_realized_pnl) — commission accrues
+        # separately and is NOT in it — so we reconcile against daily_summaries.
+        # GROSS_pnl, not net_pnl. Comparing to net would show a spurious
+        # commission-sized "drift" every day (it is NOT reconstruction error).
         ds_total = con.execute(
-            "SELECT COALESCE(SUM(net_pnl), 0) FROM daily_summaries").fetchone()[0]
+            "SELECT COALESCE(SUM(gross_pnl), 0) FROM daily_summaries").fetchone()[0]
         n_days = con.execute("SELECT COUNT(*) FROM daily_summaries").fetchone()[0]
     finally:
         con.close()
@@ -229,6 +251,7 @@ def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int
             "n": s["n"],
             "n_scored": n_scored,
             "unscored": s["unscored"],
+            "recorded": s["recorded"],
             "stop_rate": s["stopped"] / s["n"],
             "avg_credit": sum(s["credits"]) / s["n"] if s["n"] else None,
             "win_rate": (wins / n_scored) if n_scored else None,
@@ -243,7 +266,7 @@ def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int
         "db_path": db_path,
         "n_entries": sum(r["n"] for r in rows),
         "scored_total": round(scored_total, _CENT),
-        "daily_summaries_total": round(ds_total or 0.0, _CENT),
+        "daily_gross_total": round(ds_total or 0.0, _CENT),
         "n_days": n_days,
         "slots": rows,
         "min_preliminary": min_preliminary,
@@ -278,13 +301,26 @@ def format_slot_report(result: dict, title: str = "Variant B — per-slot edge")
     if not result.get("ok"):
         return f"{title}\n  ERROR: {result.get('error')}"
     L = [title, "=" * len(title)]
+    n_recorded = sum(r["recorded"] for r in result["slots"])
+    n_reconstructed = result["n_entries"] - n_recorded - sum(r["unscored"] for r in result["slots"])
     L.append(f"{result['n_entries']} entries over {result['n_days']} days.  "
-             f"Reconstructed total P&L ${result['scored_total']:,.0f} vs "
-             f"daily_summaries ${result['daily_summaries_total']:,.0f}.")
-    drift = result["scored_total"] - result["daily_summaries_total"]
-    if abs(drift) > 0.05 * max(1.0, abs(result["daily_summaries_total"])):
-        L.append(f"  ⚠ reconstruction drifts ${drift:,.0f} from the daily totals — "
-                 f"treat absolute P&L as approximate; the RANKING is robust.")
+             f"Per-entry GROSS P&L ${result['scored_total']:,.0f} vs daily gross "
+             f"${result['daily_gross_total']:,.0f} (both gross of commission).")
+    L.append(f"Per-entry source: {n_recorded} rows use the reconciled v12 realized_pnl "
+             f"(trustworthy); {n_reconstructed} fall back to trade_stops reconstruction "
+             f"(pre-v12).")
+    # A residual here means a genuine per-entry attribution miss (both sides are
+    # GROSS), and only reconstructed rows can drift — recorded rows reconcile by
+    # construction. So only warn, and only blame reconstruction, when unrecorded
+    # rows actually exist.
+    drift = result["scored_total"] - result["daily_gross_total"]
+    if n_reconstructed > 0 and abs(drift) > 0.05 * max(1.0, abs(result["daily_gross_total"])):
+        L.append(f"  ⚠ gross total drifts ${drift:,.0f} from the daily gross — driven by "
+                 f"the {n_reconstructed} reconstructed (pre-v12) rows; recorded rows "
+                 f"reconcile by construction.")
+    elif n_reconstructed == 0 and abs(drift) > 0.01 * max(1.0, abs(result["daily_gross_total"])):
+        L.append(f"  ⚠ gross total drifts ${drift:,.0f} with ALL rows v12-recorded — this "
+                 f"is a genuine per-entry attribution miss; investigate _book_realized_pnl.")
     L.append("")
     L.append("slot        n  scored  stop%   win%   avgCred   avgP&L/entry   95% CI (P&L/entry)        verdict")
     for r in result["slots"]:
