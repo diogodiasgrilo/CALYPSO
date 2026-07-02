@@ -69,6 +69,16 @@ class CalendarEntry(IronCondorEntry):
     # analogue — this is the calendar's cost basis.
     net_debit: float = 0.0
 
+    # Opening liquidation P&L (dollars) captured at fill — unrealized_pnl on the
+    # FIRST mark, which is structurally negative by the full round-trip bid/ask
+    # spread (the dry-run marks at liquidation, not mid). Decision TRIGGERS
+    # (D's transform/stop, E's profit ladder) measure MOVEMENT from this opening
+    # mark, so a fresh unmoved calendar reads 0% (as it does on a real broker's
+    # P&L) instead of a false ~-20% that was stopping D at birth (2026-07-02
+    # calendar audit). The REALIZED P&L at close still uses the honest
+    # liquidation value — anchoring changes only WHEN we act, not the EV.
+    opening_pnl: float = 0.0
+
     # Transformer outcome (set when the transformer fires; Phase 4).
     transform_credit: float = 0.0   # net cash from selling longs - buying wings (dollars)
     wing_width: float = 0.0         # IC wing width in POINTS, set at transform
@@ -164,6 +174,19 @@ class CalendarEntry(IronCondorEntry):
             ic_cost = super().call_spread_value + super().put_spread_value
             return (self.transform_credit - self.net_debit) - ic_cost
         return 0.0
+
+    @property
+    def pnl_move_pct(self) -> float:
+        """Return-on-debit MOVEMENT since the opening mark — the honest basis for
+        the decision triggers (D's transform/stop, E's profit ladder). Zero on a
+        fresh unmoved calendar because opening_pnl IS the birth liquidation mark,
+        so the full round-trip spread is netted out of the trigger (but NOT out of
+        the realized P&L at close). Falls back to absolute pnl/debit when
+        net_debit or opening_pnl is unset (pre-2026-07-02 restored trades)."""
+        nd = self.net_debit
+        if not nd:
+            return 0.0
+        return (self.unrealized_pnl - self.opening_pnl) / nd
 
     # ------------------------------------------------------------------
     # Risk-free invariant

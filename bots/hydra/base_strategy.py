@@ -1371,14 +1371,18 @@ class MEICStrategy(abc.ABC):
         # STATE-002: Validate state/position consistency
         consistency_error = self._check_state_consistency()
         if consistency_error:
-            # "MONITORING but no active entries" is a benign, self-recovering
-            # transient (state-file reload at startup before entries repopulate,
-            # or all entries closed/expired just before the DAILY_COMPLETE
-            # transition) — recovery below fixes it on the same tick. Log it as a
-            # WARNING (auto-recovering) so a planned restart doesn't emit a false
-            # ERROR; genuinely concerning mismatches (e.g. IDLE with live
-            # entries, registry count drift) stay ERROR and remain visible.
-            if "no active entries" in consistency_error:
+            # Both STATE-vs-active-entries mismatches ("MONITORING but no active
+            # entries" AND "IDLE but have N active entries") are benign, self-
+            # recovering transients — _attempt_state_recovery() below sets the
+            # correct state on the SAME tick. The "IDLE with active entries" case
+            # is exactly how the multi-day CALENDAR variants (D/E) start each day:
+            # the state file reloads an open calendar before the state machine
+            # leaves IDLE, so logging it at ERROR emitted a false alarm every
+            # morning (2026-07-02). Log any active-entries mismatch at WARNING
+            # (auto-recovering); reserve ERROR for the genuinely-concerning
+            # registry position-count drift (live-only), which does NOT contain
+            # "active entries".
+            if "active entries" in consistency_error:
                 logger.warning(f"STATE-002 (auto-recovering): {consistency_error}")
             else:
                 logger.error(f"STATE-002: {consistency_error}")

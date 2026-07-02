@@ -37,6 +37,10 @@ def _entry(net_debit=1000.0, upnl=0.0, num=1, phase=DCPhase.CALENDAR):
     e.net_debit = net_debit
     e.contracts = 1
     e.unrealized_pnl = upnl
+    # opening_pnl=0 so the anchored trigger basis (pnl_move_pct = (upnl - 0)/debit)
+    # equals the intended move these tests express via `upnl` (2026-07-02 audit).
+    e.opening_pnl = 0.0
+    e.pnl_move_pct = (upnl / net_debit) if net_debit else 0.0
     e.dc_phase = phase
     return e
 
@@ -110,6 +114,7 @@ def test_stop_breach_recovers_no_close(monkeypatch):
     s._dc_manage_calendar(e)
     assert e.entry_number in s._dc_stop_breach
     e.unrealized_pnl = -50.0                    # recovers to -5% before the window elapses
+    e.pnl_move_pct = -50.0 / 1000.0             # anchored move tracks the recovery
     monkeypatch.setattr(dcm, "get_us_market_time", lambda: t0 + timedelta(seconds=10))
     s._dc_manage_calendar(e)
     assert closed == []                        # false stop avoided
@@ -187,3 +192,35 @@ def test_monitoring_normal_when_no_entries():
     s = _strat()
     s.daily_state.active_entries = []
     assert s.get_monitoring_mode() == "normal"
+
+
+# ---- 2026-07-02 calendar audit: trigger anchoring to the opening mark ---------
+def test_pnl_move_pct_anchors_triggers_to_opening_mark():
+    """A fresh calendar is born marked at the full round-trip liquidation spread
+    (~-20% on a real double calendar). The decision triggers must measure MOVEMENT
+    from that opening mark — so an unmoved position reads 0% and does NOT stop at
+    birth (the 9/9 same-day-loss bug). Realized P&L still uses the honest mark."""
+    e = CalendarEntry(entry_number=1)
+    e.contracts = 1
+    e.dc_phase = DCPhase.CALENDAR
+    e.net_debit = 1000.0
+    # legs → calendar_value 800 → unrealized_pnl -200 (the -20% birth liquidation)
+    e.long_call_price, e.short_call_price = 10.0, 5.0   # call_val 5
+    e.long_put_price, e.short_put_price = 8.0, 5.0       # put_val 3
+    assert e.unrealized_pnl == -200.0
+    e.opening_pnl = e.unrealized_pnl                     # captured at fill
+    assert e.pnl_move_pct == 0.0                         # fresh reads 0% MOVE, not -20%
+
+    # A real 10% ADVERSE move (value 800→700): move = (-300 - -200)/1000 = -10%
+    e.long_call_price = 9.0
+    assert e.unrealized_pnl == -300.0
+    assert e.pnl_move_pct == -0.10
+
+    # A real favorable move (value 800→1000, back to flat): move = (0 - -200)/1000 = +20%
+    e.long_call_price = 12.0
+    assert e.unrealized_pnl == 0.0
+    assert e.pnl_move_pct == 0.20
+
+    # A restored pre-audit trade (opening_pnl 0) falls back to absolute pnl/debit.
+    e.opening_pnl = 0.0
+    assert e.pnl_move_pct == 0.0  # unrealized_pnl is 0 here

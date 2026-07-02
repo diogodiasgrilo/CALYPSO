@@ -489,6 +489,11 @@ class CalendarStrategyBase(HydraStrategy):
         entry.net_debit = net_debit
         entry.dc_phase = DCPhase.CALENDAR
         entry.contracts = n
+        # Capture the OPENING liquidation mark now (legs' `price` are the
+        # round-trip-cost marks set above), so decision triggers measure movement
+        # FROM here — a fresh calendar reads 0% move, not the false ~-20% birth
+        # spread that stopped D out same-day (2026-07-02 calendar audit).
+        entry.opening_pnl = entry.unrealized_pnl
         # Stamp the (config) wing width at OPEN so spread_width / capital_deployed
         # are non-zero in the CALENDAR phase (it's the planned IC wing, known
         # upfront; the transformer uses the same value).
@@ -617,6 +622,7 @@ class CalendarStrategyBase(HydraStrategy):
             "contracts": e.contracts,
             "entry_time": e.entry_time.isoformat() if e.entry_time else None,
             "net_debit": e.net_debit,
+            "opening_pnl": getattr(e, "opening_pnl", 0.0),
             "transform_credit": e.transform_credit,
             "wing_width": e.wing_width,
             "is_risk_free": e.is_risk_free,
@@ -662,6 +668,7 @@ class CalendarStrategyBase(HydraStrategy):
         et = d.get("entry_time")
         e.entry_time = datetime.fromisoformat(et) if et else None
         e.net_debit = float(d.get("net_debit", 0.0))
+        e.opening_pnl = float(d.get("opening_pnl", 0.0))
         e.transform_credit = float(d.get("transform_credit", 0.0))
         e.wing_width = float(d.get("wing_width", 0.0))
         e.is_risk_free = bool(d.get("is_risk_free", False))

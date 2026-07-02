@@ -246,7 +246,7 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
             debit = float(getattr(entry, "net_debit", 0.0) or 0.0)
             if debit <= 0 or first_step is None:
                 continue
-            ror = entry.unrealized_pnl / debit
+            ror = entry.pnl_move_pct  # movement from open (0% on a fresh calendar)
             if ror >= 0.75 * first_step:  # approaching the first ladder rung
                 self._current_monitoring_mode = "vigilant"
                 return "vigilant"
@@ -556,7 +556,9 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
         original = int(getattr(entry, "original_contracts", entry.contracts) or entry.contracts)
         if original <= 0 or entry.net_debit <= 0:
             return None
-        ror = entry.unrealized_pnl / entry.net_debit
+        # Movement from the opening mark (0% on a fresh calendar), so the ladder
+        # measures true return-on-risk instead of the birth spread (2026-07-02 audit).
+        ror = entry.pnl_move_pct
         target_closed = self._ladder_target_close_count(ror, original)
         already = self._spy_dc_closed_contracts.get(entry.entry_number, 0)
         to_close = target_closed - already
@@ -607,6 +609,17 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
         self.daily_state.total_commission += close_comm
         entry.close_commission = getattr(entry, "close_commission", 0.0) + close_comm
         entry.contracts = contracts_before - n_close
+        # PARTIAL close: scale the cost basis + opening mark down to the RESIDUAL
+        # position so the remaining ladder rungs measure ror correctly (all three
+        # of unrealized_pnl, net_debit and opening_pnl scale with contracts).
+        # Without this the residual marks against the FULL debit → hugely
+        # understated ror and mis-timed later rungs (2026-07-02 audit). Only on a
+        # partial (contracts remain); a full close leaves them so the outcome
+        # record + booked P&L stay intact. Dormant at 1 contract.
+        if entry.contracts > 0 and contracts_before:
+            residual = entry.contracts / contracts_before
+            entry.net_debit *= residual
+            entry.opening_pnl = getattr(entry, "opening_pnl", 0.0) * residual
         logger.info(
             "[SPYDC-PROFIT] E#%s scaled out %dc (ror %.0f%%): realized $%.2f, %dc remaining",
             entry.entry_number, n_close, ror * 100, slice_pnl, entry.contracts,

@@ -557,7 +557,12 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         # mark this tick — a single stale leg could otherwise fire a false stop or
         # a mistimed transform. EOD close is TIME-based and runs regardless.
         if fresh:
-            pnl_pct = entry.unrealized_pnl / entry.net_debit
+            # MOVEMENT since the opening mark (not absolute pnl/debit): a fresh
+            # calendar reads 0% here instead of the false ~-20% birth spread that
+            # was firing the stop same-day (2026-07-02 audit). Burnich's 7.5%
+            # transform pop and 20% stop are both moves-from-entry, exactly as a
+            # real broker's P&L shows them. Realized P&L at close stays honest.
+            pnl_pct = entry.pnl_move_pct
             en = entry.entry_number
             breaches = self._dc_stop_breach
 
