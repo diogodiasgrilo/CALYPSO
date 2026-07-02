@@ -15,7 +15,12 @@ from types import SimpleNamespace
 
 import pytest
 
+from datetime import datetime
+
 from bots.hydra.base_strategy import MEICStrategy
+from bots.hydra.brandon.strategy import BrandonHydraStrategy
+from bots.hydra.brandon import hedge_position
+from bots.hydra.brandon.hedge_position import HedgeLeg
 from shared.data_recorder import DataRecorder, SCHEMA_VERSION
 
 
@@ -77,6 +82,66 @@ class TestBookRealizedPnl:
         assert e1.realized_pnl == 550.0
         assert e2.realized_pnl == pytest.approx(-1675.0)
         assert e3.realized_pnl == 80.0
+
+
+class _HedgeStub:
+    """Borrows the real _brandon_settle_hedges + _book_realized_pnl onto a minimal
+    object to test the overlay-P&L booking without a full BrandonHydraStrategy."""
+
+    _brandon_settle_hedges = BrandonHydraStrategy._brandon_settle_hedges
+    _book_realized_pnl = MEICStrategy._book_realized_pnl
+
+    def __init__(self, entries, hedge_legs):
+        self.daily_state = SimpleNamespace(entries=entries, total_realized_pnl=0.0)
+        self._brandon_hedge_legs = hedge_legs
+        self._brandon_hedge_settlements = []
+        self.dry_run = True
+
+    def _brandon_send_telegram(self, *a, **k):
+        pass
+
+
+def _hedge_legs_for_entry(n):
+    """A long-call debit spread hedge for entry n."""
+    now = datetime(2026, 7, 2, 10, 0, 0)
+    return [
+        HedgeLeg(n, "long", "call", 7500.0, 1, 5.0, f"DRY_OVERLAY_{n}_0", "debit_spread", "call", now),
+        HedgeLeg(n, "short", "call", 7520.0, 1, 3.0, f"DRY_OVERLAY_{n}_1", "debit_spread", "call", now),
+    ]
+
+
+class TestOverlayPnlBooking:
+    def test_overlay_pnl_booked_to_aggregate_and_entry_and_reconciles(self):
+        e1 = SimpleNamespace(entry_number=1, realized_pnl=0.0, overlay_pnl_booked=False)
+        e2 = SimpleNamespace(entry_number=2, realized_pnl=0.0, overlay_pnl_booked=False)  # no hedge
+        legs = _hedge_legs_for_entry(1)
+        expected = hedge_position.settle_hedge(legs, spx_settle=7550.0).total_pnl
+        assert expected != 0.0  # sanity: the hedge has a nonzero P&L
+
+        s = _HedgeStub([e1, e2], {1: legs})
+        s._brandon_settle_hedges(spx_settle=7550.0)
+
+        assert e1.realized_pnl == pytest.approx(expected)
+        assert e1.overlay_pnl_booked is True
+        assert e2.realized_pnl == 0.0  # unhedged entry untouched
+        assert s.daily_state.total_realized_pnl == pytest.approx(expected)
+        # Reconciliation invariant: per-entry sum == day aggregate (both incl overlay).
+        assert (e1.realized_pnl + e2.realized_pnl) == pytest.approx(s.daily_state.total_realized_pnl)
+
+    def test_restart_rerun_does_not_double_book(self):
+        e1 = SimpleNamespace(entry_number=1, realized_pnl=0.0, overlay_pnl_booked=False)
+        legs = _hedge_legs_for_entry(1)
+        expected = hedge_position.settle_hedge(legs, spx_settle=7550.0).total_pnl
+
+        s = _HedgeStub([e1], {1: legs})
+        s._brandon_settle_hedges(spx_settle=7550.0)
+        # Simulate a post-close restart: the settlements list is NOT persisted, so
+        # the sweep re-runs — but overlay_pnl_booked (which IS persisted) guards it.
+        s._brandon_hedge_settlements = []
+        s._brandon_settle_hedges(spx_settle=7550.0)
+
+        assert e1.realized_pnl == pytest.approx(expected)  # booked ONCE, not 2x
+        assert s.daily_state.total_realized_pnl == pytest.approx(expected)
 
 
 class TestDataRecorderV12:

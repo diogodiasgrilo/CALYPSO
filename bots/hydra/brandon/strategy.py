@@ -1687,6 +1687,26 @@ class BrandonHydraStrategy(HydraStrategy):
             if s is None:
                 continue
             settlements.append(s)
+            # Fold the overlay's GROSS realized P&L into the day aggregate AND the
+            # specific entry (via _book_realized_pnl — matches realized_pnl's basis),
+            # ONCE. overlay_pnl_booked guards against the double-book a post-close
+            # restart would otherwise cause (this settle sweep re-runs because
+            # _brandon_hedge_settlements is not persisted). If the hedged entry is
+            # missing from daily_state, book to the aggregate only so the day total
+            # stays complete; the reconciliation guard then flags the rare miss.
+            entry = next(
+                (e for e in self.daily_state.entries
+                 if e.entry_number == entry_number), None)
+            if entry is not None and not getattr(entry, "overlay_pnl_booked", False):
+                self._book_realized_pnl(s.total_pnl, entry)
+                entry.overlay_pnl_booked = True
+            elif entry is None:
+                self._book_realized_pnl(s.total_pnl, None)
+                logger.warning(
+                    "BRANDON-OVERLAY E#%s: no matching daily_state entry — booked "
+                    "$%.2f to the day aggregate only (per-entry attribution missed)",
+                    entry_number, s.total_pnl,
+                )
             logger.warning(
                 "BRANDON-OVERLAY-SETTLED E#%s %s %s: SPX_close=%.2f, debit_paid=$%.2f, hedge_pnl=$%.2f",
                 s.entry_number, s.threatened_side, s.structure,

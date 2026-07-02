@@ -385,11 +385,16 @@ class IronCondorEntry:
     # at settlement. This is the per-entry P&L slot_edge.py needs; before this the
     # Brandon variants recorded real per-entry P&L nowhere (only the daily total).
     # GROSS of commission (matches the aggregate; commission accrues separately in
-    # total_commission). LIMITATION: Brandon defensive-overlay hedge P&L is tracked
-    # separately (_brandon_hedge_settlements) and is in NEITHER the day aggregate
-    # NOR this field — so reconciliation still holds, but a hedged entry's P&L here
-    # omits the overlay leg (a known scope boundary, not a drift).
+    # total_commission). Brandon defensive-overlay hedge P&L IS folded in as of
+    # 2026-07-02 (_brandon_settle_hedges books each hedge's gross P&L here + to the
+    # aggregate via _book_realized_pnl, once, guarded by overlay_pnl_booked). Overlay
+    # COMMISSION is still not tracked separately (a minor pre-existing gap).
     realized_pnl: float = 0.0
+
+    # Idempotency guard for the overlay-hedge P&L booking. Set True the first time
+    # _brandon_settle_hedges books this entry's overlay P&L; persisted + restored so
+    # a post-close restart (which re-runs the settle sweep) cannot double-book.
+    overlay_pnl_booked: bool = False
 
     # Current option prices (updated every heartbeat for P&L / cushion) —
     # bridge properties over legs[*].price

@@ -1191,6 +1191,13 @@ class TestOverlayHedgeTracking:
         from datetime import datetime, timezone
 
         inst = _make_instance()
+        # daily_state (present in production at settlement) so the overlay P&L can
+        # be booked per-entry (2026-07-02 fold-in).
+        from types import SimpleNamespace
+        inst.daily_state = SimpleNamespace(
+            entries=[SimpleNamespace(entry_number=1, realized_pnl=0.0, overlay_pnl_booked=False)],
+            total_realized_pnl=0.0,
+        )
         # Pre-seed two legs of a call debit spread on entry 1
         inst._brandon_hedge_legs[1] = [
             HedgeLeg(1, "long", "call", 6850, 1, fill_price=8.0,
@@ -1214,6 +1221,11 @@ class TestOverlayHedgeTracking:
         from datetime import datetime, timezone
 
         inst = _make_instance()
+        from types import SimpleNamespace
+        inst.daily_state = SimpleNamespace(
+            entries=[SimpleNamespace(entry_number=1, realized_pnl=0.0, overlay_pnl_booked=False)],
+            total_realized_pnl=0.0,
+        )
         inst._brandon_hedge_legs[1] = [
             HedgeLeg(1, "long", "call", 6850, 1, fill_price=8.0,
                      position_id="DRY_OVERLAY_1_call_0", structure="debit_spread",

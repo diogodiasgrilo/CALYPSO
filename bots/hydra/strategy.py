@@ -11016,6 +11016,8 @@ class HydraStrategy(MEICStrategy):
                     # _book_realized_pnl). Persist so a mid-day restart keeps the
                     # per-entry attribution consistent with total_realized_pnl.
                     "realized_pnl": getattr(entry, "realized_pnl", 0.0),
+                    # Overlay-hedge P&L booked flag (prevents restart double-book).
+                    "overlay_pnl_booked": getattr(entry, "overlay_pnl_booked", False),
                     # Status
                     "is_complete": entry.is_complete,
                     "call_side_stopped": entry.call_side_stopped,
@@ -12985,6 +12987,7 @@ class HydraStrategy(MEICStrategy):
                 # Restore per-entry realized P&L so post-restart bookings keep
                 # summing to total_realized_pnl (which is itself restored).
                 restored_entry.realized_pnl = entry_data.get("realized_pnl", 0.0)
+                restored_entry.overlay_pnl_booked = entry_data.get("overlay_pnl_booked", False)
                 # Fix #59: Restore EMA values for Trades tab logging
                 restored_entry.ema_20_at_entry = entry_data.get("ema_20_at_entry", None)
                 restored_entry.ema_40_at_entry = entry_data.get("ema_40_at_entry", None)
