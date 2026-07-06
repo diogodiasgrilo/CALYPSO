@@ -3,13 +3,19 @@
 The first Step-2 run returned all-None for SPX + VIX during market
 hours. This rewrite is a *diagnostic*: it figures out WHY by
 
-  1. testing a CONTROL instrument first — SPY, a plain US-listed ETF
-     the account has free real-time data for ("US Real-Time Non
-     Consolidated Streaming Quotes"). If the control works but the
-     indices don't, the problem is index entitlement / paper
-     data-sharing. If even the control fails, it is broader (the
-     data-sharing toggle hasn't propagated, or a snapshot mechanism
-     issue);
+  1. testing SPY (a plain US-listed ETF) alongside the indices and
+     dumping both. NOTE — updated 2026-07-06: the entitlement on THIS
+     paper account is the INVERSE of the original premise below. SPX +
+     VIX return REAL-TIME (6509 first char 'R'), while SPY returns
+     DELAYED (6509='DP') — the account carries the index real-time
+     subscription but NOT a US-equity one. So SPY is NOT a
+     free-real-time "control" here; SPY 'DP' with the indices on 'R'
+     is the expected steady state, not a fault (confirmed same-session:
+     A/C/D log realtime SPX while E's SPY logs 'DP' all day). Original
+     (now-stale) premise: SPY was assumed to have free real-time data
+     ("US Real-Time Non Consolidated Streaming Quotes") as a control,
+     so a working control with dead indices meant an index-entitlement
+     gap. Interpret today's output against the inverted reality above;
   2. dumping the RAW IBKR snapshot rows (all field codes) so nothing
      is hidden — metadata-only vs an error vs a delayed marker;
   3. polling each conid for up to ~30s (far longer than IBClient's

@@ -747,7 +747,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u h
 
 **Cause 1:** `_iserver_primed` flag bug. Verify `_ensure_iserver_primed()` is called before `live_marketdata_snapshot`. (P7-audit C2 fixed this in commit c5f43b3; should not recur.)
 
-**Cause 2:** IBKR data-sharing toggle hasn't propagated. Run `scripts/probe_ibkr_market_data.py` — it tests SPY (control US equity, free real-time) before SPX/VIX (indices, gated on toggle). If SPY shows data but SPX/VIX don't, the index entitlement / data-sharing hasn't propagated yet (allow up to 24h after toggling).
+**Cause 2:** IBKR data-sharing toggle hasn't propagated. Run `scripts/probe_ibkr_market_data.py` — it dumps SPY and SPX/VIX side by side. **Current account reality (as of 2026-07-06):** SPX + VIX return **real-time** (6509 first char `R`) while SPY returns **delayed** (`6509='DP'`) — this account holds the index real-time subscription but NOT a US-equity one. So a SPY `DP` alongside SPX/VIX on `R` is the **expected steady state**, not a fault; SPY is NOT a free-real-time control on this account (the inverse of the probe's original premise). If SPX/VIX themselves go metadata-only/`DP`, that's the real regression to chase.
 
 **Cause 3:** No real-time entitlement for the conid (or stale conid). The `_snapshot_with_preflight` warmup-exhaustion WARNING logs distinguish: "metadata-only" = entitlement/conid issue, "empty list" = service outage (P7-audit M17).
 
@@ -833,10 +833,11 @@ source .venv/bin/activate
 python scripts/probe_ibkr_market_data.py 2>&1 | tee scripts/probe_mktdata_$(date +%H%M%S).log
 ```
 
-It tests SPY (control US equity) before SPX/VIX (indices). Output interpretation:
-- **Control SPY OK, SPX/VIX NO DATA** → index data-sharing toggle not propagated yet
-- **Everything NO DATA** → broader broker-data-sharing issue
-- **All DATA OK** → Step 2 passes; check field 6509 for `R`/`D`/`Z` availability
+It dumps SPY and SPX/VIX side by side. Output interpretation (**account reality as of 2026-07-06:** SPX/VIX are real-time, SPY is delayed — the inverse of the probe's original "SPY = free-realtime control" premise):
+- **SPX/VIX `R`, SPY `DP`** → expected steady state on this account (index realtime subscription present, no US-equity one). NOT a fault.
+- **SPX/VIX NO DATA / `DP`** → the real regression — index entitlement or data-sharing lapsed; chase this.
+- **Everything NO DATA** → broader broker-data-sharing / session issue
+- Always check field 6509 first char: `R`=real-time, `D`=delayed, `Z`=frozen.
 
 ---
 
