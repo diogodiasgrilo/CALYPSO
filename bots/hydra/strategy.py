@@ -640,22 +640,27 @@ class HydraStrategy(MEICStrategy):
         # close escalates straight to a true MARKET order (a crossing limit can
         # chase-and-miss a fast tape near expiry). 0 disables the escalation.
         self.eod_flatten_market_minutes = float(_eod.get("market_order_minutes", 6.0))
-        # OTM-skip (2026-06-25): leave an entry whose every alive SHORT is at least
-        # this many points OTM to cash-settle worthless for FREE, instead of paying
-        # to close it in the un-closable window. Data-derived: over 84 days SPX
-        # never moved >=20pt in the final 10 min (max 18.4), so a >=25pt-OTM short's
-        # settlement risk is ~0% while closing it burns the close cost + commission
-        # (the 06-25 C E#2 gave back ~$43 of a $210 credit). 0 disables the skip
-        # (always close — the pre-2026-06-25 behavior). Full analysis:
-        # docs/HYDRA_HOLD_IF_SAFE_ANALYSIS.md + the final-10-min reversal study.
-        self.eod_flatten_skip_otm_pts = float(_eod.get("skip_otm_pts", 25.0))
+        # OTM-skip (2026-06-25; made PER-SIDE 2026-07-06): leave any alive SHORT that
+        # is at least this many points OTM to cash-settle worthless for FREE, instead
+        # of buying it back in the un-closable window. Data-derived: over 84 days SPX
+        # never moved >=20pt in the final 10 min (max 18.4), so a >=20pt-OTM short's
+        # settlement risk is ~0% while closing it burns the close cost + commission.
+        # Applied PER SIDE: a comfortably-OTM side rides to expiry even when the
+        # sibling side on the same entry is at-risk. The old per-ENTRY gate closed
+        # BOTH sides whenever EITHER was within the cushion — on 2026-07-06 that bought
+        # back C's 72-77pt-OTM puts (calls only ~18pt OTM) for a needless debit +
+        # commission, giving back ~$215 of the day's profit for a $0.35 net. Threshold
+        # lowered 25 -> 20 the same day to match the 84-day final-10-min max move
+        # (18.4pt). 0 disables the skip (always close — the pre-2026-06-25 behavior).
+        # Full analysis: docs/HYDRA_HOLD_IF_SAFE_ANALYSIS.md + the final-10-min study.
+        self.eod_flatten_skip_otm_pts = float(_eod.get("skip_otm_pts", 20.0))
         self._eod_flatten_done = False  # one-shot latch; reset each new ET day
         logger.info(
             f"  EOD safety flatten (MKT-047): "
             f"{'ENABLED' if self.eod_flatten_enabled else 'DISABLED'} "
             f"@ {self.eod_flatten_time_et} ET ({self.eod_flatten_time_fomc_et} on FOMC); "
             f"MARKET-order close inside {self.eod_flatten_market_minutes:.0f}min of close; "
-            f"skip shorts >= {self.eod_flatten_skip_otm_pts:.0f}pt OTM"
+            f"per-side skip shorts >= {self.eod_flatten_skip_otm_pts:.0f}pt OTM"
         )
 
         # MKT-021: Pre-entry ROC gate - skip remaining entries if ROC already
@@ -2933,9 +2938,15 @@ class HydraStrategy(MEICStrategy):
         disabled (pts <= 0), the spot/strikes are unreadable, OR any alive short is
         within the cushion. Requires >= 1 alive short (nothing to skip otherwise).
         SPXW is cash-settled (no assignment risk) and the final-10-min reversal
-        study shows ~0% touch at >= 20pt, so a >= 25pt-OTM short settles worthless
-        safely; closing it only burns the close cost + commission."""
-        cushion = getattr(self, "eod_flatten_skip_otm_pts", 25.0)
+        study shows ~0% touch at >= 20pt, so a >= 20pt-OTM short settles worthless
+        safely; closing it only burns the close cost + commission.
+
+        NOTE: this is the whole-entry gate (True only if EVERY alive short is safe).
+        When only ONE side is safe, the per-side gate `_eod_flatten_can_skip_side`
+        lets that side ride while the at-risk side is still flattened — added
+        2026-07-06 after the per-entry all-or-nothing gate needlessly bought back C's
+        72-77pt-OTM puts because the call side was ~18pt OTM."""
+        cushion = getattr(self, "eod_flatten_skip_otm_pts", 20.0)
         if cushion <= 0:
             return False  # skip disabled → always close (pre-2026-06-25 behavior)
         spot = getattr(self, "current_price", None)
@@ -2956,6 +2967,41 @@ class HydraStrategy(MEICStrategy):
             if otm < cushion:
                 return False  # a short within the cushion → close the whole entry
         return any_alive_short
+
+    def _eod_flatten_can_skip_side(self, entry, side_name: str) -> bool:
+        """Per-SIDE OTM-skip gate (MKT-047, 2026-07-06). True iff ``side_name``'s
+        (``"call"``/``"put"``) alive short is at least ``eod_flatten_skip_otm_pts``
+        OTM, so THAT side cash-settles worthless and need NOT be bought back in the
+        un-closable window — even when the sibling side on the same entry is at-risk.
+
+        This is what fixes the 2026-07-06 C leak: the per-ENTRY gate above returns
+        False (close the whole entry) the moment ANY short is within the cushion, so
+        a ~18pt-OTM short call forced a needless buy-back of the 72-77pt-OTM put side
+        (~$215 of profit given back). Flattening only the at-risk side, and leaving
+        the safe side to ride to free worthless expiry, keeps the pre-expiry tail
+        protection where it matters without the bleed.
+
+        Same conservative failure posture as the whole-entry gate: returns False (=>
+        CLOSE the side) when the skip is disabled, the spot/strike is unreadable, the
+        side is not an alive short, or the short is within the cushion."""
+        cushion = getattr(self, "eod_flatten_skip_otm_pts", 20.0)
+        if cushion <= 0:
+            return False  # skip disabled → always close
+        spot = getattr(self, "current_price", None)
+        if not (isinstance(spot, (int, float)) and spot > 0):
+            return False  # no usable spot → can't assess → close to be safe
+        # Only an ALIVE short can be skipped (a stopped/expired/skipped/pivot-closed
+        # side is already handled and is not in _close_entry_early's sides_to_close).
+        if (getattr(entry, f"{side_name}_side_stopped", False)
+                or getattr(entry, f"{side_name}_side_expired", False)
+                or getattr(entry, f"{side_name}_side_skipped", False)
+                or getattr(entry, f"{side_name}_side_pivot_closed", False)):
+            return False
+        strike = getattr(entry, f"short_{side_name}_strike", None)
+        if not (isinstance(strike, (int, float)) and strike > 0):
+            return False  # unreadable short strike → close to be safe
+        otm = (strike - spot) if side_name == "call" else (spot - strike)
+        return otm >= cushion
 
     def _execute_eod_flatten(self, *, cutoff_label: str, is_fomc: bool) -> str:
         """MKT-047: force-close ALL open legs as a pre-expiry SAFETY flatten,
@@ -2979,6 +3025,7 @@ class HydraStrategy(MEICStrategy):
         logger.warning("=" * 60)
 
         legs_closed = legs_failed = entries_closed = entries_skipped_otm = 0
+        sides_skipped_otm = 0
         deferred_legs: list = []
         for entry in list(self.daily_state.active_entries):
             # OTM-skip: a comfortably-OTM entry cash-settles worthless for free —
@@ -2992,7 +3039,22 @@ class HydraStrategy(MEICStrategy):
                     entry.entry_number, self.eod_flatten_skip_otm_pts,
                 )
                 continue
-            c, f, d = self._close_entry_early(entry)
+            # Per-SIDE OTM-skip (2026-07-06): the whole-entry gate above is False, so
+            # at least one side is at-risk — but the SIBLING side may be comfortably
+            # OTM. Leave any such side to ride to free worthless expiry instead of
+            # dragging it into the flatten (the per-entry gate used to buy back C's
+            # 72-77pt-OTM puts just because the calls were ~18pt OTM: ~$215 given back).
+            skip_sides = {s for s in ("call", "put")
+                          if self._eod_flatten_can_skip_side(entry, s)}
+            if skip_sides:
+                sides_skipped_otm += len(skip_sides)
+                logger.info(
+                    "  MKT-047: PARTIAL flatten of E#%s — %s side >= %.0fpt OTM rides "
+                    "to worthless expiry; closing only the at-risk side(s).",
+                    entry.entry_number, "+".join(sorted(skip_sides)),
+                    self.eod_flatten_skip_otm_pts,
+                )
+            c, f, d = self._close_entry_early(entry, skip_sides=skip_sides)
             legs_closed += c
             legs_failed += f
             deferred_legs.extend(d)
@@ -3045,12 +3107,13 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             logger.error(f"MKT-047: Alert failed: {e}")
 
-        _skip_pts = getattr(self, "eod_flatten_skip_otm_pts", 25.0)
+        _skip_pts = getattr(self, "eod_flatten_skip_otm_pts", 20.0)
         logger.warning(
             f"MKT-047: EOD FLATTEN COMPLETE | {entries_closed} entries, "
             f"{legs_closed} legs closed, {legs_failed} failed | "
-            f"{entries_skipped_otm} skipped (>= {_skip_pts:.0f}pt OTM, "
-            f"ride to worthless expiry) | Net P&L: ${final_net_pnl:.2f}"
+            f"{entries_skipped_otm} entries + {sides_skipped_otm} side(s) skipped "
+            f"(>= {_skip_pts:.0f}pt OTM, ride to worthless expiry) | "
+            f"Net P&L: ${final_net_pnl:.2f}"
         )
         return (
             f"MKT-047 EOD FLATTEN: {entries_closed} entr(ies) closed at "
@@ -3091,13 +3154,21 @@ class HydraStrategy(MEICStrategy):
                 f"credit=${credit:.2f} (fill prices deferred)"
             )
 
-    def _close_entry_early(self, entry) -> Tuple[int, int, list]:
+    def _close_entry_early(self, entry, skip_sides=None) -> Tuple[int, int, list]:
         """
-        Close all open legs of an entry for MKT-018 early close.
+        Close all open legs of an entry for MKT-018 early close / MKT-047 flatten.
+
+        ``skip_sides`` (a set/collection of {"call", "put"}) leaves those sides
+        UNTOUCHED — used by the MKT-047 per-side OTM-skip so a comfortably-OTM side
+        rides to free worthless expiry while the at-risk side is flattened. A skipped
+        side is NOT marked expired/closed, so it keeps its uic and stays fully stop-
+        monitored + settlement-booked, exactly as before MKT-047. Default (None/empty)
+        closes both sides — the MKT-018 behavior, unchanged.
 
         Returns: (legs_closed, legs_failed, deferred_legs)
             deferred_legs: List of (entry, side_name, leg_name, order_id, uic) for async lookup
         """
+        skip_sides = skip_sides or set()
         legs_closed = 0
         legs_failed = 0
         deferred_legs = []
@@ -3112,7 +3183,8 @@ class HydraStrategy(MEICStrategy):
         # caller marked the side stopped. position_id kept as the dry-run
         # fallback (_simulate_* sets truthy DRY_* ids). Mirrors the fix already
         # in _execute_stop_loss.
-        if (not entry.call_side_stopped and not entry.call_side_expired
+        if ("call" not in skip_sides
+            and not entry.call_side_stopped and not entry.call_side_expired
             and not getattr(entry, 'call_side_skipped', False)
             and (entry.short_call_uic or entry.short_call_position_id)):
             sides_to_close.append(("call", [
@@ -3121,7 +3193,8 @@ class HydraStrategy(MEICStrategy):
             ]))
 
         # Check put side
-        if (not entry.put_side_stopped and not entry.put_side_expired
+        if ("put" not in skip_sides
+            and not entry.put_side_stopped and not entry.put_side_expired
             and not getattr(entry, 'put_side_skipped', False)
             and (entry.short_put_uic or entry.short_put_position_id)):
             sides_to_close.append(("put", [

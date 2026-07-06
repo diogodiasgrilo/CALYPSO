@@ -36,6 +36,27 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- MKT-047 PER-SIDE OTM-skip + calendar per-entry P&L booking (2026-07-06). (1) The
+  EOD-flatten OTM-skip was PER-ENTRY all-or-nothing — it only skipped an entry when
+  EVERY alive short was >= the cushion, so one at-risk side force-closed the whole
+  entry including a far-OTM sibling side. On 2026-07-06 variant C's short calls were
+  ~18pt OTM (< cushion) while the short puts were 72-77pt OTM: both entries flattened
+  in full, buying the worthless puts back for a needless debit + close commission and
+  giving back ~$215 of a ~$215.60 would-be day (booked $105 realized − $104.65 comm =
+  $0.35 net). Fix: `_eod_flatten_can_skip_side(entry, side)` gates each side
+  independently and `_close_entry_early(entry, skip_sides=...)` leaves the safe
+  side(s) UNTOUCHED to ride to free worthless expiry, flattening only the at-risk
+  side — the pre-expiry tail protection is preserved where it matters. The
+  whole-entry `_eod_flatten_can_skip` fast-path is retained. Threshold default
+  lowered 25 → 20pt to match the 84-day final-10-min max move (18.4pt). Shared by
+  A/B/C (one strategy.py path). (2) Calendar per-entry attribution: `_dc_close_calendar`
+  (CAL-STOP + CAL-EOD-CLOSE), `_dc_settle_entry` (D), and `_spy_dc_partial_close` +
+  `_dc_settle_entry` (E) booked realized P&L straight to `daily_state.total_realized_pnl`,
+  leaving `entry.realized_pnl` at 0.0 and tripping the settlement RECONCILE drift guard
+  (2026-07-06 D: sum $0 != total −$340). All four now route through
+  `_book_realized_pnl(entry=...)`; aggregate unchanged, per-entry populated (unblocks
+  slot_edge on the calendars). +14 tests (per-side gate/exec/leg-exclusion + calendar
+  per-entry); full suite 1888 passed.
 - MKT-047 OTM-skip + dashboard EOD-flatten labeling (2026-06-25). (1) The EOD
   safety flatten now LEAVES a 0DTE entry whose every alive short is >= 25pt OTM
   (config eod_flatten.skip_otm_pts) to cash-settle worthless for FREE, instead of
