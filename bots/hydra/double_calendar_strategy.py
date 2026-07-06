@@ -719,7 +719,10 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
             close_comm = 4 * self.commission_per_leg * n
             self.daily_state.total_commission += close_comm
             entry.close_commission = getattr(entry, "close_commission", 0.0) + close_comm
-        self.daily_state.total_realized_pnl += realized
+        # Per-entry attribution (2026-07-06): route through _book_realized_pnl so
+        # entry.realized_pnl is populated and the settlement RECONCILE guard doesn't
+        # drift. Aggregate booking is identical to the old direct +=.
+        self._book_realized_pnl(realized, entry=entry)
         entry.dc_phase = DCPhase.CLOSED
         entry.call_side_expired = entry.put_side_expired = True  # settled at expiry
         self._dc_clear_leg_conids(entry)

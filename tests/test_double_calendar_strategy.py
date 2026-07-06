@@ -517,6 +517,9 @@ class TestCloseCalendar:
         assert e.dc_phase == DCPhase.CLOSED
         assert e.call_side_stopped and e.put_side_stopped
         assert inst.daily_state.total_realized_pnl == pytest.approx(-50.0)
+        # 2026-07-06: per-entry attribution — realized_pnl now mirrors the day total
+        # (was left at 0.0, which drifted the settlement RECONCILE guard).
+        assert e.realized_pnl == pytest.approx(-50.0)
         assert e.close_commission == pytest.approx(4 * 1.15 * 1)
         assert self._saved == [True]  # persisted on close (crash-window guard)
 
@@ -527,6 +530,7 @@ class TestCloseCalendar:
         assert e.dc_phase == DCPhase.CLOSED
         assert e.call_side_pivot_closed and e.put_side_pivot_closed
         assert inst.daily_state.total_realized_pnl == pytest.approx(10.0)
+        assert e.realized_pnl == pytest.approx(10.0)  # per-entry attribution (2026-07-06)
 
 
 class TestManageCalendar:

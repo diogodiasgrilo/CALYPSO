@@ -605,7 +605,9 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
         n_close = min(n_close, contracts_before)
         slice_pnl = entry.unrealized_pnl * (n_close / contracts_before)
         close_comm = 4 * self.commission_per_leg * n_close
-        self.daily_state.total_realized_pnl += slice_pnl
+        # Per-entry attribution (2026-07-06): _book_realized_pnl accumulates onto
+        # entry.realized_pnl across successive ladder slices; aggregate is unchanged.
+        self._book_realized_pnl(slice_pnl, entry=entry)
         self.daily_state.total_commission += close_comm
         entry.close_commission = getattr(entry, "close_commission", 0.0) + close_comm
         entry.contracts = contracts_before - n_close
@@ -659,7 +661,9 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
         close_comm = 4 * self.commission_per_leg * n
         self.daily_state.total_commission += close_comm
         entry.close_commission = getattr(entry, "close_commission", 0.0) + close_comm
-        self.daily_state.total_realized_pnl += realized
+        # Per-entry attribution (2026-07-06): route through _book_realized_pnl so
+        # entry.realized_pnl is populated (settlement RECONCILE guard doesn't drift).
+        self._book_realized_pnl(realized, entry=entry)
         entry.dc_phase = DCPhase.CLOSED
         entry.call_side_expired = entry.put_side_expired = True  # settled at expiry
         self._dc_clear_leg_conids(entry)

@@ -571,7 +571,12 @@ class CalendarStrategyBase(HydraStrategy):
         pnl = entry.unrealized_pnl  # CALENDAR phase: calendar_value - net_debit
         n = entry.contracts or self.contracts_per_entry
         close_comm = 4 * self.commission_per_leg * n
-        self.daily_state.total_realized_pnl += pnl
+        # Route through _book_realized_pnl(entry=...) so entry.realized_pnl is
+        # populated (per-entry attribution), not just the day aggregate. Booking
+        # directly to total_realized_pnl left entry.realized_pnl at 0.0 and tripped
+        # the settlement RECONCILE drift guard (2026-07-06 D: sum $0 != total -$340);
+        # it also blocked per-entry/slot analytics on the calendars.
+        self._book_realized_pnl(pnl, entry=entry)
         self.daily_state.total_commission += close_comm
         entry.close_commission = close_comm
         entry.dc_phase = DCPhase.CLOSED
