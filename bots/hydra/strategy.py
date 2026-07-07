@@ -5534,18 +5534,37 @@ class HydraStrategy(MEICStrategy):
         correctly still skips.
         """
         px = float(self.current_price or 0)
-        if px > 0:
-            return px
+        # Recover the day's last recorded intraday tick from disk (market_ticks) —
+        # it survives a late after-hours settlement AND a mid-evening restart.
+        disk = 0.0
         rec = getattr(self, "_data_recorder", None)
         if rec is not None:
             try:
                 today = get_us_market_time().strftime("%Y-%m-%d")
                 last = rec.get_last_spx_for_date(today)
                 if last and last > 0:
-                    return float(last)
+                    disk = float(last)
             except Exception:
                 pass
-        return px  # 0.0 — no intraday data → genuine phantom; guard skips
+        # px<=0: after-hours decay → use the on-disk close (2026-06-11 gap fix).
+        if px <= 0:
+            return disk or px
+        # STALE-PRICE GUARD (2026-07-07): a post-close restart can re-fetch a stale,
+        # NON-zero current_price — variant C on 07-06 got 7420.22 (a PRIOR-day value,
+        # ~1.6% below the real 7537.86 recorded close). Settling the daily summary /
+        # Brandon overlays against it booked a phantom -$6,037 loss (the RECONCILE
+        # guard flagged it). A legitimate settlement current_price is the ~4 PM tick,
+        # within ~0.05% of the last recorded intraday tick — so a >1% divergence means
+        # current_price is stale; trust the on-disk close instead.
+        if disk > 0 and abs(px - disk) / disk > 0.01:
+            logger.warning(
+                "SPX-CLOSE GUARD: current_price %.2f diverges >1%% from the recorded "
+                "intraday close %.2f — using the recorded close (stale post-restart "
+                "price?). Prevents a phantom settlement (2026-07-06 variant C).",
+                px, disk,
+            )
+            return disk
+        return px
 
     @staticmethod
     def _daily_summary_is_stale(state_date: str, today: str, spx_close) -> bool:

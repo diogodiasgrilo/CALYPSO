@@ -1736,14 +1736,15 @@ class BrandonHydraStrategy(HydraStrategy):
 
     def log_daily_summary(self):
         # Settle hedges BEFORE the parent's daily summary so they're journaled
-        # for the same day. We use self.current_price as the proxy for the
-        # actual SPXW PM-settlement value. The bot's last in-session price
-        # update is normally a 4:00 PM ET tick, so this is within ~0.05% of
-        # the official settlement value — acceptable for dry-run analytics.
-        # If precision matters more later, wire up Polygon's settlement
-        # endpoint or pull SPX from /v2/aggs/ticker/I:SPX/prev (next morning).
+        # for the same day. Use the VALIDATED close (_resolve_spx_close), NOT raw
+        # self.current_price: a post-close restart can leave current_price stale
+        # (variant C 07-06 held 7420.22, a prior-day value, and the overlays
+        # settled against it → phantom -$6,037 loss). _resolve_spx_close
+        # cross-checks the on-disk recorded intraday close and rejects a >1%
+        # divergent live price. The last in-session tick is a ~4 PM ET value,
+        # within ~0.05% of the official SPXW PM settlement — fine for analytics.
         try:
-            spx_settle = float(self.current_price or 0.0)
+            spx_settle = float(self._resolve_spx_close() or 0.0)
             if spx_settle > 0:
                 self._brandon_settle_hedges(spx_settle)
         except Exception as exc:

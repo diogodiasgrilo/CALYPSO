@@ -36,6 +36,21 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Stale-SPX settlement guard (2026-07-07). A post-close RESTART can re-fetch a
+  stale, non-zero current_price — variant C on 07-06 held 7420.22 (a PRIOR-day
+  value, ~1.6% below the real 7537.86 recorded close). The daily-summary +
+  Brandon-overlay settlement then booked against it → a phantom -$6,037 loss
+  (the overlays all settled as total losses vs the wrong low SPX; the RECONCILE
+  guard flagged the drift). _resolve_spx_close() only guarded the after-hours-
+  decay-to-0 case, not a non-zero-but-stale value. Fix: it now cross-checks the
+  clean on-disk recorded intraday close (market_ticks survives a restart) and,
+  when live current_price diverges >1%, trusts the recorded close; the Brandon
+  overlay settlement (log_daily_summary) routes through it instead of raw
+  current_price. Operational: don't restart C/B while settlement is still
+  pending. +5 tests (test_aud5_fixes); full suite 1896 passed. (Known follow-up:
+  data/brandon_hedge_legs.json is NOT variant-isolated and accumulates orphaned
+  prior-day overlays — 07-06 settled 6 entries' worth incl. E3/E4/E6/E7 with "no
+  matching daily_state entry" — a separate fix.)
 - MKT-047 PER-SIDE OTM-skip + calendar per-entry P&L booking (2026-07-06). (1) The
   EOD-flatten OTM-skip was PER-ENTRY all-or-nothing — it only skipped an entry when
   EVERY alive short was >= the cushion, so one at-risk side force-closed the whole

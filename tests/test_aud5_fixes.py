@@ -386,10 +386,45 @@ class TestDailySummaryCloseRecovery:
         s._data_recorder = recorder
         return s
 
-    def test_uses_current_price_when_positive(self):
-        s = self._strategy(current_price=7350.5,
-                            recorder=MagicMock(get_last_spx_for_date=MagicMock(side_effect=AssertionError("should not query"))))
-        assert s._resolve_spx_close() == 7350.5  # no DB query when live price is good
+    def test_uses_current_price_when_plausible(self):
+        # current_price is now cross-checked against the recorded intraday close;
+        # when they agree (within 1%), the live price is used.
+        rec = MagicMock()
+        rec.get_last_spx_for_date.return_value = 7349.0  # within 1% of 7350.5
+        s = self._strategy(current_price=7350.5, recorder=rec)
+        assert s._resolve_spx_close() == 7350.5
+
+    def test_uses_current_price_when_no_disk_value(self):
+        # No recorder data to cross-check → trust the live price (backward-compat).
+        rec = MagicMock()
+        rec.get_last_spx_for_date.return_value = None
+        s = self._strategy(current_price=7350.5, recorder=rec)
+        assert s._resolve_spx_close() == 7350.5
+
+    def test_stale_post_restart_price_rejected_for_recorded_close(self):
+        # The exact 2026-07-06 variant C bug: current_price is stale (7420.22, a
+        # prior-day value ~1.6% below the real recorded close 7537.86) → the guard
+        # trusts the on-disk close instead, preventing the phantom -$6,037 settle.
+        rec = MagicMock()
+        rec.get_last_spx_for_date.return_value = 7537.86
+        s = self._strategy(current_price=7420.22, recorder=rec)
+        assert s._resolve_spx_close() == 7537.86
+
+    def test_small_divergence_keeps_live_price(self):
+        # A normal ~0.05% gap between the 4 PM current_price and the last tick must
+        # NOT over-trigger the guard.
+        rec = MagicMock()
+        rec.get_last_spx_for_date.return_value = 7537.86
+        s = self._strategy(current_price=7541.5, recorder=rec)  # 0.048% gap
+        assert s._resolve_spx_close() == 7541.5
+
+    def test_divergent_price_kept_when_no_disk_recovery(self):
+        # A divergent live price with no recoverable disk close can't be verified →
+        # keep it (the guard only overrides when it has a trusted on-disk value).
+        rec = MagicMock()
+        rec.get_last_spx_for_date.return_value = None
+        s = self._strategy(current_price=7420.22, recorder=rec)
+        assert s._resolve_spx_close() == 7420.22
 
     def test_recovers_last_tick_when_price_zero(self):
         rec = MagicMock()
