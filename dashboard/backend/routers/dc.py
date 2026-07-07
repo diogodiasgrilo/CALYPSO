@@ -31,4 +31,5 @@ def dc_status():
     return read_dc_status(
         os.path.join(vd, "dc_open_trades.json"),
         os.path.join(vd, "dc_calendar.db"),
+        baseline_date=settings.variant_d_baseline_date or "",
     )

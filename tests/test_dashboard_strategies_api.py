@@ -76,6 +76,13 @@ def client(tmp_path, monkeypatch):
     # Turn the guard ON for this test (default is empty = disabled).
     monkeypatch.setattr(settings, "api_key", API_KEY, raising=False)
 
+    # These tests verify the calendar payload SHAPE off pre-2026-07-07 seed data,
+    # so pin the D/E baseline to full-history (the production default is 2026-07-07,
+    # which would otherwise cull the seed). Baseline-filtering itself is covered by
+    # tests/test_dc_db_reader.py.
+    monkeypatch.setattr(settings, "variant_d_baseline_date", "", raising=False)
+    monkeypatch.setattr(settings, "variant_e_baseline_date", "", raising=False)
+
     # Point variant D's data dir at a seeded calendar DB (the calendar group's
     # comparison reads data/variant_<id>/dc_calendar.db). E stays missing →
     # available:false, which the payload must tolerate.

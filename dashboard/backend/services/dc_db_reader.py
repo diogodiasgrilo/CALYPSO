@@ -89,6 +89,22 @@ class DCDBReader:
             self._local.conn = None  # discard broken connection
             return []
 
+    @staticmethod
+    def _entry_clause(baseline_date: str, *, leading: str = "WHERE") -> tuple[str, tuple]:
+        """A ``{leading} entry_date >= ?`` filter when a baseline is set, else a
+        no-op ("", ()) so callers are byte-identical to full history.
+
+        Keyed on **entry_date** (the calendar's birth), NOT close_date: a calendar
+        ENTERED before the strategy was 100%-correct (e.g. D's pre-cfc6027 artifact
+        days, or E's pre-fix open calendar) stays hidden even if it CLOSES after the
+        baseline. Mirrors ``BacktestingDBReader._baseline_clause`` (which keys on the
+        IC summary date) but on the calendar-native entry_date. See
+        Settings.variant_{d,e}_baseline_date."""
+        b = (baseline_date or "").strip()
+        if not b:
+            return "", ()
+        return f"{leading} entry_date >= ?", (b,)
+
     # ------------------------------------------------------------------
 
     async def is_available(self) -> bool:
@@ -100,7 +116,8 @@ class DCDBReader:
         except OSError:
             return False
 
-    async def get_daily_calendar_summaries(self, limit: int = 365) -> list[dict]:
+    async def get_daily_calendar_summaries(self, limit: int = 365,
+                                           baseline_date: str = "") -> list[dict]:
         """Per-day realized P&L, attributed to **``close_date``**.
 
         Rolls up ``dc_outcomes.realized_pnl`` GROUP BY ``close_date`` into
@@ -109,42 +126,51 @@ class DCDBReader:
         so the cumulative curve is monotonic-in-time and never mutates a past
         point when an old position settles later (audit AUD-4-F4).
         ``outcomes`` is the count of calendars that closed that day.
+
+        ``baseline_date`` (ISO) rebases to calendars ENTERED >= that date, hiding
+        pre-baseline (not-yet-correct) history; empty = full history.
         """
+        clause, cparams = self._entry_clause(baseline_date, leading="AND")
         rows = await to_thread(
             self._query,
-            """SELECT close_date AS date,
+            f"""SELECT close_date AS date,
                       ROUND(COALESCE(SUM(realized_pnl), 0), 2) AS net_pnl,
                       COUNT(*) AS outcomes
                FROM dc_outcomes
-               WHERE close_date IS NOT NULL
+               WHERE close_date IS NOT NULL {clause}
                GROUP BY close_date
                ORDER BY close_date DESC
                LIMIT ?""",
-            (limit,),
+            (*cparams, limit),
         )
         # Return oldest-first so a caller building a cumulative curve gets the
         # natural chronological order (matches the IC reader's get_all_summaries).
         return list(reversed(rows))
 
-    async def get_calendar_outcomes(self, limit: int = 20) -> list[dict]:
+    async def get_calendar_outcomes(self, limit: int = 20,
+                                    baseline_date: str = "") -> list[dict]:
         """Most-recent terminal calendar outcomes (newest first).
 
         Debit-native columns only — ``net_debit`` (the capital at risk) and
         ``transform_credit`` (nullable; present-but-empty for non-transformer
         calendars like E). No credit/spread-width fields.
+
+        ``baseline_date`` (ISO) hides outcomes for calendars ENTERED before it.
         """
+        clause, cparams = self._entry_clause(baseline_date)
         return await to_thread(
             self._query,
-            """SELECT entry_date, close_date, entry_number, strategy_id,
+            f"""SELECT entry_date, close_date, entry_number, strategy_id,
                       terminal_state, realized_pnl, spx_at_close,
                       close_commission, transform_credit, net_debit
                FROM dc_outcomes
+               {clause}
                ORDER BY close_date DESC, entry_number DESC
                LIMIT ?""",
-            (limit,),
+            (*cparams, limit),
         )
 
-    async def get_cumulative_overrides_calendar(self) -> dict:
+    async def get_cumulative_overrides_calendar(self, baseline_date: str = "") -> dict:
         """Lifetime calendar totals — debit-native, NO IC fields.
 
         Capital basis = ``SUM(net_debit)`` (the defined risk of a debit calendar),
@@ -154,35 +180,41 @@ class DCDBReader:
         calendar payload structurally cannot leak an IC field. A win/loss day is a
         ``close_date`` whose summed realized P&L is > 0 / < 0.
 
-        Returns zeros on a missing/empty DB, never raises.
+        ``baseline_date`` (ISO) rebases EVERY aggregate to calendars ENTERED >= it
+        (COALESCE keeps an empty window an authoritative $0/0, not full history);
+        empty = full history. Returns zeros on a missing/empty DB, never raises.
         """
+        main_clause, main_p = self._entry_clause(baseline_date)  # WHERE entry_date >= ?
         rows = await to_thread(
             self._query,
-            """SELECT
+            f"""SELECT
                 ROUND(COALESCE(SUM(realized_pnl), 0), 2) AS cumulative_pnl,
                 ROUND(COALESCE(SUM(net_debit), 0), 2)    AS capital_at_risk,
                 COUNT(*)                                  AS total_calendars,
                 COUNT(DISTINCT entry_date)                AS entry_days,
                 MAX(close_date)                           AS last_updated
-               FROM dc_outcomes""",
+               FROM dc_outcomes {main_clause}""",
+            main_p,
         )
         base = rows[0] if rows else {}
 
         # Win/loss DAY counts keyed on close_date (a day is a win iff its summed
         # realized P&L is positive) — computed in SQL so it stays consistent with
-        # the daily summaries' close_date attribution.
+        # the daily summaries' close_date attribution. Same entry_date baseline.
+        day_clause, day_p = self._entry_clause(baseline_date, leading="AND")
         day_rows = await to_thread(
             self._query,
-            """SELECT
+            f"""SELECT
                 SUM(CASE WHEN day_pnl > 0 THEN 1 ELSE 0 END) AS winning_days,
                 SUM(CASE WHEN day_pnl < 0 THEN 1 ELSE 0 END) AS losing_days,
                 COUNT(*)                                      AS close_days
                FROM (
                   SELECT ROUND(SUM(realized_pnl), 2) AS day_pnl
                   FROM dc_outcomes
-                  WHERE close_date IS NOT NULL
+                  WHERE close_date IS NOT NULL {day_clause}
                   GROUP BY close_date
                )""",
+            day_p,
         )
         days = day_rows[0] if day_rows else {}
 

@@ -444,6 +444,7 @@ def _dc_snapshot(vid: str, m: tax.StrategyMeta) -> dict:
     status = read_dc_status(
         str(vd / "dc_open_trades.json") if vd else None,
         str(vd / "dc_calendar.db") if vd else None,
+        baseline_date=getattr(settings, f"variant_{vid}_baseline_date", "") or "",
     )
     return {
         "available": True,
@@ -609,13 +610,15 @@ async def _calendar_group_comparison(member_ids: list[str]) -> dict:
                 "available": False,
             }
             continue
-        overrides = await reader.get_cumulative_overrides_calendar()
-        outcomes = await reader.get_calendar_outcomes(limit=10)
+        baseline = getattr(settings, f"variant_{vid}_baseline_date", "") or ""
+        overrides = await reader.get_cumulative_overrides_calendar(baseline)
+        outcomes = await reader.get_calendar_outcomes(limit=10, baseline_date=baseline)
         # Open calendars from the sidecar (D/E persist via dc_open_trades.json).
         vd = _variant_dir(vid)
         status = read_dc_status(
             str(vd / "dc_open_trades.json") if vd else None,
             str(vd / "dc_calendar.db") if vd else None,
+            baseline_date=baseline,
         )
         per_member[vid.upper()] = {
             "id": vid.upper(),
@@ -660,8 +663,9 @@ async def _calendar_group_aggregate(member_ids: list[str]) -> dict:
                 "available": False,
             }
             continue
-        daily = await reader.get_daily_calendar_summaries()
-        overrides = await reader.get_cumulative_overrides_calendar()
+        baseline = getattr(settings, f"variant_{vid}_baseline_date", "") or ""
+        daily = await reader.get_daily_calendar_summaries(baseline_date=baseline)
+        overrides = await reader.get_cumulative_overrides_calendar(baseline)
         # Running cumulative curve (close-date attributed → monotonic in time).
         running = 0.0
         curve = []

@@ -118,3 +118,35 @@ def test_read_only_connection_rejects_writes(reader):
     assert conn is not None
     with pytest.raises(sqlite3.OperationalError):
         conn.execute("INSERT INTO dc_outcomes (entry_date, entry_number) VALUES ('x', 99)")
+
+
+def test_baseline_hides_pre_baseline_entries(reader):
+    # baseline 2026-06-10 keys on ENTRY_date: the two 06-09-entered calendars are
+    # hidden even though they CLOSE on 06-12/06-13 (>= baseline); only x_3, ENTERED
+    # 06-10, survives. This is the D/E cull semantic (a pre-fix calendar can't
+    # reappear by closing after the baseline).
+    o = asyncio.run(reader.get_cumulative_overrides_calendar("2026-06-10"))
+    assert o["cumulative_pnl"] == pytest.approx(60.0)     # only x_3
+    assert o["capital_at_risk"] == pytest.approx(100.0)   # only x_3's net_debit
+    assert o["total_calendars"] == 1
+    assert o["entry_days"] == 1
+    assert o["winning_days"] == 1 and o["losing_days"] == 0
+
+    outs = asyncio.run(reader.get_calendar_outcomes(limit=10, baseline_date="2026-06-10"))
+    assert [r["entry_date"] for r in outs] == ["2026-06-10"]
+
+    daily = asyncio.run(reader.get_daily_calendar_summaries(baseline_date="2026-06-10"))
+    assert [(r["date"], r["net_pnl"]) for r in daily] == [("2026-06-13", 60.0)]
+
+
+def test_baseline_in_future_zeroes_everything(reader):
+    # A baseline AFTER every entry (the 2026-07-07 D/E case before any post-fix
+    # trade exists) → empty window → authoritative zeros/empties, NOT full history.
+    o = asyncio.run(reader.get_cumulative_overrides_calendar("2026-07-07"))
+    assert o["cumulative_pnl"] == 0.0
+    assert o["capital_at_risk"] == 0.0
+    assert o["total_calendars"] == 0
+    assert o["entry_days"] == 0
+    assert o["winning_days"] == 0
+    assert asyncio.run(reader.get_calendar_outcomes(baseline_date="2026-07-07")) == []
+    assert asyncio.run(reader.get_daily_calendar_summaries(baseline_date="2026-07-07")) == []

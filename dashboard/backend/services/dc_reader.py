@@ -18,7 +18,21 @@ import sqlite3
 from typing import Optional
 
 
-def _read_open_calendars(sidecar_path: Optional[str]) -> list:
+def _cal_entry_iso(r: dict) -> str:
+    """The calendar's entry (birth) date as YYYY-MM-DD, from ``entry_time``, else
+    the date embedded in ``strategy_id`` (e.g. ``spydc_20260622_001`` -> 2026-06-22).
+    Empty string when neither is parseable."""
+    et = str(r.get("entry_time") or "")[:10]
+    if len(et) == 10 and et[4] == "-":
+        return et
+    parts = str(r.get("strategy_id") or "").split("_")
+    if len(parts) >= 2 and len(parts[1]) == 8 and parts[1].isdigit():
+        d = parts[1]
+        return f"{d[:4]}-{d[4:6]}-{d[6:]}"
+    return ""
+
+
+def _read_open_calendars(sidecar_path: Optional[str], baseline_date: str = "") -> list:
     if not sidecar_path or not os.path.exists(sidecar_path):
         return []
     try:
@@ -26,8 +40,16 @@ def _read_open_calendars(sidecar_path: Optional[str]) -> list:
             records = json.load(f)
     except (OSError, ValueError):
         return []
+    baseline = (baseline_date or "").strip()
     rows = []
     for r in records or []:
+        # Hide calendars ENTERED before the strategy was 100%-correct (baseline),
+        # so a pre-fix open position (e.g. E's pre-cfc6027 06-22 calendar) is not
+        # shown as trustworthy live state. Unparseable entry date -> keep (fail open).
+        if baseline:
+            ed = _cal_entry_iso(r)
+            if ed and ed < baseline:
+                continue
         legs = r.get("legs", {})
         sc, lc, sp = legs.get("short_call", {}), legs.get("long_call", {}), legs.get("short_put", {})
         rows.append({
@@ -50,17 +72,22 @@ def _read_open_calendars(sidecar_path: Optional[str]) -> list:
     return rows
 
 
-def _read_recent_outcomes(db_path: Optional[str], limit: int = 20) -> list:
+def _read_recent_outcomes(db_path: Optional[str], limit: int = 20,
+                          baseline_date: str = "") -> list:
     if not db_path or not os.path.exists(db_path):
         return []
+    baseline = (baseline_date or "").strip()
+    where, params = ("", ())
+    if baseline:
+        where, params = ("WHERE entry_date >= ?", (baseline,))
     try:
         con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
         con.row_factory = sqlite3.Row
         try:
             cur = con.execute(
                 "SELECT entry_date, close_date, entry_number, terminal_state, realized_pnl "
-                "FROM dc_outcomes ORDER BY close_date DESC, entry_number DESC LIMIT ?",
-                (limit,),
+                f"FROM dc_outcomes {where} ORDER BY close_date DESC, entry_number DESC LIMIT ?",
+                (*params, limit),
             )
             return [dict(r) for r in cur.fetchall()]
         finally:
@@ -69,10 +96,14 @@ def _read_recent_outcomes(db_path: Optional[str], limit: int = 20) -> list:
         return []
 
 
-def read_dc_status(sidecar_path: Optional[str], db_path: Optional[str]) -> dict:
-    """Open calendars + recent outcomes + a small summary, for /api/dc/status."""
-    open_cals = _read_open_calendars(sidecar_path)
-    outcomes = _read_recent_outcomes(db_path)
+def read_dc_status(sidecar_path: Optional[str], db_path: Optional[str],
+                   baseline_date: str = "") -> dict:
+    """Open calendars + recent outcomes + a small summary, for /api/dc/status.
+
+    ``baseline_date`` (ISO) hides calendars entered before it (both open positions
+    and closed outcomes) — the pre-100%-correct history stays off the dashboard."""
+    open_cals = _read_open_calendars(sidecar_path, baseline_date)
+    outcomes = _read_recent_outcomes(db_path, baseline_date=baseline_date)
     return {
         "strategy": "double_calendar",
         "label": "Strategy D — DC Time Machine (dry-run)",
