@@ -3091,21 +3091,32 @@ class HydraStrategy(MEICStrategy):
         final_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
         self._save_state_to_disk()
 
-        try:
-            self.alert_service.send_alert(
-                alert_type=AlertType.POSITION_CLOSED,
-                title=f"MKT-047 EOD Flatten: {entries_closed} entr(ies) closed",
-                message=(
-                    f"Force-closed open 0DTE positions at {now.strftime('%I:%M %p ET')} "
-                    f"(cutoff {cutoff_label}{', FOMC' if is_fomc else ''}) — pre-expiry safety.\n"
-                    f"{legs_closed} legs closed, {legs_failed} failed | "
-                    f"Net P&L: ${final_net_pnl:.2f}"
-                ),
-                priority=AlertPriority.HIGH if legs_failed else AlertPriority.MEDIUM,
-                contracts=self.contracts_per_entry,
-            )
-        except Exception as e:
-            logger.error(f"MKT-047: Alert failed: {e}")
+        # Alert ONLY when the flatten actually closed (or failed) a leg. When every
+        # entry was skipped (all shorts >= cushion OTM → ride to free worthless
+        # expiry), NOTHING happened and an email is pure noise ("0 entr(ies)
+        # closed"); the EOD FLATTEN COMPLETE log line below still records the skip.
+        # And do NOT put a day-P&L in this ACTION alert: at 15:50, pre-settlement,
+        # it is just the commission paid and reads as a phantom loss (variant C
+        # 07-07: "0 closed | Net P&L $-64.40" while the real OTM-settled day was
+        # ~+$566). The real number is the DAILY_SUMMARY alert, after settlement.
+        if entries_closed or legs_failed:
+            try:
+                _msg = (
+                    f"Force-closed {entries_closed} open 0DTE entr(ies) "
+                    f"({legs_closed} legs) at {now.strftime('%I:%M %p ET')} "
+                    f"(cutoff {cutoff_label}{', FOMC' if is_fomc else ''}) — pre-expiry safety."
+                )
+                if legs_failed:
+                    _msg += f"\n⚠ {legs_failed} leg(s) FAILED to close — check the position."
+                self.alert_service.send_alert(
+                    alert_type=AlertType.POSITION_CLOSED,
+                    title=f"MKT-047 EOD Flatten: {entries_closed} entr(ies) closed",
+                    message=_msg,
+                    priority=AlertPriority.HIGH if legs_failed else AlertPriority.MEDIUM,
+                    contracts=self.contracts_per_entry,
+                )
+            except Exception as e:
+                logger.error(f"MKT-047: Alert failed: {e}")
 
         _skip_pts = getattr(self, "eod_flatten_skip_otm_pts", 20.0)
         logger.warning(

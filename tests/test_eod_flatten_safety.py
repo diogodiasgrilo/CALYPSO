@@ -162,6 +162,23 @@ class TestEodFlattenExecute:
         # Must still complete + return a summary (alert is best-effort).
         assert "MKT-047" in self._run(s)
 
+    def test_no_alert_when_nothing_closed(self):
+        # Nothing actually closed (all legs gone / every entry skipped) → NO email.
+        # 2026-07-07: a "0 entr(ies) closed" flatten alert is pure noise.
+        s = self._strat(close_ret=(0, 0, []))
+        self._run(s)
+        s.alert_service.send_alert.assert_not_called()
+
+    def test_alert_has_no_misleading_pnl(self):
+        # The action alert must NOT carry a day-P&L — pre-settlement it is just the
+        # commission and reads as a phantom loss (variant C 07-07 "$-64.40" while the
+        # real OTM-settled day was ~+$566). The real number is the DAILY_SUMMARY.
+        s = self._strat(close_ret=(2, 0, []))
+        self._run(s)
+        _, kwargs = s.alert_service.send_alert.call_args
+        assert "Net P&L" not in kwargs["message"]
+        assert "Force-closed" in kwargs["message"]
+
 
 # ───────────────── near-expiry MARKET escalation (_place_marketable_close) ─────
 class TestNearExpiryMarketEscalation:
