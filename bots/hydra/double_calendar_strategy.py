@@ -232,7 +232,15 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         never sets → always 'normal' → ~12.5s checks). Go vigilant (2s) when a
         stop breach is being CONFIRMED, or when any open calendar's P&L is within
         75% of the stop or transform trigger — so the confirm window resolves and
-        the transformer fires promptly."""
+        the transformer fires promptly.
+
+        2026-07-06: gate off the ANCHORED ``pnl_move_pct`` (move-from-open), the
+        SAME metric the transform/stop decisions use (cfc6027). Previously this
+        used the raw ``unrealized_pnl / debit``, which is born ~-20% at the
+        liquidation spread and never crosses the +0.75×trigger band on a real pop —
+        so a genuine pop toward the +7.5% transform NEVER escalated to 2s vigilant
+        monitoring, and the transformer would sample it late (~12.5s) or miss it.
+        cfc6027 re-anchored the transform/stop but left this line un-anchored."""
         if not self.daily_state.active_entries:
             self._current_monitoring_mode = "normal"
             return "normal"
@@ -245,7 +253,7 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
             debit = float(getattr(entry, "net_debit", 0.0) or 0.0)
             if debit <= 0:
                 continue
-            pnl_pct = entry.unrealized_pnl / debit
+            pnl_pct = entry.pnl_move_pct  # anchored move-from-open (matches transform/stop)
             if (pnl_pct <= -0.75 * self.dc_pre_transform_stop_pct
                     or pnl_pct >= 0.75 * self.dc_profit_trigger_pct):
                 self._current_monitoring_mode = "vigilant"

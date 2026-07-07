@@ -194,6 +194,39 @@ def test_monitoring_normal_when_no_entries():
     assert s.get_monitoring_mode() == "normal"
 
 
+def _entry_anchored(net_debit, upnl, opening_pnl, num=1):
+    """A calendar born at ``opening_pnl`` (its liquidation birth spread) whose
+    anchored move-from-open drives the trigger — pnl_move_pct = (upnl-opening)/debit."""
+    e = MagicMock(spec=CalendarEntry)
+    e.entry_number = num
+    e.net_debit = net_debit
+    e.contracts = 1
+    e.unrealized_pnl = upnl
+    e.opening_pnl = opening_pnl
+    e.pnl_move_pct = ((upnl - opening_pnl) / net_debit) if net_debit else 0.0
+    e.dc_phase = DCPhase.CALENDAR
+    return e
+
+
+def test_monitoring_vigilant_on_real_pop_from_birth_spread():
+    # 2026-07-06: born at -20% (opening_pnl=-200); a genuine +7.5% move-from-open
+    # (upnl=-125 → +7.5% anchored) MUST escalate to vigilant so the transformer can
+    # fire — even though the RAW mark (-12.5%) is still negative. Pre-fix this used
+    # raw unrealized_pnl/debit (-12.5%, in the calm band) and never escalated.
+    s = _strat()
+    s.daily_state.active_entries = [_entry_anchored(1000.0, upnl=-125.0, opening_pnl=-200.0)]
+    assert s.get_monitoring_mode() == "vigilant"
+
+
+def test_monitoring_normal_on_fresh_birth_spread():
+    # A fresh calendar sitting AT its birth spread (upnl == opening_pnl) is 0% move-
+    # from-open → stay 'normal'. Pre-fix the raw -20% mark wrongly forced vigilant on
+    # EVERY fresh calendar (burning the 2s cadence with nothing happening).
+    s = _strat()
+    s.daily_state.active_entries = [_entry_anchored(1000.0, upnl=-200.0, opening_pnl=-200.0)]
+    assert s.get_monitoring_mode() == "normal"
+
+
 # ---- 2026-07-02 calendar audit: trigger anchoring to the opening mark ---------
 def test_pnl_move_pct_anchors_triggers_to_opening_mark():
     """A fresh calendar is born marked at the full round-trip liquidation spread
