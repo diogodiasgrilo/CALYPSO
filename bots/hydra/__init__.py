@@ -47,10 +47,19 @@ Version History:
   when live current_price diverges >1%, trusts the recorded close; the Brandon
   overlay settlement (log_daily_summary) routes through it instead of raw
   current_price. Operational: don't restart C/B while settlement is still
-  pending. +5 tests (test_aud5_fixes); full suite 1896 passed. (Known follow-up:
-  data/brandon_hedge_legs.json is NOT variant-isolated and accumulates orphaned
-  prior-day overlays — 07-06 settled 6 entries' worth incl. E3/E4/E6/E7 with "no
-  matching daily_state entry" — a separate fix.)
+  pending. +5 tests (test_aud5_fixes).
+- Brandon hedge-legs variant isolation (2026-07-07). ROOT of the 07-06 phantom:
+  _brandon_resolve_hedge_state_path used _PROJECT_DATA_DIR (the SHARED base data/
+  dir), so Brandon variants B and C both wrote data/brandon_hedge_legs.json and
+  clobbered each other. On 07-06 variant C restarted and loaded variant B's 6
+  overlays from that shared file (the date matched), settling them onto C's day
+  total — the "no matching daily_state entry" E3/E4/E6/E7 orphans that, with the
+  stale-SPX settle, produced C's phantom -$6,037. Fix: use the variant-aware
+  DATA_DIR (data/variant_<id>/) so each Brandon variant is isolated (still safe
+  pre-super() — DATA_DIR is an env-derived module constant). +2 tests
+  (test_brandon_strategy_integration); full suite 1898 passed. Deploy: at EOD
+  after B/C settle today's overlays, restart B/C (they start fresh under the new
+  per-variant path) + delete the now-orphaned shared data/brandon_hedge_legs.json.
 - MKT-047 PER-SIDE OTM-skip + calendar per-entry P&L booking (2026-07-06). (1) The
   EOD-flatten OTM-skip was PER-ENTRY all-or-nothing — it only skipped an entry when
   EVERY alive short was >= the cushion, so one at-risk side force-closed the whole

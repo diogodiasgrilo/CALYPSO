@@ -1527,3 +1527,24 @@ class TestGexFallbackStop:
         inst._brandon_today_date = lambda: "2026-06-10"  # new ET day
         inst._brandon_alert_gex_fallback()
         assert len(sent) == 2
+
+
+# ── hedge-state path variant isolation (2026-07-07) ───────────────────────────
+def test_hedge_state_path_is_variant_isolated(monkeypatch):
+    """The hedge sidecar must live under the VARIANT-AWARE DATA_DIR, NOT the shared
+    base data/ — else B and C clobber each other's overlays into one file (variant C
+    loaded + settled B's on 07-06 → the phantom -$6,037)."""
+    import bots.hydra.strategy as strat_mod
+    monkeypatch.setattr(strat_mod, "DATA_DIR", "/opt/calypso/data/variant_c", raising=False)
+    inst = BrandonHydraStrategy.__new__(BrandonHydraStrategy)
+    assert inst._brandon_resolve_hedge_state_path() == \
+        "/opt/calypso/data/variant_c/brandon_hedge_legs.json"
+
+
+def test_hedge_state_path_base_dir_for_variant_a(monkeypatch):
+    # Variant A (HYDRA_VARIANT_ID unset) → DATA_DIR is the base data/ dir.
+    import bots.hydra.strategy as strat_mod
+    monkeypatch.setattr(strat_mod, "DATA_DIR", "/opt/calypso/data", raising=False)
+    inst = BrandonHydraStrategy.__new__(BrandonHydraStrategy)
+    assert inst._brandon_resolve_hedge_state_path() == \
+        "/opt/calypso/data/brandon_hedge_legs.json"

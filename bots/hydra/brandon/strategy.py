@@ -1954,14 +1954,21 @@ class BrandonHydraStrategy(HydraStrategy):
     # ------------------------------------------------------------------
 
     def _brandon_resolve_hedge_state_path(self) -> str:
-        """Return the path to the variant's hedge_legs JSON sidecar.
+        """Return the path to the variant's hedge_legs JSON sidecar, under the
+        VARIANT-AWARE data dir (``DATA_DIR`` = data/variant_<id>/ when
+        HYDRA_VARIANT_ID is set, else the base data/).
 
-        Lives alongside the bot's state file (same data dir) so it follows
-        the variant_<id> isolation. Format: brandon_hedge_legs.json.
-        """
+        2026-07-07 FIX: this previously used ``_PROJECT_DATA_DIR`` (the SHARED base
+        data/ dir), so Brandon variants B and C BOTH wrote data/brandon_hedge_legs.json
+        and clobbered each other. On 07-06 variant C restarted and loaded variant B's
+        6 overlays from that shared file (the date matched), settling them onto C's
+        day total — the "no matching daily_state entry" E3/E4/E6/E7 orphans that,
+        together with the stale-SPX settle, produced C's phantom -$6,037. ``DATA_DIR``
+        is a module constant derived from the HYDRA_VARIANT_ID env var, so this is
+        still safe to call pre-super() (no dependency on self.state_file)."""
         try:
-            from bots.hydra.strategy import _PROJECT_DATA_DIR
-            return os.path.join(_PROJECT_DATA_DIR, "brandon_hedge_legs.json")
+            from bots.hydra.strategy import DATA_DIR
+            return os.path.join(DATA_DIR, "brandon_hedge_legs.json")
         except Exception:
             return "/opt/calypso/data/brandon_hedge_legs.json"
 
