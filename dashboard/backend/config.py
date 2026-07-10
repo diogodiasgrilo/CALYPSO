@@ -145,21 +145,23 @@ class Settings(BaseSettings):
     # mutation — raw rows are preserved for the D/E validation work; only the view
     # is culled. Override via DASHBOARD_VARIANT_{D,E}_BASELINE_DATE.
     #
-    # D = 2026-07-10 (2026-07-09): D's earlier data is misleading on TWO counts.
+    # D = 2026-07-11 (2026-07-10): D's earlier data is misleading on THREE counts.
     # (a) pre-cfc6027 (<= 07-02) rows are born-at--20% valuation artifacts that
-    # instantly tripped the -20% stop; (b) EVERY day through 07-09 was priced with
-    # the full-touch fill model (dry_run_fill_model unset => 1.0 = buy@ask/sell@bid
-    # on all 8 leg transactions), which booked the entire 4-leg round-trip bid/ask
-    # spread (~$170, ~18% of debit) as a loss on a position held only ~6 hours —
-    # 73% of D's -$960 over 07-06..07-09 was that modeled slippage. The fill model
-    # was calibrated to 0.5 on 2026-07-09, so 07-10 is D's first honestly-priced
-    # session. See memory d_fill_model_and_sameday_close.
+    # instantly tripped the -20% stop; (b) days through 07-09 were priced with the
+    # full-touch fill model (dry_run_fill_model unset => 1.0), booking the full
+    # ~$170 round-trip spread as a loss on a ~6-hour hold (73% of the -$960); the
+    # fill model was calibrated to 0.5 on 07-09. (c) 07-10 then got hit by a
+    # crossed-quote spike (long call mid 15.0 < short call 24.0 => calendar value
+    # -$2,550 => phantom -20% stop for -$797), fixed by the mark-sanity guard
+    # (commit a1678ce). So 07-11 is D's first session with BOTH the calibrated fill
+    # model AND the mark guard — the true clean start. See memory
+    # d_fill_model_and_sameday_close.
     #
     # E = 2026-07-07 (first day on real-time SPY via the Network B feed). NOTE: E's
     # dry_run_fill_model is ALSO unset (full touch) — milder (tighter SPY spreads,
     # and E HOLDS multi-day so the spread amortizes instead of repeating daily) and
     # E has zero completed trades, but worth calibrating before grading its edge.
-    variant_d_baseline_date: str = "2026-07-10"
+    variant_d_baseline_date: str = "2026-07-11"
     variant_e_baseline_date: str = "2026-07-07"
 
     # Agent intel directories
