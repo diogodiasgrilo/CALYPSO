@@ -188,3 +188,66 @@ class TestTransformCreditSpread:
         # realistic credit = (7.5+7.0 - 1.8-1.8)*100 = $1090 < $1585 → defer
         assert fired is False
         assert e.dc_phase == DCPhase.CALENDAR          # still holding, not transformed
+
+
+# ───────── mark-sanity guard: reject impossible (crossed) calendar marks ─────────
+class TestRefreshMarkSanityGuard:
+    """2026-07-10: a crossed/stale leg quote made D's long-dated call (mid 15.0)
+    worth LESS than the same-strike near short (24.0) → calendar value -$2,550
+    (-356% of a defined-risk debit) → a phantom -20% stop booked at -$797. The guard
+    rejects a tick where a calendar side goes negative, keeping the prior good marks."""
+
+    def _entry(self):
+        e = CalendarEntry(entry_number=1)
+        for name, uic in (("short_call", 1), ("long_call", 2), ("short_put", 3), ("long_put", 4)):
+            e.legs[name].uic = uic
+            e.legs[name].price = 5.0  # prior GOOD mark
+        e.dc_phase = DCPhase.CALENDAR
+        return e
+
+    def _strat(self, quotes):
+        s = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
+        s._dc_fill_agg = 0.5
+        s._dc_fill_slippage = 0.0
+        s.dc_require_realtime_quotes = False
+        s._dc_read_leg_quotes = MagicMock(return_value=quotes)
+        return s
+
+    def _rt(self, mid, bid, ask):
+        return {"mid": mid, "raw": {"bid": bid, "ask": ask}, "realtime": True}
+
+    def test_valid_calendar_marks_commit_and_fresh(self):
+        q = {
+            "short_call": self._rt(23.9, 23.7, 24.1),
+            "long_call":  self._rt(28.3, 28.1, 28.5),  # long > short → valid
+            "short_put":  self._rt(27.4, 27.2, 27.6),
+            "long_put":   self._rt(31.8, 31.6, 32.0),
+        }
+        e = self._entry()
+        assert self._strat(q)._dc_refresh_marks(e) is True
+        assert e.legs["long_call"].price != 5.0  # prices updated
+
+    def test_impossible_mark_rejected_keeps_prior(self):
+        # The exact 07-10 spike: long_call 15.0 < short_call 24.0 (calendar-arb
+        # violation) → reject the tick, keep prior good marks, return not-fresh.
+        q = {
+            "short_call": self._rt(24.0, 23.8, 24.2),
+            "long_call":  self._rt(15.0, 14.8, 15.2),  # BAD: long < short
+            "short_put":  self._rt(44.5, 44.3, 44.7),  # BAD: spiked
+            "long_put":   self._rt(28.0, 27.8, 28.2),
+        }
+        e = self._entry()
+        assert self._strat(q)._dc_refresh_marks(e) is False
+        assert all(e.legs[n].price == 5.0 for n in ("short_call", "long_call", "short_put", "long_put"))
+
+    def test_real_adverse_move_still_fresh(self):
+        # A REAL adverse move keeps long >= short (both drop) → valid → fresh, so
+        # genuine stops still fire; the guard only rejects arb-impossible marks.
+        q = {
+            "short_call": self._rt(5.0, 4.8, 5.2),
+            "long_call":  self._rt(6.0, 5.8, 6.2),
+            "short_put":  self._rt(5.0, 4.8, 5.2),
+            "long_put":   self._rt(6.0, 5.8, 6.2),
+        }
+        e = self._entry()
+        assert self._strat(q)._dc_refresh_marks(e) is True

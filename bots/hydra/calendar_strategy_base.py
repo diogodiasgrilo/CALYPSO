@@ -523,28 +523,51 @@ class CalendarStrategyBase(HydraStrategy):
         }
         if not conids:
             return False
-        fresh = True
         quotes = self._dc_read_leg_quotes(conids)
         require_rt = getattr(self, "dc_require_realtime_quotes", True)
+        # Price each re-quoted leg at its LIQUIDATION fill (2026-06-17): to close NOW
+        # you SELL the longs (toward bid) and BUY BACK the shorts (toward ask), so
+        # calendar_value/unrealized_pnl and every value-driven decision (profit-take
+        # ladder, %-stop, transform trigger, EOD close P&L) stay honest about the
+        # spread instead of mid-optimistic. Compute candidates first, commit
+        # all-or-nothing after the sanity guard.
+        candidate: dict = {}
         for name in conids:
             qrow = quotes.get(name) or {}
             mid = qrow.get("mid")
             rt_ok = qrow.get("realtime", True) or not require_rt
-            # A positive mid from a real-time quote updates the price; a missing/
-            # crossed mid OR a confirmed-stale quote leaves the prior price and
-            # marks the tick not-fresh (so value-driven stop/transform skip it).
             if mid and mid > 0 and rt_ok:
-                # Mark at the LIQUIDATION fill, not the mid (2026-06-17): to close
-                # NOW you SELL the longs (toward bid) and BUY BACK the shorts
-                # (toward ask). calendar_value/ic_cost are (long_price-short_price),
-                # so this makes unrealized_pnl — and every value-driven decision
-                # (profit-take ladder, %-stop, transform trigger) plus the daily
-                # close P&L — honest about the spread instead of mid-optimistic.
                 action = "buy" if name.startswith("short") else "sell"
-                entry.legs[name].price = self._dc_fill_price(qrow, action) or mid
-            else:
-                fresh = False
-        return fresh
+                candidate[name] = self._dc_fill_price(qrow, action) or mid
+        # A missing/crossed/stale leg → not fresh; leave the prior price so a frozen
+        # leg can't trip the % stop on bad data.
+        if len(candidate) != len(conids):
+            return False
+        # MARK-SANITY GUARD (2026-07-10): a fast tape can hand back a stale/crossed
+        # leg mid that is individually POSITIVE but STRUCTURALLY IMPOSSIBLE — the
+        # further-dated LONG priced BELOW the same-strike near-dated SHORT, a
+        # calendar-arbitrage violation that drives the calendar value NEGATIVE. On
+        # 07-10 D's long-call mid dropped to 15.0 vs the short-call 24.0 → a -$2,550
+        # calendar value (-356% of a defined-risk debit) → a phantom -20% stop booked
+        # at -$797. Reject the whole tick (KEEP the prior good marks, return
+        # not-fresh) so no stop/transform/close acts on it; the next clean tick
+        # resumes. A REAL adverse move keeps long >= short, so genuine stops fire.
+        _CAL_ARB_EPS = 0.10
+        if all(k in quotes for k in ("long_call", "short_call", "long_put", "short_put")):
+            call_side = (quotes["long_call"].get("mid") or 0) - (quotes["short_call"].get("mid") or 0)
+            put_side = (quotes["long_put"].get("mid") or 0) - (quotes["short_put"].get("mid") or 0)
+            if call_side < -_CAL_ARB_EPS or put_side < -_CAL_ARB_EPS:
+                logger.warning(
+                    "[CAL] REJECTED impossible mark for E#%s — a calendar side is "
+                    "negative (call long-short=%.2f, put=%.2f): the further-dated "
+                    "long cannot be worth less than the near short. Keeping prior "
+                    "marks (crossed/stale quote on a fast tape).",
+                    entry.entry_number, call_side, put_side,
+                )
+                return False
+        for name, px in candidate.items():
+            entry.legs[name].price = px
+        return True
 
     def _dc_past_eod_cutoff(self) -> bool:
         return get_us_market_time().time() >= self.dc_eod_cutoff
