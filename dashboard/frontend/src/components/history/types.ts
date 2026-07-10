@@ -47,6 +47,10 @@ export interface DayStop {
   net_pnl: number;
   salvage_sold: number;
   salvage_revenue: number;
+  // v11: distinguishes a genuine credit+buffer "stop_loss" from a managed close
+  // (MKT-047 "early_close" EOD flatten, Brandon "take_profit" / "gex_breach"),
+  // all of which write a trade_stops row. Absent on legacy pre-v11 rows.
+  exit_reason?: string;
 }
 
 export interface OHLCBar {

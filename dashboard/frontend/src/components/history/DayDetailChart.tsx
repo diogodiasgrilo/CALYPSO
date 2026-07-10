@@ -13,6 +13,13 @@ import { colors } from "../../lib/tradingColors";
 import { withCandleContinuity } from "../../lib/candles";
 import type { OHLCBar, DayEntry, DayStop } from "./types";
 
+// trade_stops exit_reason values that are managed closes, NOT genuine credit+buffer
+// stops. They must not render as red "S" stop markers (nor color the entry marker
+// as stopped). "stop_loss" — and legacy pre-v11 rows with no exit_reason — are the
+// only real stops. See the 2026-06-25 live-state fix; this extends it to the
+// history DB path (2026-07-10).
+const MANAGED_CLOSE_REASONS = new Set(["early_close", "take_profit", "gex_breach"]);
+
 /**
  * Parse ET timestamp to epoch seconds.
  * Handles "2026-03-06 12:15:00" (bare) and "2026-03-06T11:15:32-05:00" (ISO).
@@ -173,9 +180,20 @@ export function DayDetailChart({
 
     candleSeriesRef.current.setData(data);
 
+    // A managed close (MKT-047 "early_close" EOD flatten, Brandon "take_profit" /
+    // "gex_breach") also writes a trade_stops row tagged with its exit_reason, but
+    // it is NOT a genuine credit+buffer stop: it must neither color the entry
+    // marker as "stopped" nor draw a red "S" stop marker (the entry's status +
+    // exit P&L already reflect it). Only exit_reason "stop_loss" — and legacy
+    // pre-v11 rows with no exit_reason — are real stops. (2026-07-10; matches the
+    // live-chart guard and the 2026-06-25 state-path fix.)
+    const genuineStops = stops.filter(
+      (s) => !MANAGED_CLOSE_REASONS.has(s.exit_reason ?? "")
+    );
+
     // Build stop lookup: entry_number → set of stopped sides
     const stopMap = new Map<number, Set<string>>();
-    for (const s of stops) {
+    for (const s of genuineStops) {
       if (!stopMap.has(s.entry_number)) stopMap.set(s.entry_number, new Set());
       stopMap.get(s.entry_number)!.add(s.side);
     }
@@ -202,8 +220,9 @@ export function DayDetailChart({
       })
       .filter((m) => (m.time as number) > 0);
 
-    // Stop markers — individual marker per stop on its correct candle
-    const stopMarkers = stops
+    // Stop markers — individual marker per genuine stop on its correct candle
+    // (managed closes already filtered out of genuineStops above).
+    const stopMarkers = genuineStops
       .filter((s) => s.stop_time)
       .map((s) => {
         const t = parseTimeForDate(s.stop_time, date);

@@ -161,7 +161,21 @@ export function SPXChart({ ohlc: ohlcProp, entries: entriesProp, date: dateProp 
     [entriesProp, storeEntries],
   );
   const stopEvents = useMemo(
-    () => (usingProps ? stopEventsFromEntries(entries) : storeStopEvents),
+    () => {
+      const raw = usingProps ? stopEventsFromEntries(entries) : storeStopEvents;
+      // A managed close (Brandon TP/GEX-breach, MKT-047 EOD flatten) sets
+      // early_closed and is NOT a credit+buffer stop — it must not draw a red "S"
+      // stop marker (2026-06-25 intent). stopEventsFromEntries already drops these,
+      // but storeStopEvents is an append-only WS cache: within a session it is only
+      // replaced by a reconnect's full snapshot, so a stop event captured during the
+      // flatten's multi-field state write lingers as a stale marker (e.g. C's 7-10
+      // EOD-flattened call side). Cross-check the authoritative early_closed flag so
+      // the WS path drops it too. (2026-07-10)
+      const managedClosed = new Set(
+        entries.filter((e) => e.early_closed).map((e) => e.entry_number),
+      );
+      return raw.filter((ev) => !managedClosed.has(ev.entry_number));
+    },
     [usingProps, entries, storeStopEvents],
   );
 
