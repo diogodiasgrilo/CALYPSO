@@ -140,16 +140,26 @@ class Settings(BaseSettings):
     variant_a_baseline_date: str = ""
     variant_b_baseline_date: str = ""
     variant_c_baseline_date: str = ""
-    # D & E (calendars): rebased to 2026-07-07 — the first date BOTH ran with a
-    # 100%-correct dry-run sim. cfc6027 (2026-07-02, effective D's first full
-    # session 07-06) killed D's born-at--20% valuation artifact; 07-07 is the
-    # first day D also carries the vigilant-mode anchor + per-entry P&L booking
-    # fixes AND E is on real-time SPY (Network B). Everything before is a pre-fix
-    # artifact / delayed-data mark and is hidden from the dashboard (keyed on the
-    # calendar's ENTRY date, so a pre-fix calendar can't reappear by closing
-    # later). Override via DASHBOARD_VARIANT_{D,E}_BASELINE_DATE. NO DB mutation —
-    # raw rows are preserved for the D/E validation work; only the view is culled.
-    variant_d_baseline_date: str = "2026-07-07"
+    # D & E (calendars): the dashboard hides every calendar ENTERED before the
+    # baseline (so a pre-fix calendar can't reappear by closing later). NO DB
+    # mutation — raw rows are preserved for the D/E validation work; only the view
+    # is culled. Override via DASHBOARD_VARIANT_{D,E}_BASELINE_DATE.
+    #
+    # D = 2026-07-10 (2026-07-09): D's earlier data is misleading on TWO counts.
+    # (a) pre-cfc6027 (<= 07-02) rows are born-at--20% valuation artifacts that
+    # instantly tripped the -20% stop; (b) EVERY day through 07-09 was priced with
+    # the full-touch fill model (dry_run_fill_model unset => 1.0 = buy@ask/sell@bid
+    # on all 8 leg transactions), which booked the entire 4-leg round-trip bid/ask
+    # spread (~$170, ~18% of debit) as a loss on a position held only ~6 hours —
+    # 73% of D's -$960 over 07-06..07-09 was that modeled slippage. The fill model
+    # was calibrated to 0.5 on 2026-07-09, so 07-10 is D's first honestly-priced
+    # session. See memory d_fill_model_and_sameday_close.
+    #
+    # E = 2026-07-07 (first day on real-time SPY via the Network B feed). NOTE: E's
+    # dry_run_fill_model is ALSO unset (full touch) — milder (tighter SPY spreads,
+    # and E HOLDS multi-day so the spread amortizes instead of repeating daily) and
+    # E has zero completed trades, but worth calibrating before grading its edge.
+    variant_d_baseline_date: str = "2026-07-10"
     variant_e_baseline_date: str = "2026-07-07"
 
     # Agent intel directories
