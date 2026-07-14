@@ -234,3 +234,52 @@ To actually *show* TPs:
       cleans it up (keeps the files on disk). Not done automatically — it removes them from the repo.
 - [ ] **Optional — delete stale disk clutter on the VM** (old `dist.bak.*` from April, ancient config `.bak`s).
       Pure disk cleanup; left alone since some config backups may be intentional safety copies.
+
+## 10. Go-Live documentation consolidation — `GO_LIVE_MASTER.md` + checklist refresh (2026-07-14)
+
+> **Why:** go-live knowledge is FRAGMENTED across ~6 docs + 3 scripts; there is **no single master doc** covering
+> all strategies × both go-live levels × all tests. `docs/migration/LIVE_READINESS_CHECKLIST.md` reads like a
+> master but is **stale (2026-05-24), variant-A-only, 0DTE-shaped, pre-broker**. Most content already EXISTS —
+> this is a **consolidating umbrella + a currency refresh, NOT net-new go-live thinking** (except the build-gated
+> D/E ops runbooks). Do this before any real go-live push. Full inventory: memory `golive_readiness_and_fill_lever`.
+
+### A. Create `GO_LIVE_MASTER.md` (top-level umbrella — thin, links out, does NOT duplicate content)
+- [ ] **A1. Two-levels map + boundary.** Level (i) dry-run→live-PAPER (real paper orders) vs level (ii)
+      live-paper→REAL MONEY (new live-OAuth keypair + approval — deliberately unwired on this branch). Make the
+      boundary explicit; state up front that this branch is paper-only.
+- [ ] **A2. A/B/C/D/E status matrix** — columns: current mode · next gate · flip script · smoke test · edge/readiness
+      verdict. Source: CLAUDE.md Variant Comparison + §2b/§3/§5 + the D trio. (C = live-paper; A/B = dry-run;
+      D = NO-GO build; E = dry-run-locked.)
+- [ ] **A3. Consolidated tests + pass-criteria appendix** — one surface listing each check + WHAT it verifies +
+      PASS criteria + how to run: `broker_paper_smoke.py` (paper-only + 6509='R' on SPX/VIX/leg + 1c round trip
+      → ET sentinel); pytest suite (~1918 pass) + `tests/integration/test_ib_paper_smoke.py`; `pip-audit`
+      (0 High/Crit); edge readers (`slot_edge.py`, `stop_shadow.py`, `dc_edge.py`/`analyze_calendar_edge.py`);
+      D's STATE-004 matrix.
+- [ ] **A4. Links-out index** — RB-8 (`RUNBOOKS.md`), `flip_ac_live.sh`/`flip_a_live.sh`, `broker_paper_smoke.py`,
+      the D trio (`D_GOLIVE_RUNBOOK.md` / `_SCOPE_AND_AUDIT.md` / `_MVL_PHASE1_PLAN.md`), `NEXT_STEPS.md`
+      §2b/§3/§5, `LIVE_READINESS_CHECKLIST.md`, `IBKR_CREDENTIALS_SETUP.md`, `NEW_STRATEGY_PLAYBOOK.md` Step 10.
+- [ ] **A5. Build-gated pending slots** — mark NOT-YET-BUILT + blocker: E go-live runbook, `flip_d_live.sh`,
+      `flip_e_live.sh`, `broker_dc_smoke.py`, RB-9 (flip D) / RB-10 (flatten D). All gated on the D/E real-order builds.
+- [ ] **A6. Go-live line items carried in the master** — (a) split-spread/midpoint ENTRY-pricing fill-quality lever
+      (targets the ~31% sim-vs-live credit gap; entry-only; validate on real money); (b) the mid-August
+      Entry-Schedule Lock (§5); (c) per-strategy edge-validation status.
+- [ ] **A7. Wire it as the entry point** — pointer row in CLAUDE.md's doc index + a "start here for go-live" line
+      in `PROJECT_STATUS.md` and NEXT_STEPS §0, pointing at `GO_LIVE_MASTER.md`.
+
+### B. Refresh `docs/migration/LIVE_READINESS_CHECKLIST.md` (so it stops masquerading as the master)
+- [ ] **B1. Broker-era cred model** — Gate 5 says `bots/hydra/main.py` calls `load_credentials("live")` +
+      `systemctl restart hydra`; update to: OAuth identity lives in `calypso-broker` (creds via systemd-creds per
+      `IBKR_CREDENTIALS_SETUP.md`); a session/auth fault is fixed at `calypso-broker`, not the hydra units.
+- [ ] **B2. Current test counts** — "≥885 pass" → ~1918 pass / 15 skipped; refresh smoke/integration references.
+- [ ] **B3. Multi-variant rescope** — written for HYDRA=A only. Either broaden to A/B/C (0DTE credit group) or
+      relabel "real-money gate — 0DTE IC variants" + note the calendar group (D/E) needs a SEPARATE real-money
+      gate (Gates 4/7/8/9 don't transfer to calendars, per `D_GOLIVE_SCOPE_AND_AUDIT.md` §5).
+- [ ] **B4. Reconcile ops/restart steps** with broker mode (restart order: broker first; hydra units degrade
+      gracefully through a broker restart).
+- [ ] **B5. Path note** — lives at `docs/migration/`, not `docs/`; add a top-of-file note + link from the master.
+
+### C. Verify + ship
+- [ ] **C1. Freshen stale file:line refs** in the master + D docs (`double_calendar_strategy.py:NNN` refs are
+      stale post-`CalendarStrategyBase` extraction — point at the shared `_dc_*` methods).
+- [ ] **C2. Commit clean** (docs-only, HOMER-safe: keep VM `git status` clean; no VM deploy needed for docs).
+- [ ] **C3. Check these off here** as they land; move detail into `GO_LIVE_MASTER.md`.
