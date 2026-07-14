@@ -3,7 +3,7 @@
 > **This is the single, always-current "what's left" tracker.** Update it whenever work lands or a new
 > item appears. It complements (does not replace) [`docs/migration/PROJECT_STATUS.md`](migration/PROJECT_STATUS.md)
 > (project-wide state) and the per-effort design docs. When an item is done, check it off here and move the
-> detail into the relevant doc/commit. Last updated: **2026-06-16**.
+> detail into the relevant doc/commit. Last updated: **2026-07-14**.
 
 ---
 
@@ -133,6 +133,18 @@ the VM (per its memory/journal). To take D live:
 
 ## 5. Backlog / nice-to-haves (from the audit + design)
 
+- [x] **A2-SHADOW %-of-width stop decision — RESOLVED 2026-07-14: do NOT flip C.** Ran `bots/hydra/stop_shadow.py`
+      over both live variants' full history (2026-05-05 → 07-14). A tighter %-of-width stop is **net-negative at
+      every threshold** — premature stops of recoverers (whipsaw) dominate the tail-capping of real disasters. C
+      (credit+buffer): switching to %-width costs −$2,340 (25%) to +$545–705 (50%, only 1–2 fires = noise). B
+      (already 40%-of-width): naive %-width net-negative at every threshold, and shows B's settlement-hold guard
+      earns its keep. Keep C's credit+buffer stop. Re-run the replay periodically; revisit only if the sign flips.
+- [ ] **E calendar-stop analyzer (PARKED — blocked on data).** To decide whether E (SPY double calendar) needs a
+      max-loss floor at go-live, build a `stop_shadow`-style replay over E's `dc_calendar_snapshots.unrealized_pnl`
+      (a hypothetical −X% stop). No new live logging needed (snapshots already record per-tick unrealized P&L).
+      Blocked: E has **0 completed trades** (`dc_outcomes=0`, 1 open calendar) and pre-2026-07-11 snapshots are
+      arb-contaminated (worst −108% of debit = pre-`a1678ce` crossed-quote artifact — filter to clean marks). D is
+      the live reference (−20% CAL-STOP, 15 completed trades). Build once E accrues a handful of completed calendars.
 - [x] **Per-strategy History/Analytics (item 3, 2026-06-22).** Both tabs now follow the strategy picker:
       `/api/metrics/{daily,entries,stops,comparisons,performance}` take an optional `strategy_id` and read that
       variant's own DB (today-from-live-state gated to the canonical id); the picker shows on /history + /analytics.
