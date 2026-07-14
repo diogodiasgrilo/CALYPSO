@@ -138,6 +138,7 @@ export function History() {
         <DayDetailModal
           date={selectedDate}
           summary={selectedSummary}
+          strategyId={strategyId}
           allDates={summaries.map((s) => s.date)}
           onNavigate={handleDayClick}
           onClose={() => setSelectedDate(null)}

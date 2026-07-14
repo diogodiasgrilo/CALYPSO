@@ -6,39 +6,21 @@ from fastapi import APIRouter, Query
 
 from dashboard.backend.config import settings
 from dashboard.backend.services.metrics_reader import MetricsFileReader
-from dashboard.backend.services.db_reader import BacktestingDBReader, apply_db_cumulative
+from dashboard.backend.services.db_reader import apply_db_cumulative
+from dashboard.backend.services.variant_readers import canonical_reader, reader_for
 from dashboard.backend.services.live_state import LiveStateProvider
 from dashboard.backend.services.market_status import get_today_et, is_after_market_close
 
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
 metrics_reader = MetricsFileReader(settings.hydra_metrics_file)
-db_reader = BacktestingDBReader(settings.backtesting_db)
 
 # The canonical reader (settings.backtesting_db) IS the live primary's DB, and
 # `_live_state` tracks that same variant's state file — so today-from-live-state
-# augmentation is only valid for the canonical id. Per-variant readers are built
-# lazily so a missing settings field just makes that variant fall back, never
-# crashes import.
-_PRIMARY_ID = "c"
-_variant_db_readers: dict[str, BacktestingDBReader] = {}
-
-
-def _reader_for(strategy_id: str) -> tuple[BacktestingDBReader, bool]:
-    """Return ``(reader, is_canonical)`` for a strategy id (History/Analytics
-    per-strategy support). Empty / unknown / the primary id → the canonical
-    reader (is_canonical=True, so today's live-state augmentation applies). A
-    known non-primary variant → its own DB reader (is_canonical=False; we do
-    NOT graft the primary's live `today` onto another variant's history)."""
-    sid = (strategy_id or "").strip().lower()
-    if not sid or sid == _PRIMARY_ID:
-        return db_reader, True
-    path = getattr(settings, f"variant_{sid}_backtesting_db", None)
-    if path is None:
-        return db_reader, True
-    if sid not in _variant_db_readers:
-        _variant_db_readers[sid] = BacktestingDBReader(path)
-    return _variant_db_readers[sid], False
+# augmentation is only valid for the canonical id. Per-strategy resolution lives
+# in services/variant_readers.reader_for() (shared with /api/hydra/entries and
+# /api/market/replay_pnl so the History day-detail header + tables never diverge).
+db_reader = canonical_reader
 
 # Set by main.py at startup
 _live_state: LiveStateProvider | None = None
@@ -94,7 +76,7 @@ async def get_daily(
     strategy_id: str = Query(default=""),
 ):
     """Daily summaries for calendar heat map (per-strategy)."""
-    reader, is_canonical = _reader_for(strategy_id)
+    reader, is_canonical = reader_for(strategy_id)
     if year >= 2020:
         summaries = await reader.get_daily_summaries_by_year(year)
     elif days > 0:
@@ -110,7 +92,7 @@ async def get_daily(
 @router.get("/entries")
 async def get_all_entries(strategy_id: str = Query(default="")):
     """All historical entries for analytics (per-strategy)."""
-    reader, is_canonical = _reader_for(strategy_id)
+    reader, is_canonical = reader_for(strategy_id)
     entries = await reader.get_all_entries()
 
     # Append today's entries from state file only after market close (canonical only)
@@ -128,7 +110,7 @@ async def get_all_entries(strategy_id: str = Query(default="")):
 @router.get("/stops")
 async def get_all_stops(strategy_id: str = Query(default="")):
     """All historical stops for analytics (per-strategy)."""
-    reader, is_canonical = _reader_for(strategy_id)
+    reader, is_canonical = reader_for(strategy_id)
     stops = await reader.get_all_stops()
 
     # Append today's stops from state file only after market close (canonical only)
@@ -146,7 +128,7 @@ async def get_all_stops(strategy_id: str = Query(default="")):
 @router.get("/comparisons")
 async def get_comparisons(strategy_id: str = Query(default="")):
     """Comparison statistics (averages across all trading days, per-strategy)."""
-    reader, is_canonical = _reader_for(strategy_id)
+    reader, is_canonical = reader_for(strategy_id)
     data = await reader.get_comparison_stats()
 
     # If we have DB data, augment with today's values only after market close (canonical only)
@@ -184,7 +166,7 @@ async def get_performance(strategy_id: str = Query(default="")):
 
     Rebased to settings.baseline_date so Sharpe/drawdown match the rebased card.
     """
-    reader, is_canonical = _reader_for(strategy_id)
+    reader, is_canonical = reader_for(strategy_id)
     pnls = await reader.get_daily_pnls(settings.baseline_date)
 
     # Append today's net P&L only after market close (canonical only)

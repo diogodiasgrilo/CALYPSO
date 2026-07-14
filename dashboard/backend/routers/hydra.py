@@ -4,14 +4,14 @@ import json
 import logging
 import re
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
 logger = logging.getLogger("dashboard.hydra")
 
 from dashboard.backend.config import settings
 from dashboard.backend.services.state_reader import StateFileReader
-from dashboard.backend.services.db_reader import BacktestingDBReader
+from dashboard.backend.services.variant_readers import reader_for
 from dashboard.backend.services.market_status import get_today_et
 
 router = APIRouter(prefix="/api/hydra", tags=["hydra"])
@@ -19,7 +19,6 @@ router = APIRouter(prefix="/api/hydra", tags=["hydra"])
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 state_reader = StateFileReader(settings.hydra_state_file)
-db_reader = BacktestingDBReader(settings.backtesting_db)
 
 
 @router.get("/bot-config")
@@ -99,20 +98,29 @@ async def get_state():
 
 
 @router.get("/entries")
-async def get_entries(date_str: str | None = None):
-    """Today's entries (or specific date) with full details."""
+async def get_entries(date_str: str | None = None, strategy_id: str = Query(default="")):
+    """Entries + stops for a date, scoped to the picked strategy variant.
+
+    ``strategy_id`` selects the variant's DB via the shared ``reader_for`` (same
+    resolver as ``/api/metrics/daily``) so the History day-detail ENTRIES /
+    STOP-LOSSES tables read the SAME variant as the header count cards. Empty /
+    primary id → the canonical (live) DB. The live state-file fast path (no
+    ``date_str``) is primary-only by construction — the day-detail modal always
+    passes an explicit ``date_str``, so it goes through the variant-aware DB path.
+    """
     if date_str is not None and not _DATE_RE.match(date_str):
         return JSONResponse(status_code=400, content={"error": "Invalid date format. Use YYYY-MM-DD."})
     if date_str is None:
-        # Try state file first for live data
+        # Try state file first for live data (primary variant only)
         state = state_reader.get_cached() or state_reader.read_latest()
         if state and "entries" in state:
             return {"source": "state_file", "entries": state["entries"]}
 
-    # Fall back to SQLite for historical
+    # Fall back to SQLite for historical — read the PICKED variant's DB.
+    reader, _ = reader_for(strategy_id)
     target = date_str or get_today_et()
-    entries = await db_reader.get_entries_for_date(target)
-    stops = await db_reader.get_stops_for_date(target)
+    entries = await reader.get_entries_for_date(target)
+    stops = await reader.get_stops_for_date(target)
     return {"source": "database", "date": target, "entries": entries, "stops": stops}
 
 

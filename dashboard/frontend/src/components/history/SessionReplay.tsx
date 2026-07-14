@@ -68,7 +68,7 @@ function fmtEntryTime(ts: string): string {
   return toTime24h(ts).slice(0, 5);
 }
 
-export function SessionReplay({ date }: { date: string }) {
+export function SessionReplay({ date, strategyId = "" }: { date: string; strategyId?: string }) {
   const [state, setState] = useState<ReplayState>("idle");
   const [ticks, setTicks] = useState<Tick[]>([]);
   const [entries, setEntries] = useState<ReplayEntry[]>([]);
@@ -80,10 +80,13 @@ export function SessionReplay({ date }: { date: string }) {
   // Load all data in parallel
   useEffect(() => {
     setState("loading");
+    // ticks = variant-agnostic SPX/VIX track; entries + replay P&L are scoped to
+    // the picked variant so the replay matches the strategy shown in History.
+    const sid = encodeURIComponent(strategyId);
     Promise.all([
       fetch(`/api/market/ticks?date_str=${date}`).then((r) => r.json()),
-      fetch(`/api/hydra/entries?date_str=${date}`).then((r) => r.json()),
-      fetch(`/api/market/replay_pnl?date_str=${date}`).then((r) => r.json()),
+      fetch(`/api/hydra/entries?date_str=${date}&strategy_id=${sid}`).then((r) => r.json()),
+      fetch(`/api/market/replay_pnl?date_str=${date}&strategy_id=${sid}`).then((r) => r.json()),
     ])
       .then(([tickData, entryData, pnlData]) => {
         const t = (tickData.ticks ?? []) as Tick[];
@@ -114,7 +117,7 @@ export function SessionReplay({ date }: { date: string }) {
         setState(t.length > 0 ? "ready" : "idle");
       })
       .catch(() => setState("idle"));
-  }, [date]);
+  }, [date, strategyId]);
 
   useEffect(() => {
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
