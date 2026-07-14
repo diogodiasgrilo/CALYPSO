@@ -107,7 +107,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
     ),
     "b": StrategyMeta(
         id="b",
-        display_name="Brandon Narrow (4-slot)",
+        display_name="Brandon Narrow (7-slot)",
         short_name="BRANDON-B",
         strategy_class="brandon",
         group_id="ic_0dte",
