@@ -133,6 +133,18 @@ the VM (per its memory/journal). To take D live:
 
 ## 5. Backlog / nice-to-haves (from the audit + design)
 
+- [ ] **🎯 Entry-Schedule Lock review — target ~mid-August 2026 (~2026-08-11).** By then C has ~40+ live-paper
+      trading days (roughly double 07-14's ~22), so the 3 outlier days (07-02/06/13) stop dominating and real-fill
+      economics per slot become separable. At that review: (a) re-run `bots/hydra/slot_edge.py` for both B & C;
+      (b) run the real-fill credit-vs-(commission+measured-slippage) filter per C slot (C captures fills+mids at
+      100%); (c) LOCK the go-live entry schedule (which slots / how many / start size) on **economics + tail-risk +
+      regime-robustness**, NOT p-values (per-slot statistical significance takes months–years given ~$884 per-entry
+      std — do not wait for it). Default = C's proven sparse 3-slot/2-entry schedule at reduced size; only add B's
+      extra slots if separately proven on real fills (needs B's own paper account). This is the last strategy-side
+      gate before the operational go-live gates (§2b / LIVE_READINESS_CHECKLIST / RB-8). Data hygiene to do before
+      the review: exclude 07-06 + 07-07 from per-entry analysis (settlement-bug contaminated: B 07-07 gross 392 vs
+      entries +2925; C 07-06 gross 105 vs entries −2224), or correct them; keep 07-02/07-13 (real down-days).
+
 - [x] **A2-SHADOW %-of-width stop decision — RESOLVED 2026-07-14: do NOT flip C.** Ran `bots/hydra/stop_shadow.py`
       over both live variants' full history (2026-05-05 → 07-14). A tighter %-of-width stop is **net-negative at
       every threshold** — premature stops of recoverers (whipsaw) dominate the tail-capping of real disasters. C
