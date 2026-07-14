@@ -893,3 +893,36 @@ class DataRecorder:
                 return row[0] if row else None
         except Exception:
             return None
+
+    def get_spx_ohlc_for_date(self, date_str: str):
+        """``(open, high, low, close)`` of the recorded intraday ``spx_price`` for
+        ``date_str`` from ``market_ticks`` — open = first positive tick, close =
+        last. Returns ``(None, None, None, None)`` if no positive tick exists.
+
+        Used to backfill a daily-summary's OHLC when the live ``MarketData`` never
+        captured it — e.g. Strategy E's SPY underlying isn't read via the index
+        (``sec_type=IND``) path, so ``spx_open``/``spx_high`` stay at their ``0.0``
+        reset defaults even though E records a SPY ``spx_price`` every heartbeat.
+        Read-only; no other caller relies on it (a strict addition).
+        """
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """SELECT
+                        (SELECT spx_price FROM market_ticks
+                         WHERE timestamp LIKE :d AND spx_price > 0
+                         ORDER BY timestamp ASC LIMIT 1),
+                        MAX(spx_price),
+                        MIN(spx_price),
+                        (SELECT spx_price FROM market_ticks
+                         WHERE timestamp LIKE :d AND spx_price > 0
+                         ORDER BY timestamp DESC LIMIT 1)
+                       FROM market_ticks
+                       WHERE timestamp LIKE :d AND spx_price > 0""",
+                    {"d": date_str + "%"},
+                ).fetchone()
+            if row and row[0] is not None:
+                return (row[0], row[1], row[2], row[3])
+        except Exception:
+            pass
+        return (None, None, None, None)

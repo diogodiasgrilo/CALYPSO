@@ -487,6 +487,32 @@ class BacktestingDB:
             inserted = conn.total_changes
         return inserted
 
+    def _drop_contaminated_skipped_slots(self, conn, rows):
+        """CONTAMINATION GUARD (2026-07-14): drop back-fill rows whose
+        (date, entry_number) this DB's own variant SKIPPED.
+
+        HOMER back-fills trade rows from the Google-Sheets "Trades" tab, which
+        after the 2026-06-02 pivot reflects the canonical LIVE variant's REAL
+        trades — but the main backtesting.db it writes to belongs to variant A.
+        When A (this DB's variant) SKIPPED an entry the live variant took, A's own
+        DataRecorder recorded it in `skipped_entries` and wrote NO `trade_entries`
+        row, so `INSERT OR IGNORE`'s PK guard has nothing to conflict with and a
+        PHANTOM row (config_version NULL) gets fabricated for a trade A never
+        placed. A slot present in this DB's `skipped_entries` is one the variant
+        provably did not take (skip XOR entry), so any trade row for it is phantom.
+        Genuine gap-fill is preserved: entries the variant actually took are never
+        in `skipped_entries`. On the live variant's own DB (variant_c) this is a
+        no-op (it never skipped those slots). rows[i][0]=date, rows[i][1]=entry_number.
+        """
+        try:
+            skipped = {
+                (r[0], r[1])
+                for r in conn.execute("SELECT date, entry_number FROM skipped_entries")
+            }
+        except sqlite3.OperationalError:
+            return rows  # no skipped_entries table → nothing to filter
+        return [r for r in rows if (r[0], r[1]) not in skipped]
+
     def insert_trade_entries(self, entries: List[Dict[str, Any]]) -> int:
         """Insert trade entry records. Returns rows inserted."""
         if not entries:
@@ -532,6 +558,9 @@ class BacktestingDB:
             for e in entries
         ]
         with self._connect() as conn:
+            rows = self._drop_contaminated_skipped_slots(conn, rows)
+            if not rows:
+                return 0
             conn.executemany(sql, rows)
             inserted = conn.total_changes
         return inserted
@@ -567,6 +596,9 @@ class BacktestingDB:
             for s in stops
         ]
         with self._connect() as conn:
+            rows = self._drop_contaminated_skipped_slots(conn, rows)
+            if not rows:
+                return 0
             conn.executemany(sql, rows)
             inserted = conn.total_changes
         return inserted

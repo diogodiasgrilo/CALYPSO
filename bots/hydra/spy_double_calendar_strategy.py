@@ -224,6 +224,34 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
         _dc_open_debit_at_risk's CALENDAR filter."""
         return self._dc_open_debit_at_risk()
 
+    def _record_daily_summary_to_db(self):
+        """E-only: backfill the (IC-shaped, vestigial) ``daily_summaries`` market
+        OHLC from E's own recorded SPY ticks before writing the row.
+
+        E's underlying is SPY (an ETF). The shared IC market-data path reads the
+        underlying via ``_read_index_price`` with ``sec_type="IND"``, which never
+        resolves a SPY spot, so ``market_data.spx_open``/``spx_high`` stay at their
+        ``0.0`` reset defaults — leaving E's summary row with ``spx_open=0.0`` /
+        ``spx_high=0.0`` while ``spx_close`` still resolves to SPY via the tick
+        fallback. E's AUTHORITATIVE record is ``dc_calendar.db``; this keeps the
+        secondary row honest (real, internally-consistent SPY OHLC) by recovering
+        open/high/low from ``market_ticks`` (E writes a SPY ``spx_price`` every
+        heartbeat). Strict no-op for A/B/C/D — only E overrides this method.
+        """
+        md = getattr(self, "market_data", None)
+        rec = getattr(self, "_data_recorder", None)
+        if md is not None and rec is not None and (not md.spx_open or not md.spx_high):
+            try:
+                date_str = get_us_market_time().strftime("%Y-%m-%d")
+                o, h, l, _c = rec.get_spx_ohlc_for_date(date_str)
+                if o:
+                    md.spx_open = o
+                    md.spx_high = h or o
+                    md.spx_low = l or o
+            except Exception:
+                pass
+        super()._record_daily_summary_to_db()
+
     def get_monitoring_mode(self) -> str:
         """Vigilant (2s) when any open calendar is NEAR a ladder threshold or
         within the time-exit window; else normal. E has no stop-confirm window

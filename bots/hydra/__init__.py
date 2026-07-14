@@ -36,6 +36,27 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Data-integrity + dashboard-plumbing fixes (2026-07-14, from the 07-13 audit).
+  (1) `_record_stop_to_db` treated a RESOLVED close-cost of 0.0 (a worthless close
+  = full credit kept) as "missing" via a falsy-0 guard, booking the trigger-level
+  placeholder -(stop-credit) into `trade_stops.net_pnl` instead of +credit
+  (variant B's 07-13 E3 recorded -1500, not +500). Now only None (a fill never
+  captured) falls back to the placeholder; the two stop callers map their unknown
+  0.0 → None. RECORD-ONLY — realized_pnl / cumulative P&L were always correct
+  (this is a reporting column). +4 tests (test_early_close_pnl_signs). (2) HOMER's
+  Sheets→DB back-fill fabricated PHANTOM trade_entries/trade_stops rows in variant
+  A's MAIN backtesting.db for slots A SKIPPED — the Sheets reflect the LIVE variant
+  post-2026-06-02 pivot, and INSERT OR IGNORE can't dedup a skipped slot A never
+  wrote. `db_manager` now drops any back-fill row whose (date,entry_number) is in
+  the target DB's skipped_entries (no-op on the live variant's own DB). +5 tests
+  (test_homer_skip_contamination). (3) Strategy E's SPY underlying isn't read via
+  the index (sec_type=IND) path, so its vestigial IC daily_summaries had
+  spx_open/high=0.0; E now backfills that row's OHLC from its own recorded SPY
+  market_ticks (new read-only DataRecorder.get_spx_ohlc_for_date + an E-only
+  `_record_daily_summary_to_db` override — strict no-op for A/B/C/D). +6 tests
+  (test_e_daily_summary_ohlc). Companion dashboard fix (commit 4b3d6a0): History
+  day-detail entries/stops scope to the picked variant via a shared reader_for()
+  instead of always reading primary-C. Full suite: 1918 passed.
 - Stale-SPX settlement guard (2026-07-07). A post-close RESTART can re-fetch a
   stale, non-zero current_price — variant C on 07-06 held 7420.22 (a PRIOR-day
   value, ~1.6% below the real 7537.86 recorded close). The daily-summary +

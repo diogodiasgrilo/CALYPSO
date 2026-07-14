@@ -5452,7 +5452,7 @@ class HydraStrategy(MEICStrategy):
         )
 
     def _record_stop_to_db(self, entry, side: str, stop_level: float,
-                           actual_close_cost: float, exit_reason: str = "stop_loss"):
+                           actual_close_cost: float | None, exit_reason: str = "stop_loss"):
         """Record stop loss data to SQLite with execution quality metrics.
 
         exit_reason (v11) discriminates a real stop-loss from a Brandon
@@ -5494,12 +5494,18 @@ class HydraStrategy(MEICStrategy):
             if actual_close_cost and quoted_mid:
                 slippage = actual_close_cost - quoted_mid
 
-            # I-M2: when the synchronous close cost is missing (a leg fill wasn't
-            # captured), actual_debit=0 and net_pnl would be NULL forever (the
-            # async-correction hooks are IBKR no-ops). Fall back to the trigger-
-            # level estimate -(stop_level - credit) so per-stop analytics aren't
-            # permanently corrupted. The daily total stays driven by realized P&L.
-            if actual_close_cost and credit:
+            # I-M2 (fixed 2026-07-14): net_pnl = credit - actual_close_cost whenever
+            # the close cost is KNOWN. A resolved debit of 0.0 is a VALID worthless
+            # close (the short expired / was bought back for ~nothing → full credit
+            # kept), NOT "missing" — so it must book +credit, not the placeholder.
+            # Callers pass None (never 0.0) when a leg fill was genuinely not
+            # captured; only that None case falls back to the trigger-level estimate
+            # -(stop_level - credit) so per-stop analytics aren't permanently NULL
+            # (the async-correction hooks are IBKR no-ops). The daily/cumulative
+            # total is always driven by realized P&L, so this column is reporting-only.
+            # (Prior falsy-0 guard mis-booked a worthless early_close as -(stop-credit),
+            #  e.g. variant B's 07-13 E3: -(2000-500)=-1500 instead of +500.)
+            if actual_close_cost is not None and credit:
                 net_pnl = -(actual_close_cost - credit)
             elif stop_level and credit:
                 net_pnl = -(stop_level - credit)
@@ -7081,7 +7087,10 @@ class HydraStrategy(MEICStrategy):
             # Record stop to SQLite
             stop_level = entry.call_side_stop if side == "call" else entry.put_side_stop
             actual_debit = entry.actual_call_stop_debit if side == "call" else entry.actual_put_stop_debit
-            self._record_stop_to_db(entry, side, stop_level, actual_debit)
+            # 0.0 here = the stop's close fill was never captured (unknown); a real
+            # stop buys back an ITM short (cost > 0), never worthless — so map 0.0 to
+            # None to keep the trigger-level placeholder (do NOT book +credit).
+            self._record_stop_to_db(entry, side, stop_level, actual_debit or None)
             return result
 
         logger.warning(
@@ -7300,7 +7309,10 @@ class HydraStrategy(MEICStrategy):
         self._flush_batched_alerts()
 
         # Record stop to SQLite
-        self._record_stop_to_db(entry, side, stop_level, actual_close_cost)
+        # 0.0 = short buy-back fill not captured (unknown); a real MKT-025 short-only
+        # stop always buys back an expensive ITM short, so 0.0 is never a worthless
+        # close — map to None to retain the placeholder rather than book +credit.
+        self._record_stop_to_db(entry, side, stop_level, actual_close_cost or None)
 
         # MKT-033: Immediately try to sell the long leg if profitable
         if self.long_salvage_enabled and not self.dry_run:

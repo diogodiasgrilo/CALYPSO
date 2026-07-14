@@ -108,3 +108,70 @@ class TestCloseEntryEarlyWritesRealCost:
         # REAL fill-based costs, NOT the marks (87.5 / 17.5).
         assert entry.actual_call_stop_debit == pytest.approx(140.0)
         assert entry.actual_put_stop_debit == pytest.approx(70.0)
+
+
+class TestRecordStopNetPnl:
+    """2026-07-14: `_record_stop_to_db` must treat a RESOLVED debit of 0.0 (a
+    worthless close — short expired / bought back for ~nothing, full credit kept)
+    as +credit, NOT the trigger-level placeholder. Reproduces variant B's 07-13
+    E#3: put credit $500 closed worthless at the EOD flatten (debit 0.0) was
+    mis-recorded as net_pnl -1500 = -(trigger 2000 - credit 500) instead of +500.
+    Only None (a fill that was never captured) may fall back to the placeholder."""
+
+    def _strat(self):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s._data_recorder = MagicMock()
+        s.current_price = 7516.0
+        s._last_stop_time = None
+        return s
+
+    def _put_entry(self, credit, value=50.0, contracts=10):
+        return SimpleNamespace(
+            entry_number=3, contracts=contracts, entry_time=None,
+            put_spread_credit=credit, put_spread_value=value,
+            call_spread_credit=0.0, call_spread_value=0.0,
+        )
+
+    def _payload(self, s):
+        return s._data_recorder.record_stop.call_args[0][0]
+
+    def test_worthless_early_close_books_full_credit(self):
+        # B 07-13 E#3: credit 500, worthless close (debit 0.0) → +500, NOT -1500.
+        s = self._strat()
+        with patch("bots.hydra.strategy.get_us_market_time",
+                   return_value=datetime(2026, 7, 13, 15, 50)):
+            s._record_stop_to_db(self._put_entry(500.0), "put", 2000.0, 0.0,
+                                 exit_reason="early_close")
+        payload = self._payload(s)
+        assert payload["net_pnl"] == 500.0
+        assert payload["actual_debit"] == 0.0
+        assert payload["net_pnl"] != -1500.0  # the pre-fix placeholder
+
+    def test_unknown_fill_keeps_placeholder(self):
+        # None = fill never captured → trigger-level placeholder retained.
+        s = self._strat()
+        with patch("bots.hydra.strategy.get_us_market_time",
+                   return_value=datetime(2026, 7, 13, 15, 50)):
+            s._record_stop_to_db(self._put_entry(500.0), "put", 2000.0, None,
+                                 exit_reason="early_close")
+        assert self._payload(s)["net_pnl"] == -1500.0
+
+    def test_nonzero_debit_still_correct(self):
+        # C 07-13 E#1: credit 315, real debit 70 → +245 (unchanged by the fix).
+        s = self._strat()
+        with patch("bots.hydra.strategy.get_us_market_time",
+                   return_value=datetime(2026, 7, 13, 15, 50)):
+            s._record_stop_to_db(self._put_entry(315.0), "put", 1575.0, 70.0,
+                                 exit_reason="early_close")
+        assert self._payload(s)["net_pnl"] == 245.0
+
+    def test_real_stop_unknown_debit_uses_placeholder(self):
+        # A real stop whose close fill wasn't captured: the stop callers map their
+        # 0.0 -> None (see _execute_stop_loss / MKT-025), so None here must record
+        # the trigger-level placeholder, never +credit.
+        s = self._strat()
+        with patch("bots.hydra.strategy.get_us_market_time",
+                   return_value=datetime(2026, 7, 13, 15, 39)):
+            s._record_stop_to_db(self._put_entry(105.0), "put", 1575.0, None,
+                                 exit_reason="stop_loss")
+        assert self._payload(s)["net_pnl"] == -(1575.0 - 105.0)  # -1470 placeholder
