@@ -16,7 +16,7 @@ LIVE-paper variant C (Brandon 0DTE, real orders), via calypso-broker (one OAuth 
 The risk-officer audit returned a hard **NO-GO** for flipping D now, and the other four audits
 support it. The reasons are structural, not cosmetic:
 
-1. **D has NO real-order execution path at all.** `_initiate_entry` (double_calendar_strategy.py:803)
+1. **D has NO real-order execution path at all.** `_initiate_entry` (double_calendar_strategy.py:469)
    calls `_dc_simulate_entry` UNCONDITIONALLY — there is no `if not self.dry_run` fork anywhere in
    the file. `grep place_order|place_and_wait_for_fill` across all 3 D files = zero hits. Every
    action (open/transform/stop/EOD/settle) is simulated from mids + `DRY_*` ids. "Flip dry_run=false"
@@ -71,7 +71,7 @@ The 5-agent audit materially corrected the scope. These corrections are the high
   false sense of safety. The real backstop today is that `reconcile_orders` is **not allowlisted** in
   broker_service — keep it that way.
 - **C4 — The blast radius is WIDER than "C only".** STATE-004 (`_reset_for_new_day`, no dry-run gate,
-  called from main.py:526) and the ORDER-004 BP gate (`_check_buying_power` + `_read_account_balance`,
+  called from main.py:513) and the ORDER-004 BP gate (`_check_buying_power` + `_read_account_balance`,
   no dry-run gate) **also fire on dry-run variants A and B** → D's overnight legs would corrupt the
   A/B head-to-head record AND page on A/B daily. ONLY the hourly orphan sweep is dry-run-gated
   (`_check_hourly_reconciliation` returns early when `self.dry_run`). So A/B are *not* automatically

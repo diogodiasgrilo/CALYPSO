@@ -134,16 +134,16 @@ ever holds a real overnight leg.*
   `_read_open_positions(strict=True)`: HALT on every open conid **except** one positively in
   *another* variant's ledger; unknown / uic-less / ledger-unavailable → **HALT** (fail-safe). Apply
   in A/B/C. *Passes the full §6 test matrix + the live soak.* — files: `bots/hydra/strategy.py`
-  (`_reset_for_new_day` ~10979, `_read_open_positions` ~1902).
+  (`_reset_for_new_day` ~11774, `_read_open_positions` ~1937).
 - [ ] **G3** 🟧 **Orphan sweep → symmetric scoping.** Subtract other variants' conids before
   flagging (MVP: C ignores non-today expiry; D ignores today/0DTE). Apply in BOTH directions.
   *No orphan CRITICAL fires when D holds a paper leg; a genuine C orphan still alerts.* — files:
-  `bots/hydra/strategy.py` (`_recon_detect_orphans` ~10796, `_reconcile_orphan_sweep` ~10936).
+  `bots/hydra/strategy.py` (`_recon_detect_orphans` ~11553, `_reconcile_orphan_sweep` ~11729).
 - [ ] **G4** 🟧 **`_check_buying_power` → C-aware budget.** Gate D against `min(dc_max_deployed_debit,
   available − C_peak_reservation)`; document the static partition; size `C_peak_reservation` from C's
   worst-case `(max_wing − min_credit) × contracts × peak_concurrent`. *D refuses an entry that would
   cross into C's reservation; tested both directions.* — files: `bots/hydra/base_strategy.py`
-  (`_check_buying_power` ~6078), `bots/hydra/double_calendar_strategy.py` (`_dc_pre_entry_gates`).
+  (`_check_buying_power` ~6240), `bots/hydra/double_calendar_strategy.py` (`_dc_pre_entry_gates`).
 - [ ] **G5** 🟩 **Hard assert `dc_short_dte_min >= 1`** at construction + every entry (load-bearing
   for G3's heuristic + the no-shared-conid invariant). *Assert present + tested.* — files:
   `bots/hydra/double_calendar_strategy.py`.

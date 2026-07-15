@@ -245,12 +245,12 @@ To actually *show* TPs:
 > this is a **consolidating umbrella + a currency refresh, NOT net-new go-live thinking** (except the build-gated
 > D/E ops runbooks). Do this before any real go-live push. Full inventory: memory `golive_readiness_and_fill_lever`.
 >
-> **✅ STATUS (2026-07-14): Group A + Group B DONE.** `docs/GO_LIVE_MASTER.md` created (A1–A6); wired as the
+> **✅ STATUS (2026-07-14): Groups A + B + C DONE.** `docs/GO_LIVE_MASTER.md` created (A1–A6); wired as the
 > entry point in CLAUDE.md doc index + NEXT_STEPS §0 (A7); `LIVE_READINESS_CHECKLIST.md` refreshed —
-> real-money relabel + scope banner, ~1918 test count, broker-era cred model, broker-first restart order (B1–B5).
-> **Remaining: C1** (freshen the D-trio's stale `double_calendar_strategy.py:NNN` line refs — a separate build-doc
-> pass) + the **§8 build-gated artifacts** (E runbook, `flip_d/e_live.sh`, `broker_dc_smoke.py`, RB-9/RB-10),
-> which are blocked on the D/E real-order builds.
+> real-money relabel + scope banner, ~1918 test count, broker-era cred model, broker-first restart order (B1–B5);
+> **C1 stale D-doc line refs freshened** (6 drifted refs corrected, all cross-checked == current `def` line).
+> **Remaining: only the §8 build-gated artifacts** (E runbook, `flip_d/e_live.sh`, `broker_dc_smoke.py`,
+> RB-9/RB-10), which are blocked on the D/E real-order builds.
 
 ### A. Create `GO_LIVE_MASTER.md` (top-level umbrella — thin, links out, does NOT duplicate content)
 - [ ] **A1. Two-levels map + boundary.** Level (i) dry-run→live-PAPER (real paper orders) vs level (ii)
@@ -288,7 +288,12 @@ To actually *show* TPs:
 - [ ] **B5. Path note** — lives at `docs/migration/`, not `docs/`; add a top-of-file note + link from the master.
 
 ### C. Verify + ship
-- [ ] **C1. Freshen stale file:line refs** in the master + D docs (`double_calendar_strategy.py:NNN` refs are
-      stale post-`CalendarStrategyBase` extraction — point at the shared `_dc_*` methods).
+- [x] **C1. Freshen stale file:line refs** in the D docs — DONE 2026-07-14. Fixed 6 drifted refs:
+      `_initiate_entry` `double_calendar_strategy.py:803→469` + `main.py:526→513` (SCOPE_AND_AUDIT); and in
+      RUNBOOK `_reset_for_new_day` `~10979→~11774`, `_read_open_positions` `~1902→~1937`,
+      `_recon_detect_orphans` `~10796→~11553`, `_reconcile_orphan_sweep` `~10936→~11729`,
+      `_check_buying_power` `~6078→~6240`. (The `_dc_*` methods that moved to `calendar_strategy_base.py` in
+      the extraction were only referenced *by name* in the D docs — no stale file:line — and the RUNBOOK §11
+      Appendix already documents the lift. Every ref cross-checked == current `def` line.)
 - [ ] **C2. Commit clean** (docs-only, HOMER-safe: keep VM `git status` clean; no VM deploy needed for docs).
 - [ ] **C3. Check these off here** as they land; move detail into `GO_LIVE_MASTER.md`.
