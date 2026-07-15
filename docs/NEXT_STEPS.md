@@ -20,6 +20,8 @@
   picker). `calypso-broker` was restarted for the new `shared/ib_client`; session healthy. VM tree clean.
 - **Still dry-run-LOCKED / NOT live:** E and D place **no real orders**. A/B/C unchanged (A=dry-run per its
   config, C=live-paper). Real-money/live-paper go-live for E/D remains gated (§2b/§3).
+- **🚀 Go-live — START HERE:** [`docs/GO_LIVE_MASTER.md`](GO_LIVE_MASTER.md) — the umbrella (two levels, the
+  A/B/C/D/E status matrix, the tests+pass-criteria appendix, the flip procedure). Its own build/refresh TODO is §10.
 
 ---
 
@@ -242,6 +244,13 @@ To actually *show* TPs:
 > master but is **stale (2026-05-24), variant-A-only, 0DTE-shaped, pre-broker**. Most content already EXISTS —
 > this is a **consolidating umbrella + a currency refresh, NOT net-new go-live thinking** (except the build-gated
 > D/E ops runbooks). Do this before any real go-live push. Full inventory: memory `golive_readiness_and_fill_lever`.
+>
+> **✅ STATUS (2026-07-14): Group A + Group B DONE.** `docs/GO_LIVE_MASTER.md` created (A1–A6); wired as the
+> entry point in CLAUDE.md doc index + NEXT_STEPS §0 (A7); `LIVE_READINESS_CHECKLIST.md` refreshed —
+> real-money relabel + scope banner, ~1918 test count, broker-era cred model, broker-first restart order (B1–B5).
+> **Remaining: C1** (freshen the D-trio's stale `double_calendar_strategy.py:NNN` line refs — a separate build-doc
+> pass) + the **§8 build-gated artifacts** (E runbook, `flip_d/e_live.sh`, `broker_dc_smoke.py`, RB-9/RB-10),
+> which are blocked on the D/E real-order builds.
 
 ### A. Create `GO_LIVE_MASTER.md` (top-level umbrella — thin, links out, does NOT duplicate content)
 - [ ] **A1. Two-levels map + boundary.** Level (i) dry-run→live-PAPER (real paper orders) vs level (ii)

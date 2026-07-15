@@ -1,10 +1,21 @@
-# Live-Readiness Checklist — HYDRA on IBKR
+# Live-Readiness Checklist — REAL-MONEY gate (0DTE IC group: A/B/C)
 
-**Purpose:** A go/no-go checklist an operator MUST complete before flipping HYDRA from paper to live trading. Every item is a hard gate. If any item answers "no" or "unknown," do NOT go live.
+**Purpose:** A go/no-go checklist an operator MUST complete before flipping a 0DTE IC variant from live-PAPER to **REAL MONEY**. Every item is a hard gate. If any item answers "no" or "unknown," do NOT go live.
 
 **This file is NOT** the credentials-deploy runbook (that's `deploy/IBKR_CREDENTIALS_SETUP.md`) or the merge plan (`docs/migration/MERGE_PLAN.md`). It's the **final readiness gate** before live-money trading.
 
 **Authority:** Live trading requires explicit written approval (committed to the repo). The operator records the approval as the final item.
+
+> **📍 Scope + currency (refreshed 2026-07-14 — see [GO_LIVE_MASTER.md](../GO_LIVE_MASTER.md)):**
+> - This is the **Level II (live-MONEY) gate ONLY.** The **Level I dry-run→live-PAPER flip** is covered by
+>   `GO_LIVE_MASTER.md` §3 + `RUNBOOKS.md` RB-8, **not here**. **Start at [`GO_LIVE_MASTER.md`](../GO_LIVE_MASTER.md).**
+> - It is written **0DTE-IC-centric (A/B/C)** — apply it per variant (swap the `hydra*` unit +
+>   `config_variant_*.json`). The **calendar group (D/E) needs a SEPARATE real-money gate** — the 0DTE gates
+>   4/7/8/9 don't transfer (see `D_GOLIVE_SCOPE_AND_AUDIT.md` §5).
+> - **Broker mode (deployed topology):** OAuth/credentials now live in **`calypso-broker`**, not the strategy
+>   units — read Gates 5 & 6 in that light (this file predates the broker; the live-cred swap happens at
+>   `calypso-broker`, and a session fault is fixed by restarting `calypso-broker`, not `hydra`).
+> - This file lives at `docs/migration/` (not `docs/`).
 
 ---
 
@@ -47,7 +58,7 @@
 
 ## Gate 3 — Test state
 
-- [ ] Full test suite passes (≥ 885 passed, 0 failed)
+- [ ] Full test suite passes (**~1918 passed / 15 skipped**, 0 failed — as of 2026-07-14; the count grows, so require the current baseline with **0 failed**)
   ```bash
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m pytest tests/ -q --ignore=tests/test_dashboard 2>&1 | tail -3'"
   ```
@@ -84,11 +95,15 @@
   - Live signature + encryption + dhparam PEM files
 - [ ] All 6 live credentials encrypted via `systemd-creds encrypt --name=ibkr_<id>` to `/etc/calypso/ibkr-live/*.cred`
   - Note: directory name MUST differ from paper (`/etc/calypso/ibkr-live/` vs `/etc/calypso/ibkr/`)
-- [ ] `deploy/hydra.service` `LoadCredentialEncrypted=` paths updated to `/etc/calypso/ibkr-live/...`
-- [ ] `bots/hydra/main.py` calls `load_credentials("live")`, NOT `load_credentials("paper")`
+- [ ] **Broker mode (deployed):** `deploy/calypso-broker.service` `LoadCredentialEncrypted=` paths updated to
+  `/etc/calypso/ibkr-live/...`. In broker mode **`calypso-broker` owns the one IBClient/OAuth session** — the
+  live-cred swap happens THERE, not in the `hydra*` strategy units (which proxy data/orders to the broker and
+  carry now-unused cred lines). *(Legacy single-bot fallback only, if `CALYPSO_BROKER_URL` is unset:
+  `deploy/hydra.service` + `bots/hydra/main.py`'s `load_credentials(...)` call site.)*
+- [ ] The broker resolves the **live** keypair — after the swap, the broker's session `is_paper` is **False**.
   ```bash
-  gcloud compute ssh calypso-bot --zone=us-east1-b --command="grep 'load_credentials(' /opt/calypso/bots/hydra/main.py"
-  # MUST show: load_credentials("live")
+  # Confirm the broker is loading the LIVE credential set (per deploy/IBKR_CREDENTIALS_SETUP.md pre-start checks)
+  gcloud compute ssh calypso-bot --zone=us-east1-b --command="grep -n 'load_credentials' /opt/calypso/services/broker/main.py"
   ```
 - [ ] Pre-start verification (per `deploy/IBKR_CREDENTIALS_SETUP.md`, 3 checks) passes against the new `/etc/calypso/ibkr-live/` directory
 - [ ] **The paper credentials remain in `/etc/calypso/ibkr/`** for fallback / rollback. Do not delete.
@@ -199,12 +214,14 @@ Gate 8 (Position sizing):  GREEN — 1c week 1
 Gate 9 (Approval/halt):    GREEN — halt criteria committed at $(SHA)
 Gate 10 (Monitoring):      GREEN — operator availability confirmed
 
-Cutting over now via:
-  systemctl restart hydra
-  sudo journalctl -u hydra -f &  # monitor in another shell
+Cutting over now via (BROKER MODE — restart the broker FIRST; it owns the live session):
+  systemctl restart calypso-broker   # picks up the live creds; wait for /health connected:true
+  systemctl restart hydra hydra_variant_c   # (per-variant; the strategy units proxy to the broker)
+  sudo journalctl -u calypso-broker -u hydra -f &  # monitor in another shell
 
 If any halt criterion fires in week 1, execute:
-  systemctl stop hydra
+  systemctl stop hydra hydra_variant_c   # stop trading (broker stays up as a passive session holder)
+  # stop calypso-broker too only to drop the IBKR session entirely
   # then: refer to docs/migration/RUNBOOKS.md
 "
 ```

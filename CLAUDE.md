@@ -1067,7 +1067,8 @@ For the full 86-fix history including all Saxo-era bugs and resolutions, see `bo
 ### By problem type
 
 | Problem | Document | Key sections |
-|---------|----------|--------------|
+|---|---|---|
+| **🚀 Going live (START HERE)** | [docs/GO_LIVE_MASTER.md](docs/GO_LIVE_MASTER.md) | Umbrella: the two go-live levels, the A/B/C/D/E status matrix, the tests+pass-criteria appendix, and the flip procedure — links out to RB-8, the flip scripts, `broker_paper_smoke.py`, the D trio, and the readiness checklist |
 | IBKR migration history | [docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md](docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md) | F1–F7 + P1–P7 phases |
 | P7 audit findings (49 issues, all closed) | [docs/migration/P7_AUDIT_FINDINGS.md](docs/migration/P7_AUDIT_FINDINGS.md) | Round 1 register + Round 2/3 verifications |
 | Credentials setup | [deploy/IBKR_CREDENTIALS_SETUP.md](deploy/IBKR_CREDENTIALS_SETUP.md) | One-time setup + pre-start checklist |
