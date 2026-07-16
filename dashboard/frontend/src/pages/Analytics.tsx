@@ -21,6 +21,7 @@ import {
 import { colors } from "../lib/tradingColors";
 import { formatPnL } from "../lib/formatters";
 import { EquityCurve } from "../components/pnl/EquityCurve";
+import { markersForStrategy } from "../lib/strategyMarkers";
 import { CorrelationHeatmap } from "../components/market/CorrelationHeatmap";
 import { Download } from "lucide-react";
 import { exportEntriesCSV } from "../lib/exportUtils";
@@ -285,7 +286,7 @@ export function Analytics() {
           <>
             <PerformanceTab summaries={sortedSummaries} />
             <div className="col-span-2 max-lg:col-span-1">
-              <EquityCurve dailySummaries={sortedSummaries} />
+              <EquityCurve dailySummaries={sortedSummaries} markers={markersForStrategy(strategyId)} />
             </div>
           </>
         )}
