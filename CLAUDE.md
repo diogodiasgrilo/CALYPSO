@@ -143,7 +143,7 @@ The strategy itself is unchanged across the Saxo→IBKR migration; only the brok
 
 **2 base entries per day** at **10:45 ET** and **11:15 ET** (E#1 at 10:15 dropped at ALL VIX levels). Full iron condors or one-sided via MKT-011 credit gate. VIX entry cutoff disabled (`max_vix_entry=999` — neither Tammy nor Sandvand use VIX cutoffs).
 
-Conditional entries: **E7 disabled.** **E6 (14:00)** fires put-only on up-days (≥ 0.25% above session open — Upday-035) or call-only on down-days (≥ 0.25% below open — Downday-035). Down-day check runs first, then up-day; flat days skip E6.
+Conditional entries: **E7 disabled.** **E6 (14:00)** fires put-only on up-days (≥ 0.25% above session open — Upday-035) or call-only on down-days (≥ 0.25% below open — Downday-035). Down-day check runs first, then up-day; flat days skip E6. **This is variant A behavior. On B/C, E6 — being inherently one-sided — no longer fires** (suppressed by `one_sided_entries_enabled=false`, the require-both-sides change of 2026-07-16; see the Credit Gate note below).
 
 Walk-forward backtest Sharpe 3.282; realistic live Sharpe estimate 2.684 (ThetaData→Saxo calibration applied).
 
@@ -180,6 +180,8 @@ Estimates credit from quotes BEFORE placing orders. Thresholds VIX-regime-depend
 - **Both non-viable** → skip
 
 Per P7-audit H7: the IBKR `_estimate_entry_credit_ib` requires BOTH legs of a side to be quoted in the batch — any None makes that side return 0.0 so MKT-011 stays conservative.
+
+**Require-both-sides / no one-sided entries (B/C, deployed 2026-07-16).** `one_sided_entries_enabled=false` on B and C: any entry that would be placed one-sided is **skipped entirely** ("REQUIRE-BOTH-SIDES … SKIPPING" in the log). This covers all three one-sided sources — the credit gate (MKT-011/032/039/040 return "skip"), the Brandon GEX accel-zone skip (the strike-adjuster aborts the entry instead of routing one-sided), and the E6/conditional entries (inherently one-sided → suppressed). Rationale: one-sided entries (put_only-dominant) showed negative expectancy with a naked-put fat tail on B/C. **Reversible:** flip `one_sided_entries_enabled` back to `true` in the variant config + restart. Variant A is unaffected (still allows one-sided). Full detail in `bots/hydra/__init__.py` version history (2026-07-16) + memory `onesided_entry_negative_expectancy`.
 
 ### Stop Formula
 
@@ -405,8 +407,8 @@ Up to **5 parallel HYDRA processes** run concurrently, clustered into **2 compar
 | Variant | Group | Service | Strategy | Schedule | Contracts | Widths | Status |
 |---|---|---|---|---|---|---|---|
 | A | `ic_0dte` | `hydra.service` | HYDRA baseline (MKT-027 dynamic) | 10:45 / 11:15 (+ E6 14:00 conditional) | 1c | 75pt MKT-027 dynamic | dry_run_shadow (config `dry_run=true`; only C is live-paper) |
-| B | `ic_0dte` | `hydra_variant_b.service` | `BrandonHydraStrategy` (Trojan Horse stack LIVE) | 09:45 / 10:45 / 11:15 / 11:45 (+ E6) | 10c | 5pt below VIX 22, 10pt above (narrow) | dry_run_shadow |
-| C | `ic_0dte` | `hydra_variant_c.service` | `BrandonHydraStrategy` (Brandon-faithful baseline) | 10:15 / 10:45 / 11:15 (+ E6) | 10c | Same narrow widths as B | live (dashboard PRIMARY) |
+| B | `ic_0dte` | `hydra_variant_b.service` | `BrandonHydraStrategy` (Trojan Horse stack LIVE) | 09:45 / 10:45 / 11:15 / 11:45 (E6 **off** — require-both-sides) | 10c | 5pt below VIX 22, 10pt above (narrow) | dry_run_shadow |
+| C | `ic_0dte` | `hydra_variant_c.service` | `BrandonHydraStrategy` (Brandon-faithful baseline) | 10:15 / 10:45 / 11:15 (E6 **off** — require-both-sides) | 10c | Same narrow widths as B | live (dashboard PRIMARY) |
 | D | `calendar_multiday` | `hydra_variant_d.service` | `DoubleCalendarStrategy` ("DC Time Machine", multi-day SPX net-debit) | multi-day (not 0DTE) | — | double calendar | dry_run_locked (NO-GO) |
 | E | `calendar_multiday` | `hydra_variant_e.service` | `SpyDoubleCalendarStrategy` ("SPY Double Calendar", multi-day SPY net-debit, from an OptionsKit video) | multi-day (not 0DTE) | — | double calendar | dry_run_locked |
 
