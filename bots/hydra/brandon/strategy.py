@@ -520,10 +520,16 @@ class BrandonHydraStrategy(HydraStrategy):
 
     def _execute_entry(self, entry) -> bool:
         self._brandon_apply_strike_adjuster(entry)
+        if getattr(entry, "require_both_abort", False):
+            # one_sided disabled + GEX would route one-sided → don't place;
+            # _initiate_entry converts the False return into a clean skip.
+            return False
         return super()._execute_entry(entry)
 
     def _simulate_entry(self, entry) -> bool:
         self._brandon_apply_strike_adjuster(entry)
+        if getattr(entry, "require_both_abort", False):
+            return False
         return super()._simulate_entry(entry)
 
     def _brandon_apply_strike_adjuster(self, entry) -> None:
@@ -568,6 +574,15 @@ class BrandonHydraStrategy(HydraStrategy):
                 entry.short_call_strike = r.new_strike
                 entry.long_call_strike = r.new_strike + width
             elif r.action == gex_strike_adjuster.AdjustAction.SKIP:
+                if not getattr(self, "one_sided_entries_enabled", True):
+                    # require-both-sides: refuse to route one-sided; abort the entry.
+                    logger.warning(
+                        "BRANDON-GEX-ADJ E#%s call: SKIP — %s. one_sided_entries_enabled=false "
+                        "→ ABORTING entry (require both sides).",
+                        entry.entry_number, r.reason,
+                    )
+                    entry.require_both_abort = True
+                    return
                 logger.warning(
                     "BRANDON-GEX-ADJ E#%s call: SKIP — %s. Routing as put-only entry.",
                     entry.entry_number, r.reason,
@@ -598,6 +613,15 @@ class BrandonHydraStrategy(HydraStrategy):
                 entry.short_put_strike = r.new_strike
                 entry.long_put_strike = r.new_strike - width
             elif r.action == gex_strike_adjuster.AdjustAction.SKIP:
+                if not getattr(self, "one_sided_entries_enabled", True):
+                    # require-both-sides: refuse to route one-sided; abort the entry.
+                    logger.warning(
+                        "BRANDON-GEX-ADJ E#%s put: SKIP — %s. one_sided_entries_enabled=false "
+                        "→ ABORTING entry (require both sides).",
+                        entry.entry_number, r.reason,
+                    )
+                    entry.require_both_abort = True
+                    return
                 logger.warning(
                     "BRANDON-GEX-ADJ E#%s put: SKIP — %s. Routing as call-only entry.",
                     entry.entry_number, r.reason,

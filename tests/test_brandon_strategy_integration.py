@@ -950,6 +950,104 @@ class TestStrikeAdjusterLive:
         inst._brandon_apply_strike_adjuster(e)
         assert e.short_call_strike == 6850  # unchanged
 
+    def test_skip_aborts_entry_when_one_sided_disabled(self):
+        """require-both-sides: a GEX call-SKIP must ABORT the entry (not route
+        one-sided) when one_sided_entries_enabled=False."""
+        prof = self._profile_with_accel_at_call_short()
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_strike_adjuster_enabled=True,
+            brandon_accel_min_pct=0.05, current_price=6800,
+            one_sided_entries_enabled=False,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
+        e = self._entry()
+        inst._brandon_apply_strike_adjuster(e)
+        assert getattr(e, "require_both_abort", False) is True
+        assert e.put_only is False           # NOT routed one-sided
+        assert e.call_side_skipped is False   # aborted before any strike mutation
+        assert e.short_call_strike == 6850    # strikes untouched
+
+    def test_skip_still_routes_one_sided_when_enabled(self):
+        """Regression: with one_sided_entries_enabled=True (default), a GEX SKIP
+        still routes one-sided (existing behavior preserved)."""
+        prof = self._profile_with_accel_at_call_short()
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_strike_adjuster_enabled=True,
+            brandon_accel_min_pct=0.05, current_price=6800,
+            one_sided_entries_enabled=True,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
+        e = self._entry()
+        inst._brandon_apply_strike_adjuster(e)
+        # Observable behavior proves the enabled path ran (MagicMock auto-attrs make
+        # a getattr(require_both_abort) check unreliable here — the abort test uses an
+        # explicit-True set, which is checkable).
+        assert e.put_only is True
+        assert e.call_side_skipped is True
+
+
+class TestRequireBothSidesGuards:
+    """require-both-sides (one_sided_entries_enabled=false): _execute/_simulate
+    abort before super() when the GEX adjuster flagged require_both_abort, and the
+    _initiate_entry skip helper records a clean skip (not a failed retry)."""
+
+    def test_execute_entry_aborts_before_super(self):
+        import types
+        from bots.hydra.strategy import HydraStrategy
+        inst = _make_instance()
+        inst._brandon_apply_strike_adjuster = lambda e: setattr(e, "require_both_abort", True)
+        with patch.object(HydraStrategy, "_execute_entry", return_value=True) as mock_super:
+            e = types.SimpleNamespace(require_both_abort=False)
+            result = inst._execute_entry(e)
+        assert result is False
+        mock_super.assert_not_called()
+
+    def test_simulate_entry_aborts_before_super(self):
+        import types
+        from bots.hydra.strategy import HydraStrategy
+        inst = _make_instance()
+        inst._brandon_apply_strike_adjuster = lambda e: setattr(e, "require_both_abort", True)
+        with patch.object(HydraStrategy, "_simulate_entry", return_value=True) as mock_super:
+            e = types.SimpleNamespace(require_both_abort=False)
+            result = inst._simulate_entry(e)
+        assert result is False
+        mock_super.assert_not_called()
+
+    def test_execute_entry_proceeds_when_no_abort(self):
+        import types
+        from bots.hydra.strategy import HydraStrategy
+        inst = _make_instance()
+        inst._brandon_apply_strike_adjuster = lambda e: None  # no abort flag set
+        with patch.object(HydraStrategy, "_execute_entry", return_value=True) as mock_super:
+            e = types.SimpleNamespace()  # no require_both_abort attr → getattr default False
+            result = inst._execute_entry(e)
+        assert result is True
+        mock_super.assert_called_once()
+
+    def test_skip_helper_records_clean_skip(self):
+        import types
+        from bots.hydra.strategy import MEICState
+        inst = _make_instance()
+        inst.daily_state = types.SimpleNamespace(
+            entries_skipped=0, credit_gate_skips=0, active_entries=[]
+        )
+        inst._entry_in_progress = True
+        inst._current_entry = object()
+        inst._next_entry_index = 2
+        inst.entry_times = [1, 2, 3]
+        inst._log_safety_event = MagicMock()
+        inst._record_skipped_entry = MagicMock()
+        e = types.SimpleNamespace()
+        msg = inst._skip_require_both_sides(e, 3, "GEX-skip")
+        assert inst.daily_state.entries_skipped == 1
+        assert inst.daily_state.credit_gate_skips == 1
+        assert inst._entry_in_progress is False
+        assert inst._current_entry is None
+        assert inst._next_entry_index == 3
+        assert inst.state == MEICState.MONITORING
+        inst._record_skipped_entry.assert_called_once()
+        assert "require both sides" in msg.lower()
+
 
 class TestBreachExitLive:
     """Verify the LIVE breach exit actually closes the IC."""

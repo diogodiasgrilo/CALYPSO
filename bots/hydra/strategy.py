@@ -5763,6 +5763,29 @@ class HydraStrategy(MEICStrategy):
                 best_price = price
         return best_price if best_diff < minutes * 60 * 2 else 0.0  # reject if too far off
 
+    def _skip_require_both_sides(self, entry, entry_num: int, source: str) -> str:
+        """require-both-sides (one_sided_entries_enabled=false): skip an entry that
+        would be placed one-sided, from ANY source (credit-gate / E6 conditional /
+        the Brandon GEX strike-adjuster). Mirrors the MKT-010 clean-skip pattern so
+        the entry is recorded as a SKIP (not a failed retry). Returns the skip msg."""
+        logger.warning(
+            f"REQUIRE-BOTH-SIDES: Entry #{entry_num} would be one-sided ({source}) — "
+            f"SKIPPING (one_sided_entries_enabled=false)"
+        )
+        self._log_safety_event(
+            "REQUIRE_BOTH_SIDES_SKIP",
+            f"Entry #{entry_num} - one-sided ({source}) → skip (require both sides)",
+            "Skipped - Require Both Sides",
+        )
+        self.daily_state.entries_skipped += 1
+        self.daily_state.credit_gate_skips += 1
+        self._entry_in_progress = False
+        self._current_entry = None
+        self.state = MEICState.MONITORING
+        self._next_entry_index += 1
+        self._record_skipped_entry(entry_num, f"require-both-sides: one-sided ({source}) suppressed")
+        return f"Entry #{entry_num} skipped - require both sides ({source})"
+
     # OVERRIDE: Entry initiation with trend detection
     # =========================================================================
 
@@ -6454,6 +6477,13 @@ class HydraStrategy(MEICStrategy):
                     else:
                         logger.info(f"NEUTRAL → placing full iron condor")
 
+                # REQUIRE-BOTH-SIDES (B/C): when one-sided entries are disabled, skip
+                # any credit-gate / E6 / conditional one-sided routing before placement.
+                if not getattr(self, "one_sided_entries_enabled", True) and (place_put_only or place_call_only):
+                    return self._skip_require_both_sides(
+                        entry, entry_num, "call-only" if place_call_only else "put-only"
+                    )
+
                 import time as _time
                 _fill_start = _time.monotonic()
 
@@ -6472,6 +6502,12 @@ class HydraStrategy(MEICStrategy):
                         success = self._simulate_entry(entry)
                     else:
                         success = self._execute_entry(entry)
+
+                # REQUIRE-BOTH-SIDES: the Brandon GEX strike-adjuster runs INSIDE
+                # _execute/_simulate_entry and, when one-sided is disabled, sets
+                # require_both_abort + returns without placing. Convert to a clean skip.
+                if getattr(entry, "require_both_abort", False):
+                    return self._skip_require_both_sides(entry, entry_num, "GEX-skip")
 
                 entry._fill_time_ms = int((_time.monotonic() - _fill_start) * 1000)
                 entry._fill_attempts = attempt + 1

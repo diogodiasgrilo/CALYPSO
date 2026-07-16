@@ -36,6 +36,24 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Require-both-sides / no one-sided entries on B+C (2026-07-16). Data showed one-sided
+  entries (put_only-dominant) win 69-77% but carry NEGATIVE expectancy on B and C
+  (naked-short fat tail), net -$14.3k (B) / -$3.8k (C) over 2026-07-01..07-16 — worse
+  than full ICs. Set `one_sided_entries_enabled=false` on B+C. The credit-gate one-sided
+  path (MKT-011/032/039/040) already skips when the flag is false; ADDED coverage for the
+  two paths that bypassed it: (a) the Brandon GEX strike-adjuster SKIP (bots/hydra/brandon/
+  strategy.py) now sets `entry.require_both_abort` instead of routing one-sided when the
+  flag is off, and `_execute/_simulate_entry` return without placing; (b) `_initiate_entry`
+  gains two guards (pre-dispatch for credit-gate/E6 one-sided, post-dispatch for the GEX
+  abort) that funnel to a new `_skip_require_both_sides` clean-skip helper (recorded as a
+  SKIP, not a failed retry). Fully config-reversible (flag→true restores prior behavior).
+  Flag reads are getattr-defensive (default true). +6 tests (test_brandon_strategy_integration
+  TestRequireBothSidesGuards + TestStrikeAdjusterLive). Also fixed a residual data bug:
+  variant C 2026-07-06 two full_ic entries carried stale realized_pnl (-1489.54/-734.49 vs
+  the correct +105.00/0.00; SPX never breached, peak cost-to-close $315) — a leftover of the
+  07-06 stale-SPX settlement bug (daily/cumulative were corrected, entry rows were not).
+  Corrected in C's backtesting.db (GCS-backed); every reliable day now reconciles
+  SUM(realized_pnl)==gross_pnl. See memory `onesided_entry_negative_expectancy`.
 - Data-integrity + dashboard-plumbing fixes (2026-07-14, from the 07-13 audit).
   (1) `_record_stop_to_db` treated a RESOLVED close-cost of 0.0 (a worthless close
   = full credit kept) as "missing" via a falsy-0 guard, booking the trigger-level
