@@ -198,6 +198,10 @@ One-sided stops:
 - **Put-only (MKT-039):** `credit + put_stop_buffer`
 - **Call-only (MKT-040/MKT-038):** `call_credit + theoretical $2.60 put + call_stop_buffer`
 
+**Min-stop-credit floor (`MIN_STOP_LEVEL`).** Before the buffer is added, the credit input to *every* branch (full-IC total, put-only, call-only) is floored at **$0.50/contract** (`50.0 × contracts_per_entry`) in `strategy.py:_calculate_stop_levels_hydra`. This matters for the **narrow-spread variants B/C**, whose thin credit (often < the floor) means the floor — not the raw credit — sets the stop. Example: C put-only, 7c, zone 0 → credit floored to $350 + put_buf ($1.75 × 7 × 100 = $1,225) = **$1,575** trigger. Logged INFO ("… below … min-stop floor — using floor for stop"), not an error.
+
+**B/C use this SAME method for one-sided stops.** Brandon (B/C) overrides `_check_stop_losses` to add its own exits on top — take-profit (80% credit) and the GEX breach exit (Brandon's "primary stop" when GEX/Polygon is armed) — but the actual stop-*loss* is `super()._check_stop_losses()` → the identical `_calculate_stop_levels_hydra` + MKT-046 confirmation + `_execute_stop_loss` that variant A runs. The credit+buffer stop acts as the **live backstop** whenever GEX is unavailable (fallback) or armed-but-didn't-fire this tick (backstop, added 2026-06-10). There is **no** bespoke one-sided stop for B/C. Note: one-sided (put_only-dominant) entries win often but carry negative expectancy on B/C — see the memory `onesided_entry_negative_expectancy`.
+
 ### Stop Anti-Spike Filter (MKT-046)
 10-second persistence requirement on breach. Filters momentary bid/ask spikes from MM widening. On first breach, logs full bid/ask detail (`STOP-DETAIL`). If spread recovers within 10s → `MKT-046_FALSE_STOP_AVOIDED`. (MKT-036 75-second confirmation timer is `stop_confirmation_enabled: false`.)
 
