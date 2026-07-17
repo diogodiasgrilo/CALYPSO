@@ -535,16 +535,19 @@ def main():
     dry_run_active = False
     try:
         # I-M10: the [DRY-RUN] marker must reflect the variant whose trades are
-        # actually journaled. The default path is variant A's state file, but
-        # after the 2026-06-02 pivot the canonical record can be a LIVE variant
-        # (C, dry_run=false) — reading A's (sim) dry_run would then mislabel C's
-        # REAL trades as [DRY-RUN]. The operator points HOMER at the canonical
-        # variant's state file via HOMER_DRY_RUN_STATE_FILE (default = A, so
-        # this is a no-op until set — no regression).
-        state_path = os.environ.get(
-            "HOMER_DRY_RUN_STATE_FILE",
-            os.path.join(_project_root, "data", "hydra_state.json"),
-        )
+        # actually journaled. Reading A's (sim, dry_run=true) state would mislabel a
+        # LIVE variant's REAL trades as [DRY-RUN]. In db mode HOMER reads a specific
+        # variant's backtesting.db (homer.read_db), so DERIVE that same variant's
+        # state file (e.g. data/variant_c/backtesting.db -> data/variant_c/hydra_state.json,
+        # C is live -> no marker). HOMER_DRY_RUN_STATE_FILE still overrides; the
+        # sheets/legacy default remains variant A (no regression).
+        default_state = os.path.join(_project_root, "data", "hydra_state.json")
+        _read_db = homer_config.get("read_db")
+        if _read_db and str(homer_config.get("data_source", "")).lower() == "db":
+            default_state = os.path.join(
+                _project_root, os.path.dirname(_read_db), "hydra_state.json"
+            )
+        state_path = os.environ.get("HOMER_DRY_RUN_STATE_FILE", default_state)
         if os.path.exists(state_path):
             with open(state_path) as f:
                 state_blob = json.load(f)
