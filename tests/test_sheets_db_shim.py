@@ -127,6 +127,31 @@ def test_daily_summary_reconstructed_fields(tmp_path):
     assert r["VIX High"] == 17.2 and r["VIX Low"] == 15.8
 
 
+def test_win_rate_is_stop_count_not_pnl_sign(tmp_path):
+    """Win Rate = entries with NO side stopped (the Sheet's definition), NOT a P&L
+    sign test. A stopped-but-net-positive entry is still a non-win (audit 2026-07-17)."""
+    db = str(tmp_path / "bt.db")
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE daily_summaries (date TEXT, net_pnl REAL, gross_pnl REAL)")
+    conn.execute("CREATE TABLE trade_entries (date TEXT, entry_number INTEGER, entry_type TEXT, "
+                 "trend_signal TEXT, total_credit REAL, realized_pnl REAL)")
+    conn.execute("CREATE TABLE trade_stops (date TEXT, entry_number INTEGER, side TEXT, "
+                 "exit_reason TEXT, net_pnl REAL)")
+    conn.execute("INSERT INTO daily_summaries VALUES ('2026-07-20', 100, 100)")
+    conn.executemany("INSERT INTO trade_entries VALUES (?,?,?,?,?,?)", [
+        ('2026-07-20', 1, 'full_ic', 'neutral', 50, 50),    # expired, win
+        ('2026-07-20', 2, 'put_only', 'neutral', 40, 30),   # STOPPED, but net +30 (P&L-positive)
+        ('2026-07-20', 3, 'full_ic', 'neutral', 60, 20),    # expired, win
+    ])
+    conn.execute("INSERT INTO trade_stops VALUES ('2026-07-20', 2, 'put', 'stop_loss', 30)")
+    conn.commit()
+    conn.close()
+    r = DbSheetsReader(db).get_last_row_as_dict("X", "Daily Summary")
+    # all 3 netted >=0, but 1 was stopped -> 2/3 = 66.7% (a P&L-sign test would say 100%)
+    assert r["Win Rate (%)"] == 66.7
+    assert r["Put Stops"] == 1
+
+
 def test_positions_serves_recent_entries(tmp_path):
     db = str(tmp_path / "bt.db")
     conn = sqlite3.connect(db)

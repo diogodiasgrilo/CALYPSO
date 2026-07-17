@@ -21,8 +21,11 @@ as synthetic ``Action`` strings — HOMER reads structured ``trade_entries`` /
 """
 from __future__ import annotations
 
+import logging
 import sqlite3
 from typing import Any, Dict, List, Optional
+
+logger = logging.getLogger(__name__)
 
 
 def _to_float(v: Any) -> float:
@@ -74,7 +77,19 @@ def _row_to_sheet_dict(
             out[sheet_label] = "" if val is None else val
     gross = _to_float(row["gross_pnl"]) if "gross_pnl" in keys else 0.0
     salvage = _to_float(row["long_salvage_revenue"]) if "long_salvage_revenue" in keys else 0.0
-    stop_debits = agg.get("stop_debits", 0.0)
+    call_stops = agg.get("call_stops", 0)
+    put_stops = agg.get("put_stops", 0)
+    double_stops = agg.get("double_stops", 0)
+    # Stop Loss Debits = net loss on stops (-SUM net_pnl), NET of any long-salvage
+    # recovery, so the journal's P&L identity (Expired - Stops - Commission == Daily
+    # P&L) balances (audit 2026-07-17). salvage is 0 on all current variants, so this
+    # is a no-op today; correct if MKT-033 long salvage is ever enabled.
+    stop_debits = round(agg.get("stop_debits", 0.0) - salvage, 2)
+    # Win Rate = fraction of entries with NO side stopped — the Sheet's definition
+    # (logger_service: wins = entries - call_stops - put_stops + double_stops), NOT a
+    # per-entry P&L-sign test (audit 2026-07-17).
+    n_ent = agg.get("n_entries", 0)
+    wins = n_ent - call_stops - put_stops + double_stops
     out["Cumulative P&L ($)"] = round(cumulative_pnl, 2)
     out["Total Credit ($)"] = agg.get("total_credit", 0.0)
     out["Full ICs"] = agg.get("full_ics", 0)
@@ -82,12 +97,12 @@ def _row_to_sheet_dict(
     out["Bullish Signals"] = agg.get("bull", 0)
     out["Bearish Signals"] = agg.get("bear", 0)
     out["Neutral Signals"] = agg.get("neut", 0)
-    out["Win Rate (%)"] = agg.get("win_rate", 0.0)
-    out["Call Stops"] = agg.get("call_stops", 0)
-    out["Put Stops"] = agg.get("put_stops", 0)
-    out["Double Stops"] = agg.get("double_stops", 0)
-    out["Stop Loss Debits ($)"] = round(stop_debits, 2)
-    out["Expired Credits ($)"] = round(gross + stop_debits - salvage, 2)
+    out["Win Rate (%)"] = round(100.0 * wins / n_ent, 1) if n_ent else 0.0
+    out["Call Stops"] = call_stops
+    out["Put Stops"] = put_stops
+    out["Double Stops"] = double_stops
+    out["Stop Loss Debits ($)"] = stop_debits
+    out["Expired Credits ($)"] = round(gross + stop_debits, 2)
     out["Entries Skipped"] = agg.get("skipped", 0)
     out["VIX High"] = agg.get("vix_high", "")
     out["VIX Low"] = agg.get("vix_low", "")
@@ -131,6 +146,14 @@ def make_agent_reader(config: Dict[str, Any], *, agent: Optional[str] = None):
     """
     data_source, db_path = resolve_agent_source(config, agent)
     if data_source == "db":
+        if db_path == "data/backtesting.db":
+            # db mode with no read_db set falls back to variant A's DB — HOMER's WRITE
+            # target and the contaminated one. Warn loudly (audit 2026-07-17).
+            logger.warning(
+                "make_agent_reader(agent=%s): data_source=db but no read_db set — "
+                "using default data/backtesting.db (variant A). Set read_db to the "
+                "canonical variant's DB, e.g. data/variant_c/backtesting.db.", agent
+            )
         return DbSheetsReader(db_path)
     from shared.sheets_reader import SheetsReader  # lazy: avoids gspread import in DB mode
 
@@ -204,7 +227,7 @@ class DbSheetsReader:
             g["full_ics"] = r["full_ics"]
             g["one_sided"] = r["one_sided"]
             g["bull"], g["bear"], g["neut"] = r["bull"], r["bear"], r["neut"]
-            g["win_rate"] = round(100.0 * r["wins"] / r["n"], 1) if r["n"] else 0.0
+            g["n_entries"] = r["n"]  # Win Rate is derived from stop counts in _row_to_sheet_dict
         _try(
             "SELECT date, COALESCE(SUM(total_credit),0) total_credit, "
             "SUM(CASE WHEN entry_type IN ('full_ic','ic','Iron Condor') THEN 1 ELSE 0 END) full_ics, "
@@ -212,10 +235,7 @@ class DbSheetsReader:
             "SUM(CASE WHEN trend_signal='bullish' THEN 1 ELSE 0 END) bull, "
             "SUM(CASE WHEN trend_signal='bearish' THEN 1 ELSE 0 END) bear, "
             "SUM(CASE WHEN trend_signal='neutral' THEN 1 ELSE 0 END) neut, "
-            # win = realized_pnl >= 0 (a breakeven expiry counts as a win, matching
-            # the Sheet — verified 07-06: entry2 closed exactly 0, Sheet win-rate 100%).
-            "SUM(CASE WHEN realized_pnl>=0 THEN 1 ELSE 0 END) wins, COUNT(*) n "
-            "FROM trade_entries GROUP BY date",
+            "COUNT(*) n FROM trade_entries GROUP BY date",
             _ent,
         )
         # stops: per-side counts + net-loss (Stop Loss Debits = -SUM(net_pnl))

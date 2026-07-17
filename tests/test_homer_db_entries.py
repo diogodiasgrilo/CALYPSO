@@ -60,6 +60,20 @@ def test_outcome_double_stop_tp_early():
     assert _build_entries_for_day_from_db([dict(base, realized_pnl=-70)], ec, "d")[0]["Outcome"] == "Early Closed (Defensive)"
 
 
+def test_mixed_tp_and_stop_labels_as_stopped():
+    """A leg that STOPS while the other leg hits take-profit must label the entry as
+    *Stopped (so it surfaces in the Stop Timing Log and agrees with Section-2 stop
+    counts) — NOT 'Take Profit' (audit 2026-07-17 has_tp short-circuit bug)."""
+    entries = [dict(entry_number=1, entry_type="full_ic", trend_signal="neutral",
+                    short_call_strike=100, short_put_strike=90, total_credit=60, realized_pnl=-50)]
+    stops = [dict(entry_number=1, side="put", exit_reason="stop_loss", net_pnl=-140, stop_time="14:00:00", salvage_revenue=0),
+             dict(entry_number=1, side="call", exit_reason="take_profit", net_pnl=90, stop_time="13:00:00", salvage_revenue=0)]
+    e = _build_entries_for_day_from_db(entries, stops, "d")[0]
+    assert e["Outcome"] == "Put Stopped"       # NOT "Take Profit"
+    assert e["P&L Impact"] == -50.0
+    assert e["Put Stop Time"] == "02:00:00 PM ET"
+
+
 def test_call_stopped_and_salvage():
     entries = [dict(entry_number=2, entry_type="full_ic", trend_signal="bullish",
                     short_call_strike=100, short_put_strike=90, total_credit=60, realized_pnl=-120)]

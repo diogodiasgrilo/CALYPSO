@@ -544,16 +544,21 @@ def _build_entries_for_day_from_db(
         has_tp = any(st.get("exit_reason") == "take_profit" for st in estops)
         has_early = any(st.get("exit_reason") == "early_close" for st in estops)
 
-        if has_tp:
-            outcome = "Take Profit"
-        elif call_stopped and put_stopped:
+        # STOPS take priority over take_profit: a side that stopped must surface as
+        # "*Stopped" so it appears in the Stop Timing Log AND agrees with the Section-2
+        # Call/Put Stops counts, even when the other leg later hit an 80%-capture TP
+        # (audit 2026-07-17: a mixed TP+stop IC must not be mislabeled "Take Profit").
+        if call_stopped and put_stopped:
             outcome = "Double Stop" if net < 0 else "Take Profit"
         elif call_stopped:
             outcome = "Call Stopped"
         elif put_stopped:
             outcome = "Put Stopped"
+        elif has_tp:
+            outcome = "Take Profit"
         elif has_early:
-            outcome = "Take Profit" if net > 0 else ("Early Closed (Defensive)" if net < 0 else "Expired")
+            # matches the legacy Sheets classifier (net >= 0 -> Take Profit)
+            outcome = "Take Profit" if net >= 0 else "Early Closed (Defensive)"
         else:
             outcome = "Expired"
 
