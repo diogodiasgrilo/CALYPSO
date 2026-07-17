@@ -203,7 +203,9 @@ class DbSheetsReader:
             "SUM(CASE WHEN trend_signal='bullish' THEN 1 ELSE 0 END) bull, "
             "SUM(CASE WHEN trend_signal='bearish' THEN 1 ELSE 0 END) bear, "
             "SUM(CASE WHEN trend_signal='neutral' THEN 1 ELSE 0 END) neut, "
-            "SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins, COUNT(*) n "
+            # win = realized_pnl >= 0 (a breakeven expiry counts as a win, matching
+            # the Sheet — verified 07-06: entry2 closed exactly 0, Sheet win-rate 100%).
+            "SUM(CASE WHEN realized_pnl>=0 THEN 1 ELSE 0 END) wins, COUNT(*) n "
             "FROM trade_entries GROUP BY date",
             _ent,
         )
