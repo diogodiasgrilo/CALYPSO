@@ -571,6 +571,20 @@ def main():
     # 3. Detect missing days
     missing_days = detect_missing_days(journal_dates, sheets_dates)
 
+    # Forward-only cutoff. In DB mode the source (backtesting.db) has MORE history
+    # than the Sheet-era journal, so without this HOMER would back-fill pre-journal
+    # days (early dry-run data). Ignore any date earlier than homer.min_journal_date
+    # (set when migrating to data_source=db). No-op in sheets mode / when unset.
+    min_journal_date = homer_config.get("min_journal_date")
+    if min_journal_date:
+        _before = len(missing_days)
+        missing_days = [d for d in missing_days if d >= min_journal_date]
+        if _before != len(missing_days):
+            logger.info(
+                f"min_journal_date={min_journal_date}: ignoring "
+                f"{_before - len(missing_days)} pre-cutoff day(s)"
+            )
+
     if not missing_days:
         logger.info("Journal is up to date — no missing days")
         return
