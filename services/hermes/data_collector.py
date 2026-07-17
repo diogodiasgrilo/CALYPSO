@@ -75,33 +75,42 @@ def _read_apollo_report(config: Dict[str, Any], today_str: str) -> Optional[str]
 
 
 def _read_sheets_daily_summary(config: Dict[str, Any]) -> Optional[Dict[str, str]]:
-    """Read today's daily summary row from Google Sheets."""
+    """Read today's daily summary row — from the DB (migration) or Google Sheets.
+
+    Source chosen by config["hermes"]["data_source"] / config["data_source"]
+    (default sheets) via make_agent_reader. DB mode returns a Sheet-shaped row.
+    """
     try:
-        from shared.sheets_reader import SheetsReader
+        from shared.sheets_db_shim import make_agent_reader
 
         spreadsheet = config.get("google_sheets", {}).get(
             "spreadsheet_name", "Calypso_HYDRA_Live_Data"
         )
-        reader = SheetsReader(config)
+        reader = make_agent_reader(config, agent="hermes")
         return reader.get_last_row_as_dict(spreadsheet, "Daily Summary")
     except Exception as e:
-        logger.warning(f"Failed to read Daily Summary from Sheets: {e}")
+        logger.warning(f"Failed to read Daily Summary: {e}")
         return None
 
 
 def _read_sheets_positions(config: Dict[str, Any]) -> Optional[List[Dict[str, str]]]:
-    """Read today's position entries from Google Sheets."""
+    """Read recent position entries — from the DB (migration) or Google Sheets.
+
+    In DB mode the shim returns recent trade_entries as raw position context (this
+    block is dumped verbatim to Claude; HERMES's numeric analysis comes from the
+    state file, not here). Source chosen as in _read_sheets_daily_summary.
+    """
     try:
-        from shared.sheets_reader import SheetsReader
+        from shared.sheets_db_shim import make_agent_reader
 
         spreadsheet = config.get("google_sheets", {}).get(
             "spreadsheet_name", "Calypso_HYDRA_Live_Data"
         )
-        reader = SheetsReader(config)
+        reader = make_agent_reader(config, agent="hermes")
         # Read last 20 rows (max 6 entries × ~3 rows each for a typical day)
         return reader.read_tab_as_dicts(spreadsheet, "Positions", limit_rows=20)
     except Exception as e:
-        logger.warning(f"Failed to read Positions from Sheets: {e}")
+        logger.warning(f"Failed to read Positions: {e}")
         return None
 
 

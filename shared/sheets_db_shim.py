@@ -125,8 +125,13 @@ class DbSheetsReader:
     def read_tab_as_dicts(
         self, spreadsheet_name: str, tab_name: str, limit_rows: Optional[int] = None
     ) -> List[Dict[str, Any]]:
+        if tab_name == "Positions":
+            # Recent entries as raw position context (HERMES dumps this to Claude
+            # as raw JSON, so structured entry rows are equivalent context). HOMER
+            # does NOT use this path — it reads entries_for_day/stops_for_day.
+            return self._recent_entries(limit_rows or 20)
         if tab_name != "Daily Summary":
-            # Trades/Positions are served structured via entries_for_day/stops_for_day.
+            # "Trades" is served structured via entries_for_day/stops_for_day.
             return []
         conn = self._conn()
         try:
@@ -163,6 +168,23 @@ class DbSheetsReader:
     ) -> Optional[Dict[str, Any]]:
         rows = self.read_tab_as_dicts(spreadsheet_name, tab_name)
         return rows[-1] if rows else None
+
+    def _recent_entries(self, limit: int) -> List[Dict[str, Any]]:
+        """Most-recent entries (raw) — position context for HERMES."""
+        conn = self._conn()
+        try:
+            return [
+                dict(r)
+                for r in conn.execute(
+                    "SELECT date, entry_number, entry_type, short_call_strike, "
+                    "long_call_strike, short_put_strike, long_put_strike, call_credit, "
+                    "put_credit, total_credit, realized_pnl "
+                    "FROM trade_entries ORDER BY date DESC, entry_number DESC LIMIT ?",
+                    (limit,),
+                )
+            ]
+        finally:
+            conn.close()
 
     # --- structured reads for HOMER (no Sheet-string round-trip) ---
     def entries_for_day(self, date_str: str) -> List[Dict[str, Any]]:

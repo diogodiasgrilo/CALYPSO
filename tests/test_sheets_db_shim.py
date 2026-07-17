@@ -84,6 +84,28 @@ def test_daily_summary_shape_and_reconstructed_fields(tmp_path):
     assert r.entries_for_day("2026-07-16") == []                  # empty trade_entries in this db
 
 
+def test_positions_serves_recent_entries(tmp_path):
+    db = str(tmp_path / "bt.db")
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE daily_summaries (date TEXT, net_pnl REAL)")
+    conn.execute("CREATE TABLE trade_stops (date TEXT, side TEXT, exit_reason TEXT)")
+    conn.execute(
+        "CREATE TABLE trade_entries (date TEXT, entry_number INTEGER, entry_type TEXT, "
+        "short_call_strike REAL, long_call_strike REAL, short_put_strike REAL, "
+        "long_put_strike REAL, call_credit REAL, put_credit REAL, total_credit REAL, realized_pnl REAL)"
+    )
+    conn.execute(
+        "INSERT INTO trade_entries VALUES ('2026-07-16', 1, 'put_only', 0, 0, 7515, 7510, 0, 105, 105, -1785)"
+    )
+    conn.commit()
+    conn.close()
+    r = DbSheetsReader(db)
+    pos = r.read_tab_as_dicts("X", "Positions", limit_rows=20)   # recent entries as raw context
+    assert len(pos) == 1
+    assert pos[0]["entry_type"] == "put_only" and pos[0]["short_put_strike"] == 7515
+    assert r.read_tab_as_dicts("X", "Trades") == []              # Trades still not served here
+
+
 def test_factory_db_mode_and_path_resolution():
     from shared.sheets_db_shim import make_agent_reader, DbSheetsReader
     # read_db is preferred over backtesting_db (so it never collides with HOMER's write path)
