@@ -122,14 +122,20 @@ def _read_text_file(path: str) -> Optional[str]:
 
 
 def _read_sheets_history(config: Dict[str, Any]) -> Optional[List[Dict[str, str]]]:
-    """Read full Daily Summary history from Google Sheets."""
+    """Read full Daily Summary history — from the DB (migration) or Google Sheets.
+
+    Source is chosen by `config["data_source"]` ("db" | "sheets", default sheets)
+    via `make_agent_reader`. In DB mode it reads `config["backtesting_db"]` (the
+    canonical variant's backtesting.db) and returns Sheet-shaped Daily Summary
+    dicts — identical shape to the Sheets path, so downstream is unchanged.
+    """
     try:
-        from shared.sheets_reader import SheetsReader
+        from shared.sheets_db_shim import make_agent_reader
 
         spreadsheet = config.get("google_sheets", {}).get(
             "spreadsheet_name", "Calypso_HYDRA_Live_Data"
         )
-        reader = SheetsReader(config)
+        reader = make_agent_reader(config)
         return reader.read_tab_as_dicts(spreadsheet, "Daily Summary")
     except Exception as e:
         logger.warning(f"Failed to read Daily Summary history: {e}")

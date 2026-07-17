@@ -71,6 +71,26 @@ def _row_to_sheet_dict(
     return out
 
 
+def make_agent_reader(config: Dict[str, Any]):
+    """Factory used by the agents during the Sheets→DB migration.
+
+    Returns a :class:`DbSheetsReader` when ``config["data_source"] == "db"``,
+    else the Google ``SheetsReader``. Both expose ``read_tab_as_dicts`` and
+    ``get_last_row_as_dict`` with the same signature, so a caller swaps readers
+    with no other change. Default is ``"sheets"`` (zero behavior change until an
+    operator flips the flag). The DB path comes from ``config["backtesting_db"]``
+    (falls back to ``data/backtesting.db``) — set it to the CANONICAL variant's DB
+    (e.g. ``data/variant_c/backtesting.db``), not variant A's.
+    """
+    data_source = str(config.get("data_source") or "sheets").lower()
+    if data_source == "db":
+        db_path = config.get("backtesting_db") or "data/backtesting.db"
+        return DbSheetsReader(db_path)
+    from shared.sheets_reader import SheetsReader  # lazy: avoids gspread import in DB mode
+
+    return SheetsReader(config)
+
+
 class DbSheetsReader:
     """Drop-in for ``shared.sheets_reader.SheetsReader`` backed by backtesting.db.
 

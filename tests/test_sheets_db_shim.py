@@ -75,6 +75,26 @@ def test_daily_summary_shape_and_reconstructed_fields(tmp_path):
     assert r.entries_for_day("2026-07-16") == []                  # empty trade_entries in this db
 
 
+def test_factory_db_mode(tmp_path):
+    from shared.sheets_db_shim import make_agent_reader, DbSheetsReader
+    r = make_agent_reader({"data_source": "db", "backtesting_db": "data/variant_c/backtesting.db"})
+    assert isinstance(r, DbSheetsReader)
+    assert r.db_path == "data/variant_c/backtesting.db"
+    # default DB path when unset
+    r2 = make_agent_reader({"data_source": "db"})
+    assert isinstance(r2, DbSheetsReader) and r2.db_path == "data/backtesting.db"
+
+
+def test_factory_default_is_sheets(monkeypatch):
+    import shared.sheets_reader as sr
+    sentinel = object()
+    monkeypatch.setattr(sr, "SheetsReader", lambda cfg: sentinel)
+    from shared.sheets_db_shim import make_agent_reader
+    assert make_agent_reader({}) is sentinel                       # default
+    assert make_agent_reader({"data_source": "sheets"}) is sentinel
+    assert make_agent_reader({"data_source": "SHEETS"}) is sentinel  # case-insensitive
+
+
 def test_roundtrip_matches_homer_forward_map(tmp_path):
     try:
         from services.homer.data_collector import _build_summary_record
