@@ -50,24 +50,47 @@ DAILY_DB_TO_SHEET: Dict[str, str] = {
     "commission": "Commission ($)",
     "entries_placed": "Entries Completed",
     "long_salvage_revenue": "Long Salvage ($)",
+    "contracts_per_entry": "Contracts",
     "economic_events": "Notes",          # lossy: Sheet Notes is free-form; DB keeps economic_events
 }
 
+# Sheet "Daily Summary" labels that have NO DB source and stay blank in DB mode
+# (documented Option-A gap): EUR columns, Capital Deployed, Return on Capital,
+# Sortino Ratio, Max Loss Stops/Catastrophic, Early Close. Everything else is
+# either mapped above or reconstructed below (validated vs the live Sheet).
+
 
 def _row_to_sheet_dict(
-    row: sqlite3.Row, cumulative_pnl: float, call_stops: int, put_stops: int
+    row: sqlite3.Row, cumulative_pnl: float, agg: Dict[str, Any]
 ) -> Dict[str, Any]:
-    """One daily_summaries row -> a "Daily Summary"-labeled dict."""
+    """One daily_summaries row + its per-day aggregates -> a "Daily Summary"-labeled
+    dict. `agg` carries the reconstructed fields (validated field-for-field against
+    C's live Sheet for settled days 2026-07-14/15/16)."""
     keys = row.keys()
     out: Dict[str, Any] = {}
     for db_col, sheet_label in DAILY_DB_TO_SHEET.items():
         if db_col in keys:
             val = row[db_col]
             out[sheet_label] = "" if val is None else val
-    # Reconstructed fields with no 1:1 daily_summaries column.
+    gross = _to_float(row["gross_pnl"]) if "gross_pnl" in keys else 0.0
+    salvage = _to_float(row["long_salvage_revenue"]) if "long_salvage_revenue" in keys else 0.0
+    stop_debits = agg.get("stop_debits", 0.0)
     out["Cumulative P&L ($)"] = round(cumulative_pnl, 2)
-    out["Call Stops"] = call_stops
-    out["Put Stops"] = put_stops
+    out["Total Credit ($)"] = agg.get("total_credit", 0.0)
+    out["Full ICs"] = agg.get("full_ics", 0)
+    out["One-Sided Entries"] = agg.get("one_sided", 0)
+    out["Bullish Signals"] = agg.get("bull", 0)
+    out["Bearish Signals"] = agg.get("bear", 0)
+    out["Neutral Signals"] = agg.get("neut", 0)
+    out["Win Rate (%)"] = agg.get("win_rate", 0.0)
+    out["Call Stops"] = agg.get("call_stops", 0)
+    out["Put Stops"] = agg.get("put_stops", 0)
+    out["Double Stops"] = agg.get("double_stops", 0)
+    out["Stop Loss Debits ($)"] = round(stop_debits, 2)
+    out["Expired Credits ($)"] = round(gross + stop_debits - salvage, 2)
+    out["Entries Skipped"] = agg.get("skipped", 0)
+    out["VIX High"] = agg.get("vix_high", "")
+    out["VIX Low"] = agg.get("vix_low", "")
     return out
 
 
@@ -135,33 +158,87 @@ class DbSheetsReader:
             return []
         conn = self._conn()
         try:
-            rows = conn.execute(
-                "SELECT * FROM daily_summaries ORDER BY date"
-            ).fetchall()
-            # Per-side stop counts = ACTUAL stops only. trade_stops also holds EOD
-            # 'early_close' flattens (not stops) and legacy NULL-exit rows; the
-            # Sheet's "Call/Put Stops" counted only genuine stops, so match that:
-            # exit_reason in ('stop_loss','gex_breach'). (Verified against C's
-            # Sheet: 06-24/07-13 put = 1 stop_loss, not the +1 early_close.)
-            stop_counts: Dict[str, Dict[str, int]] = {}
-            for r in conn.execute(
-                "SELECT date, side, COUNT(*) n FROM trade_stops "
-                "WHERE exit_reason IN ('stop_loss', 'gex_breach') GROUP BY date, side"
-            ):
-                stop_counts.setdefault(r["date"], {})[r["side"]] = r["n"]
+            rows = conn.execute("SELECT * FROM daily_summaries ORDER BY date").fetchall()
+            aggs = self._daily_aggregates(conn)
             out: List[Dict[str, Any]] = []
             cumulative = 0.0
             for row in rows:
                 cumulative += _to_float(row["net_pnl"])
-                sc = stop_counts.get(row["date"], {})
-                out.append(
-                    _row_to_sheet_dict(row, cumulative, sc.get("call", 0), sc.get("put", 0))
-                )
+                out.append(_row_to_sheet_dict(row, cumulative, aggs.get(row["date"], {})))
             if limit_rows is not None and limit_rows > 0:
                 out = out[-limit_rows:]
             return out
         finally:
             conn.close()
+
+    def _daily_aggregates(self, conn: sqlite3.Connection) -> Dict[str, Dict[str, Any]]:
+        """Per-date reconstructions for the Daily Summary fields that have no 1:1
+        daily_summaries column. Each source table is queried defensively — a missing
+        table (edge/partial DB) leaves those fields at their defaults rather than
+        raising. Formulas validated field-for-field vs C's live Sheet (07-14/15/16)."""
+        agg: Dict[str, Dict[str, Any]] = {}
+
+        def _g(d):
+            return agg.setdefault(d, {})
+
+        def _try(sql, handler):
+            try:
+                for r in conn.execute(sql):
+                    handler(r)
+            except sqlite3.OperationalError:
+                pass  # table absent in this DB — leave fields blank/default
+
+        # entries: credit, structure, signals, daily win rate
+        def _ent(r):
+            g = _g(r["date"])
+            g["total_credit"] = round(r["total_credit"] or 0.0, 2)
+            g["full_ics"] = r["full_ics"]
+            g["one_sided"] = r["one_sided"]
+            g["bull"], g["bear"], g["neut"] = r["bull"], r["bear"], r["neut"]
+            g["win_rate"] = round(100.0 * r["wins"] / r["n"], 1) if r["n"] else 0.0
+        _try(
+            "SELECT date, COALESCE(SUM(total_credit),0) total_credit, "
+            "SUM(CASE WHEN entry_type IN ('full_ic','ic','Iron Condor') THEN 1 ELSE 0 END) full_ics, "
+            "SUM(CASE WHEN entry_type IN ('put_only','call_only','Put Spread','Call Spread') THEN 1 ELSE 0 END) one_sided, "
+            "SUM(CASE WHEN trend_signal='bullish' THEN 1 ELSE 0 END) bull, "
+            "SUM(CASE WHEN trend_signal='bearish' THEN 1 ELSE 0 END) bear, "
+            "SUM(CASE WHEN trend_signal='neutral' THEN 1 ELSE 0 END) neut, "
+            "SUM(CASE WHEN realized_pnl>0 THEN 1 ELSE 0 END) wins, COUNT(*) n "
+            "FROM trade_entries GROUP BY date",
+            _ent,
+        )
+        # stops: per-side counts + net-loss (Stop Loss Debits = -SUM(net_pnl))
+        def _st(r):
+            g = _g(r["date"])
+            g["call_stops"], g["put_stops"] = r["calls"], r["puts"]
+            g["stop_debits"] = round(-(r["net"] or 0.0), 2)
+        _try(
+            "SELECT date, SUM(CASE WHEN side='call' THEN 1 ELSE 0 END) calls, "
+            "SUM(CASE WHEN side='put' THEN 1 ELSE 0 END) puts, COALESCE(SUM(net_pnl),0) net "
+            "FROM trade_stops WHERE exit_reason IN ('stop_loss','gex_breach') GROUP BY date",
+            _st,
+        )
+        # double stops: entries with BOTH sides stopped
+        _try(
+            "SELECT date, COUNT(*) n FROM (SELECT date, entry_number FROM trade_stops "
+            "WHERE exit_reason IN ('stop_loss','gex_breach') AND side IN ('call','put') "
+            "GROUP BY date, entry_number HAVING COUNT(DISTINCT side)=2) GROUP BY date",
+            lambda r: _g(r["date"]).__setitem__("double_stops", r["n"]),
+        )
+        _try(
+            "SELECT date, COUNT(*) n FROM skipped_entries GROUP BY date",
+            lambda r: _g(r["date"]).__setitem__("skipped", r["n"]),
+        )
+        # VIX high/low from ticks (market_ticks keys on timestamp, not date)
+        def _vix(r):
+            g = _g(r["d"])
+            g["vix_high"], g["vix_low"] = r["hi"], r["lo"]
+        _try(
+            "SELECT substr(timestamp,1,10) d, MAX(vix_level) hi, MIN(vix_level) lo "
+            "FROM market_ticks WHERE vix_level>0 GROUP BY substr(timestamp,1,10)",
+            _vix,
+        )
+        return agg
 
     def get_last_row_as_dict(
         self, spreadsheet_name: str, tab_name: str

@@ -31,17 +31,20 @@ def _make_db(tmp_path, rows, stops=None):
     db = str(tmp_path / "bt.db")
     conn = sqlite3.connect(db)
     conn.execute(f"CREATE TABLE daily_summaries ({', '.join(c + ' ' + t for c, t in _DAILY_COLS)})")
-    conn.execute("CREATE TABLE trade_stops (date TEXT, entry_number INTEGER, side TEXT, exit_reason TEXT)")
+    conn.execute(
+        "CREATE TABLE trade_stops (date TEXT, entry_number INTEGER, side TEXT, exit_reason TEXT, net_pnl REAL)"
+    )
     conn.execute("CREATE TABLE trade_entries (date TEXT, entry_number INTEGER)")
     for r in rows:
         cols = ", ".join(r.keys())
         ph = ", ".join("?" * len(r))
         conn.execute(f"INSERT INTO daily_summaries ({cols}) VALUES ({ph})", tuple(r.values()))
     for s in (stops or []):
-        # accept (date, entry, side) [defaults exit_reason=stop_loss] or (date, entry, side, exit_reason)
-        row = s if len(s) == 4 else (s[0], s[1], s[2], "stop_loss")
+        # (date, entry, side[, exit_reason[, net_pnl]]) — defaults stop_loss / -100.0
+        row = (s[0], s[1], s[2], s[3] if len(s) > 3 else "stop_loss", s[4] if len(s) > 4 else -100.0)
         conn.execute(
-            "INSERT INTO trade_stops (date, entry_number, side, exit_reason) VALUES (?, ?, ?, ?)", row
+            "INSERT INTO trade_stops (date, entry_number, side, exit_reason, net_pnl) VALUES (?, ?, ?, ?, ?)",
+            row,
         )
     conn.commit()
     conn.close()
@@ -82,6 +85,46 @@ def test_daily_summary_shape_and_reconstructed_fields(tmp_path):
     # Trades/Positions are NOT served by the shim (HOMER reads them structured).
     assert r.read_tab_as_dicts("X", "Trades") == []
     assert r.entries_for_day("2026-07-16") == []                  # empty trade_entries in this db
+
+
+def test_daily_summary_reconstructed_fields(tmp_path):
+    """The DB-reconstructed Daily Summary fields (validated field-for-field vs C's
+    live Sheet). One day: a won full_ic + a stopped put_only + a skip + VIX ticks."""
+    db = str(tmp_path / "bt.db")
+    conn = sqlite3.connect(db)
+    conn.execute("CREATE TABLE daily_summaries (date TEXT, net_pnl REAL, gross_pnl REAL, "
+                 "long_salvage_revenue REAL, contracts_per_entry INTEGER)")
+    conn.execute("CREATE TABLE trade_entries (date TEXT, entry_number INTEGER, entry_type TEXT, "
+                 "trend_signal TEXT, total_credit REAL, realized_pnl REAL)")
+    conn.execute("CREATE TABLE trade_stops (date TEXT, entry_number INTEGER, side TEXT, "
+                 "exit_reason TEXT, net_pnl REAL)")
+    conn.execute("CREATE TABLE skipped_entries (date TEXT, entry_number INTEGER)")
+    conn.execute("CREATE TABLE market_ticks (timestamp TEXT, vix_level REAL)")
+    conn.execute("INSERT INTO daily_summaries VALUES ('2026-07-16', -1310, -1310, 0, 7)")
+    conn.executemany("INSERT INTO trade_entries VALUES (?,?,?,?,?,?)", [
+        ('2026-07-16', 1, 'full_ic', 'neutral', 300, 300),     # expired, won
+        ('2026-07-16', 2, 'put_only', 'neutral', 280, -1610),  # stopped
+    ])
+    conn.execute("INSERT INTO trade_stops VALUES ('2026-07-16', 2, 'put', 'stop_loss', -1610)")
+    conn.execute("INSERT INTO trade_stops VALUES ('2026-07-16', 1, 'call', 'early_close', 5)")  # not a stop
+    conn.execute("INSERT INTO skipped_entries VALUES ('2026-07-16', 3)")
+    conn.executemany("INSERT INTO market_ticks VALUES (?,?)", [
+        ('2026-07-16 10:00:00', 16.0), ('2026-07-16 12:00:00', 17.2), ('2026-07-16 14:00:00', 15.8)])
+    conn.commit()
+    conn.close()
+
+    r = DbSheetsReader(db).get_last_row_as_dict("X", "Daily Summary")
+    assert r["Total Credit ($)"] == 580.0          # 300 + 280
+    assert r["Full ICs"] == 1 and r["One-Sided Entries"] == 1
+    assert r["Neutral Signals"] == 2
+    assert r["Win Rate (%)"] == 50.0               # 1 of 2 profitable
+    assert r["Put Stops"] == 1 and r["Call Stops"] == 0   # early_close call excluded
+    assert r["Double Stops"] == 0
+    assert r["Stop Loss Debits ($)"] == 1610.0     # -SUM(net_pnl) of real stops
+    assert r["Expired Credits ($)"] == 300.0       # gross(-1310) + debits(1610) - salvage(0)
+    assert r["Entries Skipped"] == 1
+    assert r["Contracts"] == 7
+    assert r["VIX High"] == 17.2 and r["VIX Low"] == 15.8
 
 
 def test_positions_serves_recent_entries(tmp_path):
