@@ -94,6 +94,22 @@ def _row_to_sheet_dict(
     return out
 
 
+def resolve_agent_source(config: Dict[str, Any], agent: Optional[str] = None):
+    """Return ``(data_source, db_path)`` using the same per-agent-then-top-level
+    resolution as :func:`make_agent_reader`, WITHOUT constructing a reader — so a
+    caller (e.g. HOMER choosing its entries builder) can branch on mode cheaply
+    and only build a :class:`DbSheetsReader` when actually in ``"db"`` mode."""
+    def _resolve(key, default=None):
+        sub = config.get(agent) if agent else None
+        if isinstance(sub, dict) and sub.get(key) is not None:
+            return sub[key]
+        return config.get(key, default)
+
+    data_source = str(_resolve("data_source", "sheets") or "sheets").lower()
+    db_path = _resolve("read_db") or _resolve("backtesting_db") or "data/backtesting.db"
+    return data_source, db_path
+
+
 def make_agent_reader(config: Dict[str, Any], *, agent: Optional[str] = None):
     """Factory used by the agents during the Sheets→DB migration.
 
@@ -113,15 +129,8 @@ def make_agent_reader(config: Dict[str, Any], *, agent: Optional[str] = None):
     collides with HOMER's (write) ``backtesting_db``. Point it at the CANONICAL
     variant's DB (``data/variant_c/backtesting.db``), not variant A's.
     """
-    def _resolve(key, default=None):
-        sub = config.get(agent) if agent else None
-        if isinstance(sub, dict) and sub.get(key) is not None:
-            return sub[key]
-        return config.get(key, default)
-
-    data_source = str(_resolve("data_source", "sheets") or "sheets").lower()
+    data_source, db_path = resolve_agent_source(config, agent)
     if data_source == "db":
-        db_path = _resolve("read_db") or _resolve("backtesting_db") or "data/backtesting.db"
         return DbSheetsReader(db_path)
     from shared.sheets_reader import SheetsReader  # lazy: avoids gspread import in DB mode
 
