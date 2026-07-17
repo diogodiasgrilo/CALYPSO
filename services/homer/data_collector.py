@@ -491,17 +491,25 @@ _ENTRY_TYPE_DB_TO_SHEET = {
 
 
 def _fmt_ts(ts) -> str:
-    """DB entry_time/stop_time -> the Sheet's '%-I:%M:%S %p ET' format."""
+    """DB entry_time/stop_time -> the Sheet's '%I:%M:%S %p ET' format (leading zero kept)."""
     if not ts:
         return ""
     s = str(ts).strip()
     part = s.split(" ")[-1] if " " in s else s  # 'YYYY-MM-DD HH:MM:SS' or 'HH:MM:SS'
     try:
         from datetime import datetime
-        t = datetime.strptime(part[:8], "%H:%M:%S")
-        return t.strftime("%I:%M:%S %p ET").lstrip("0")
+        return datetime.strptime(part[:8], "%H:%M:%S").strftime("%I:%M:%S %p ET")
     except (ValueError, TypeError):
         return s
+
+
+def _num(v):
+    """Render a DB numeric like the Sheet did: whole -> int (no trailing .0), else float."""
+    try:
+        f = float(v)
+        return int(f) if f.is_integer() else f
+    except (TypeError, ValueError):
+        return v
 
 
 def _build_entries_for_day_from_db(
@@ -557,19 +565,20 @@ def _build_entries_for_day_from_db(
 
         all_stop_times = [st.get("stop_time") for st in estops if st.get("stop_time")]
         sc, sp = e.get("short_call_strike") or 0, e.get("short_put_strike") or 0
+        lc, lp = e.get("long_call_strike") or 0, e.get("long_put_strike") or 0
         out.append({
             "Entry #": en,
             "Entry Time": _fmt_ts(e.get("entry_time")),
             "Trend Signal": str(e.get("trend_signal") or "neutral").upper(),
             "Entry Type": _ENTRY_TYPE_DB_TO_SHEET.get(e.get("entry_type"), e.get("entry_type") or ""),
             "Override Reason": e.get("override_reason") or "",
-            "Short Call Strike": sc if sc else "",
-            "Short Put Strike": sp if sp else "",
-            "Long Call Strike": e.get("long_call_strike") or "",
-            "Long Put Strike": e.get("long_put_strike") or "",
-            "Call Credit": e.get("call_credit") or 0,
-            "Put Credit": e.get("put_credit") or 0,
-            "Total Credit": e.get("total_credit") or 0,
+            "Short Call Strike": _num(sc) if sc else "",
+            "Short Put Strike": _num(sp) if sp else "",
+            "Long Call Strike": _num(lc) if lc else "",
+            "Long Put Strike": _num(lp) if lp else "",
+            "Call Credit": _num(e.get("call_credit") or 0),
+            "Put Credit": _num(e.get("put_credit") or 0),
+            "Total Credit": _num(e.get("total_credit") or 0),
             "P&L Impact": round(net, 2),
             "Outcome": outcome,
             "Stop Time": _fmt_ts(min(all_stop_times)) if all_stop_times else "",

@@ -27,8 +27,8 @@ def test_put_only_stopped():
     assert e["Outcome"] == "Put Stopped"
     assert e["P&L Impact"] == -1785.0
     assert e["Total Credit"] == 105
-    assert e["Stop Time"] == "3:31:48 PM ET"
-    assert e["Put Stop Time"] == "3:31:48 PM ET" and e["Call Stop Time"] == ""
+    assert e["Stop Time"] == "03:31:48 PM ET"
+    assert e["Put Stop Time"] == "03:31:48 PM ET" and e["Call Stop Time"] == ""
 
 
 def test_full_ic_expired():
