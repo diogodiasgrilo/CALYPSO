@@ -504,9 +504,10 @@ def _fmt_ts(ts) -> str:
 
 
 def _num(v):
-    """Render a DB numeric like the Sheet did: whole -> int (no trailing .0), else float."""
+    """Render a DB numeric like the Sheet did: round off float noise (e.g. the DB's
+    244.9999999999999 -> 245), then whole -> int (no trailing .0), else 2dp float."""
     try:
-        f = float(v)
+        f = round(float(v), 2)
         return int(f) if f.is_integer() else f
     except (TypeError, ValueError):
         return v
