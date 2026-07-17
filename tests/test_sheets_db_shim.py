@@ -84,14 +84,30 @@ def test_daily_summary_shape_and_reconstructed_fields(tmp_path):
     assert r.entries_for_day("2026-07-16") == []                  # empty trade_entries in this db
 
 
-def test_factory_db_mode(tmp_path):
+def test_factory_db_mode_and_path_resolution():
     from shared.sheets_db_shim import make_agent_reader, DbSheetsReader
-    r = make_agent_reader({"data_source": "db", "backtesting_db": "data/variant_c/backtesting.db"})
-    assert isinstance(r, DbSheetsReader)
-    assert r.db_path == "data/variant_c/backtesting.db"
-    # default DB path when unset
-    r2 = make_agent_reader({"data_source": "db"})
-    assert isinstance(r2, DbSheetsReader) and r2.db_path == "data/backtesting.db"
+    # read_db is preferred over backtesting_db (so it never collides with HOMER's write path)
+    r = make_agent_reader({"data_source": "db", "read_db": "data/variant_c/backtesting.db",
+                           "backtesting_db": "data/backtesting.db"})
+    assert isinstance(r, DbSheetsReader) and r.db_path == "data/variant_c/backtesting.db"
+    # falls back to backtesting_db when read_db unset
+    assert make_agent_reader({"data_source": "db", "backtesting_db": "data/x.db"}).db_path == "data/x.db"
+    # default path when neither set
+    assert make_agent_reader({"data_source": "db"}).db_path == "data/backtesting.db"
+
+
+def test_factory_per_agent_override_and_isolation(monkeypatch):
+    import shared.sheets_reader as sr
+    sentinel = object()
+    monkeypatch.setattr(sr, "SheetsReader", lambda cfg: sentinel)
+    from shared.sheets_db_shim import make_agent_reader, DbSheetsReader
+    # CLIO flipped to DB via its OWN section...
+    cfg = {"clio": {"data_source": "db", "read_db": "data/variant_c/backtesting.db"}}
+    r = make_agent_reader(cfg, agent="clio")
+    assert isinstance(r, DbSheetsReader) and r.db_path == "data/variant_c/backtesting.db"
+    # ...while HERMES (no per-agent flag) stays on Sheets — one-at-a-time rollout
+    assert make_agent_reader(cfg, agent="hermes") is sentinel
+    assert make_agent_reader(cfg) is sentinel  # no agent → top-level default (sheets)
 
 
 def test_factory_default_is_sheets(monkeypatch):

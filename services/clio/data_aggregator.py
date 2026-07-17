@@ -135,7 +135,7 @@ def _read_sheets_history(config: Dict[str, Any]) -> Optional[List[Dict[str, str]
         spreadsheet = config.get("google_sheets", {}).get(
             "spreadsheet_name", "Calypso_HYDRA_Live_Data"
         )
-        reader = make_agent_reader(config)
+        reader = make_agent_reader(config, agent="clio")
         return reader.read_tab_as_dicts(spreadsheet, "Daily Summary")
     except Exception as e:
         logger.warning(f"Failed to read Daily Summary history: {e}")
