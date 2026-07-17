@@ -119,9 +119,15 @@ class DbSheetsReader:
             rows = conn.execute(
                 "SELECT * FROM daily_summaries ORDER BY date"
             ).fetchall()
+            # Per-side stop counts = ACTUAL stops only. trade_stops also holds EOD
+            # 'early_close' flattens (not stops) and legacy NULL-exit rows; the
+            # Sheet's "Call/Put Stops" counted only genuine stops, so match that:
+            # exit_reason in ('stop_loss','gex_breach'). (Verified against C's
+            # Sheet: 06-24/07-13 put = 1 stop_loss, not the +1 early_close.)
             stop_counts: Dict[str, Dict[str, int]] = {}
             for r in conn.execute(
-                "SELECT date, side, COUNT(*) n FROM trade_stops GROUP BY date, side"
+                "SELECT date, side, COUNT(*) n FROM trade_stops "
+                "WHERE exit_reason IN ('stop_loss', 'gex_breach') GROUP BY date, side"
             ):
                 stop_counts.setdefault(r["date"], {})[r["side"]] = r["n"]
             out: List[Dict[str, Any]] = []

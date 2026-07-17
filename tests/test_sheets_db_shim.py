@@ -31,14 +31,18 @@ def _make_db(tmp_path, rows, stops=None):
     db = str(tmp_path / "bt.db")
     conn = sqlite3.connect(db)
     conn.execute(f"CREATE TABLE daily_summaries ({', '.join(c + ' ' + t for c, t in _DAILY_COLS)})")
-    conn.execute("CREATE TABLE trade_stops (date TEXT, entry_number INTEGER, side TEXT)")
+    conn.execute("CREATE TABLE trade_stops (date TEXT, entry_number INTEGER, side TEXT, exit_reason TEXT)")
     conn.execute("CREATE TABLE trade_entries (date TEXT, entry_number INTEGER)")
     for r in rows:
         cols = ", ".join(r.keys())
         ph = ", ".join("?" * len(r))
         conn.execute(f"INSERT INTO daily_summaries ({cols}) VALUES ({ph})", tuple(r.values()))
     for s in (stops or []):
-        conn.execute("INSERT INTO trade_stops (date, entry_number, side) VALUES (?, ?, ?)", s)
+        # accept (date, entry, side) [defaults exit_reason=stop_loss] or (date, entry, side, exit_reason)
+        row = s if len(s) == 4 else (s[0], s[1], s[2], "stop_loss")
+        conn.execute(
+            "INSERT INTO trade_stops (date, entry_number, side, exit_reason) VALUES (?, ?, ?, ?)", row
+        )
     conn.commit()
     conn.close()
     return db
@@ -57,7 +61,11 @@ def test_daily_summary_shape_and_reconstructed_fields(tmp_path):
                  entries_stopped=2, gross_pnl=-3395.0, net_pnl=-3459.4, commission=64.4,
                  long_salvage_revenue=0.0, economic_events="", day_type=None),
         ],
-        stops=[("2026-07-16", 1, "put"), ("2026-07-16", 2, "put")],
+        stops=[
+            ("2026-07-16", 1, "put", "stop_loss"),
+            ("2026-07-16", 2, "put", "stop_loss"),
+            ("2026-07-16", 1, "call", "early_close"),  # EOD flatten — must NOT be counted
+        ],
     )
     r = DbSheetsReader(db)
     rows = r.read_tab_as_dicts("X", "Daily Summary")
@@ -68,7 +76,8 @@ def test_daily_summary_shape_and_reconstructed_fields(tmp_path):
     assert float(r0["SPX Open"]) == 7528.0
     assert r0["Cumulative P&L ($)"] == 740.6                       # first day
     assert r1["Cumulative P&L ($)"] == round(740.6 - 3459.4, 2)    # running SUM(net_pnl)
-    assert r1["Put Stops"] == 2 and r1["Call Stops"] == 0          # per-side reconstruction
+    # only stop_loss/gex_breach count; the early_close call is excluded
+    assert r1["Put Stops"] == 2 and r1["Call Stops"] == 0
     assert r.get_last_row_as_dict("X", "Daily Summary")["Date"] == "2026-07-16"
     # Trades/Positions are NOT served by the shim (HOMER reads them structured).
     assert r.read_tab_as_dicts("X", "Trades") == []
