@@ -337,8 +337,16 @@ def find_strike_at_delta(
     recompute_t_years: Optional[float] = None,
     increment: float = SPX_STRIKE_GRID_PT,
     max_delta_abs: Optional[float] = None,
-) -> Optional[float]:
+    return_delta: bool = False,
+) -> "Optional[float] | tuple[Optional[float], Optional[float]]":
     """Find the strike whose `side` option delta is closest to ±target_delta_abs.
+
+    When ``return_delta`` is True, returns ``(snapped_strike, achieved_delta)``
+    (or ``(None, None)`` on failure) so the caller can apply a MIN-delta floor —
+    a too-FAR pick off an under-hydrated chain (2026-07-17: 8δ target selected
+    ~0.5-1δ garbage) is NOT catchable here (we only clamp the too-CLOSE ceiling
+    via ``max_delta_abs``), so the floor policy lives in the caller. Default
+    (False) preserves the original ``Optional[float]`` contract.
 
     Brandon's "8 delta short" rule: target_delta_abs ≈ 0.08, side="put" or "call".
     For puts we match against |delta| since Polygon returns put deltas as
@@ -378,8 +386,9 @@ def find_strike_at_delta(
         raise ValueError(f"target_delta_abs must be in (0, 1), got {target_delta_abs}")
 
     spot = float(spot_fallback if spot_fallback is not None else profile.spot)
+    _none = (None, None) if return_delta else None
     if spot <= 0:
-        return None
+        return _none
 
     recompute_enabled = (
         recompute_t_years is not None
@@ -427,7 +436,7 @@ def find_strike_at_delta(
         candidates.append((d, effective_delta))
 
     if not candidates:
-        return None
+        return _none
 
     # Closest by absolute delta distance to target.
     best_d, best_delta = min(candidates, key=lambda item: abs(abs(item[1]) - target_delta_abs))
@@ -444,9 +453,9 @@ def find_strike_at_delta(
             "(target %.3f) — chain too sparse near target; returning None for OTM fallback",
             side, best_d.strike, abs(best_delta), max_delta_abs, target_delta_abs,
         )
-        return None
+        return _none
     snapped = round(best_d.strike / increment) * increment
-    return snapped
+    return (snapped, best_delta) if return_delta else snapped
 
 
 HttpFetcher = Callable[[str], dict]

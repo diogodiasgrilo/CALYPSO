@@ -36,6 +36,31 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Brandon degraded-Polygon-data guard + honest dry-run (2026-07-17). ROOT CAUSE:
+  on 2026-07-17 (OPEX Fri) Polygon's greek feed degraded (80/1000 strikes hydrated);
+  Brandon's 8δ delta-target, with no real 8δ strikes in a sparse chain, sold the
+  "closest" — actually ~0.5-1δ, far-OTM, ~$0.05 premium. Every existing guard missed
+  it (profile FRESH so the stale-guard passed; pick BELOW the max-delta clamp; ~$0
+  credit so the too-rich price-veto couldn't fire). Impact: live C churned
+  protective-long leg-in/unwinds (the net-credit guard-floor saved it → 0 positions,
+  no orphans); dry-run B booked 3 phantom $0-credit ICs → dashboard −$138 (commission
+  only). A (non-Brandon) unaffected (+$403 normal day). FIXES: (1) find_strike_at_delta
+  gains return_delta=True → (strike, achieved_delta) so the caller sees the picked delta
+  (bots/hydra/brandon/gex_provider.py). (2) DEGRADED-DATA FLOOR in _calculate_strikes: a
+  short below target × min_delta_pct_of_target (config under delta_target_strike_selection,
+  default 0.5 → 4δ for an 8δ target) → SKIP the entry (operator-chosen over the
+  OTM-multiplier fallback) via entry.abort_entry_reason + a MEDIUM Telegram alert. (3)
+  _initiate_entry routes abort_entry_reason to a new _skip_degraded_entry clean-skip (early
+  + post-dispatch, mirrors _skip_require_both_sides). (4) HONEST-DRY-RUN: base
+  _simulate_entry skips a sim entry when NO ACTIVE side clears the net-credit floor
+  (min_net_credit_per_contract×100 = $5/ct), gated by skip_dryrun_below_net_credit_floor
+  (default true) — so B stops booking phantom $0 ICs, but a legit one-sided or
+  one-viable-leg entry still books (call_active/put_active mirror _execute_entry;
+  2026-07-18 review fix). Both knobs config-reversible; A unaffected (non-Brandon → real
+  credit). NOTE: the delta-floor guard's one-sided neutrality assumes B/C keep
+  one_sided_entries_enabled=false — revisit if that flag is flipped back on. +15 tests
+  (test_brandon_degraded_delta_guard_2026_07_18); 4-lens adversarial review + focused
+  re-verify → SAFE-TO-DEPLOY. See memory `brandon_degraded_polygon_data_guard`.
 - Require-both-sides / no one-sided entries on B+C (2026-07-16). Data showed one-sided
   entries (put_only-dominant) win 69-77% but carry NEGATIVE expectancy on B and C
   (naked-short fat tail), net -$14.3k (B) / -$3.8k (C) over 2026-07-01..07-16 — worse

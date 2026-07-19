@@ -1122,6 +1122,13 @@ class MEICStrategy(abc.ABC):
         self.min_net_credit_per_contract = float(
             self.strategy_config.get("min_net_credit_per_contract", 0.05)
         )
+        # HONEST-DRY-RUN (2026-07-17): in dry-run, skip an entry whose simulated
+        # credit can't clear the net-credit floor a LIVE entry would require. B was
+        # booking phantom $0-credit ICs (degraded-Polygon 8δ picks) that live C
+        # never takes — polluting the dashboard/journal and diverging the shadow.
+        self.skip_dryrun_below_net_credit_floor = bool(
+            self.strategy_config.get("skip_dryrun_below_net_credit_floor", True)
+        )
         self.target_delta = self.strategy_config.get("target_delta", 8)
         self.min_delta = self.strategy_config.get("min_delta", 5)
         self.max_delta = self.strategy_config.get("max_delta", 15)
@@ -2320,6 +2327,47 @@ class MEICStrategy(abc.ABC):
                     entry.call_spread_credit = self.spread_width * 0.025 * 100 * self.contracts_per_entry
                 if not entry.put_spread_credit:
                     entry.put_spread_credit = self.spread_width * 0.025 * 100 * self.contracts_per_entry
+
+        # HONEST-DRY-RUN (2026-07-17): a live entry ABORTS at the net-credit
+        # guard-floor when a short can't clear long_fill + min_net_credit (that
+        # day's degraded-Polygon 8δ picks collected ~$0 on BOTH sides → live C
+        # placed 0 positions). Don't book a phantom $0-credit IC that live would
+        # never take. Skip ONLY when NO ACTIVE side clears the floor — mirror
+        # live: (a) a side we are not trading (put_only/call_only, or a
+        # GEX-adjuster-skipped side) has credit 0.0 BY DESIGN and must NOT trip
+        # the floor — that would wrongly drop a legit one-sided entry (2026-07-18
+        # review); (b) a full IC with one viable side still legs that side in, so
+        # a single transiently-unpriceable leg must not skip the whole entry
+        # ("fails closed where live fails open"). call_active/put_active mirror
+        # _execute_entry's gating. abort_entry_reason → clean skip in
+        # _initiate_entry.
+        if getattr(self, "skip_dryrun_below_net_credit_floor", True):
+            floor = self.min_net_credit_per_contract * 100.0  # per-share → per-contract $
+            n = max(getattr(self, "contracts_per_entry", 1) or 1, 1)
+            put_only = getattr(entry, "put_only", False)
+            call_only = getattr(entry, "call_only", False)
+            call_active = (
+                not put_only and not getattr(entry, "call_side_skipped", False)
+                and bool(entry.short_call_strike)
+            )
+            put_active = (
+                not call_only and not getattr(entry, "put_side_skipped", False)
+                and bool(entry.short_put_strike)
+            )
+            per_ct_call = (entry.call_spread_credit or 0.0) / n
+            per_ct_put = (entry.put_spread_credit or 0.0) / n
+            call_clears = call_active and per_ct_call >= floor
+            put_clears = put_active and per_ct_put >= floor
+            if not call_clears and not put_clears:
+                entry.abort_entry_reason = (
+                    f"dry-run credit below net-credit floor — no active side clears "
+                    f"${floor:.2f}/ct (call ${per_ct_call:.2f} active={call_active}, "
+                    f"put ${per_ct_put:.2f} active={put_active}); live would place nothing"
+                )
+                logger.warning(
+                    f"[DRY RUN] Entry #{entry.entry_number} SKIP: {entry.abort_entry_reason}"
+                )
+                return False
 
         # Generate fake position IDs (we have no real Saxo positions in dry mode)
         base_id = int(datetime.now().timestamp() * 1000)

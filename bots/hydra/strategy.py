@@ -5786,6 +5786,27 @@ class HydraStrategy(MEICStrategy):
         self._record_skipped_entry(entry_num, f"require-both-sides: one-sided ({source}) suppressed")
         return f"Entry #{entry_num} skipped - require both sides ({source})"
 
+    def _skip_degraded_entry(self, entry, entry_num: int, reason: str) -> str:
+        """Clean-skip an entry aborted upstream for degraded/unreliable data — the
+        Brandon delta-target floor (under-hydrated Polygon chain → near-worthless
+        far-OTM strikes, 2026-07-17) or the dry-run net-credit-floor honesty check.
+        Mirrors _skip_require_both_sides / the MKT-010 clean-skip so the entry is
+        recorded as a SKIP (not a failed retry)."""
+        logger.warning(f"DEGRADED-DATA SKIP: Entry #{entry_num} — {reason}")
+        self._log_safety_event(
+            "DEGRADED_DATA_SKIP",
+            f"Entry #{entry_num} - {reason}",
+            "Skipped - Degraded Data",
+        )
+        self.daily_state.entries_skipped += 1
+        self.daily_state.credit_gate_skips += 1
+        self._entry_in_progress = False
+        self._current_entry = None
+        self.state = MEICState.MONITORING
+        self._next_entry_index += 1
+        self._record_skipped_entry(entry_num, reason)
+        return f"Entry #{entry_num} skipped - degraded data"
+
     # OVERRIDE: Entry initiation with trend detection
     # =========================================================================
 
@@ -6038,6 +6059,15 @@ class HydraStrategy(MEICStrategy):
                 if not self._calculate_strikes(entry):
                     last_error = "Failed to calculate strikes"
                     continue
+
+                # DEGRADED-DATA clean skip (2026-07-17): the Brandon delta-target
+                # floor sets abort_entry_reason in _calculate_strikes when the
+                # Polygon chain is under-hydrated and it picked near-worthless
+                # far-OTM strikes. Skip cleanly here — before the credit gate
+                # wastes an estimate on garbage — rather than retry (the chain
+                # won't re-hydrate this tick).
+                if getattr(entry, "abort_entry_reason", None):
+                    return self._skip_degraded_entry(entry, entry_num, entry.abort_entry_reason)
 
                 # Determine if this is a conditional entry (MKT-035 E6/E7) before tightening
                 # so we can skip put tightening (saves API calls + main loop time)
@@ -6508,6 +6538,14 @@ class HydraStrategy(MEICStrategy):
                 # require_both_abort + returns without placing. Convert to a clean skip.
                 if getattr(entry, "require_both_abort", False):
                     return self._skip_require_both_sides(entry, entry_num, "GEX-skip")
+
+                # DEGRADED-DATA: the dry-run net-credit-floor honesty check in
+                # _simulate_entry sets abort_entry_reason when the simulated credit
+                # can't clear the floor a live entry would require — B would
+                # otherwise book a phantom $0-credit IC that C never takes
+                # (2026-07-17). Convert the False return into a clean skip.
+                if getattr(entry, "abort_entry_reason", None):
+                    return self._skip_degraded_entry(entry, entry_num, entry.abort_entry_reason)
 
                 entry._fill_time_ms = int((_time.monotonic() - _fill_start) * 1000)
                 entry._fill_attempts = attempt + 1

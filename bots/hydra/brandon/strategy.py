@@ -302,6 +302,18 @@ class BrandonHydraStrategy(HydraStrategy):
         self.brandon_delta_target_max_credit_pct_of_width = float(
             dts.get("max_credit_pct_of_width", 0.20)
         )
+        # DEGRADED-DATA FLOOR (2026-07-17): the max-delta clamp only catches
+        # too-CLOSE picks. The mirror failure — a too-FAR pick — happens when
+        # Polygon's greek feed degrades (that day: 80/1000 strikes hydrated) and
+        # the "closest to 8δ" among a sparse chain is really ~0.5-1δ, far-OTM,
+        # ~$0.05 premium. B booked 3 phantom $0-credit ICs; C churned leg-in/
+        # unwinds. Reject a selected short whose achieved delta is below
+        # target × this fraction (0.5 → 4δ floor for an 8δ target) and SKIP the
+        # entry (operator-chosen over falling back to the OTM-multiplier). 0
+        # disables the floor. Acceptable band becomes [target×frac, 2×target].
+        self.brandon_delta_target_min_pct_of_target = float(
+            dts.get("min_delta_pct_of_target", 0.5)
+        )
 
         hs = bcfg.get("hydra_stop_shadow") or {}
         self.brandon_hydra_shadow_enabled = bool(hs.get("enabled", True))
@@ -425,15 +437,15 @@ class BrandonHydraStrategy(HydraStrategy):
         # at 20-35δ — far too close — even off a fresh profile; falling back to
         # the OTM-multiplier is the safe outcome there.
         max_delta = target * 2.0
-        call_short = gex_provider.find_strike_at_delta(
+        call_short, call_delta = gex_provider.find_strike_at_delta(
             profile, side="call", target_delta_abs=target, spot_fallback=spot,
             recompute_t_years=t_years, increment=self.strike_increment,
-            max_delta_abs=max_delta,
+            max_delta_abs=max_delta, return_delta=True,
         )
-        put_short = gex_provider.find_strike_at_delta(
+        put_short, put_delta = gex_provider.find_strike_at_delta(
             profile, side="put", target_delta_abs=target, spot_fallback=spot,
             recompute_t_years=t_years, increment=self.strike_increment,
-            max_delta_abs=max_delta,
+            max_delta_abs=max_delta, return_delta=True,
         )
         if call_short is None or put_short is None:
             logger.warning(
@@ -461,6 +473,52 @@ class BrandonHydraStrategy(HydraStrategy):
             entry.short_put_strike, entry.long_put_strike, put_width,
             spot,
         )
+
+        # DEGRADED-DATA FLOOR (2026-07-17) — reject a too-FAR pick (mirror of the
+        # max-delta clamp). When Polygon's greek feed degrades (that day: 80/1000
+        # strikes hydrated), the "closest to 8δ" among a sparse chain is really
+        # ~0.5-1δ: near-worthless, far-OTM garbage that passes every existing
+        # guard (fresh profile, under the max clamp, ~$0 credit so the price-veto
+        # can't fire). Operator choice 2026-07-17: SKIP the entry — an
+        # under-hydrated chain is not a tradeable signal — rather than fall back
+        # to the OTM-multiplier. call_delta/put_delta are the achieved
+        # (drift-adjusted) deltas of the picked shorts from find_strike_at_delta.
+        floor_frac = getattr(self, "brandon_delta_target_min_pct_of_target", 0.0)
+        if floor_frac and floor_frac > 0:
+            min_delta = target * floor_frac
+            worst = None
+            if call_delta is not None and abs(call_delta) < min_delta:
+                worst = ("call", entry.short_call_strike, call_delta)
+            elif put_delta is not None and abs(put_delta) < min_delta:
+                worst = ("put", entry.short_put_strike, put_delta)
+            if worst is not None:
+                side, strike, dlt = worst
+                reason = (
+                    f"delta-target {side} short {strike:.0f} is {abs(dlt) * 100:.1f}δ "
+                    f"< {min_delta * 100:.1f}δ floor (target {target * 100:.1f}δ) — chain "
+                    f"under-hydrated, picked near-worthless far-OTM strikes"
+                )
+                logger.warning(
+                    "BRANDON-DELTA-TARGET E#%s: %s → SKIPPING entry (degraded data).",
+                    getattr(entry, "entry_number", "?"), reason,
+                )
+                self._brandon_send_telegram(
+                    message=(
+                        f"Entry #{getattr(entry, 'entry_number', '?')}: delta-target picked a "
+                        f"{abs(dlt) * 100:.1f}δ {side} short (target {target * 100:.1f}δ) — Polygon "
+                        f"greeks look degraded/sparse. Skipped the entry (no trade on unreliable "
+                        f"chain data)."
+                    ),
+                    title="Delta-target degraded — entry skipped",
+                    priority_name="MEDIUM",
+                    alert_type_name="SLIPPAGE_ALERT",
+                    details={
+                        "entry_number": getattr(entry, "entry_number", None),
+                        "side": side, "achieved_delta": round(abs(dlt), 4), "target": target,
+                    },
+                )
+                entry.abort_entry_reason = reason
+                return True
 
         # PRICE SANITY VETO (2026-06-11) — see __init__ comment. The picker keys
         # off a 0DTE delta that systematically UNDER-states moneyness, so a short

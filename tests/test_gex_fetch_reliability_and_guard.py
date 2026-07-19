@@ -157,8 +157,12 @@ class TestStaleGreeksGuard:
         s._brandon_get_gex_profile = MagicMock(return_value=_profile(5))     # fresh
         entry = SimpleNamespace(entry_number=1, short_call_strike=0.0, long_call_strike=0.0,
                                 short_put_strike=0.0, long_put_strike=0.0)
+        # return_delta=True → (strike, achieved_delta); near-target 8δ so the
+        # degraded-data floor guard does NOT fire.
         with patch.object(HydraStrategy, "_calculate_strikes", return_value="FALLBACK") as sup, \
-             patch("bots.hydra.brandon.gex_provider.find_strike_at_delta", side_effect=[7425.0, 7290.0]):
+             patch("bots.hydra.brandon.gex_provider.find_strike_at_delta",
+                   side_effect=[(7425.0, 0.08), (7290.0, -0.08)]):
             s._calculate_strikes(entry)
         sup.assert_not_called()             # delta-target used, NOT the fallback
         assert entry.short_call_strike == 7425.0 and entry.short_put_strike == 7290.0
+        assert not getattr(entry, "abort_entry_reason", None)
