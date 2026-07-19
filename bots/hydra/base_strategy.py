@@ -6136,7 +6136,9 @@ class MEICStrategy(abc.ABC):
 
     def get_dashboard_metrics(self) -> Dict[str, Any]:
         """
-        Get comprehensive MEIC strategy metrics for Looker Studio dashboard.
+        Get comprehensive MEIC strategy metrics for the HYDRA dashboard.
+        (Formerly fed the Google Sheets / Looker tabs named below — both retired
+        2026-07-18; the field names are kept as the metric contract.)
 
         Returns all metrics needed for:
         - Account Summary worksheet (positions, credits, P&L)

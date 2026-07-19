@@ -196,6 +196,20 @@ class GoogleSheetsLogger:
         """
         self.config = config.get("google_sheets", {})
         self.enabled = self.config.get("enabled", False)
+        # RETIRED 2026-07-18: the Google Sheets WRITE path is decommissioned. The
+        # agents (CLIO/HERMES/HOMER) and the dashboard now read
+        # data/variant_c/backtesting.db; all variants run google_sheets.enabled=false.
+        # Force-disable so the write path can NEVER execute regardless of config —
+        # this short-circuits _initialize() below, and every log_* method already
+        # guards on self.enabled. Kept as DORMANT code (symmetric with the retained
+        # read-side shared/sheets_reader.py). Reversible: delete this override. See
+        # docs/GOOGLE_SHEETS.md + memory agents_sheets_to_db_migration.
+        if self.enabled:
+            logger.info(
+                "GoogleSheetsLogger: Sheets WRITE path is RETIRED (2026-07-18) — "
+                "ignoring google_sheets.enabled=true; agents + dashboard read the DB."
+            )
+        self.enabled = False
         self.credentials_file = self.config.get("credentials_file", "config/google_credentials.json")
         self.spreadsheet_name = self.config.get("spreadsheet_name", "Trading_Bot_Log")
 
@@ -302,7 +316,7 @@ class GoogleSheetsLogger:
                         self.spreadsheet = self.client.create(self.spreadsheet_name)
                         logger.info(f"Created new Google spreadsheet: {self.spreadsheet_name}")
 
-                    # Initialize all worksheets (7 tabs for comprehensive Looker dashboard)
+                    # Initialize all worksheets (7 tabs — legacy Google Sheets dashboard, RETIRED 2026-07-18)
                     self._setup_trades_worksheet()
                     self._setup_positions_worksheet()
                     self._setup_daily_summary_worksheet()
