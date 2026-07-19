@@ -5694,6 +5694,10 @@ class HydraStrategy(MEICStrategy):
                 "opex_week": 1 if is_opex_week(now.date()) else 0,
                 # v8 contract count for the day
                 "contracts_per_entry": self.contracts_per_entry,
+                # v13: aggregate-only overlay P&L (forwarded from get_daily_summary so
+                # the persisted column is populated — the DB/slot_edge half of the
+                # reconciliation fix; NULL/0 for non-overlay days).
+                "unattributed_overlay_pnl": summary.get("unattributed_overlay_pnl", 0.0),
             })
 
             # Per-entry realized P&L: reconcile the per-entry attribution against
@@ -5724,15 +5728,31 @@ class HydraStrategy(MEICStrategy):
         try:
             entries = list(self.daily_state.entries)
             per_entry_sum = sum(getattr(e, "realized_pnl", 0.0) for e in entries)
+            # Overlay P&L booked aggregate-only (hedged entry absent from
+            # daily_state) lands in total_realized_pnl but on no entry — add it back
+            # so the identity is sum(entries) + unattributed == total. 0.0 for
+            # non-Brandon / days with no such overlay (2026-07-18 reconciliation
+            # blind-spot fix). Derived from this process's settlement sweep so a
+            # genuine double-book still drifts (not masked).
+            unattributed = self._unattributed_overlay_pnl()
             agg = self.daily_state.total_realized_pnl
-            drift = per_entry_sum - agg
+            drift = (per_entry_sum + unattributed) - agg
             if abs(drift) > 0.01:
                 logger.warning(
-                    "RECONCILE realized_pnl DRIFT on %s: per-entry sum $%.2f != "
-                    "total_realized_pnl $%.2f (drift $%.2f) — a booking site likely "
-                    "did not route through _book_realized_pnl(entry=...); per-entry "
-                    "P&L is under-attributed. Investigate before trusting slot_edge.",
-                    date_str, per_entry_sum, agg, drift,
+                    "RECONCILE realized_pnl DRIFT on %s: per-entry sum $%.2f + "
+                    "unattributed-overlay $%.2f = $%.2f != total_realized_pnl $%.2f "
+                    "(drift $%.2f) — a booking site likely did not route through "
+                    "_book_realized_pnl(entry=...); per-entry P&L is under-attributed. "
+                    "Investigate before trusting slot_edge.",
+                    date_str, per_entry_sum, unattributed, per_entry_sum + unattributed,
+                    agg, drift,
+                )
+            elif abs(unattributed) > 0.01:
+                logger.info(
+                    "RECONCILE realized_pnl OK on %s: per-entry sum $%.2f "
+                    "(+ $%.2f aggregate-only overlay) == total_realized_pnl $%.2f "
+                    "(%d entries)",
+                    date_str, per_entry_sum, unattributed, agg, len(entries),
                 )
             else:
                 logger.info(

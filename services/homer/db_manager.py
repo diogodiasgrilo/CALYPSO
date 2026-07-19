@@ -421,6 +421,14 @@ class BacktestingDB:
         except sqlite3.OperationalError:
             pass  # column already exists (idempotent)
 
+        # v13 parity (2026-07-18): per-day unattributed-overlay P&L on
+        # daily_summaries (Brandon aggregate-only hedge — see data_recorder.py
+        # MIGRATION_V13_SQL). Same authority/UN-gated pattern as v12 above.
+        try:
+            conn.execute("ALTER TABLE daily_summaries ADD COLUMN unattributed_overlay_pnl REAL")
+        except sqlite3.OperationalError:
+            pass  # column already exists (idempotent)
+
     def _connect(self) -> sqlite3.Connection:
         """Create a new connection with WAL mode.
 

@@ -46,7 +46,7 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 12
+SCHEMA_VERSION = 13
 
 # ============================================================================
 # Schema Migration SQL
@@ -170,6 +170,18 @@ MIGRATION_V11_SQL = [
 # historical rows stay NULL. Kept in sync with services/homer/db_manager.py.
 MIGRATION_V12_SQL = [
     "ALTER TABLE trade_entries ADD COLUMN realized_pnl REAL",
+]
+
+# v13 (2026-07-18): per-DAY unattributed-overlay P&L on daily_summaries. A Brandon
+# defensive-overlay hedge whose hedged entry is ABSENT from daily_state at settle
+# (post-close / cross-day restart) is booked to the day aggregate ONLY — it lands in
+# gross_pnl but on no trade_entries.realized_pnl. Recording that residual here makes
+# the per-entry reconciliation exact everywhere (live guard + slot_edge + audits):
+# sum(trade_entries.realized_pnl) + unattributed_overlay_pnl == gross_pnl. NULL/0 on
+# non-Brandon variants and on any day with no such overlay. Additive + nullable —
+# historical rows stay NULL. Kept in sync with services/homer/db_manager.py.
+MIGRATION_V13_SQL = [
+    "ALTER TABLE daily_summaries ADD COLUMN unattributed_overlay_pnl REAL",
 ]
 
 # v7: shadow entries table — records what OTM-based selection WOULD have chosen
@@ -398,6 +410,9 @@ class DataRecorder:
                 if current_version < 12:
                     # v12: per-entry realized P&L on trade_entries
                     migration_sql += MIGRATION_V12_SQL
+                if current_version < 13:
+                    # v13: per-day unattributed-overlay P&L on daily_summaries
+                    migration_sql += MIGRATION_V13_SQL
 
                 for sql in migration_sql:
                     try:
@@ -749,6 +764,8 @@ class DataRecorder:
                 "config_version", "opex_week",
                 # v8 contract count per day
                 "contracts_per_entry",
+                # v13 per-day unattributed-overlay P&L (Brandon aggregate-only hedge)
+                "unattributed_overlay_pnl",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)

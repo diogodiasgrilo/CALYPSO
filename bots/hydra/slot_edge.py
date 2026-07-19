@@ -73,6 +73,12 @@ _Z95 = 1.960
 _CENT = 2
 _SCRATCH_EPS = 0.005  # |pnl| at/below this (after rounding) is a scratch, not win/loss
 
+# Per-entry realized_pnl booking (schema v12 + the Brandon overlay-fold) shipped
+# 2026-07-01, effective the first close after → reliable from 2026-07-02. Earlier
+# days carry unbooked 0.0 realized_pnl, so the reconciliation cross-check floors to
+# this date (the per-slot ranking still uses all rows via reconstruction fallback).
+_PER_ENTRY_RELIABLE_SINCE = "2026-07-02"
+
 
 def _t_crit(df: int) -> float:
     """95% two-sided t critical value for df, conservative for untabulated df."""
@@ -191,6 +197,17 @@ def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int
             f"SELECT date, entry_number, entry_time, call_credit, put_credit, "
             f"total_credit, contracts, {rcol} FROM trade_entries"
         ).fetchall()
+        # Reconciliation is per-DAY across two tables (trade_entries vs
+        # daily_summaries); restrict the cross-check to days present in
+        # daily_summaries AND in the reliable window, so a day with entries but no
+        # summary row (e.g. the phantom-summary guard returned before writing it)
+        # can't produce spurious cross-table drift.
+        xcheck_dates = {
+            r[0] for r in con.execute(
+                "SELECT date FROM daily_summaries WHERE date >= ?",
+                (_PER_ENTRY_RELIABLE_SINCE,),
+            )
+        }
         # stops keyed by (date, entry_number) -> {side: {net_pnl, stop_time}}
         stops_by_entry: dict = {}
         for r in con.execute(
@@ -203,6 +220,7 @@ def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int
         slots: dict = {s: {"pnls": [], "credits": [], "n": 0, "unscored": 0,
                            "stopped": 0, "recorded": 0} for s in _SLOT_ORDER}
         scored_total = 0.0
+        scored_total_x = 0.0  # reliable-window (>= _PER_ENTRY_RELIABLE_SINCE) for the cross-check
         for e in entries:
             key = (e["date"], e["entry_number"])
             stops = stops_by_entry.get(key, {})
@@ -222,6 +240,8 @@ def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int
             if scored:
                 s["pnls"].append(pnl)
                 scored_total += pnl
+                if e["date"] in xcheck_dates:  # reliable window AND has a summary row
+                    scored_total_x += pnl
             else:
                 s["unscored"] += 1
 
@@ -230,8 +250,21 @@ def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int
         # separately and is NOT in it — so we reconcile against daily_summaries.
         # GROSS_pnl, not net_pnl. Comparing to net would show a spurious
         # commission-sized "drift" every day (it is NOT reconstruction error).
+        # Two blind spots removed (2026-07-18): (1) subtract unattributed_overlay_pnl
+        # (Brandon aggregate-only hedge P&L lives in gross but on no entry — v13
+        # column, guarded for old DBs); (2) floor the cross-check to the per-entry-
+        # reliable era (pre-2026-07-02 days carry unbooked 0.0 realized_pnl).
         ds_total = con.execute(
             "SELECT COALESCE(SUM(gross_pnl), 0) FROM daily_summaries").fetchone()[0]
+        has_overlay_col = any(
+            r[1] == "unattributed_overlay_pnl"
+            for r in con.execute("PRAGMA table_info(daily_summaries)")
+        )
+        _ov = "- COALESCE(SUM(unattributed_overlay_pnl), 0)" if has_overlay_col else ""
+        ds_total_x = con.execute(
+            f"SELECT COALESCE(SUM(gross_pnl), 0) {_ov} FROM daily_summaries WHERE date >= ?",
+            (_PER_ENTRY_RELIABLE_SINCE,),
+        ).fetchone()[0]
         n_days = con.execute("SELECT COUNT(*) FROM daily_summaries").fetchone()[0]
     finally:
         con.close()
@@ -267,6 +300,9 @@ def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int
         "n_entries": sum(r["n"] for r in rows),
         "scored_total": round(scored_total, _CENT),
         "daily_gross_total": round(ds_total or 0.0, _CENT),
+        # reliable-window, overlay-adjusted totals for the reconciliation cross-check
+        "scored_total_xcheck": round(scored_total_x, _CENT),
+        "daily_gross_xcheck": round(ds_total_x or 0.0, _CENT),
         "n_days": n_days,
         "slots": rows,
         "min_preliminary": min_preliminary,
@@ -309,18 +345,16 @@ def format_slot_report(result: dict, title: str = "Variant B — per-slot edge")
     L.append(f"Per-entry source: {n_recorded} rows use the reconciled v12 realized_pnl "
              f"(trustworthy); {n_reconstructed} fall back to trade_stops reconstruction "
              f"(pre-v12).")
-    # A residual here means a genuine per-entry attribution miss (both sides are
-    # GROSS), and only reconstructed rows can drift — recorded rows reconcile by
-    # construction. So only warn, and only blame reconstruction, when unrecorded
-    # rows actually exist.
-    drift = result["scored_total"] - result["daily_gross_total"]
-    if n_reconstructed > 0 and abs(drift) > 0.05 * max(1.0, abs(result["daily_gross_total"])):
-        L.append(f"  ⚠ gross total drifts ${drift:,.0f} from the daily gross — driven by "
-                 f"the {n_reconstructed} reconstructed (pre-v12) rows; recorded rows "
-                 f"reconcile by construction.")
-    elif n_reconstructed == 0 and abs(drift) > 0.01 * max(1.0, abs(result["daily_gross_total"])):
-        L.append(f"  ⚠ gross total drifts ${drift:,.0f} with ALL rows v12-recorded — this "
-                 f"is a genuine per-entry attribution miss; investigate _book_realized_pnl.")
+    # Reconciliation cross-check over the per-entry-reliable window (>= 2026-07-02),
+    # overlay-adjusted (aggregate-only Brandon hedge P&L subtracted): per-entry sum
+    # should equal (gross - unattributed_overlay). A residual here IS a genuine
+    # per-entry attribution miss — the two documented blind spots (pre-feature 0s
+    # and aggregate-only overlays) are already removed from both sides.
+    drift = result["scored_total_xcheck"] - result["daily_gross_xcheck"]
+    if abs(drift) > 0.01 * max(1.0, abs(result["daily_gross_xcheck"])):
+        L.append(f"  ⚠ reliable-window gross drifts ${drift:,.0f} (overlay-adjusted, "
+                 f"since {_PER_ENTRY_RELIABLE_SINCE}) — a genuine per-entry attribution "
+                 f"miss; investigate _book_realized_pnl.")
     L.append("")
     L.append("slot        n  scored  stop%   win%   avgCred   avgP&L/entry   95% CI (P&L/entry)        verdict")
     for r in result["slots"]:

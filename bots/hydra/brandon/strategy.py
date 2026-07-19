@@ -1816,6 +1816,25 @@ class BrandonHydraStrategy(HydraStrategy):
             )
         return settlements
 
+    def _unattributed_overlay_pnl(self) -> float:
+        """Overlay P&L booked to the day AGGREGATE only — hedges whose entry is
+        absent from daily_state at settle, so ``_brandon_settle_hedges`` folded
+        ``s.total_pnl`` into ``total_realized_pnl`` via ``_book_realized_pnl(None)``
+        but no ``entry.realized_pnl`` carries it. The RECONCILE guard adds this back
+        so ``sum(entry.realized_pnl) + this == total_realized_pnl`` (2026-07-07 B:
+        an overlay loss booked aggregate-only made per-entry sum $2925 vs gross
+        $392, which is EXPECTED, not drift). Derived from THIS process's settlement
+        sweep (runs first, log_daily_summary line ~1831), so a re-run that
+        double-books the aggregate still drifts rather than being masked."""
+        settlements = getattr(self, "_brandon_hedge_settlements", None)
+        if not settlements:
+            return 0.0
+        present = {e.entry_number for e in self.daily_state.entries}
+        return sum(
+            s.total_pnl for s in settlements
+            if s.entry_number not in present
+        )
+
     def log_daily_summary(self):
         # Settle hedges BEFORE the parent's daily summary so they're journaled
         # for the same day. Use the VALIDATED close (_resolve_spx_close), NOT raw

@@ -36,6 +36,25 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Reconciliation overlay-aware + per-day unattributed-overlay column (2026-07-18).
+  The per-entry identity `sum(trade_entries.realized_pnl) == daily_summaries.gross_pnl`
+  had two blind spots that made an audit false-flag: (a) a Brandon defensive-overlay
+  hedge whose entry is ABSENT from daily_state at settle (post-close / cross-day
+  restart) is booked aggregate-only — its P&L lands in gross but on no entry
+  (2026-07-07 B: per-entry sum $2925 vs gross $392, EXPECTED not corruption); (b)
+  pre-feature days (< 2026-07-02) carry unbooked 0.0 realized_pnl. FIX: new
+  `_unattributed_overlay_pnl()` (0.0 base; Brandon sums settlements whose entry is
+  absent) so the live RECONCILE guard identity is `sum(entries) + unattributed ==
+  total_realized_pnl` — derived from THIS process's settlement sweep so a genuine
+  aggregate double-book still surfaces as drift (not masked). Persisted via schema
+  **v13** (`daily_summaries.unattributed_overlay_pnl`, additive/nullable, HOMER
+  parity) — forwarded through `_record_daily_summary_to_db`'s payload — so slot_edge
+  + offline audits reconcile too. slot_edge cross-check now overlay-adjusted +
+  floored to the reliable window (>= 2026-07-02) + intersected to days present in
+  daily_summaries (no cross-table drift). Daily/cumulative P&L UNCHANGED (this only
+  fixes attribution + the reconciliation check). +15 tests; 4-lens adversarial review
+  caught the un-forwarded-key bug (column would have written NULL) pre-deploy. See
+  memory `per-slot-edge-and-realized-pnl`.
 - Brandon degraded-Polygon-data guard + honest dry-run (2026-07-17). ROOT CAUSE:
   on 2026-07-17 (OPEX Fri) Polygon's greek feed degraded (80/1000 strikes hydrated);
   Brandon's 8δ delta-target, with no real 8δ strikes in a sparse chain, sold the

@@ -3861,6 +3861,20 @@ class MEICStrategy(abc.ABC):
         if entry is not None:
             entry.realized_pnl = getattr(entry, "realized_pnl", 0.0) + amount
 
+    def _unattributed_overlay_pnl(self) -> float:
+        """P&L that was folded into the day aggregate (``total_realized_pnl``) but
+        NOT onto any ``entry.realized_pnl`` — so the true reconciliation identity is
+        ``sum(entry.realized_pnl) + _unattributed_overlay_pnl() == total_realized_pnl``.
+        Base strategies run no overlays → always 0.0. Brandon overrides it: a
+        defensive-overlay hedge whose hedged entry is ABSENT from ``daily_state`` at
+        settle (post-close / cross-day restart) is booked aggregate-only, so its P&L
+        lands in the day total but on no entry. Kept as a DERIVED method (not a
+        stored field) computed from THIS process's settlement sweep, so a genuine
+        aggregate double-book on a restart still surfaces as unexplained drift
+        instead of being silently masked. See RECONCILE guard in
+        strategy.py:_record_entry_realized_pnl."""
+        return 0.0
+
     def _execute_stop_loss(self, entry: IronCondorEntry, side: str) -> str:
         """
         Execute a stop loss for one side of an IC.
@@ -5278,6 +5292,11 @@ class MEICStrategy(abc.ABC):
             "net_pnl": total_pnl - self.daily_state.total_commission,  # P&L after commission
             "stop_loss_debits": stop_loss_debits,
             "expired_credits": expired_credits,
+            # v13: overlay P&L folded into total_realized_pnl but attributed to no
+            # entry (Brandon aggregate-only hedge). 0.0 for non-Brandon / no-overlay
+            # days. Lets sum(trade_entries.realized_pnl)+this == gross_pnl everywhere.
+            # getattr-defensive: every real MEICStrategy defines it (default 0.0).
+            "unattributed_overlay_pnl": getattr(self, "_unattributed_overlay_pnl", lambda: 0.0)(),
         }
 
     def get_status_summary(self) -> Dict:
