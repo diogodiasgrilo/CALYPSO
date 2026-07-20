@@ -5711,6 +5711,11 @@ class HydraStrategy(MEICStrategy):
             # WAL checkpoint (prevent unbounded WAL growth)
             self._data_recorder.wal_checkpoint()
 
+            # SELF-HEAL the cumulative metrics from the just-written DB (root-cause
+            # fix for metrics-vs-DB drift, 2026-07-20) — runs AFTER the daily_summary
+            # row is durable so the DB is complete for today.
+            self._reconcile_cumulative_metrics_from_db(date_str)
+
         except Exception as e:
             logger.debug(f"DataRecorder daily summary failed: {e}")
 
@@ -5770,6 +5775,61 @@ class HydraStrategy(MEICStrategy):
                 )
         except Exception as ex:
             logger.debug(f"per-entry realized_pnl record/reconcile failed: {ex}")
+
+    def _reconcile_cumulative_metrics_from_db(self, date_str: str) -> None:
+        """SELF-HEAL the cumulative metrics (hydra_metrics.json) from the authoritative
+        daily_summaries — the ROOT-CAUSE fix for metrics-vs-DB drift (2026-07-20 audit:
+        B metrics $11,053 vs DB $4,828).
+
+        WHY IT DRIFTED: _book_daily_cumulative accumulates cumulative_pnl and each
+        daily_returns row's net_pnl INCREMENTALLY and IDEMPOTENTLY-BY-DATE, so a day
+        booked with a corrupted total (stale-SPX settlement days like 07-06) or BEFORE
+        a later DB correction (a manual scrub/fix) is NEVER re-reconciled — the metrics
+        file and the reconciled DB drift apart forever, silently. daily_summaries is the
+        per-day-reconciled source of truth, so here — every settlement, after the DB
+        write — we re-derive cumulative_pnl + per-day net_pnl + win/loss from it. That
+        makes the metrics file a SELF-HEALING derived view: any drift (past correction,
+        corruption, restart-timing) is corrected on the next close and cannot accumulate.
+        Only net_pnl is DB-authoritative; capital_deployed/contracts stay (metrics-only,
+        return_pct re-derived). No-op when already consistent (the normal case)."""
+        if not self._data_recorder:
+            return
+        try:
+            import sqlite3 as _sqlite
+            con = _sqlite.connect(f"file:{self._data_recorder.db_path}?mode=ro", uri=True)
+            db = {r[0]: round((r[1] or 0.0), 2)
+                  for r in con.execute("SELECT date, net_pnl FROM daily_summaries")}
+            con.close()
+            if not db:
+                return
+            cm = self.cumulative_metrics
+            dr = cm.get("daily_returns", [])
+            corrected = 0
+            for row in dr:
+                d = row.get("date")
+                if d in db and abs(float(row.get("net_pnl", 0.0)) - db[d]) > 0.01:
+                    row["net_pnl"] = db[d]
+                    cap = row.get("capital_deployed", 0) or 0
+                    if cap > 0:
+                        row["return_pct"] = db[d] / cap
+                    corrected += 1
+            db_cum = round(sum(db.values()), 2)   # authoritative lifetime total
+            old_cum = round(float(cm.get("cumulative_pnl", 0.0)), 2)
+            drift = round(db_cum - old_cum, 2)
+            if corrected or abs(drift) > 0.01:
+                logger.warning(
+                    "METRICS-RECONCILE %s: self-healed from daily_summaries — corrected %d "
+                    "daily_returns net_pnl; cumulative_pnl $%.2f -> $%.2f (drift $%.2f had "
+                    "accumulated vs the authoritative DB). Root-cause guard active.",
+                    date_str, corrected, old_cum, db_cum, drift,
+                )
+                cm["cumulative_pnl"] = db_cum
+                # win/loss over the reconciled per-day rows (trading days only)
+                cm["winning_days"] = sum(1 for r in dr if float(r.get("net_pnl", 0)) >= 0)
+                cm["losing_days"] = sum(1 for r in dr if float(r.get("net_pnl", 0)) < 0)
+                self._save_cumulative_metrics(trading_date=date_str)
+        except Exception as e:
+            logger.debug("METRICS-RECONCILE %s failed (non-fatal): %s", date_str, e)
 
     def _get_spx_price_minutes_ago(self, minutes: int) -> float:
         """Get SPX price from approximately N minutes ago using heartbeat price history."""
