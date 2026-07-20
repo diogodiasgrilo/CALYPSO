@@ -11137,6 +11137,12 @@ class HydraStrategy(MEICStrategy):
                 "entries_skipped": self.daily_state.entries_skipped,
                 "total_credit_received": self.daily_state.total_credit_received,
                 "total_realized_pnl": self.daily_state.total_realized_pnl,
+                # Brandon overlay double-book guard — persisted ATOMICALLY with
+                # total_realized_pnl (this same os.replace save) so a restart can never
+                # restore the guard WITHOUT the booked total it protects, which would
+                # silently lose the overlay (2026-07-18 review). getattr: empty for
+                # non-Brandon variants and during pre-super().__init__ base recovery.
+                "brandon_overlay_booked": sorted(getattr(self, "_brandon_overlay_booked", set()) or set()),
                 "total_commission": self.daily_state.total_commission,
                 "call_stops_triggered": self.daily_state.call_stops_triggered,
                 "put_stops_triggered": self.daily_state.put_stops_triggered,
@@ -13039,6 +13045,11 @@ class HydraStrategy(MEICStrategy):
             # Restore historical data
             self.daily_state.date = today
             self.daily_state.total_realized_pnl = saved_state.get("total_realized_pnl", 0.0)
+            # Restore the Brandon overlay double-book guard ATOMICALLY with the total
+            # it protects (same-day-gated by the date check above). Only on Brandon
+            # instances that carry the attr (set in __init__ before recovery runs).
+            if hasattr(self, "_brandon_overlay_booked"):
+                self._brandon_overlay_booked = set(saved_state.get("brandon_overlay_booked", []))
             self.daily_state.put_stops_triggered = saved_state.get("put_stops_triggered", 0)
             self.daily_state.call_stops_triggered = saved_state.get("call_stops_triggered", 0)
             self.daily_state.double_stops = saved_state.get("double_stops", 0)

@@ -95,10 +95,14 @@ class _HedgeStub:
         self.daily_state = SimpleNamespace(entries=entries, total_realized_pnl=0.0)
         self._brandon_hedge_legs = hedge_legs
         self._brandon_hedge_settlements = []
+        self._brandon_overlay_booked = set()
         self.dry_run = True
 
     def _brandon_send_telegram(self, *a, **k):
         pass
+
+    def _brandon_save_hedge_state(self):
+        pass  # persistence is exercised in the load/save round-trip tests
 
 
 def _hedge_legs_for_entry(n):
@@ -142,6 +146,48 @@ class TestOverlayPnlBooking:
 
         assert e1.realized_pnl == pytest.approx(expected)  # booked ONCE, not 2x
         assert s.daily_state.total_realized_pnl == pytest.approx(expected)
+
+    def test_aggregate_only_booked_once_and_guarded_on_rerun(self):
+        # Entry ABSENT from daily_state -> aggregate-only booking (2026-07-18 fix).
+        # Must book once into the day total and NOT double-book on a sweep re-run.
+        legs = _hedge_legs_for_entry(1)
+        expected = hedge_position.settle_hedge(legs, spx_settle=7550.0).total_pnl
+        s = _HedgeStub([], {1: legs})  # entry 1 NOT in daily_state
+        s._brandon_settle_hedges(spx_settle=7550.0)
+        assert s.daily_state.total_realized_pnl == pytest.approx(expected)  # aggregate, once
+        assert 1 in s._brandon_overlay_booked
+        # restart: settlements list not persisted -> sweep re-runs; guard prevents re-book
+        s._brandon_hedge_settlements = []
+        s._brandon_settle_hedges(spx_settle=7550.0)
+        assert s.daily_state.total_realized_pnl == pytest.approx(expected)  # STILL once
+
+    def test_flip_aggregate_then_attributed_books_once(self):
+        # run1: entry absent (aggregate-only); run2 (restart): entry now PRESENT.
+        # The unified guard must stop the entry-attributed path re-booking it.
+        legs = _hedge_legs_for_entry(1)
+        expected = hedge_position.settle_hedge(legs, spx_settle=7550.0).total_pnl
+        s = _HedgeStub([], {1: legs})
+        s._brandon_settle_hedges(spx_settle=7550.0)
+        e1 = SimpleNamespace(entry_number=1, realized_pnl=0.0, overlay_pnl_booked=False)
+        s.daily_state.entries = [e1]
+        s._brandon_hedge_settlements = []
+        s._brandon_settle_hedges(spx_settle=7550.0)
+        assert s.daily_state.total_realized_pnl == pytest.approx(expected)  # booked ONCE
+        assert e1.realized_pnl == 0.0  # not re-attributed on the flip
+
+    def test_flip_attributed_then_aggregate_books_once(self):
+        # run1: entry present (attributed); run2 (restart): entry now ABSENT.
+        # The unified guard must stop the aggregate-only path re-booking it.
+        e1 = SimpleNamespace(entry_number=1, realized_pnl=0.0, overlay_pnl_booked=False)
+        legs = _hedge_legs_for_entry(1)
+        expected = hedge_position.settle_hedge(legs, spx_settle=7550.0).total_pnl
+        s = _HedgeStub([e1], {1: legs})
+        s._brandon_settle_hedges(spx_settle=7550.0)
+        assert e1.realized_pnl == pytest.approx(expected)
+        s.daily_state.entries = []
+        s._brandon_hedge_settlements = []
+        s._brandon_settle_hedges(spx_settle=7550.0)
+        assert s.daily_state.total_realized_pnl == pytest.approx(expected)  # booked ONCE
 
 
 class TestDataRecorderV12:

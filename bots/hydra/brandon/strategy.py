@@ -148,6 +148,17 @@ class BrandonHydraStrategy(HydraStrategy):
         # log_daily_summary.
         self._brandon_hedge_legs: dict[int, list[HedgeLeg]] = {}
         self._brandon_hedge_settlements: list[HedgeSettlement] = []
+        # Per-day set of entry_numbers whose overlay P&L has been booked into
+        # total_realized_pnl (by EITHER the entry-attributed OR the aggregate-only
+        # path). The settle sweep re-runs after a restart (settlements aren't
+        # persisted); this UNIFIED, persisted guard makes the booking idempotent
+        # regardless of path or of an entry's presence flipping between runs, so an
+        # overlay reaches the day total exactly once. Persisted in hydra_state.json
+        # ATOMICALLY with total_realized_pnl (NOT the hedge sidecar — else a crash
+        # could restore the guard without the booked total, losing the overlay);
+        # cleared on the new-day reset. Initialized BEFORE super().__init__() so it
+        # exists if base-class recovery restores it.
+        self._brandon_overlay_booked: set[int] = set()
         self._brandon_hedge_state_path = self._brandon_resolve_hedge_state_path()
         self._brandon_load_hedge_state()
 
@@ -1779,14 +1790,35 @@ class BrandonHydraStrategy(HydraStrategy):
             entry = next(
                 (e for e in self.daily_state.entries
                  if e.entry_number == entry_number), None)
-            if entry is not None and not getattr(entry, "overlay_pnl_booked", False):
+            # UNIFIED double-book guard: skip if this entry's overlay was already
+            # booked today — via the per-day set (either path) OR the per-entry
+            # overlay_pnl_booked flag (back-compat with pre-guard state). Makes a
+            # settle-sweep re-run after a restart idempotent, including when the
+            # entry's presence FLIPS between runs (aggregate-only on one, attributed
+            # on another). CRITICAL: the guard set is persisted in hydra_state.json
+            # ATOMICALLY with daily_state.total_realized_pnl (the same os.replace
+            # save), NOT in the hedge sidecar — otherwise a crash between the sidecar
+            # write and the state save could restore the guard WITHOUT the booked
+            # total, silently losing the overlay (2026-07-18 review). We therefore do
+            # NOT persist here; the booking + guard flip both ride the next state save.
+            if (entry_number in self._brandon_overlay_booked
+                    or (entry is not None and getattr(entry, "overlay_pnl_booked", False))):
+                logger.info(
+                    "BRANDON-OVERLAY E#%s: overlay $%.2f already booked today — "
+                    "skipping re-book (idempotent settle-sweep re-run).",
+                    entry_number, s.total_pnl,
+                )
+            elif entry is not None:
                 self._book_realized_pnl(s.total_pnl, entry)
                 entry.overlay_pnl_booked = True
-            elif entry is None:
+                self._brandon_overlay_booked.add(entry_number)
+            else:  # entry is None — book aggregate-only, guarded so a re-run can't double
                 self._book_realized_pnl(s.total_pnl, None)
+                self._brandon_overlay_booked.add(entry_number)
                 logger.warning(
                     "BRANDON-OVERLAY E#%s: no matching daily_state entry — booked "
-                    "$%.2f to the day aggregate only (per-entry attribution missed)",
+                    "$%.2f to the day aggregate only (per-entry attribution missed; "
+                    "guarded against restart double-book).",
                     entry_number, s.total_pnl,
                 )
             logger.warning(
@@ -2324,6 +2356,7 @@ class BrandonHydraStrategy(HydraStrategy):
             self._brandon_orphan_alerted.clear()
         self._brandon_hedge_legs.clear()
         self._brandon_hedge_settlements = []
+        self._brandon_overlay_booked.clear()  # reset the overlay double-book guard
         # Wipe yesterday's hedge sidecar so a new-day restart won't restore it.
         try:
             path = getattr(self, "_brandon_hedge_state_path", None)

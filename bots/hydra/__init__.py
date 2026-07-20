@@ -36,6 +36,18 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Overlay double-book guard, atomic (2026-07-18, follow-up to the reconcile fix
+  below). The aggregate-only overlay booking (hedge whose entry is absent from
+  daily_state at settle) had NO idempotency guard, so a settle-sweep re-run after a
+  restart could double-book it into gross_pnl (B dry-run; C is overlay=False, immune).
+  FIX: a UNIFIED per-day set `_brandon_overlay_booked` that BOTH booking paths check +
+  set (also closes the presence-FLIP double-book: absent one run, present the next).
+  Persisted in hydra_state.json ATOMICALLY with total_realized_pnl (same os.replace,
+  same same-day-gated restore) — NOT the hedge sidecar, which would let a crash restore
+  the guard without the booked total and silently LOSE the overlay (2nd review finding).
+  +9 tests (booking/flip idempotency + save co-location + same-day-gated restore); two
+  adversarial-review rounds each caught a real bug pre-deploy. B/C only reconcile 100%
+  including on overlay + restart days.
 - Reconciliation overlay-aware + per-day unattributed-overlay column (2026-07-18).
   The per-entry identity `sum(trade_entries.realized_pnl) == daily_summaries.gross_pnl`
   had two blind spots that made an audit false-flag: (a) a Brandon defensive-overlay

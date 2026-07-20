@@ -64,6 +64,7 @@ def _make_instance(**brandon_attrs):
         _brandon_hydra_shadow_fired=set(),
         _brandon_hedge_legs={},
         _brandon_hedge_settlements=[],
+        _brandon_overlay_booked=set(),  # unified overlay double-book guard (2026-07-18)
         current_price=6800.0,
         dry_run=True,
         alert_service=None,

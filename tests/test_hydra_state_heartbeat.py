@@ -121,3 +121,52 @@ class TestStateHeartbeat:
         assert second >= first, (
             f"heartbeat did not advance: {first!r} → {second!r}"
         )
+
+
+class TestBrandonOverlayGuardPersistence:
+    """2026-07-18: the overlay double-book guard (_brandon_overlay_booked) must be
+    persisted ATOMICALLY with daily_state.total_realized_pnl — same hydra_state.json
+    write — so a restart never restores the guard without the booked total it
+    protects (which would silently lose the overlay). These pin the co-location +
+    the getattr-default for non-Brandon variants, and a same-day-gated restore."""
+
+    def test_guard_co_located_with_total_in_one_write(self, tmp_path):
+        s = _make_strategy(tmp_path)
+        s._brandon_overlay_booked = {7, 2}
+        s.daily_state.total_realized_pnl = 392.0
+        s._save_state_to_disk()
+        data = json.loads(Path(s.state_file).read_text())
+        # Both live in the SAME file/dict (one os.replace) → crash-atomic.
+        assert data["brandon_overlay_booked"] == [2, 7]  # sorted
+        assert data["total_realized_pnl"] == 392.0
+
+    def test_non_brandon_defaults_to_empty_guard(self, tmp_path):
+        s = _make_strategy(tmp_path)  # plain HydraStrategy: no _brandon_overlay_booked
+        s._save_state_to_disk()       # getattr-default set() → must not crash
+        data = json.loads(Path(s.state_file).read_text())
+        assert data["brandon_overlay_booked"] == []
+
+    def test_restore_reads_guard_and_total_together_same_day(self, tmp_path):
+        import datetime as _dt
+        s = _make_strategy(tmp_path)
+        today = _dt.datetime.now().strftime("%Y-%m-%d")
+        s.daily_state.date = today
+        s._brandon_overlay_booked = set()  # Brandon attr present → restore path active
+        Path(s.state_file).write_text(json.dumps({
+            "date": today, "total_realized_pnl": 392.0, "brandon_overlay_booked": [2, 7],
+            "entries": [],
+        }))
+        assert s._load_state_file_history() is True
+        assert s.daily_state.total_realized_pnl == 392.0   # total restored...
+        assert s._brandon_overlay_booked == {2, 7}         # ...and guard, together
+
+    def test_restore_skips_stale_day_guard_and_total(self, tmp_path):
+        s = _make_strategy(tmp_path)
+        s.daily_state.date = "2026-05-24"
+        s._brandon_overlay_booked = set()
+        Path(s.state_file).write_text(json.dumps({
+            "date": "2020-01-01", "total_realized_pnl": 392.0,
+            "brandon_overlay_booked": [2, 7], "entries": [],
+        }))
+        assert s._load_state_file_history() is False  # stale → neither restored
+        assert s._brandon_overlay_booked == set()
