@@ -185,9 +185,9 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         # across the bid/ask spread instead of the mid. aggressiveness 1.0 = full
         # touch (buy@ask / sell@bid) — the honest worst case for a marketable order;
         # 0.0 = the old mid pricing. Applied at entry, transform, mark + close.
-        _fm = cfg.get("dry_run_fill_model", {}) or {}
-        self._dc_fill_agg = float(_fm.get("aggressiveness", 1.0))
-        self._dc_fill_slippage = float(_fm.get("extra_slippage_per_leg", 0.0))
+        # Resolver honors the value whether written as a scalar under
+        # ``double_calendar`` or a dict at the strategy level (2026-07-20 fix).
+        self._resolve_dc_fill_model(cfg, dc)
         # entry_number -> first-breach time, for the stop-confirmation window.
         self._dc_stop_breach: Dict[int, datetime] = {}
 

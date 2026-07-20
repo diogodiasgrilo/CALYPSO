@@ -121,6 +121,28 @@ class CalendarStrategyBase(HydraStrategy):
             # net_pnl/total_pnl; lifetime totals accumulate in the metrics file via
             # log_daily_summary. The per-day total_realized_pnl=0 reset is correct.
 
+        # Intraday anti-spike state must NOT carry a stale timestamp across the
+        # overnight gap (2026-07-20). D's -20% stop confirm window keys on
+        # _dc_stop_breach[entry] = first-breach time and only fires once the breach
+        # PERSISTS dc_stop_confirm_seconds. A breach recorded near yesterday's close
+        # (that neither stopped nor recovered on a fresh tick before marks went
+        # stale) would leave a stale timestamp; on the first day-2 breaching tick
+        # (now - breaches[en]) is ~hours >> the confirm window, firing an INSTANT
+        # stop that BYPASSES the anti-spike gate. This is newly reachable now that
+        # eod_close_if_no_transform=false lets a calendar span days (with same-day
+        # close the EOD _dc_close_calendar popped the key the same session). The
+        # market is closed overnight, so any in-flight confirm window is moot — start
+        # each day fresh; a genuine day-2 breach simply re-confirms. Also clears any
+        # orphaned key for an entry that settled (kept D pinned in 2s-vigilant).
+        breach = getattr(self, "_dc_stop_breach", None)
+        if breach:
+            logger.info(
+                "[CAL-CARRY] cleared %d stale stop-breach timer(s) at the new-day "
+                "reset (fresh anti-spike confirmation each session).",
+                len(breach),
+            )
+            breach.clear()
+
     def _calculate_capital_deployed(self) -> float:
         """Capital at risk for a calendar variant = sum of OPEN calendars' net
         debit (pre-transform the max loss IS the debit; post-risk-free-transform
@@ -322,6 +344,44 @@ class CalendarStrategyBase(HydraStrategy):
             q = self._read_option_quote(conid) or {}
             out[name] = {"mid": self._quote_mid(q), "raw": q, "realtime": self._dc_quote_is_realtime(q)}
         return out
+
+    def _resolve_dc_fill_model(self, cfg: dict, sub: dict) -> None:
+        """Resolve the dry-run fill model → set self._dc_fill_agg / _dc_fill_slippage.
+
+        Tolerant of BOTH the config LOCATION and FORMAT an operator might reasonably
+        use (2026-07-20 fix):
+          * location — the strategy SUB-block (``strategy.<variant>.dry_run_fill_model``,
+            where the DTE/wing/trigger knobs live) is checked FIRST, then the strategy
+            level (``strategy.dry_run_fill_model``). The sub-block wins if both are set.
+          * format — a bare SCALAR (interpreted as the aggressiveness) OR a dict
+            ``{"aggressiveness", "extra_slippage_per_leg"}``.
+
+        ``aggressiveness``: 0.0 = mid, 1.0 = full touch (buy@ask / sell@bid). Defaults
+        to 1.0 (the honest worst case) when unset. ALWAYS logged so the resolved value
+        can never be silently wrong again — the prior inline read only accepted a dict
+        at the strategy level, so a scalar written under the sub-block (as D's
+        ``double_calendar.dry_run_fill_model: 0.5`` was) was silently ignored and D ran
+        at full-touch 1.0 despite the configured 0.5.
+        """
+        raw = sub.get("dry_run_fill_model")
+        if raw is None:
+            raw = cfg.get("dry_run_fill_model")
+        if isinstance(raw, dict):
+            agg = float(raw.get("aggressiveness", 1.0))
+            slip = float(raw.get("extra_slippage_per_leg", 0.0))
+        elif isinstance(raw, (int, float)) and not isinstance(raw, bool):
+            agg = float(raw)
+            slip = 0.0
+        else:
+            agg = 1.0
+            slip = 0.0
+        self._dc_fill_agg = agg
+        self._dc_fill_slippage = slip
+        logger.info(
+            "[CAL] dry-run fill model: aggressiveness=%.2f (0=mid, 1=touch), "
+            "slippage=$%.2f/leg",
+            agg, slip,
+        )
 
     def _dc_fill_price(self, qrow: dict, action: str) -> Optional[float]:
         """Realistic dry-run fill for ONE leg — model the bid/ask spread instead of

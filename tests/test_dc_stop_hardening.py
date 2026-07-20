@@ -7,7 +7,7 @@ re-fetched a milder value. The fixes: confirm the breach over a window before
 closing, don't re-fetch in the close, gate on real-time quotes, cap concurrency.
 """
 from datetime import datetime, timedelta, timezone
-from unittest.mock import MagicMock
+from unittest.mock import MagicMock, patch
 
 import bots.hydra.double_calendar_strategy as dcm
 from bots.hydra.double_calendar_strategy import DoubleCalendarStrategy as D
@@ -64,6 +64,43 @@ def test_quote_realtime_true_on_checker_error():
         raise RuntimeError("x")
     s._option_quote_is_realtime = boom
     assert s._dc_quote_is_realtime({}) is True
+
+
+# ---- stop-breach timer must not carry a stale timestamp across days ----------
+# (2026-07-20: with eod_close_if_no_transform=false a calendar spans days; a stale
+# day-1 breach timestamp would make (now - breaches[en]) >> the confirm window on
+# the first day-2 tick, firing an INSTANT stop that bypasses the anti-spike gate.)
+def test_new_day_reset_clears_stale_stop_breach():
+    s = _strat()
+    s._dc_stop_breach = {1: datetime(2026, 7, 19, 15, 59, tzinfo=timezone.utc)}
+    s.daily_state.entries = []
+    s._dc_entry_is_open = lambda e: True
+    with patch("bots.hydra.strategy.HydraStrategy._reset_for_new_day", lambda self: None):
+        s._reset_for_new_day()
+    assert s._dc_stop_breach == {}  # fresh anti-spike confirmation each session
+
+
+def test_new_day_reset_breach_clear_survives_carried_open_entry():
+    # A still-open multi-day entry is CARRIED, but its stale breach timer is still
+    # cleared (a genuine day-2 breach re-confirms fresh).
+    s = _strat()
+    e = _entry(net_debit=1000.0, upnl=-250.0, num=1)
+    s.daily_state.entries = [e]
+    s._dc_stop_breach = {1: datetime(2026, 7, 19, 15, 59, tzinfo=timezone.utc)}
+    s._dc_entry_is_open = lambda x: True
+    with patch("bots.hydra.strategy.HydraStrategy._reset_for_new_day", lambda self: None):
+        s._reset_for_new_day()
+    assert s._dc_stop_breach == {}
+
+
+def test_new_day_reset_no_breach_is_safe():
+    s = _strat()
+    s._dc_stop_breach = {}
+    s.daily_state.entries = []
+    s._dc_entry_is_open = lambda e: True
+    with patch("bots.hydra.strategy.HydraStrategy._reset_for_new_day", lambda self: None):
+        s._reset_for_new_day()  # must not raise
+    assert s._dc_stop_breach == {}
 
 
 # ---- capital = sum of OPEN debits (not wing notional) -------------------------

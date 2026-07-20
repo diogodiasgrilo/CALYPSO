@@ -160,10 +160,10 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
         # simulated fill across the bid/ask spread, not the mid. aggressiveness 1.0
         # = full touch (buy@ask / sell@bid). Read by the inherited _dc_fill_price,
         # so E's entry debit, liquidation marks, and laddered profit-takes are all
-        # honest about the spread instead of mid-optimistic.
-        _fm = cfg.get("dry_run_fill_model", {}) or {}
-        self._dc_fill_agg = float(_fm.get("aggressiveness", 1.0))
-        self._dc_fill_slippage = float(_fm.get("extra_slippage_per_leg", 0.0))
+        # honest about the spread instead of mid-optimistic. Resolver honors the
+        # value whether written as a scalar under ``spy_double_calendar`` or a dict
+        # at the strategy level (2026-07-20 fix); E currently sets none → 1.0.
+        self._resolve_dc_fill_model(cfg, e)
 
         # ── Attributes the INHERITED base methods read (so D is untouched) ──
         # E never transforms, so there is no IC wing. _dc_simulate_entry stamps
