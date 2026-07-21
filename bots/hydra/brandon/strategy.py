@@ -1880,6 +1880,16 @@ class BrandonHydraStrategy(HydraStrategy):
             spx_settle = float(self._resolve_spx_close() or 0.0)
             if spx_settle > 0:
                 self._brandon_settle_hedges(spx_settle)
+                # Persist the overlay booking immediately (2026-07-21 fix). Without
+                # this the last state save on the day was POS-004's IC-only
+                # settlement, so total_realized_pnl / entry.realized_pnl / the
+                # brandon_overlay_booked guard on disk stayed PRE-overlay while the
+                # DB + metrics captured the full total — the dashboard's "today"
+                # card (which reads the state file) then contradicted the cumulative
+                # (e.g. +$1,795 card vs +$11,852 cumulative). One atomic os.replace;
+                # the overlay double-book guard rides this same save (see
+                # _brandon_settle_hedges' persistence note).
+                self._save_state_to_disk()
         except Exception as exc:
             logger.error("BRANDON-OVERLAY settlement failed (non-fatal): %s", exc)
         super().log_daily_summary()
