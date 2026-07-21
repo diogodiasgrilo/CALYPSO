@@ -252,6 +252,16 @@ class BrandonHydraStrategy(HydraStrategy):
         self.brandon_overlay_butterfly_width = int(ov.get("butterfly_width_pts", 10))
         self.brandon_overlay_butterfly_cutoff_hour = int(ov.get("butterfly_cutoff_hour", 12))
         self.brandon_overlay_butterfly_cutoff_minute = int(ov.get("butterfly_cutoff_minute", 30))
+        # Realistic dry-run ENTRY fill (2026-07-21). estimate_fill_price returns a
+        # Black-Scholes MID with NO bid/ask spread, so the modeled overlay debit is
+        # too cheap and the overlay P&L is inflated (the settlement side is already
+        # realistic — SPXW is PM-settled at the close, cash-settled, held to expiry).
+        # Cross the spread on entry: buy long legs toward the ask (+spread), sell
+        # short legs toward the bid (−spread), by this per-leg half-spread ($/share).
+        # Only the DRY-RUN path uses it; live fills come from the broker already
+        # spread-crossed. 0.0 restores the old mid pricing. Tune against real 0DTE
+        # SPX spreads (mirrors Strategy-D's dry_run_fill_model calibration).
+        self.brandon_overlay_fill_spread = float(ov.get("dry_run_fill_spread_per_leg", 0.25))
 
         ns = bcfg.get("narrow_spread") or {}
         self.brandon_narrow_spread_enabled = bool(ns.get("enabled", False))
@@ -1601,6 +1611,7 @@ class BrandonHydraStrategy(HydraStrategy):
         # DRY-RUN: synthetic legs with a Black-Scholes-estimated fill (unchanged).
         if self.dry_run:
             hedge_legs: list[HedgeLeg] = []
+            _half_spread = float(getattr(self, "brandon_overlay_fill_spread", 0.0))
             for i, leg in enumerate(proposal.legs):
                 fill_price = hedge_position.estimate_fill_price(
                     contract_type=leg.contract_type,
@@ -1608,6 +1619,15 @@ class BrandonHydraStrategy(HydraStrategy):
                     spot=spot,
                     t_years=t_years,
                 )
+                # Cross the spread so the modeled debit reflects a real marketable
+                # fill, not the BS mid: buy (long) toward the ask, sell (short)
+                # toward the bid. Deflates the inflated overlay P&L (2026-07-21).
+                if _half_spread:
+                    fill_price = max(
+                        0.0,
+                        fill_price + _half_spread if leg.side == "long"
+                        else fill_price - _half_spread,
+                    )
                 position_id = f"DRY_OVERLAY_{entry.entry_number}_{proposal.threatened_side}_{i}"
                 hedge_legs.append(HedgeLeg(
                     entry_number=entry.entry_number,

@@ -130,6 +130,13 @@ export function DailyPnLCard({ summary, cumulative }: DailyPnLCardProps = {}) {
   const conditionalEntries = summary
     ? 0
     : entries.filter((e) => e.entry_number > baseCount).length;
+  // Denominator for "placed/slots". In summary (non-primary polled) mode the WS
+  // schedule isn't available, so baseCount would fall back to 2 and render a
+  // nonsensical "4/2" for a 7-slot variant like B — use the variant's own
+  // total_entries (its actual slot count) there instead (2026-07-21).
+  const slotsDenominator = summary
+    ? summary.total_entries ?? baseCount
+    : baseCount;
 
   return (
     <div className="space-y-3">
@@ -155,7 +162,7 @@ export function DailyPnLCard({ summary, cumulative }: DailyPnLCardProps = {}) {
         {/* Stat grid — 4 columns, centered */}
         <div className="grid grid-cols-4 gap-1 pt-3 border-t border-border-dim">
           <StatCell label="Entries">
-            {baseEntries}/{baseCount}
+            {baseEntries}/{slotsDenominator}
             {conditionalEntries > 0 && (
               <span className="text-text-dim text-xs">+{conditionalEntries}</span>
             )}
