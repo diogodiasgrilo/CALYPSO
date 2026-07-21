@@ -13,6 +13,7 @@
 
 import { useEffect, useState } from "react";
 import type { DataKind, PnlShape } from "./useStrategyMeta";
+import type { BrandonOverlay } from "../store/hydraStore";
 
 const POLL_MS = 2000;
 
@@ -53,6 +54,7 @@ export interface ICSnapshotEntry {
     call_value: number | null;
     put_value: number | null;
   };
+  overlays?: BrandonOverlay[];
   [key: string]: unknown;
 }
 

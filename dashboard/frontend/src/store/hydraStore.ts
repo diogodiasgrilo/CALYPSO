@@ -5,9 +5,32 @@ import { immer } from "zustand/middleware/immer";
 
 // ── Types ──
 
+/** A single leg of a Brandon defensive overlay (hedge) structure. */
+export interface BrandonOverlayLeg {
+  side: "long" | "short";
+  contract_type: "call" | "put";
+  strike: number;
+  quantity: number;
+}
+
+/** A Brandon defensive overlay stacked on an iron condor (a debit spread before
+ *  12:30 ET, a butterfly after). Previously invisible on the dashboard — this is
+ *  what drives most of variant B's daily P&L. `pnl` is a DISPLAY value computed
+ *  from the legs' intrinsic at the close (matches how the bot books it today). */
+export interface BrandonOverlay {
+  structure: string; // "debit_spread" | "butterfly"
+  threatened_side: string; // "call" | "put"
+  placed_at?: string | null;
+  debit: number; // net debit paid to open
+  pnl: number | null; // display P&L at current/close SPX
+  legs: BrandonOverlayLeg[];
+}
+
 export interface HydraEntry {
   entry_number: number;
   entry_time: string | null;
+  /** Brandon defensive overlays on this entry (empty on non-Brandon variants). */
+  overlays?: BrandonOverlay[];
   short_call_strike: number;
   long_call_strike: number;
   short_put_strike: number;

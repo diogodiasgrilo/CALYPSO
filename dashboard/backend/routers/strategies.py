@@ -399,6 +399,7 @@ def _ic_snapshot(vid: str, m: tax.StrategyMeta) -> dict:
     # in settings but not _VARIANT_IDS we still build from settings paths via the
     # same readers, so reuse its building blocks rather than its registry.
     from dashboard.backend.services.state_reader import StateFileReader
+    from dashboard.backend.services.brandon_hedge_reader import read_overlays_by_entry
 
     state_file = _state_file_for(vid)
     db_path = getattr(settings, f"variant_{vid}_backtesting_db", None)
@@ -408,11 +409,18 @@ def _ic_snapshot(vid: str, m: tax.StrategyMeta) -> dict:
 
     state = StateFileReader(state_file).read_latest() or {}
     entries = state.get("entries", [])
+    # Brandon defensive overlays (per-entry hedge structures) — read the sidecar and
+    # value each overlay at the current/close SPX for display so B's overlay activity
+    # (which drives most of its P&L) is no longer invisible (2026-07-21).
+    vd = _variant_dir(vid)
+    _spx_for_overlay = state.get("last_spx_price") or variants_router._latest_spx_from_db(db_path)
+    overlays_by_entry = read_overlays_by_entry(
+        str(vd / "brandon_hedge_legs.json") if vd else None, _spx_for_overlay)
     body = {
         "available": True,
         "state_file_age_seconds": round(age, 1),
         "summary": variants_router._summary_from_state(state),
-        "entries": variants_router._enrich_entries(entries),
+        "entries": variants_router._enrich_entries(entries, overlays_by_entry),
         "pnl_history": state.get("pnl_history", []),
         "min_buffer_margin": variants_router._min_buffer_margin_pct(entries, db_path=db_path),
         "spx_price": variants_router._latest_spx_from_db(db_path),

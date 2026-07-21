@@ -427,18 +427,25 @@ def _entry_realized_pnl(entry: dict) -> float:
     return realized
 
 
-def _enrich_entries(entries: list[dict]) -> list[dict]:
-    """Add buffer-utilization, disposition tag, and per-entry realized P&L
-    so the comparison panel can show what actually happened to each entry
-    instead of a bare "DONE" badge.
+def _enrich_entries(entries: list[dict], overlays_by_entry: dict | None = None) -> list[dict]:
+    """Add buffer-utilization, disposition tag, per-entry realized P&L, and any
+    Brandon defensive overlays so the panel shows what actually happened to each
+    entry instead of a bare "DONE" badge.
+
+    ``overlays_by_entry`` (from brandon_hedge_reader) maps entry_number(str) →
+    list of overlay summaries; injected as ``entry["overlays"]`` so the entry
+    card can render the hedge structure(s) + their P&L that were otherwise
+    invisible. Empty list on entries with no overlay / non-Brandon variants.
     """
     after_close = is_after_market_close()
+    overlays_by_entry = overlays_by_entry or {}
     out = []
     for e in entries:
         copy = dict(e)
         copy["buffer"] = _compute_buffer_margin(e)
         copy["disposition"] = _entry_disposition(e, after_close)
         copy["entry_realized_pnl"] = round(_entry_realized_pnl(e), 2)
+        copy["overlays"] = overlays_by_entry.get(str(e.get("entry_number")), [])
         out.append(copy)
     return out
 

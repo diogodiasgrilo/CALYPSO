@@ -117,6 +117,7 @@ function coerceEntry(e: ICSnapshotEntry): HydraEntry {
     ...e,
     entry_number: n(e.entry_number),
     entry_time: (e.entry_time as string | null) ?? null,
+    overlays: (e.overlays as HydraEntry["overlays"]) ?? [],
     short_call_strike: n(e.short_call_strike),
     long_call_strike: n(e.long_call_strike),
     short_put_strike: n(e.short_put_strike),
