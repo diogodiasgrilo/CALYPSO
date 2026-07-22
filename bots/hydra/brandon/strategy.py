@@ -1796,39 +1796,35 @@ class BrandonHydraStrategy(HydraStrategy):
 
         settlements: list[HedgeSettlement] = []
         for entry_number, legs in self._brandon_hedge_legs.items():
+            entry = next(
+                (e for e in self.daily_state.entries
+                 if e.entry_number == entry_number), None)
+            # UNIFIED double-book guard: if this entry's overlay was already booked
+            # today — via the per-day set (either path) OR the per-entry
+            # overlay_pnl_booked flag — SKIP IT ENTIRELY (2026-07-21 fix). Previously
+            # the loop still re-priced the legs at whatever SPX was current on a
+            # restart re-run (this sweep re-runs because _brandon_hedge_settlements is
+            # not persisted) and re-logged a duplicate "BRANDON-OVERLAY-SETTLED" line
+            # at that different SPX_close — confusing, and it corrupted any log-based
+            # analysis. The booking was always guarded, so P&L never double-counted;
+            # now the re-run is a true no-op: no re-price, no duplicate log/Telegram.
+            # The guard set is persisted in hydra_state.json ATOMICALLY with
+            # daily_state.total_realized_pnl (the same os.replace save), NOT the hedge
+            # sidecar, so a crash between the sidecar write and the state save can't
+            # restore the guard without the booked total (2026-07-18 review) — the
+            # booking + guard flip both ride the next state save.
+            if (entry_number in self._brandon_overlay_booked
+                    or (entry is not None and getattr(entry, "overlay_pnl_booked", False))):
+                continue
             s = hedge_position.settle_hedge(legs, spx_settle)
             if s is None:
                 continue
             settlements.append(s)
             # Fold the overlay's GROSS realized P&L into the day aggregate AND the
-            # specific entry (via _book_realized_pnl — matches realized_pnl's basis),
-            # ONCE. overlay_pnl_booked guards against the double-book a post-close
-            # restart would otherwise cause (this settle sweep re-runs because
-            # _brandon_hedge_settlements is not persisted). If the hedged entry is
+            # specific entry (via _book_realized_pnl), ONCE. If the hedged entry is
             # missing from daily_state, book to the aggregate only so the day total
             # stays complete; the reconciliation guard then flags the rare miss.
-            entry = next(
-                (e for e in self.daily_state.entries
-                 if e.entry_number == entry_number), None)
-            # UNIFIED double-book guard: skip if this entry's overlay was already
-            # booked today — via the per-day set (either path) OR the per-entry
-            # overlay_pnl_booked flag (back-compat with pre-guard state). Makes a
-            # settle-sweep re-run after a restart idempotent, including when the
-            # entry's presence FLIPS between runs (aggregate-only on one, attributed
-            # on another). CRITICAL: the guard set is persisted in hydra_state.json
-            # ATOMICALLY with daily_state.total_realized_pnl (the same os.replace
-            # save), NOT in the hedge sidecar — otherwise a crash between the sidecar
-            # write and the state save could restore the guard WITHOUT the booked
-            # total, silently losing the overlay (2026-07-18 review). We therefore do
-            # NOT persist here; the booking + guard flip both ride the next state save.
-            if (entry_number in self._brandon_overlay_booked
-                    or (entry is not None and getattr(entry, "overlay_pnl_booked", False))):
-                logger.info(
-                    "BRANDON-OVERLAY E#%s: overlay $%.2f already booked today — "
-                    "skipping re-book (idempotent settle-sweep re-run).",
-                    entry_number, s.total_pnl,
-                )
-            elif entry is not None:
+            if entry is not None:
                 self._book_realized_pnl(s.total_pnl, entry)
                 entry.overlay_pnl_booked = True
                 self._brandon_overlay_booked.add(entry_number)

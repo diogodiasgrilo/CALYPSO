@@ -147,6 +147,24 @@ class TestOverlayPnlBooking:
         assert e1.realized_pnl == pytest.approx(expected)  # booked ONCE, not 2x
         assert s.daily_state.total_realized_pnl == pytest.approx(expected)
 
+    def test_rerun_at_different_spx_is_a_clean_noop(self):
+        # 2026-07-21 fix: a restart re-run must NOT re-price the legs at a different
+        # (possibly stale) SPX or append a duplicate settlement — it used to re-run
+        # settle_hedge at whatever SPX was current then and re-log a duplicate
+        # "SETTLED" line at that SPX_close, corrupting any log-based analysis.
+        e1 = SimpleNamespace(entry_number=1, realized_pnl=0.0, overlay_pnl_booked=False)
+        legs = _hedge_legs_for_entry(1)
+        booked = hedge_position.settle_hedge(legs, spx_settle=7550.0).total_pnl
+        s = _HedgeStub([e1], {1: legs})
+        s._brandon_settle_hedges(spx_settle=7550.0)  # books at the real close 7550
+        assert e1.realized_pnl == pytest.approx(booked)
+        # Restart re-run at a WILDLY different (stale) SPX — must change nothing.
+        s._brandon_hedge_settlements = []
+        result = s._brandon_settle_hedges(spx_settle=7400.0)
+        assert e1.realized_pnl == pytest.approx(booked)  # NOT re-priced at 7400
+        assert s.daily_state.total_realized_pnl == pytest.approx(booked)
+        assert result == []  # the re-run settled nothing — a clean no-op
+
     def test_aggregate_only_booked_once_and_guarded_on_rerun(self):
         # Entry ABSENT from daily_state -> aggregate-only booking (2026-07-18 fix).
         # Must book once into the day total and NOT double-book on a sweep re-run.
