@@ -147,9 +147,13 @@ class TestBrandonOverlayGuardPersistence:
         assert data["brandon_overlay_booked"] == []
 
     def test_restore_reads_guard_and_total_together_same_day(self, tmp_path):
-        import datetime as _dt
+        from shared.market_hours import get_us_market_time
         s = _make_strategy(tmp_path)
-        today = _dt.datetime.now().strftime("%Y-%m-%d")
+        # Use the SAME time source the code gates on (ET market time), not local
+        # datetime.now(): otherwise, in the evening-Pacific window where the local
+        # date still lags the ET date, "today" here mismatches the code's ET
+        # "today" and the same-day restore gate spuriously fails.
+        today = get_us_market_time().strftime("%Y-%m-%d")
         s.daily_state.date = today
         s._brandon_overlay_booked = set()  # Brandon attr present → restore path active
         Path(s.state_file).write_text(json.dumps({
