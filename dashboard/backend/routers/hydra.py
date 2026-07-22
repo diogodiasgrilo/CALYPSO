@@ -126,37 +126,22 @@ async def get_entries(date_str: str | None = None, strategy_id: str = Query(defa
 
 @router.get("/summary")
 async def get_summary():
-    """Today's summary: P&L, entries count, stops, credits."""
+    """Today's summary: P&L, entries count, stops, credits.
+
+    Delegates to the canonical `_summary_from_state` (variants router) so the
+    main summary card matches the per-strategy snapshot / leaderboard exactly:
+    net_pnl is LIVE (realized + unrealized − commission) and active_entries is
+    gated on the per-side live flags — NOT `is_complete`, which goes True at
+    placement and undercounted monitoring entries (dashboard audit 2026-07-22).
+    """
+    from dashboard.backend.routers.variants import _summary_from_state
+
     state = state_reader.get_cached() or state_reader.read_latest()
     if not state:
         return {"error": "State not available"}
 
-    entries = state.get("entries", [])
-    # Phase 2 X-1: derive today's contract count for the summary payload.
-    # Prefer state file's own field (written by the bot each heartbeat). If
-    # absent (e.g. pre-Phase-1 state), fall back to max over per-entry
-    # contracts, then finally to 1 — same null-safe pattern as Phase 1.
-    contracts = (
-        state.get("contracts_per_entry")
-        or max((e.get("contracts", 1) for e in entries), default=1)
-        or 1
-    )
-    return {
-        "date": state.get("date"),
-        "state": state.get("state"),
-        "entries_completed": state.get("entries_completed", 0),
-        "entries_failed": state.get("entries_failed", 0),
-        "entries_skipped": state.get("entries_skipped", 0),
-        "total_credit_received": state.get("total_credit_received", 0),
-        "total_realized_pnl": state.get("total_realized_pnl", 0),
-        "total_commission": state.get("total_commission", 0),
-        "net_pnl": state.get("total_realized_pnl", 0) - state.get("total_commission", 0),
-        "call_stops": state.get("call_stops_triggered", 0),
-        "put_stops": state.get("put_stops_triggered", 0),
-        "total_stops": state.get("call_stops_triggered", 0) + state.get("put_stops_triggered", 0),
-        "one_sided_entries": state.get("one_sided_entries", 0),
-        "credit_gate_skips": state.get("credit_gate_skips", 0),
-        "active_entries": len([e for e in entries if not e.get("is_complete", True)]),
-        "total_entries": len(entries),
-        "contracts_per_entry": contracts,
-    }
+    summary = _summary_from_state(state)
+    # Preserve the two counters `_summary_from_state` doesn't carry.
+    summary["one_sided_entries"] = state.get("one_sided_entries", 0)
+    summary["credit_gate_skips"] = state.get("credit_gate_skips", 0)
+    return summary

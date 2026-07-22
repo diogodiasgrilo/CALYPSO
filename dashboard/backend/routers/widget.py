@@ -13,6 +13,25 @@ state_reader = StateFileReader(settings.hydra_state_file)
 metrics_reader = MetricsFileReader(settings.hydra_metrics_file)
 
 
+def _entry_dot(e: dict) -> str:
+    """Classify one entry into a widget status dot.
+
+    A SKIPPED entry (no trade placed) gets its OWN 'skipped' dot rather than
+    falling through to 'expired' — 'expired' reads as a kept-credit win, so a
+    no-trade day of skips would otherwise look like a day of winners (dashboard
+    audit 2026-07-22).
+    """
+    if e.get("is_complete"):
+        if e.get("call_side_stopped") or e.get("put_side_stopped"):
+            return "stopped"
+        if e.get("call_side_skipped") and e.get("put_side_skipped"):
+            return "skipped"
+        return "expired"
+    if e.get("entry_time"):
+        return "active"
+    return "pending"
+
+
 @router.get("/api/widget")
 async def get_widget_data():
     """Flat JSON for iOS Scriptable widget and Siri shortcuts.
@@ -46,17 +65,7 @@ async def get_widget_data():
     )
 
     # Entry status dots for medium widget
-    entry_dots = []
-    for e in entries:
-        if e.get("is_complete"):
-            if e.get("call_side_stopped") or e.get("put_side_stopped"):
-                entry_dots.append("stopped")
-            else:
-                entry_dots.append("expired")
-        elif e.get("entry_time"):
-            entry_dots.append("active")
-        else:
-            entry_dots.append("pending")
+    entry_dots = [_entry_dot(e) for e in entries]
 
     # Pad to scheduled entry count (base + conditional, read from state)
     schedule = state.get("entry_schedule", {})
@@ -65,7 +74,22 @@ async def get_widget_data():
     while len(entry_dots) < pad_to:
         entry_dots.append("pending")
 
-    cumulative_pnl = metrics.get("cumulative_pnl", 0) if metrics else 0
+    # Lifetime P&L must match the web dashboard's /api/metrics/cumulative card:
+    # apply the SAME DB-canonical override + baseline rebase, else the widget
+    # shows the raw metrics-file value (which still includes pre-baseline legacy
+    # history the rest of the dashboard excludes) — the iOS widget and the web
+    # card disagreed by ~$1,966 (dashboard audit 2026-07-22).
+    from dashboard.backend.services.db_reader import apply_db_cumulative
+    from dashboard.backend.services.variant_readers import canonical_reader
+
+    cumulative_pnl = 0
+    if metrics:
+        try:
+            overrides = await canonical_reader.get_cumulative_overrides(settings.baseline_date)
+            rebased = apply_db_cumulative(dict(metrics), overrides) or {}
+            cumulative_pnl = rebased.get("cumulative_pnl", metrics.get("cumulative_pnl", 0))
+        except Exception:
+            cumulative_pnl = metrics.get("cumulative_pnl", 0)
 
     # Phase 2 X-1: expose contract count so iOS widget can show a [Nc] badge
     # next to P&L. Prefer state file's explicit field, fall back to max across
