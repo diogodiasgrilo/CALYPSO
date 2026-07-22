@@ -1686,7 +1686,20 @@ class BrandonHydraStrategy(HydraStrategy):
         expected_contracts = sum(int(l.quantity) for l in proposal.legs)
         placed_contracts = 0
         chunk_cap = max(1, int(getattr(self, "max_contracts_per_order", 15)))
-        for i, leg in enumerate(proposal.legs):
+        # B3 (2026-07-21): place protective LONG wings BEFORE the short body, so
+        # the short leg is never open without its cover. A butterfly's proposal
+        # order is (long lower, short pin×2, long upper) — placing in that order
+        # leaves the short uncovered on the upside until the upper wing fills.
+        # Sorting longs-first (stable within each side) removes the uncovered-
+        # short window on a clean fill; if a wing then fails, the atomic unwind
+        # below still flattens everything (fail-closed — never a naked short).
+        # `i` stays the ORIGINAL leg index so external_ref / cOID identity is
+        # unchanged. (Debit spreads are already long-then-short.)
+        ordered_legs = sorted(
+            enumerate(proposal.legs),
+            key=lambda t: 0 if t[1].side == "long" else 1,
+        )
+        for i, leg in ordered_legs:
             buy_sell = BuySell.BUY if leg.side == "long" else BuySell.SELL
             put_call = "Call" if leg.contract_type == "call" else "Put"
             external_ref = f"OVERLAY_{entry.entry_number}_{proposal.threatened_side}_{i}"
@@ -1852,6 +1865,36 @@ class BrandonHydraStrategy(HydraStrategy):
                 sign = 1 if hl.side == "long" else -1
                 expected[conid] = expected.get(conid, 0) + sign * int(hl.quantity)
         return expected
+
+    def _get_current_position_size(self) -> int:
+        """B4 (2026-07-21): fold LIVE overlay hedge legs into the concentration
+        count so `max_contracts_per_underlying` sees the REAL gross exposure.
+
+        The base method counts only the 4 IC legs; with overlays enabled, true
+        exposure (IC + overlay contracts) can exceed the cap while it reads
+        "well under" (the 2026-06-10 risk-redesign proposal's Bug B4). This makes
+        the cap a true gross-contract backstop that would also catch a runaway
+        overlay (like the pre-fix 98-vs-14). Mirrors `_expected_position_quantities`:
+        only real conid-bearing overlay legs count (absolute contracts), so
+        dry-run DRY_OVERLAY_* placeholders (conid=None) are skipped and sim sizing
+        is unchanged. NOTE: B's `max_contracts_per_underlying` is set high enough
+        (config) to fit the full IC grid PLUS a realistic overlay load, so this
+        never blocks a legitimate defensive overlay — it only trips on a genuine
+        gross-exposure runaway.
+
+        Bounded soft-edge: the overlay CURRENTLY being placed is not yet in
+        `_brandon_hedge_legs` (it is tracked only after a full fill), so its own
+        chunks validate against a constant baseline — true gross can overshoot the
+        cap by at most one overlay's (leg_total − max_chunk) ≈ ≤4×contracts_per_entry.
+        That is tiny vs the cap and cannot reopen the 98-vs-14 runaway (each
+        overlay's size is fixed by the placement loop, not by this cap).
+        """
+        total = super()._get_current_position_size()
+        for legs in (getattr(self, "_brandon_hedge_legs", {}) or {}).values():
+            for hl in legs:
+                if getattr(hl, "conid", None) is not None:
+                    total += abs(int(hl.quantity))
+        return total
 
     def _brandon_estimate_t_years_to_close(self) -> float:
         """Calendar time from now to today's 4 PM ET expiry, in years."""

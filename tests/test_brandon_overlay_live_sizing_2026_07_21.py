@@ -176,6 +176,50 @@ class TestLiveOverlaySizing:
         assert len(flat_calls) == 3
 
 
+class TestOverlayLegOrderAndCap:
+    def test_long_wings_placed_before_short_body_butterfly(self):
+        """B3: the short body must never be opened before both long wings are on."""
+        seq = []
+
+        def place(**kw):
+            seq.append(kw["buy_sell"])
+            return {"uic": int(kw["strike"]), "fill_price": 1.0}
+
+        s = _live_stub()
+        s._place_option_order = place
+        s._flatten_accumulated_partial = lambda *a, **k: None
+        s._brandon_place_overlay(SimpleNamespace(entry_number=5), _butterfly())
+
+        last_long = max(i for i, x in enumerate(seq) if x == BuySell.BUY)
+        first_short = min(i for i, x in enumerate(seq) if x == BuySell.SELL)
+        assert last_long < first_short, "short body placed before a long wing was complete"
+
+    def test_get_current_position_size_counts_overlays(self):
+        """B4: the concentration cap must see real overlay contracts, not just IC legs."""
+        from types import SimpleNamespace as NS
+
+        s = BrandonHydraStrategy.__new__(BrandonHydraStrategy)
+        s.contracts_per_entry = 7
+        # one full IC entry -> base counts 4 legs x 7 = 28
+        s.daily_state = NS(entries=[NS(
+            short_call_uic=1, long_call_uic=2, short_put_uic=3, long_put_uic=4)])
+        s._brandon_hedge_legs = {
+            5: [NS(conid=7500, quantity=10, side="long"),
+                NS(conid=7510, quantity=20, side="short")],   # +30 real overlay
+            6: [NS(conid=None, quantity=99, side="long")],    # dry placeholder -> skipped
+        }
+        # 28 (IC) + 10 + 20 (real overlays) = 58; the conid=None dry leg is excluded
+        assert s._get_current_position_size() == 58
+
+    def test_get_current_position_size_no_overlays_is_base(self):
+        from types import SimpleNamespace as NS
+        s = BrandonHydraStrategy.__new__(BrandonHydraStrategy)
+        s.contracts_per_entry = 7
+        s.daily_state = NS(entries=[])
+        s._brandon_hedge_legs = {}
+        assert s._get_current_position_size() == 0
+
+
 class TestPlaceOptionOrderQuantityAware:
     def test_place_option_order_forwards_explicit_quantity(self):
         s = BrandonHydraStrategy.__new__(BrandonHydraStrategy)
