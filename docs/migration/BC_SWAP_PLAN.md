@@ -42,6 +42,20 @@ Committed on `hydra-ibkr-standalone` (deploy pending a safe EOD window):
 
 **Remaining before a flip:** the two sizing DECISIONS (contracts 7-vs-10, cap) in §7; the VM-only coherence edits (agents repoint C2/C3; optional baseline C6); deploy (pull + `__pycache__` clear + restart the two hydra units — **no broker restart**, no `shared/` the broker imports changed); then run `flip_bc_swap.sh` at an EOD-flat window.
 
+### Decisions LOCKED + execution state (2026-07-21)
+
+- **Contracts:** B live = **7** (match C's live risk; B does NOT inherit — set explicitly). ✅ **staged** in `config_variant_b.json` (`contracts_per_entry` 10→7); `dry_run` untouched (B still a dry shadow).
+- **Cap:** **`max_contracts_per_underlying` = 200** (corrected from the "~160" label, which was 10c-math; at 7c a full 7-slot grid = 7×4×7 = 196 IC contracts, overlays don't count against this cap). ✅ **staged** (60→200).
+- **Full primary move:** NO — trade-only; the dashboard picker auto-follows to B (C5). C stays the `config.py` default.
+- **Agents repoint (C2/C3) + baseline (C6):** YES — but done AT the flip (after the Jul 22 close), NOT before: C trades live through Jul 22, so its agents must keep reading `variant_c` until then.
+- **Code:** all 6 commits deployed + staged on the VM (`6584ceb`); dashboard restarted (auto-follow live); B/C NOT restarted (the flip's restart loads B's new 7c/200 config + the overlay fix).
+
+**Timing is forced by the smoke gate:** a paper smoke places a real 1-contract order that only fills in market hours, so the earliest valid flip is **after the Jul 22 close**. Sequence:
+1. **Jul 22, market hours:** `sudo -u calypso CALYPSO_BROKER_URL=… .venv/bin/python scripts/broker_paper_smoke.py --place` → today-ET PASS sentinel. Confirm broker `/health`.
+2. **Jul 22, after close + settlement (both flat):** `sudo /opt/calypso/scripts/flip_bc_swap.sh` (self-guards; C→dry first, then B→live+alerts; A untouched).
+3. **Coherence:** repoint agents (`agents_config.json` `read_db`/`state_file`/`metrics_file` → `variant_b`) + set B's dashboard baseline to 2026-07-23; verify `git status` clean before HOMER's 7:30pm commit.
+4. **Jul 23 open:** B places real paper orders (7c). Watch `logs/hydra_variant_b/bot.log` for cap rejects, 09:45-slot strike quality, POS-003, and the first live (chunked) overlay.
+
 ---
 
 ## 2. HARD BLOCKERS — RESOLVED (status inline below)
