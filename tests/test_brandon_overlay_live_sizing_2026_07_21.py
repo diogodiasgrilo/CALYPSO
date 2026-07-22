@@ -104,6 +104,28 @@ class TestLiveOverlaySizing:
         legs = s._brandon_hedge_legs[5]
         assert sorted(l.quantity for l in legs) == [10, 10, 20]
 
+    def test_mixed_priced_unpriced_chunks_average_over_priced_only(self):
+        """Body 20 -> chunks 15 (priced 1.00) + 5 (filled, no price). The leg
+        fill price must be 1.00 (avg over priced qty), NOT 0.75 (avg over all)."""
+        calls = {"n": 0}
+
+        def place(**kw):
+            if int(kw["strike"]) == 7510:          # body leg, two chunks
+                calls["n"] += 1
+                if calls["n"] == 1:
+                    return {"uic": 7510, "fill_price": 1.0}
+                return {"uic": 7510}                # filled, but no fill_price
+            return {"uic": int(kw["strike"]), "fill_price": 1.0}
+
+        s = _live_stub()
+        s._place_option_order = place
+        s._flatten_accumulated_partial = lambda *a, **k: pytest.fail("full fill")
+        s._brandon_place_overlay(SimpleNamespace(entry_number=6), _butterfly())
+
+        body = next(l for l in s._brandon_hedge_legs[6] if l.strike == 7510.0)
+        assert body.quantity == 20
+        assert body.fill_price == pytest.approx(1.0)   # not 15.0/20 = 0.75
+
     def test_partial_fill_unwinds_all_filled_legs_and_does_not_track(self):
         """Upper wing fails → the two filled legs are flattened, nothing tracked."""
         flat_calls = []

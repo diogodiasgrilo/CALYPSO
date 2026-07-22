@@ -1691,6 +1691,7 @@ class BrandonHydraStrategy(HydraStrategy):
             leg_filled_qty = 0
             leg_conid = None
             weighted_fill = 0.0
+            priced_qty = 0   # contracts whose chunk reported a real fill price
             remaining = int(leg.quantity)
             chunk_idx = 0
             while remaining > 0:
@@ -1720,12 +1721,15 @@ class BrandonHydraStrategy(HydraStrategy):
                     fp = res.get("fill_price")
                     if fp:
                         weighted_fill += float(fp) * chunk
+                        priced_qty += chunk
                 remaining -= chunk
                 chunk_idx += 1
             placed_contracts += leg_filled_qty
             if leg_filled_qty > 0:
+                # Average over PRICED chunks only (divisor == numerator's set) so
+                # a mixed priced/unpriced multi-chunk leg can't understate the fill.
                 leg_fill_price = (
-                    weighted_fill / leg_filled_qty if weighted_fill > 0 else 0.0
+                    weighted_fill / priced_qty if priced_qty > 0 else 0.0
                 )
                 # Fall back to the BS estimate ONLY if the broker reported no
                 # fill price, so settlement still has a non-zero basis.
@@ -1789,6 +1793,14 @@ class BrandonHydraStrategy(HydraStrategy):
             if not conid or int(hl.quantity) <= 0:
                 continue
             orig_side = "BUY" if hl.side == "long" else "SELL"
+            # DELIBERATE asymmetry vs the placement path: the flatten is placed
+            # as ONE MARKET order at the full leg quantity, NOT chunked to
+            # max_contracts_per_order and NOT run through _validate_order_size.
+            # An emergency close must never be rejected/throttled by a
+            # self-imposed entry cap (that would strand the naked short); IBKR's
+            # real per-order limit is far above an overlay leg (<= 2x
+            # contracts_per_entry). A failed/partial flatten still fails CLOSED —
+            # the leg was never tracked, so it surfaces as a POS-003 orphan.
             self._flatten_accumulated_partial(
                 conid, orig_side, int(hl.quantity),
                 f"OVERLAY_UNWIND_{hl.entry_number}_{hl.threatened_side}"
