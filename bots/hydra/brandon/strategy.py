@@ -1677,9 +1677,11 @@ class BrandonHydraStrategy(HydraStrategy):
         # so it placed leg.quantity × contracts_per_entry — a contracts_per_entry-
         # fold OVER-placement (a 40-contract butterfly attempted 400). The
         # max_contracts_per_underlying cap then truncated it mid-structure into a
-        # naked short with no unwind. Overlays only ever ran in dry-run (the sole
-        # live variant, C, had overlays OFF), so this never fired in production —
-        # but it would the instant an overlay-enabled variant went live.
+        # naked short with no unwind. This DID fire once live — on C, 2026-06-10
+        # (placed 98 vs 14 contracts) — after which C's overlays were disabled as
+        # the mitigation pending "the sizing fix" (see config _comment_disabled).
+        # This is that fix; it has not recurred since because C stayed overlay-OFF
+        # and B is dry-run.
         filled_legs: list[HedgeLeg] = []
         expected_contracts = sum(int(l.quantity) for l in proposal.legs)
         placed_contracts = 0

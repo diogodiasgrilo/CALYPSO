@@ -43,9 +43,12 @@ Version History:
   `_place_option_order` placed contracts_per_entry contracts → it attempted
   leg.quantity × contracts_per_entry (400 on a 40-contract butterfly). The
   max_contracts_per_underlying cap then truncated it mid-structure into a naked
-  short with NO unwind. It never fired in production only because the sole live
-  variant (C) has overlays OFF — but it would the instant an overlay-enabled
-  variant (B) went live. FIX: `_place_option_order`/`_place_option_order_ib`
+  short with NO unwind. It DID fire once in production — on C, 2026-06-10: the
+  overlay placed contracts_per_entry × intended qty (98 vs 14 contracts, i.e.
+  C's 7-fold) and C's overlays were DISABLED that day as the mitigation (config
+  `_comment_disabled`: "re-enable only after the sizing fix"). It has not
+  recurred only because C's overlays stayed OFF and B is dry-run — this IS that
+  long-awaited sizing fix. FIX: `_place_option_order`/`_place_option_order_ib`
   gained an optional `quantity` (None ⇒ contracts_per_entry, so the IC path is
   byte-identical; ORDER-006 now validates the ACTUAL requested qty). The overlay
   caller places each leg ONCE at leg.quantity, chunked by max_contracts_per_order,

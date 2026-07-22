@@ -23,7 +23,7 @@
 |---|---|---|---|
 | `dry_run` | `false` (LIVE) | `true` (sim) | the swap flips these |
 | `contracts_per_entry` | **7** | **10** | **DECISION:** B live places 10 unless changed to 7. B does NOT inherit C's 7. |
-| `defensive_overlay.enabled` | **false** | **true** | **C-live has overlays OFF** — that is *why* the B1 bug never fired in prod. B's overlays are what drove its recent P&L. |
+| `defensive_overlay.enabled` | **false** | **true** | **C-live has overlays OFF since 2026-06-10** — disabled *because* the B1 bug fired live on C that day (placed 98 vs 14 contracts; config note: "re-enable only after the sizing fix"). B's (dry) overlays are what drove its recent P&L. |
 | entry slots (`entry_times`) | 3 (10:15/10:45/11:15) | 7 (09:45→12:45) | B is a denser grid |
 | `vix_regime.max_entries` | [2,2,2,1] (keep 2) | [7,7,7,7] (keep 7) | B holds more concurrent ICs |
 | `max_contracts_per_underlying` | 180 | **60** | **DECISION (B3):** 60 truncates B's denser live grid; sim ignores the cap. |
