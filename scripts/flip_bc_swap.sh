@@ -55,6 +55,37 @@ if ! grep -q "_brandon_unwind_overlay_legs" "$BSTRAT"; then
     exit 0
 fi
 
+# ── Guard 3b — B's concentration cap must fit ICs + overlays (B4 coherence) ───
+# With B4, max_contracts_per_underlying counts overlay contracts. If overlays are
+# enabled but the cap is sized for ICs only, EVERY overlay is unwound (rejected
+# by ORDER-006) — silently defeating B's defense. Require the cap to clear the
+# full grid + an equal overlay allowance: contracts_per_entry × 4 × keep × 2.
+capcheck=$(runuser -u calypso -- "$VENV" - <<'PY' 2>/dev/null || echo ERR
+import json
+c = json.load(open("/opt/calypso/bots/hydra/config/config_variant_b.json"))
+s = c["strategy"]; ov = (s.get("brandon") or {}).get("defensive_overlay") or {}
+cpe = int(s.get("contracts_per_entry", 0))
+cap = int(s.get("max_contracts_per_underlying", 0))
+keep = max((s.get("vix_regime") or {}).get("max_entries") or [0])
+need = cpe * 4 * int(keep) * 2
+if not ov.get("enabled", False):
+    print("OK overlays-off")
+elif cap >= need:
+    print("OK cap=%d need>=%d" % (cap, need))
+else:
+    print("SMALL cap=%d need>=%d (cpe=%d keep=%d)" % (cap, need, cpe, keep))
+PY
+)
+if echo "$capcheck" | grep -q "^SMALL"; then
+    log "ABORT: B cap too small for its overlay load — $capcheck"
+    log "       Raise max_contracts_per_underlying in config_variant_b.json first (B4)."
+    exit 0
+elif echo "$capcheck" | grep -q "ERR"; then
+    log "WARN: could not verify B cap adequacy ($capcheck) — proceeding on operator check."
+else
+    log "B cap adequacy: $capcheck"
+fi
+
 # ── Guard 4 — the shared paper account should be FLAT before swapping ─────────
 # Query the broker for open option positions (authoritative). After the close +
 # settlement it must be empty; a non-empty book means something is still open

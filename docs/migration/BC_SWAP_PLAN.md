@@ -45,10 +45,11 @@ Committed on `hydra-ibkr-standalone` (deploy pending a safe EOD window):
 ### Decisions LOCKED + execution state (2026-07-21)
 
 - **Contracts:** B live = **7** (match C's live risk; B does NOT inherit — set explicitly). ✅ **staged** in `config_variant_b.json` (`contracts_per_entry` 10→7); `dry_run` untouched (B still a dry shadow).
-- **Cap:** **`max_contracts_per_underlying` = 200** (corrected from the "~160" label, which was 10c-math; at 7c a full 7-slot grid = 7×4×7 = 196 IC contracts, overlays don't count against this cap). ✅ **staged** (60→200).
+- **Cap:** **`max_contracts_per_underlying` = 600** ✅ **staged** (60→200→600). Journey: first 200 (ICs-only at 7c = 196), then raised to 600 once **B4 made the cap COUNT overlay contracts** — the cap must clear the full legit load (7 ICs = 196 + up to 14 held-to-expiry overlays ≈ 392 → 588) so a legitimate defensive overlay is never rejected. 600 gives margin; the real runaway protection is the per-order cap (15) + the B1 sizing fix, so a loose underlying cap is fine. `flip_bc_swap.sh` Guard-3b now aborts if B's cap is below `contracts_per_entry×4×keep×2`.
+- **Overlay sibling bugs (from the 2026-06-10 risk-redesign proposal) closed:** **B3** — overlay now places both protective long wings BEFORE the short body (longs-first), so the short is never opened uncovered (butterfly). **B4** — `_get_current_position_size` now folds real overlay contracts so the concentration cap sees true gross exposure (+ the cap raise above). B2 (naked-short-on-partial-IC-close) was already fixed post-June. +4 tests; 3-red-team + 1-red-team audits clean.
 - **Full primary move:** NO — trade-only; the dashboard picker auto-follows to B (C5). C stays the `config.py` default.
 - **Agents repoint (C2/C3) + baseline (C6):** YES — but done AT the flip (after the Jul 22 close), NOT before: C trades live through Jul 22, so its agents must keep reading `variant_c` until then.
-- **Code:** all 6 commits deployed + staged on the VM (`6584ceb`); dashboard restarted (auto-follow live); B/C NOT restarted (the flip's restart loads B's new 7c/200 config + the overlay fix).
+- **Code:** overlay B1 fix + B3/B4 + tooling + dashboard auto-follow all committed + staged on the VM; dashboard restarted (auto-follow live); B/C NOT restarted (the flip's restart loads B's new 7c/600 config + the overlay fixes).
 
 **Timing is forced by the smoke gate:** a paper smoke places a real 1-contract order that only fills in market hours, so the earliest valid flip is **after the Jul 22 close**. Sequence:
 1. **Jul 22, market hours:** `sudo -u calypso CALYPSO_BROKER_URL=… .venv/bin/python scripts/broker_paper_smoke.py --place` → today-ET PASS sentinel. Confirm broker `/health`.
