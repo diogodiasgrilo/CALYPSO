@@ -109,6 +109,41 @@ def _primary_id() -> str:
     return live[0] if len(live) == 1 else PRIMARY_FALLBACK_ID
 
 
+def _is_live(vid: str) -> bool:
+    """A strategy is LIVE iff its config has ``dry_run=false`` (it places REAL
+    paper orders) — read dynamically so a C<->B live-seat swap is reflected
+    immediately. The static taxonomy ``status`` would still say only 'c' is live
+    after a swap (dashboard audit 2026-07-22). Falls back to the taxonomy status
+    when the config is unreadable; never raises.
+    """
+    import json
+    cfg_path = getattr(settings, f"variant_{vid}_config_file", None)
+    if cfg_path is not None:
+        try:
+            with open(cfg_path) as fh:
+                return not bool(json.load(fh).get("dry_run", True))
+        except Exception:
+            pass
+    m = tax.meta(vid)
+    return bool(m and getattr(m, "status", "") == "live")
+
+
+def _decide_calendar_winner(scores: dict, outcome_counts: dict) -> str:
+    """Winner among ONLY the variants with >=1 post-baseline closed calendar.
+
+    A variant sitting at a hollow $0 because it has no clean outcomes yet must
+    NOT outrank a variant with real results (even a real loss) — else E, whose
+    only closed calendar was pre-baseline delayed-data history, is crowned
+    'winner' at $0 over D's genuine loss (dashboard audit 2026-07-22).
+    """
+    eligible = {vid: s for vid, s in scores.items() if outcome_counts.get(vid, 0) > 0}
+    if not eligible:
+        return "n/a"
+    best = max(eligible.values())
+    leaders = [vid for vid, s in eligible.items() if abs(s - best) < 0.01]
+    return leaders[0] if len(leaders) == 1 else "tie"
+
+
 def _data_kind(m: tax.StrategyMeta) -> str:
     """``dc_calendar`` for net-debit double calendars, else ``ic_state``."""
     return "dc_calendar" if m.structure_family == "double_calendar" else "ic_state"
@@ -224,7 +259,7 @@ def _strategy_meta_dict(m: tax.StrategyMeta) -> dict:
         "family": m.structure_family,  # spec: family (= structure_family)
         "pnl_shape": m.pnl_shape,
         "data_kind": _data_kind(m),
-        "is_live": m.status == "live",
+        "is_live": _is_live(m.id),
         "is_primary": m.id == _primary_id(),
         "available": _is_available_meta(m),
         "capabilities": _capabilities(m),
@@ -660,6 +695,8 @@ async def _calendar_group_comparison(member_ids: list[str]) -> dict:
     multi-day; there's no single "today net P&L" the way a 0DTE IC has)."""
     per_member: dict[str, dict] = {}
     scores: dict[str, float] = {}
+    outcome_counts: dict[str, int] = {}
+    baselines: dict[str, str] = {}
     for vid in member_ids:
         m = tax.meta(vid)
         reader = _calendar_dc_reader(vid)
@@ -671,6 +708,7 @@ async def _calendar_group_comparison(member_ids: list[str]) -> dict:
             }
             continue
         baseline = getattr(settings, f"variant_{vid}_baseline_date", "") or ""
+        baselines[vid.upper()] = baseline
         overrides = await reader.get_cumulative_overrides_calendar(baseline)
         outcomes = await reader.get_calendar_outcomes(limit=10, baseline_date=baseline)
         # Open calendars from the sidecar (D/E persist via dc_open_trades.json).
@@ -690,18 +728,20 @@ async def _calendar_group_comparison(member_ids: list[str]) -> dict:
             "open_summary": status.get("summary", {}),
         }
         scores[vid.upper()] = overrides.get("cumulative_pnl", 0.0) or 0.0
+        # How many post-baseline calendars this variant has actually CLOSED. A
+        # variant with zero clean outcomes sits at a hollow $0 and must NOT be
+        # crowned "winner" over a variant that has really traded (E's only closed
+        # calendar was a pre-baseline delayed-data trade, correctly excluded).
+        outcome_counts[vid.upper()] = int(overrides.get("total_calendars", 0) or 0) or len(outcomes)
 
-    if not scores:
-        winner = "n/a"
-    else:
-        best = max(scores.values())
-        leaders = [vid for vid, s in scores.items() if abs(s - best) < 0.01]
-        winner = leaders[0] if len(leaders) == 1 else "tie"
+    winner = _decide_calendar_winner(scores, outcome_counts)
 
     return {
         "leaderboard": {
             "winner": winner,
             "scores": scores,  # {id: lifetime cumulative realized P&L (debit-native)}
+            "outcome_counts": outcome_counts,  # {id: # post-baseline closed calendars} — 0 = "no clean results yet", NOT winning
+            "baselines": baselines,            # {id: rebase date} so the UI can caption "since <date>"
             "basis": "lifetime_realized_pnl",
         },
         "members": per_member,

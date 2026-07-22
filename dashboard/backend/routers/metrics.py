@@ -164,10 +164,17 @@ async def get_performance(strategy_id: str = Query(default="")):
     """Daily P&L values for client-side performance metric calculations
     (per-strategy).
 
-    Rebased to settings.baseline_date so Sharpe/drawdown match the rebased card.
+    Rebased to the strategy's OWN baseline_date so Sharpe/drawdown match that
+    strategy's rebased card — NOT the primary's baseline for every id (dashboard
+    audit 2026-07-22; the per-strategy snapshot already resolves per-variant).
     """
     reader, is_canonical = reader_for(strategy_id)
-    pnls = await reader.get_daily_pnls(settings.baseline_date)
+    _sid = (strategy_id or "").strip().lower()
+    baseline = (
+        settings.baseline_date if (is_canonical or not _sid)
+        else getattr(settings, f"variant_{_sid}_baseline_date", settings.baseline_date)
+    )
+    pnls = await reader.get_daily_pnls(baseline)
 
     # Append today's net P&L only after market close (canonical only)
     if is_canonical and _live_state and is_after_market_close():

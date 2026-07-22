@@ -355,3 +355,39 @@ def test_primary_id_falls_back_when_ambiguous(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "variant_b_config_file", tmp_path / "nope_b.json", raising=False)
     monkeypatch.setattr(settings, "variant_c_config_file", tmp_path / "nope_c.json", raising=False)
     assert S._primary_id() == "c"
+
+
+# ---------------------------------------------------------------------------
+# Audit fixes 2026-07-22: _is_live follows dry_run (swap-coherent); the calendar
+# leaderboard won't crown a 0-outcome variant over one with real results.
+# ---------------------------------------------------------------------------
+
+
+def test_is_live_follows_dry_run(tmp_path, monkeypatch):
+    from dashboard.backend.routers import strategies as S
+    import json as _json
+
+    c = tmp_path / "config_variant_c.json"
+    b = tmp_path / "config_variant_b.json"
+    c.write_text(_json.dumps({"dry_run": False}))   # C live today
+    b.write_text(_json.dumps({"dry_run": True}))
+    monkeypatch.setattr(settings, "variant_c_config_file", c, raising=False)
+    monkeypatch.setattr(settings, "variant_b_config_file", b, raising=False)
+    assert S._is_live("c") is True
+    assert S._is_live("b") is False
+
+    # After the swap: B live, C dry — is_live must follow, not stay pinned to C.
+    c.write_text(_json.dumps({"dry_run": True}))
+    b.write_text(_json.dumps({"dry_run": False}))
+    assert S._is_live("b") is True
+    assert S._is_live("c") is False
+
+
+def test_calendar_winner_excludes_zero_outcome_variant():
+    from dashboard.backend.routers.strategies import _decide_calendar_winner
+    # E has 0 clean outcomes at $0; D has 5 outcomes at a real loss -> D wins, not E.
+    assert _decide_calendar_winner({"D": -1180.0, "E": 0.0}, {"D": 5, "E": 0}) == "D"
+    # nobody has outcomes -> n/a (not a hollow $0 winner)
+    assert _decide_calendar_winner({"D": 0.0, "E": 0.0}, {"D": 0, "E": 0}) == "n/a"
+    # genuine tie among variants that both have outcomes
+    assert _decide_calendar_winner({"D": 5.0, "E": 5.0}, {"D": 2, "E": 3}) == "tie"
