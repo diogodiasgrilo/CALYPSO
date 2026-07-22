@@ -305,3 +305,53 @@ def test_entry_realized_pnl_early_close_nets_the_close_cost():
                  "actual_call_stop_debit": 0, "put_side_expired": True, "put_side_stopped": False,
                  "call_side_expired": False, "call_side_stopped": False, "early_closed": False}
     assert _entry_realized_pnl(worthless) == 210  # true worthless expiry keeps full credit
+
+
+# ---------------------------------------------------------------------------
+# _primary_id() — dashboard default view follows the LIVE Brandon seat (B or C)
+# so a C<->B live-paper swap needs no dashboard code change (swap coherence).
+# ---------------------------------------------------------------------------
+
+
+def _write_cfg(path: Path, dry_run: bool) -> None:
+    import json
+    path.write_text(json.dumps({"dry_run": dry_run}))
+
+
+def test_primary_id_follows_live_seat(tmp_path, monkeypatch):
+    from dashboard.backend.routers import strategies as S
+
+    b = tmp_path / "config_variant_b.json"
+    c = tmp_path / "config_variant_c.json"
+    monkeypatch.setattr(settings, "variant_b_config_file", b, raising=False)
+    monkeypatch.setattr(settings, "variant_c_config_file", c, raising=False)
+
+    # C live (today's reality) -> primary c
+    _write_cfg(b, True); _write_cfg(c, False)
+    assert S._primary_id() == "c"
+
+    # After the swap: B live -> primary follows to b
+    _write_cfg(b, False); _write_cfg(c, True)
+    assert S._primary_id() == "b"
+
+
+def test_primary_id_falls_back_when_ambiguous(tmp_path, monkeypatch):
+    from dashboard.backend.routers import strategies as S
+
+    b = tmp_path / "config_variant_b.json"
+    c = tmp_path / "config_variant_c.json"
+    monkeypatch.setattr(settings, "variant_b_config_file", b, raising=False)
+    monkeypatch.setattr(settings, "variant_c_config_file", c, raising=False)
+
+    # both dry -> fallback c
+    _write_cfg(b, True); _write_cfg(c, True)
+    assert S._primary_id() == S.PRIMARY_FALLBACK_ID == "c"
+
+    # both live (should never happen, but must not pick arbitrarily) -> fallback c
+    _write_cfg(b, False); _write_cfg(c, False)
+    assert S._primary_id() == "c"
+
+    # unreadable configs -> fallback c (never raises)
+    monkeypatch.setattr(settings, "variant_b_config_file", tmp_path / "nope_b.json", raising=False)
+    monkeypatch.setattr(settings, "variant_c_config_file", tmp_path / "nope_c.json", raising=False)
+    assert S._primary_id() == "c"

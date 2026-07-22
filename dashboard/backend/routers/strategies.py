@@ -78,12 +78,35 @@ def _run_coro(coro):
 # Identity / configuration
 # ---------------------------------------------------------------------------
 # The CANONICAL / primary strategy id (the one the main dashboard defaults to).
-# Today this is the live Brandon-narrow variant "c" (see config.py — the
-# primary hydra_*/bot_config_file paths point at data/variant_c/*). It is NOT a
-# taxonomy field (the taxonomy's status="live" is operational metadata, and two
-# variants are "live") — the primary is a deployment choice, surfaced here so the
-# frontend picker can default to it.
-PRIMARY_ID = "c"
+# It follows whichever Brandon seat (B or C) is currently LIVE (dry_run=false),
+# so a C<->B live-paper swap needs NO dashboard code change — the picker just
+# re-defaults to the new live seat once its config flips. Historically hardcoded
+# "c"; kept as the fallback for when detection is ambiguous. It is NOT a taxonomy
+# field (the taxonomy's status is static operational metadata) — the primary is
+# a live deployment fact read from the variant configs.
+PRIMARY_FALLBACK_ID = "c"
+
+
+def _primary_id() -> str:
+    """Return the live Brandon seat id (b or c) — the dashboard's default view.
+
+    Reads each seat's config ``dry_run``; the single live one (dry_run=false)
+    wins. Falls back to ``PRIMARY_FALLBACK_ID`` when neither or both are live, or
+    a config is unreadable (e.g. briefly during a swap restart). Never raises.
+    """
+    import json
+    live = []
+    for vid in ("b", "c"):
+        cfg_path = getattr(settings, f"variant_{vid}_config_file", None)
+        if cfg_path is None:
+            continue
+        try:
+            with open(cfg_path) as fh:
+                if not bool(json.load(fh).get("dry_run", True)):
+                    live.append(vid)
+        except Exception:
+            continue
+    return live[0] if len(live) == 1 else PRIMARY_FALLBACK_ID
 
 
 def _data_kind(m: tax.StrategyMeta) -> str:
@@ -202,7 +225,7 @@ def _strategy_meta_dict(m: tax.StrategyMeta) -> dict:
         "pnl_shape": m.pnl_shape,
         "data_kind": _data_kind(m),
         "is_live": m.status == "live",
-        "is_primary": m.id == PRIMARY_ID,
+        "is_primary": m.id == _primary_id(),
         "available": _is_available_meta(m),
         "capabilities": _capabilities(m),
     }
@@ -238,7 +261,7 @@ async def get_meta():
     strategies = [_strategy_meta_dict(tax.meta(sid)) for sid in tax.available_ids()]
 
     return {
-        "primary_id": PRIMARY_ID,
+        "primary_id": _primary_id(),
         "groups": groups,
         "strategies": strategies,
     }
@@ -515,7 +538,7 @@ async def get_snapshot(strategy_id: str):
         "data_kind": kind,
         "group_id": m.group_id,
         "pnl_shape": m.pnl_shape,
-        "is_primary": vid == PRIMARY_ID,
+        "is_primary": vid == _primary_id(),
         **_header_chrome(vid, m),
         "body": body,
     }
