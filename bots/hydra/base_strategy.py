@@ -2624,9 +2624,18 @@ class MEICStrategy(abc.ABC):
         external_ref: str,
         emergency_mode: bool = False,
         paired_long_fill_per_share: Optional[float] = None,
+        quantity: Optional[int] = None,
     ) -> Optional[Dict]:
         """
         Place a single option order with progressive slippage retry.
+
+        quantity: number of contracts to place for THIS leg. ``None`` (the
+        default, used by the IC entry path) means ``contracts_per_entry`` — so
+        the condor path is unchanged. The Brandon defensive-overlay path passes
+        an explicit per-leg quantity (the overlay leg sizes are already scaled
+        to ``contracts_per_entry``, e.g. a butterfly body is ``2×contracts``),
+        so it must NOT be re-multiplied by ``contracts_per_entry``. Callers that
+        need more than ``max_contracts_per_order`` must chunk the request.
 
         paired_long_fill_per_share: for a SHORT leg whose protective long already
         filled, the long's per-share fill price. Floors the SELL limit at
@@ -2673,6 +2682,7 @@ class MEICStrategy(abc.ABC):
         return self._place_option_order_ib(
             strike, put_call, buy_sell, expiry, external_ref,
             emergency_mode, paired_long_fill_per_share=paired_long_fill_per_share,
+            quantity=quantity,
         )
 
     def _place_option_order_ib(
@@ -2684,6 +2694,7 @@ class MEICStrategy(abc.ABC):
         external_ref: str,
         emergency_mode: bool = False,
         paired_long_fill_per_share: Optional[float] = None,
+        quantity: Optional[int] = None,
     ) -> Optional[Dict]:
         """IBKR path of :meth:`_place_option_order` (F6.2).
 
@@ -2711,6 +2722,17 @@ class MEICStrategy(abc.ABC):
 
         leg_description = f"{put_call} {strike}"
 
+        # Contracts to place for this leg. None ⇒ the IC-entry default
+        # (contracts_per_entry) so the condor path is unchanged; the overlay
+        # path passes an explicit, already-contracts_per_entry-scaled quantity.
+        req_qty = int(quantity) if quantity is not None else int(self.contracts_per_entry)
+        if req_qty <= 0:
+            logger.error(
+                f"_place_option_order_ib: non-positive quantity {req_qty} for "
+                f"{leg_description} — skipping"
+            )
+            return None
+
         # Resolve the conid via the broker-agnostic chain reader (F3.2).
         call_map, put_map = self._read_option_chain(expiry, [float(strike)])
         id_map = call_map if put_call == "Call" else put_map
@@ -2722,9 +2744,12 @@ class MEICStrategy(abc.ABC):
             )
             return None
 
-        # ORDER-006: order-size validation (broker-agnostic).
+        # ORDER-006: order-size validation (broker-agnostic). Validate the
+        # ACTUAL requested quantity — an overlay leg or a mis-sized order that
+        # exceeds max_contracts_per_order must be caught here, not silently
+        # placed because we validated contracts_per_entry instead.
         is_valid, _err = self._validate_order_size(
-            self.contracts_per_entry, leg_description
+            req_qty, leg_description
         )
         if not is_valid:
             logger.error(
@@ -2753,7 +2778,7 @@ class MEICStrategy(abc.ABC):
         # the leg is whole. An accumulated partial is flattened ONLY as a last
         # resort (ambiguous placement / failed cancel / all rungs exhausted) so
         # we never carry an untracked naked 0DTE leg.
-        target_qty = int(self.contracts_per_entry)
+        target_qty = req_qty
         filled_so_far = 0
         weighted_fill_sum = 0.0  # Σ (chunk fill_price × chunk qty) → blended avg
         first_fill_mid = None    # mid of the first filling chunk (slippage ref)

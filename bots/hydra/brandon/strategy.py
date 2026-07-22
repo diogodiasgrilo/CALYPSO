@@ -1667,18 +1667,34 @@ class BrandonHydraStrategy(HydraStrategy):
             )
             return
 
+        # Each overlay leg's `quantity` is ALREADY scaled to contracts_per_entry
+        # (a butterfly body is 2×contracts, a debit-spread leg is 1×contracts).
+        # Place each leg ONCE at its full quantity — chunked only to respect
+        # max_contracts_per_order — via the quantity-aware _place_option_order.
+        #
+        # BUG FIX (2026-07-21): the prior code looped `for q in range(leg.quantity)`
+        # and each _place_option_order call placed contracts_per_entry contracts,
+        # so it placed leg.quantity × contracts_per_entry — a contracts_per_entry-
+        # fold OVER-placement (a 40-contract butterfly attempted 400). The
+        # max_contracts_per_underlying cap then truncated it mid-structure into a
+        # naked short with no unwind. Overlays only ever ran in dry-run (the sole
+        # live variant, C, had overlays OFF), so this never fired in production —
+        # but it would the instant an overlay-enabled variant went live.
         filled_legs: list[HedgeLeg] = []
-        expected_orders = 0
-        placed_orders = 0
+        expected_contracts = sum(int(l.quantity) for l in proposal.legs)
+        placed_contracts = 0
+        chunk_cap = max(1, int(getattr(self, "max_contracts_per_order", 15)))
         for i, leg in enumerate(proposal.legs):
             buy_sell = BuySell.BUY if leg.side == "long" else BuySell.SELL
             put_call = "Call" if leg.contract_type == "call" else "Put"
             external_ref = f"OVERLAY_{entry.entry_number}_{proposal.threatened_side}_{i}"
             leg_filled_qty = 0
             leg_conid = None
-            leg_fill_price = 0.0
-            for q in range(int(leg.quantity)):
-                expected_orders += 1
+            weighted_fill = 0.0
+            remaining = int(leg.quantity)
+            chunk_idx = 0
+            while remaining > 0:
+                chunk = min(remaining, chunk_cap)
                 res = None
                 try:
                     res = self._place_option_order(
@@ -1686,21 +1702,31 @@ class BrandonHydraStrategy(HydraStrategy):
                         put_call=put_call,
                         buy_sell=buy_sell,
                         expiry=expiry,
-                        external_ref=f"{external_ref}_{q}",
+                        external_ref=f"{external_ref}_{chunk_idx}",
+                        quantity=chunk,
                     )
                 except Exception as exc:
                     logger.error(
-                        "BRANDON-OVERLAY E#%s leg %s %s %.0f failed: %s",
-                        entry.entry_number, leg.side, leg.contract_type, leg.strike, exc,
+                        "BRANDON-OVERLAY E#%s leg %s %s %.0f x%d failed: %s",
+                        entry.entry_number, leg.side, leg.contract_type,
+                        leg.strike, chunk, exc,
                     )
+                # _place_option_order returns non-None ONLY when the full chunk
+                # filled (it flattens any sub-partial itself), so a truthy result
+                # means exactly `chunk` contracts are on.
                 if res and res.get("uic"):
-                    placed_orders += 1
-                    leg_filled_qty += 1
+                    leg_filled_qty += chunk
                     leg_conid = res.get("uic")  # raw native conid — matches IC uic type
                     fp = res.get("fill_price")
                     if fp:
-                        leg_fill_price = float(fp)
+                        weighted_fill += float(fp) * chunk
+                remaining -= chunk
+                chunk_idx += 1
+            placed_contracts += leg_filled_qty
             if leg_filled_qty > 0:
+                leg_fill_price = (
+                    weighted_fill / leg_filled_qty if weighted_fill > 0 else 0.0
+                )
                 # Fall back to the BS estimate ONLY if the broker reported no
                 # fill price, so settlement still has a non-zero basis.
                 if leg_fill_price <= 0:
@@ -1724,25 +1750,64 @@ class BrandonHydraStrategy(HydraStrategy):
                     conid=leg_conid,
                 ))
 
+        # ATOMICITY (2026-07-21): a defensive overlay that did NOT fully fill
+        # every leg is worse than no overlay — a filled short wing without its
+        # protective long is a naked 0DTE short. Unwind every filled leg
+        # (opposite MARKET) rather than track a partial structure, then surface
+        # it CRITICAL. Unwound legs are deliberately not added to the hedge set.
+        if placed_contracts < expected_contracts:
+            logger.critical(
+                "BRANDON-OVERLAY E#%s %s: PARTIAL fill %d/%d contracts — "
+                "unwinding all filled legs (no partial hedge / naked short)",
+                entry.entry_number, proposal.threatened_side,
+                placed_contracts, expected_contracts,
+            )
+            self._brandon_unwind_overlay_legs(filled_legs, expiry)
+            self._brandon_alert_overlay_partial(
+                entry, proposal, placed=placed_contracts, expected=expected_contracts,
+            )
+            return
+
+        # Fully filled — track for reconciliation + settlement, persist state.
         if filled_legs:
             self._brandon_hedge_legs.setdefault(entry.entry_number, []).extend(filled_legs)
             self._brandon_save_hedge_state()
 
-        if placed_orders < expected_orders:
-            self._brandon_alert_overlay_partial(
-                entry, proposal, placed=placed_orders, expected=expected_orders,
+    def _brandon_unwind_overlay_legs(self, filled_legs, expiry) -> None:
+        """Flatten every filled overlay leg (opposite MARKET) so a partially-
+        filled overlay never strands a naked short or a stray long.
+
+        Reuses the IC path's `_flatten_accumulated_partial` (opposite-side
+        MARKET close + orphan-on-failure). Legs unwound here are intentionally
+        NOT added to `self._brandon_hedge_legs` — they're being closed, so they
+        must never settle. A failed flatten orphans the conid + fires CRITICAL
+        (inside `_flatten_accumulated_partial`), and because the leg was never
+        tracked, POS-003 reconciliation surfaces the residual for manual review.
+        """
+        for hl in filled_legs:
+            conid = getattr(hl, "conid", None)
+            if not conid or int(hl.quantity) <= 0:
+                continue
+            orig_side = "BUY" if hl.side == "long" else "SELL"
+            self._flatten_accumulated_partial(
+                conid, orig_side, int(hl.quantity),
+                f"OVERLAY_UNWIND_{hl.entry_number}_{hl.threatened_side}"
+                f"_{int(hl.strike)}_{hl.contract_type[0]}",
+                "ovunwind",
+                f"overlay {hl.side} {hl.contract_type} {hl.strike:.0f}",
             )
 
     def _brandon_alert_overlay_partial(self, entry, proposal, *, placed: int, expected: int) -> None:
-        """L-H6: a LIVE overlay that did not fully fill leaves an INCOMPLETE
-        hedge. The legs that DID fill are tracked (so they reconcile + settle),
-        but the operator must know the protection is partial — surface it as a
-        CRITICAL alert rather than swallowing it in a log line."""
+        """L-H6: a LIVE overlay that did not fully fill is UNWOUND (its filled
+        legs flattened) rather than left as an incomplete hedge — a partial
+        defensive structure can be a naked 0DTE short. Surface it CRITICAL so
+        the operator knows the intended protection never went on (and can
+        confirm the unwind flattened cleanly)."""
         msg = (
             f"BRANDON-OVERLAY E#{entry.entry_number} {proposal.threatened_side}: "
-            f"PARTIAL hedge — only {placed}/{expected} legs filled. Filled legs "
-            f"are tracked and will reconcile/settle, but the hedge is INCOMPLETE. "
-            f"Manual review recommended."
+            f"PARTIAL fill — only {placed}/{expected} contracts filled. All "
+            f"filled legs have been UNWOUND (flattened); no overlay is on. "
+            f"Verify the flatten completed cleanly (check for orphaned orders)."
         )
         logger.critical(msg)
         try:

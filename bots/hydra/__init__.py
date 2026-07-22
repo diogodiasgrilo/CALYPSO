@@ -36,6 +36,23 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Defensive-overlay LIVE placement over-placement fix + atomicity (2026-07-21,
+  found while auditing the B<->C live-paper swap). Overlay leg `quantity` is
+  ALREADY scaled to contracts_per_entry (a butterfly is 10/20/10 = 40 for a
+  10-lot variant). The live path looped `for q in range(leg.quantity)` and each
+  `_place_option_order` placed contracts_per_entry contracts → it attempted
+  leg.quantity × contracts_per_entry (400 on a 40-contract butterfly). The
+  max_contracts_per_underlying cap then truncated it mid-structure into a naked
+  short with NO unwind. It never fired in production only because the sole live
+  variant (C) has overlays OFF — but it would the instant an overlay-enabled
+  variant (B) went live. FIX: `_place_option_order`/`_place_option_order_ib`
+  gained an optional `quantity` (None ⇒ contracts_per_entry, so the IC path is
+  byte-identical; ORDER-006 now validates the ACTUAL requested qty). The overlay
+  caller places each leg ONCE at leg.quantity, chunked by max_contracts_per_order,
+  and is now ATOMIC — a partial fill unwinds every filled leg
+  (`_brandon_unwind_overlay_legs` → `_flatten_accumulated_partial`) instead of
+  tracking a partial structure / stranding a naked short. +10 tests
+  (test_brandon_overlay_live_sizing_2026_07_21).
 - Overlay double-book guard, atomic (2026-07-18, follow-up to the reconcile fix
   below). The aggregate-only overlay booking (hedge whose entry is absent from
   daily_state at settle) had NO idempotency guard, so a settle-sweep re-run after a
