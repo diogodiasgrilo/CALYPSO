@@ -6,11 +6,30 @@ from dashboard.backend.config import settings
 from dashboard.backend.services.state_reader import StateFileReader
 from dashboard.backend.services.metrics_reader import MetricsFileReader
 from dashboard.backend.services.market_status import get_current_status
+from dashboard.backend.services.variant_readers import (
+    live_state_file, live_metrics_file,
+)
 
 router = APIRouter(tags=["widget"])
 
-state_reader = StateFileReader(settings.hydra_state_file)
-metrics_reader = MetricsFileReader(settings.hydra_metrics_file)
+# Readers for the CURRENT live seat, cached per resolved path so the iOS widget
+# follows a C<->B swap with no restart.
+_state_readers: dict[str, StateFileReader] = {}
+_metrics_readers: dict[str, MetricsFileReader] = {}
+
+
+def _live_state_reader() -> StateFileReader:
+    key = str(live_state_file())
+    if key not in _state_readers:
+        _state_readers[key] = StateFileReader(live_state_file())
+    return _state_readers[key]
+
+
+def _live_metrics_reader() -> MetricsFileReader:
+    key = str(live_metrics_file())
+    if key not in _metrics_readers:
+        _metrics_readers[key] = MetricsFileReader(live_metrics_file())
+    return _metrics_readers[key]
 
 
 def _entry_dot(e: dict) -> str:
@@ -38,8 +57,8 @@ async def get_widget_data():
 
     Returns a simplified view optimized for small displays.
     """
-    state = state_reader.get_cached() or state_reader.read_latest()
-    metrics = metrics_reader.get_cached() or metrics_reader.read_latest()
+    state = _live_state_reader().get_cached() or _live_state_reader().read_latest()
+    metrics = _live_metrics_reader().get_cached() or _live_metrics_reader().read_latest()
     market = get_current_status()
 
     if not state:
@@ -80,12 +99,12 @@ async def get_widget_data():
     # history the rest of the dashboard excludes) — the iOS widget and the web
     # card disagreed by ~$1,966 (dashboard audit 2026-07-22).
     from dashboard.backend.services.db_reader import apply_db_cumulative
-    from dashboard.backend.services.variant_readers import canonical_reader
+    from dashboard.backend.services.variant_readers import canonical_db_reader
 
     cumulative_pnl = 0
     if metrics:
         try:
-            overrides = await canonical_reader.get_cumulative_overrides(settings.baseline_date)
+            overrides = await canonical_db_reader().get_cumulative_overrides(settings.baseline_date)
             rebased = apply_db_cumulative(dict(metrics), overrides) or {}
             cumulative_pnl = rebased.get("cumulative_pnl", metrics.get("cumulative_pnl", 0))
         except Exception:

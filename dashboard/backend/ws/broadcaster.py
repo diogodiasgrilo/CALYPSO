@@ -32,14 +32,21 @@ class Broadcaster:
 
     def __init__(self, manager: ConnectionManager):
         self.manager = manager
-        self.state_reader = StateFileReader(settings.hydra_state_file)
-        self.metrics_reader = MetricsFileReader(settings.hydra_metrics_file)
-        self.db_reader = BacktestingDBReader(settings.backtesting_db)
+        # Stream the CURRENT live seat (dry_run=false among b/c), resolved at
+        # startup — so the WS "main" view follows a C<->B swap once the dashboard
+        # restarts (the swap procedure restarts it). The request endpoints follow
+        # per-request without a restart; the WS follows at its next start.
+        from dashboard.backend.services.variant_readers import (
+            live_state_file, live_metrics_file, live_log_file, live_backtesting_db,
+        )
+        self.state_reader = StateFileReader(live_state_file())
+        self.metrics_reader = MetricsFileReader(live_metrics_file())
+        self.db_reader = BacktestingDBReader(live_backtesting_db())
         # SPX/VIX price chart is account-agnostic — source it from the densest
         # recorder (config.market_data_db, e.g. A at ~4-8 ticks/min) so candles
         # have real bodies, not the flat dojis C's ~1 tick/min produces.
         self.market_db_reader = BacktestingDBReader(settings.market_data_db)
-        self.log_tailer = LogTailer(settings.hydra_log_file)
+        self.log_tailer = LogTailer(live_log_file())
         self.live_ohlc = LiveOHLCBuilder()
         self.live_state = LiveStateProvider(self.state_reader, db_reader=self.db_reader)
         self.agent_reader = AgentReportReader(settings.agent_intel_dir)

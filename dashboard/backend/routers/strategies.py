@@ -88,25 +88,14 @@ PRIMARY_FALLBACK_ID = "c"
 
 
 def _primary_id() -> str:
-    """Return the live Brandon seat id (b or c) — the dashboard's default view.
+    """The live Brandon seat id (b or c) — the dashboard's default view.
 
-    Reads each seat's config ``dry_run``; the single live one (dry_run=false)
-    wins. Falls back to ``PRIMARY_FALLBACK_ID`` when neither or both are live, or
-    a config is unreadable (e.g. briefly during a swap restart). Never raises.
+    Delegates to the single source of truth ``variant_readers.live_seat_id()`` so
+    the picker default, the canonical readers, the WS, and the widget all agree on
+    which seat is "the bot". Falls back to ``PRIMARY_FALLBACK_ID``. Never raises.
     """
-    import json
-    live = []
-    for vid in ("b", "c"):
-        cfg_path = getattr(settings, f"variant_{vid}_config_file", None)
-        if cfg_path is None:
-            continue
-        try:
-            with open(cfg_path) as fh:
-                if not bool(json.load(fh).get("dry_run", True)):
-                    live.append(vid)
-        except Exception:
-            continue
-    return live[0] if len(live) == 1 else PRIMARY_FALLBACK_ID
+    from dashboard.backend.services.variant_readers import live_seat_id
+    return live_seat_id()
 
 
 def _is_live(vid: str) -> bool:

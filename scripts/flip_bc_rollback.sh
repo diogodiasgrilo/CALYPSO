@@ -103,6 +103,11 @@ set_key "C" "$CFG_C" "alerts.enabled" "true"
 systemctl restart hydra_variant_c
 sleep 15
 
+# ── STEP 3 — restart the dashboard so its WS/widget canonical view re-resolves ─
+# back onto C (the live seat again). Read-only service; safe anytime.
+log "STEP 3: restart dashboard so the WS/widget canonical view follows C"
+systemctl restart dashboard 2>/dev/null || log "  (dashboard restart skipped — unit not present)"
+
 # ── Verify + alert ────────────────────────────────────────────────────────────
 for pair in "B:hydra_variant_b:true" "C:hydra_variant_c:false"; do
     label="${pair%%:*}"; rest="${pair#*:}"; unit="${rest%%:*}"; want="${rest##*:}"

@@ -154,6 +154,13 @@ set_key "B" "$CFG_B" "alerts.enabled" "true"
 systemctl restart hydra_variant_b
 sleep 15
 
+# ── STEP 3 — restart the dashboard so its WS/widget/legacy canonical views ────
+# re-resolve onto the new live seat (B). The request endpoints already follow the
+# live seat per-request, but the WebSocket broadcaster resolves at startup, so a
+# restart moves the live stream onto B too. Read-only service; safe anytime.
+log "STEP 3: restart dashboard so the WS/widget canonical view follows B"
+systemctl restart dashboard 2>/dev/null || log "  (dashboard restart skipped — unit not present)"
+
 # ── Verify ────────────────────────────────────────────────────────────────────
 report=""
 for pair in "B:hydra_variant_b:false" "C:hydra_variant_c:true"; do

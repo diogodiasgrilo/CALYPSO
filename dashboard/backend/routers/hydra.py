@@ -11,14 +11,26 @@ logger = logging.getLogger("dashboard.hydra")
 
 from dashboard.backend.config import settings
 from dashboard.backend.services.state_reader import StateFileReader
-from dashboard.backend.services.variant_readers import reader_for
+from dashboard.backend.services.variant_readers import (
+    reader_for, live_state_file, live_config_file, live_label,
+)
 from dashboard.backend.services.market_status import get_today_et
 
 router = APIRouter(prefix="/api/hydra", tags=["hydra"])
 
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
-state_reader = StateFileReader(settings.hydra_state_file)
+# State reader for the CURRENT live seat, cached per resolved path so a C<->B
+# swap re-points these legacy /api/hydra/* endpoints to the new live seat with no
+# restart (the path changes → a new cached reader is built for it).
+_state_readers: dict[str, StateFileReader] = {}
+
+
+def _live_state_reader() -> StateFileReader:
+    key = str(live_state_file())
+    if key not in _state_readers:
+        _state_readers[key] = StateFileReader(live_state_file())
+    return _state_readers[key]
 
 
 @router.get("/bot-config")
@@ -35,7 +47,7 @@ async def get_bot_config():
     # variant C, the live canonical strategy). The dry_run flag + schedule here
     # drive the main dashboard's banner/labels, so they must match whichever
     # variant the main page is showing.
-    config_path = settings.bot_config_file
+    config_path = live_config_file()
     try:
         with open(config_path) as f:
             config = json.load(f)
@@ -66,7 +78,7 @@ async def get_bot_config():
             "conditional_entry_times": strategy.get("conditional_entry_times", []),
             "contracts_per_entry": contracts,
             "dry_run": dry_run,
-            "primary_label": settings.primary_label,
+            "primary_label": live_label(),
         }
     except Exception as e:
         logger.warning(f"Could not read bot config ({config_path}): {e}")
@@ -84,14 +96,14 @@ async def get_bot_config():
             "conditional_entry_times": [],
             "contracts_per_entry": 1,
             "dry_run": False,
-            "primary_label": settings.primary_label,
+            "primary_label": live_label(),
         }
 
 
 @router.get("/state")
 async def get_state():
     """Current HYDRA state from last file read."""
-    data = state_reader.read_latest()
+    data = _live_state_reader().read_latest()
     if data is None:
         return {"error": "State file not available"}
     return data
@@ -112,7 +124,7 @@ async def get_entries(date_str: str | None = None, strategy_id: str = Query(defa
         return JSONResponse(status_code=400, content={"error": "Invalid date format. Use YYYY-MM-DD."})
     if date_str is None:
         # Try state file first for live data (primary variant only)
-        state = state_reader.get_cached() or state_reader.read_latest()
+        state = _live_state_reader().get_cached() or _live_state_reader().read_latest()
         if state and "entries" in state:
             return {"source": "state_file", "entries": state["entries"]}
 
@@ -136,7 +148,7 @@ async def get_summary():
     """
     from dashboard.backend.routers.variants import _summary_from_state
 
-    state = state_reader.get_cached() or state_reader.read_latest()
+    state = _live_state_reader().get_cached() or _live_state_reader().read_latest()
     if not state:
         return {"error": "State not available"}
 

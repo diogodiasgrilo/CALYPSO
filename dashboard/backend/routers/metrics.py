@@ -7,20 +7,30 @@ from fastapi import APIRouter, Query
 from dashboard.backend.config import settings
 from dashboard.backend.services.metrics_reader import MetricsFileReader
 from dashboard.backend.services.db_reader import apply_db_cumulative
-from dashboard.backend.services.variant_readers import canonical_reader, reader_for
+from dashboard.backend.services.variant_readers import (
+    canonical_db_reader, reader_for, live_metrics_file,
+)
 from dashboard.backend.services.live_state import LiveStateProvider
 from dashboard.backend.services.market_status import get_today_et, is_after_market_close
 
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
-metrics_reader = MetricsFileReader(settings.hydra_metrics_file)
+# Metrics reader for the CURRENT live seat, cached per resolved path so a
+# C<->B swap re-points the cumulative card to the new live seat with no restart.
+_metrics_readers: dict[str, MetricsFileReader] = {}
+
+
+def _live_metrics_reader() -> MetricsFileReader:
+    key = str(live_metrics_file())
+    if key not in _metrics_readers:
+        _metrics_readers[key] = MetricsFileReader(live_metrics_file())
+    return _metrics_readers[key]
 
 # The canonical reader (settings.backtesting_db) IS the live primary's DB, and
 # `_live_state` tracks that same variant's state file — so today-from-live-state
 # augmentation is only valid for the canonical id. Per-strategy resolution lives
 # in services/variant_readers.reader_for() (shared with /api/hydra/entries and
 # /api/market/replay_pnl so the History day-detail header + tables never diverge).
-db_reader = canonical_reader
 
 # Set by main.py at startup
 _live_state: LiveStateProvider | None = None
@@ -59,8 +69,8 @@ async def get_cumulative():
     Rebased to settings.baseline_date when set (sums only days >= baseline);
     the resolved baseline is echoed back so the UI can caption "since <date>".
     """
-    data = metrics_reader.read_latest()
-    overrides = await db_reader.get_cumulative_overrides(settings.baseline_date)
+    data = _live_metrics_reader().read_latest()
+    overrides = await canonical_db_reader().get_cumulative_overrides(settings.baseline_date)
     data = apply_db_cumulative(data, overrides)
     if data is None:
         data = {}
@@ -193,5 +203,5 @@ async def get_performance(strategy_id: str = Query(default="")):
 @router.get("/range")
 async def get_date_range():
     """Available date range in database."""
-    info = await db_reader.get_date_range()
+    info = await canonical_db_reader().get_date_range()
     return info or {"first_date": None, "last_date": None, "total_days": 0}
