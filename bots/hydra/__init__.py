@@ -36,6 +36,19 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Skipped-entry reasons rewritten for humans (2026-07-22). The dashboard
+  skip-reason strings carried backend jargon (MKT-011 / MKT-032 / MKT-010 /
+  Downday-035 / Upday-035 / "require-both-sides: one-sided (GEX-skip)
+  suppressed") that means nothing to a non-operator. Rewrote every user-facing
+  `_record_skipped_entry` reason to say WHY in plain English + show the actual
+  minimums: the credit gate now reads "Not enough premium … call spread $X
+  (need ≥ $min), put spread $Y (need ≥ $min). Skipped (credit gate)."; the
+  require-both-sides skip explains one-sided = negative expectancy / naked-short
+  tail risk and names the cause (credit gate vs GEX accel-zone skip); illiquid
+  wings + conditional-no-trigger similarly de-jargoned. Backend logs keep their
+  MKT codes; only the display strings changed. Also RE-ENABLED C's defensive
+  overlays (config) now that the sizing fix below is deployed — C runs the full
+  Brandon strategy again (loads at its next restart).
 - Defensive-overlay LIVE placement over-placement fix + atomicity (2026-07-21,
   found while auditing the B<->C live-paper swap). Overlay leg `quantity` is
   ALREADY scaled to contracts_per_entry (a butterfly is 10/20/10 = 40 for a

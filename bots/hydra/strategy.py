@@ -5863,7 +5863,22 @@ class HydraStrategy(MEICStrategy):
         self._current_entry = None
         self.state = MEICState.MONITORING
         self._next_entry_index += 1
-        self._record_skipped_entry(entry_num, f"require-both-sides: one-sided ({source}) suppressed")
+        _src_expl = {
+            "call-only": "the put spread didn't have enough premium, so only a call "
+                         "spread would have been placed",
+            "put-only": "the call spread didn't have enough premium, so only a put "
+                        "spread would have been placed",
+            "GEX-skip": "one short strike sat inside a gamma-acceleration zone "
+                        "(where dealer hedging tends to amplify moves), so the GEX "
+                        "strike-adjuster dropped that side (GEX accel-zone skip)",
+        }.get(source, source)
+        self._record_skipped_entry(
+            entry_num,
+            f"Skipped — this entry would have placed only ONE spread, but we require "
+            f"a full iron condor (both a call spread AND a put spread). Single-sided "
+            f"entries have negative expectancy and a naked-short tail risk, so we "
+            f"don't take them (require-both-sides). Cause: {_src_expl}.",
+        )
         return f"Entry #{entry_num} skipped - require both sides ({source})"
 
     def _skip_degraded_entry(self, entry, entry_num: int, reason: str) -> str:
@@ -6123,7 +6138,10 @@ class HydraStrategy(MEICStrategy):
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
                         self._record_skipped_entry(
-                            entry_num, f"Conditional: no {direction}-day trigger"
+                            entry_num,
+                            f"Skipped — this is a conditional afternoon entry that only "
+                            f"fires on a {direction} day, and SPX didn't move enough "
+                            f"{direction} from today's open to trigger it (conditional entry)."
                         )
                         return f"Entry #{entry_num} skipped - conditional (no trigger)"
 
@@ -6237,8 +6255,10 @@ class HydraStrategy(MEICStrategy):
                         self._next_entry_index += 1
                         self._record_skipped_entry(
                             entry_num,
-                            f"Downday-035: call credit non-viable (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
-                            f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})",
+                            f"Not enough premium on the call spread (${est_call / 100:.2f}, "
+                            f"need ≥ ${call_floor / 100:.2f}) for this down-day, call-only "
+                            f"afternoon entry. Skipped (credit gate).",
+                            f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, target ${self.min_viable_credit_per_side / 100:.2f})",
                             est_call=est_call
                         )
                         return f"Entry #{entry_num} skipped - call credit non-viable (Downday-035)"
@@ -6272,8 +6292,10 @@ class HydraStrategy(MEICStrategy):
                         self._next_entry_index += 1
                         self._record_skipped_entry(
                             entry_num,
-                            f"Upday-035: put credit non-viable (${est_put / 100:.2f} < ${put_floor / 100:.2f})",
-                            f"• Put est: ${est_put / 100:.2f} (floor ${put_floor / 100:.2f}, primary ${self.min_viable_credit_put_side / 100:.2f})",
+                            f"Not enough premium on the put spread (${est_put / 100:.2f}, "
+                            f"need ≥ ${put_floor / 100:.2f}) for this up-day, put-only "
+                            f"afternoon entry. Skipped (credit gate).",
+                            f"• Put est: ${est_put / 100:.2f} (floor ${put_floor / 100:.2f}, target ${self.min_viable_credit_put_side / 100:.2f})",
                             est_put=est_put
                         )
                         return f"Entry #{entry_num} skipped - put credit non-viable (Upday-035)"
@@ -6311,8 +6333,10 @@ class HydraStrategy(MEICStrategy):
                             self._next_entry_index += 1
                             self._record_skipped_entry(
                                 entry_num,
-                                f"Base-Downday: call credit non-viable (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
-                                f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})",
+                                f"Not enough premium on the call spread (${est_call / 100:.2f}, "
+                                f"need ≥ ${call_floor / 100:.2f}) for this down-day call-only "
+                                f"entry. Skipped (credit gate).",
+                                f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, target ${self.min_viable_credit_per_side / 100:.2f})",
                                 est_call=est_call
                             )
                             return f"Entry #{entry_num} skipped - call credit non-viable (Base-Downday)"
@@ -6346,8 +6370,10 @@ class HydraStrategy(MEICStrategy):
                         self._next_entry_index += 1
                         self._record_skipped_entry(
                             entry_num,
-                            f"MKT-038: call credit non-viable on FOMC T+1 (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
-                            f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})",
+                            f"Not enough premium on the call spread (${est_call / 100:.2f}, "
+                            f"need ≥ ${call_floor / 100:.2f}) for the day-after-FOMC call-only "
+                            f"entry. Skipped (credit gate).",
+                            f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, target ${self.min_viable_credit_per_side / 100:.2f})",
                             est_call=est_call
                         )
                         return f"Entry #{entry_num} skipped - call credit non-viable (MKT-038)"
@@ -6375,27 +6401,40 @@ class HydraStrategy(MEICStrategy):
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
                         # Determine specific skip reason for dashboard/alert
+                        _min_call = self.min_viable_credit_per_side / 100
+                        _min_put = self.min_viable_credit_put_side / 100
                         if estimation_worked and est_call < self.min_viable_credit_per_side and est_put < self.min_viable_credit_put_side:
-                            skip_reason = f"MKT-011: both sides below minimum credit (call ${est_call / 100:.2f}, put ${est_put / 100:.2f})"
+                            skip_reason = (
+                                f"Not enough premium — both spreads came in below our minimum credit. "
+                                f"Call spread ${est_call / 100:.2f} (need ≥ ${_min_call:.2f}), "
+                                f"put spread ${est_put / 100:.2f} (need ≥ ${_min_put:.2f}). "
+                                f"Skipped (credit gate)."
+                            )
                             skip_details = (
-                                f"• Call est: ${est_call / 100:.2f} (min ${self.min_viable_credit_per_side / 100:.2f})\n"
-                                f"• Put est: ${est_put / 100:.2f} (min ${self.min_viable_credit_put_side / 100:.2f})"
+                                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f})\n"
+                                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f})"
                             )
                         elif self.current_vix and self.current_vix >= self.put_only_max_vix:
                             skip_reason = (
-                                f"MKT-032: call non-viable (${est_call / 100:.2f}), "
-                                f"VIX {self.current_vix:.1f} too high for put-only (max {self.put_only_max_vix:.1f})"
+                                f"Call spread too cheap (${est_call / 100:.2f}, need ≥ ${_min_call:.2f}) and "
+                                f"VIX {self.current_vix:.1f} is above our {self.put_only_max_vix:.1f} ceiling for a "
+                                f"put-only fallback — we don't run a one-sided put in high volatility. "
+                                f"Skipped (credit gate + volatility filter)."
                             )
                             skip_details = (
-                                f"• Call est: ${est_call / 100:.2f} (min ${self.min_viable_credit_per_side / 100:.2f})\n"
-                                f"• Put est: ${est_put / 100:.2f} (min ${self.min_viable_credit_put_side / 100:.2f})\n"
-                                f"• VIX: {self.current_vix:.1f} (max {self.put_only_max_vix:.1f} for put-only fallback)"
+                                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f})\n"
+                                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f})\n"
+                                f"• VIX: {self.current_vix:.1f} (max {self.put_only_max_vix:.1f} for a put-only fallback)"
                             )
                         else:
-                            skip_reason = f"MKT-011: credit gate skip (call ${est_call / 100:.2f}, put ${est_put / 100:.2f})"
+                            skip_reason = (
+                                f"Not enough premium to justify the risk — call spread ${est_call / 100:.2f} and "
+                                f"put spread ${est_put / 100:.2f}, both below our minimum credit "
+                                f"(call ≥ ${_min_call:.2f}, put ≥ ${_min_put:.2f}). Skipped (credit gate)."
+                            )
                             skip_details = (
-                                f"• Call est: ${est_call / 100:.2f} (min ${self.min_viable_credit_per_side / 100:.2f})\n"
-                                f"• Put est: ${est_put / 100:.2f} (min ${self.min_viable_credit_put_side / 100:.2f})"
+                                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f})\n"
+                                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f})"
                             )
                         self._record_skipped_entry(entry_num, skip_reason, skip_details,
                                                     est_call=est_call, est_put=est_put)
@@ -6536,7 +6575,7 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
-                        self._record_skipped_entry(entry_num, "MKT-010: call wings illiquid")
+                        self._record_skipped_entry(entry_num, "Call spread wings too illiquid to place safely (wide bid/ask) — skipped.")
                         return f"Entry #{entry_num} skipped - call illiquid, no one-sided entries"
                     elif entry.put_wing_illiquid and not entry.call_wing_illiquid:
                         # Put wing illiquid — no one-sided entries, skip
@@ -6555,7 +6594,7 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
-                        self._record_skipped_entry(entry_num, "MKT-010: put wings illiquid")
+                        self._record_skipped_entry(entry_num, "Put spread wings too illiquid to place safely (wide bid/ask) — skipped.")
                         return f"Entry #{entry_num} skipped - put illiquid, no one-sided entries"
                     elif entry.call_wing_illiquid and entry.put_wing_illiquid:
                         # Both wings illiquid — skip entry
@@ -6573,7 +6612,7 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
-                        self._record_skipped_entry(entry_num, "MKT-010: both wings illiquid")
+                        self._record_skipped_entry(entry_num, "Both spreads' wings too illiquid to place safely (wide bid/ask) — skipped.")
                         return f"Entry #{entry_num} skipped - both wings illiquid"
 
                 # Determine entry type and execute
