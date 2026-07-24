@@ -67,7 +67,13 @@ export function StrategyPicker() {
                 .map((s) => (
                   <option key={s.id} value={s.id} disabled={!s.available}>
                     {s.display_name}
-                    {!s.available ? " (not running)" : s.is_primary ? " — primary" : ""}
+                    {!s.available
+                      ? " (not running)"
+                      : s.is_live
+                        ? " — LIVE"
+                        : s.is_primary
+                          ? " — primary"
+                          : ""}
                   </option>
                 ))}
             </optgroup>
