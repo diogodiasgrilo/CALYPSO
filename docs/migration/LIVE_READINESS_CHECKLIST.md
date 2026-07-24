@@ -216,11 +216,15 @@ Gate 10 (Monitoring):      GREEN — operator availability confirmed
 
 Cutting over now via (BROKER MODE — restart the broker FIRST; it owns the live session):
   systemctl restart calypso-broker   # picks up the live creds; wait for /health connected:true
-  systemctl restart hydra hydra_variant_c   # (per-variant; the strategy units proxy to the broker)
+  systemctl restart hydra hydra_variant_b   # (per-variant — substitute the unit(s) actually being
+                                             # promoted to real money; hydra_variant_b shown here as B
+                                             # holds the live-PAPER seat as of the 2026-07-24 swap, see
+                                             # RUNBOOKS.md RB-9 — the strategy units proxy to the broker)
   sudo journalctl -u calypso-broker -u hydra -f &  # monitor in another shell
 
 If any halt criterion fires in week 1, execute:
-  systemctl stop hydra hydra_variant_c   # stop trading (broker stays up as a passive session holder)
+  systemctl stop hydra hydra_variant_b   # stop trading (broker stays up as a passive session holder) —
+                                          # again, substitute the unit(s) actually promoted
   # stop calypso-broker too only to drop the IBKR session entirely
   # then: refer to docs/migration/RUNBOOKS.md
 "

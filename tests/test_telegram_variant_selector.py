@@ -44,7 +44,7 @@ class TestVariantView:
         s = _strat()
         s._load_variant_state = lambda vid: dict(_IC_STATE)
         out = s._build_telegram_variant_view("c")
-        assert "Brandon Narrow (live)" in out  # C's display_name
+        assert "Brandon Narrow (3-slot)" in out  # C's display_name
         assert "(C)" in out
         assert "Net P&L: $221.00" in out       # 285 realized − 64 commission
         assert "Stops: 1 call / 0 put" in out
@@ -67,7 +67,7 @@ class TestDelegation:
     def test_snapshot_delegates_for_named_variant(self):
         s = _strat()
         s._load_variant_state = lambda vid: dict(_IC_STATE)
-        assert "Brandon Narrow (live)" in s.build_telegram_snapshot("c")
+        assert "Brandon Narrow (3-slot)" in s.build_telegram_snapshot("c")
 
     def test_stops_delegates_for_named_variant(self):
         s = _strat()

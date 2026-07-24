@@ -15,7 +15,10 @@ acts" — that was the bug the 06-10 C max-loss incident exposed and L-C2 fixed)
 Feature matrix (both B and C):
 
     take_profit         LIVE     close IC at threshold% of credit captured
-    narrow_spread       LIVE     5/10pt widths in C (overrides MKT-027); off in B
+    narrow_spread       LIVE     5/10pt widths (overrides MKT-027) in BOTH B and C —
+                                 config-driven (narrow_spread.enabled), no variant
+                                 gating in code. (Pre-existing stale line here claimed
+                                 "off in B"; flagged wrong in 3 audit rounds, fixed here.)
     gex_strike_adjuster LIVE     mutate entry.short_*_strike (and long_) before
                                  _execute_entry / _simulate_entry; SKIP routes
                                  through HYDRA's existing one-sided entry path

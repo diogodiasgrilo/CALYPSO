@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# HISTORICAL — this was the 2026-06-02 A+C go-live script (see RUNBOOKS.md RB-8).
+# SUPERSEDED as the live-seat procedure by scripts/flip_bc_swap.sh /
+# flip_bc_rollback.sh since the 2026-07-24 B<->C swap (RUNBOOKS.md RB-9): B is
+# now the live paper seat, C is dry-run-shadow. Guard 0 below refuses to run
+# while B is live, because flipping C to dry_run:false here would put TWO
+# strategies (B + C) placing real paper orders on the same account
+# simultaneously — a collision this script was never designed to prevent.
+#
 # One-shot manual go-live: flip variant A (hydra) AND variant C (hydra_variant_c)
 # from dry_run:true → dry_run:false (REAL paper trading), run AFTER the
 # 2026-06-02 close so both are live for the 2026-06-03 session from the open.
@@ -14,6 +22,20 @@ set -uo pipefail
 
 VENV=/opt/calypso/.venv/bin/python
 log() { echo "flip_ac_live: $*"; }
+
+# Guard 0 — refuse to run while B holds the live paper seat (post-2026-07-24
+# swap). Flipping C live here would collide with B: two strategies placing
+# real paper orders on the same account at once. Use flip_bc_rollback.sh to
+# hand the live seat back to C instead.
+B_CFG=/opt/calypso/bots/hydra/config/config_variant_b.json
+b_dry=$(runuser -u calypso -- "$VENV" -c \
+    "import json;print(json.load(open('$B_CFG')).get('dry_run'))" 2>/dev/null || echo ERR)
+if [ "$b_dry" = "False" ]; then
+    log "ABORT: B is currently the LIVE paper seat (dry_run=False in $B_CFG)."
+    log "       Flipping C live now would run B and C live simultaneously."
+    log "       To hand the live seat back to C, use scripts/flip_bc_rollback.sh instead."
+    exit 1
+fi
 
 # Guard 1 — broker session must be live RIGHT NOW (never flip onto a dead session).
 h=$(curl -s --max-time 6 http://127.0.0.1:8788/health 2>/dev/null || true)

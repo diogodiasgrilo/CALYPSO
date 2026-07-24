@@ -1,5 +1,14 @@
 # B ↔ C Live-Paper Swap — Researched, Audited Plan
 
+> ✅ **EXECUTED 2026-07-24 (~03:04 ET).** The swap described in this plan has been run: **B is now the live
+> paper seat** (`dry_run=false`, 7 contracts/entry, 7-slot grid, `alerts.enabled=true`, dashboard PRIMARY) and
+> **C is now `dry_run_shadow`** (7 contracts, alerts off). A is unchanged. Executed via
+> `scripts/flip_bc_swap.sh` per the sequence below; decisions in §7 were resolved as: contracts = 7,
+> `max_contracts_per_underlying` = 600, full primary move = yes (implemented 2026-07-22, ahead of the flip),
+> agents/baseline repoint = yes. This plan document is **retained for historical/audit context** — do not treat
+> any "remaining"/"open decision"/"before a flip" language below as still pending. For current state and the
+> swap/rollback procedure, see CLAUDE.md's Variant Comparison section and `RUNBOOKS.md` **RB-9**.
+
 **Goal:** make variant **B** the live-paper variant (`dry_run=false`, places real orders on the IBKR **paper** account) and put **C** on simulation (`dry_run=true`) — with B executing as close to its current simulation as physically possible.
 
 **Status:** researched + adversarially audited 2026-07-21 via an 8-agent workflow (5 research dimensions → 3 red-team lenses: fidelity / completeness / safety-rollback). **Then the blockers were FIXED (2026-07-21) — see §0.** The remaining work is a set of operator DECISIONS (sizing) + the gated EOD deploy, not code.
@@ -40,7 +49,7 @@ Committed on `hydra-ibkr-standalone` (deploy pending a safe EOD window):
 - **B4 + B2 + B5 — DONE** (`e6df195`). `scripts/flip_bc_swap.sh` (forward C→B) + `scripts/flip_bc_rollback.sh` (reverse) + `scripts/flatten_paper_account.py` (check-only default; `--execute` market-closes the book). The swap script guards on broker `/health` + fresh ET-day smoke PASS + **overlay-fix-deployed** + **account-flat**, flips `dry_run` AND `alerts.enabled` for both, sets **C dry FIRST** then B live (B5 ordering), and never touches A. The rollback **hard-aborts unless flat** (B2) and points at the flatten helper.
 - **C5 — DONE** (`042066e`). Dashboard `PRIMARY_ID` is now `_primary_id()`, which auto-follows whichever Brandon seat is live (`dry_run=false`) — no dashboard code change at flip time. +2 tests.
 
-**Remaining before a flip:** the two sizing DECISIONS (contracts 7-vs-10, cap) in §7; the VM-only coherence edits (agents repoint C2/C3; optional baseline C6); deploy (pull + `__pycache__` clear + restart the two hydra units — **no broker restart**, no `shared/` the broker imports changed); then run `flip_bc_swap.sh` at an EOD-flat window.
+**Remaining before a flip (HISTORICAL — all of this completed by the 2026-07-24 execution; see the banner at the top of this file):** the two sizing DECISIONS (contracts 7-vs-10, cap) in §7; the VM-only coherence edits (agents repoint C2/C3; optional baseline C6); deploy (pull + `__pycache__` clear + restart the two hydra units — **no broker restart**, no `shared/` the broker imports changed); then run `flip_bc_swap.sh` at an EOD-flat window.
 
 ### Decisions LOCKED + execution state (2026-07-21)
 
@@ -165,7 +174,10 @@ The hard part (B1 overlay fix + tooling) is **done, tested, committed**. The ful
 
 So: **a well-understood ~half-day of deploy + one gated EOD command, not a multi-day build.** The overlay-OFF shortcut is now moot — it was only attractive to dodge B1, which is fixed; and the user's requirement ("execute exactly like it does now") *needs* overlays on.
 
-## 7. Open decisions for the user (the only things left before a flip)
+## 7. Open decisions for the user (the only things left before a flip) — RESOLVED, see the top-of-file banner
+
+*(Decisions as executed 2026-07-24: #1 contracts = 7; #2 cap = 600; #3 full primary move (implemented
+2026-07-22, ahead of the flip); #4/#5 = yes, done at the flip.)*
 
 1. **B's contract size when live: keep `contracts_per_entry=10` ("exactly like B runs now") or drop to `7` (match C's current live risk)?** B does NOT inherit C's 7 — it uses its own config. 10 = higher paper risk per entry but true-to-sim; 7 = conservative parity with today's live seat. *(Set in `config_variant_b.json` before the flip; the swap script does not touch it.)*
 2. **B's `max_contracts_per_underlying`:** raise to ~160–180 (let B run its denser grid like sim + no CRITICAL cap-alert spam) or keep 60 (throttle live-B below sim, accept the divergence + benign alerts)? Interacts with #1 (at 7c the effective contract totals are lower).

@@ -42,9 +42,10 @@ HEALTH_LOG="${CALYPSO_DIR}/intel/argus/health_log.jsonl"
 INCIDENT_DIR="${CALYPSO_DIR}/intel/argus/incidents"
 NOTIFY_SCRIPT="${CALYPSO_DIR}/services/argus/notify.py"
 STATE_FILE="${CALYPSO_DIR}/data/hydra_state.json"
-# I-H1: per-variant state files. Variant C (hydra_variant_c) is the LIVE
-# real-paper-order process and previously had ZERO ARGUS coverage — a crash/
-# freeze/stale-state on C reported PASS. CHECK 9 below now watches it (and B).
+# I-H1: per-variant state files. Whichever of B/C holds the live paper seat
+# (B since the 2026-07-24 swap; was C before) previously had ZERO ARGUS
+# coverage — a crash/freeze/stale-state there reported PASS. CHECK 9 below
+# watches both B and C regardless of which is currently live.
 VARIANT_B_STATE_FILE="${CALYPSO_DIR}/data/variant_b/hydra_state.json"
 VARIANT_C_STATE_FILE="${CALYPSO_DIR}/data/variant_c/hydra_state.json"
 GCS_BACKUPS="gs://calypso-backups"
@@ -139,9 +140,9 @@ except Exception:
 
 # ─── Helper: per-variant health (process + heartbeat + state + log) ──────
 # I-H1: ARGUS originally watched ONLY variant A (the inline CHECKs 1/2/6/7
-# below). Variant C is the live real-paper-order process and had NO watchdog,
-# so a crash/freeze/stale-state on C went unobserved (compounded by the C
-# alerts gap). This function adds process + heartbeat-freshness + state JSON
+# below). Whichever of B/C holds the live paper seat had NO watchdog, so a
+# crash/freeze/stale-state there went unobserved (compounded by the alerts
+# gap on that variant). This function adds process + heartbeat-freshness + state JSON
 # integrity + log-staleness for an arbitrary variant unit, appending to the
 # global FAILURES/WARNINGS arrays prefixed with the unit name. A's proven
 # inline checks are left untouched (this is purely additive). The
@@ -456,8 +457,9 @@ elif ! command -v gsutil >/dev/null 2>&1; then
 fi
 
 # =========================================================================
-# CHECK 9: Variant coverage (I-H1) — variant C is the LIVE real-paper-order
-# process and MUST be watched; variant B is a dry-run sibling we watch too.
+# CHECK 9: Variant coverage (I-H1) — whichever of B/C holds the LIVE
+# real-paper-order seat (B since 2026-07-24; was C before) MUST be watched;
+# both are watched regardless so a future swap needs no code change here.
 # Uses check_variant_health() (process + heartbeat + state integrity + log
 # staleness). Only runs if the unit is installed on this host (a single-bot
 # host without the variant units shouldn't false-FAIL).

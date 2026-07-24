@@ -1,14 +1,21 @@
 {
-  "_comment_variant": "HYDRA Variant B — Brandon Trojan Horse stack with NARROW 5/10pt widths (same as variant C) but a denser 4-slot entry grid (09:45 / 10:45 / 11:15 / 11:45) instead of C's 3 morning slots. 2026-05-13 cut from 7 slots → 4 after 5/4-5/12 review: B went 0-for-4 days at the original 7-slot × 15c sizing, commission drag dominated (each Brandon narrow-spread entry pays $2.50/leg × 4 legs × 15c = $150 round-trip; 7 slots = $1,050/day in fees alone). Dropped the 09:31 opening tick (high whipsaw), the 10:15 between-slot (low marginal info vs neighbors), and the 12:15 late slot (GEX walls already in motion). Same 2026-05-13 change: contracts_per_entry 15 → 10 (same commission-drag logic). Pre-2026-05-05 design used HYDRA wide widths; that experiment was retired because Brandon GEX-ADJ + put-only VIX gate combined to skip B on most days. Dry-run only.",
+  "_comment_variant": "HYDRA Variant B \u2014 Brandon Trojan Horse stack with NARROW 5/10pt widths (same as variant C). CURRENT STATE (since the 2026-07-24 live-seat swap, RUNBOOKS.md RB-9): B is the LIVE paper seat at 7 contracts, 7-slot entry grid (09:45\u201312:45, 30min grid). C is now dry-run-shadow. History: 2026-05-13 cut from 7 slots to 4 after a 5/4-5/12 review found commission drag dominated at the original 7-slot x 15c sizing (each Brandon narrow-spread entry pays $2.50/leg x 4 legs x 15c = $150 round-trip; 7 slots = $1,050/day in fees alone). Same 2026-05-13 change: contracts_per_entry 15 -> 10 (same commission-drag logic). 2026-07-01: widened back 4 -> 7 base slots as the per-slot tester for slot_edge (attempt all 7 every zone, gates filter). Later re-sized 10c -> 7c for the live swap. Pre-2026-05-05 design used HYDRA wide widths; retired because Brandon GEX-ADJ + put-only VIX gate combined to skip B on most days. NOTE: this checked-in file is a sample/template, not deploy-authoritative \u2014 the VM's live copy is edited directly there (see CLAUDE.md Config Files) and may diverge from this value.",
   "bot_name": "HYDRA",
-  "dry_run": true,
+  "dry_run": false,
   "_comment_credentials": "IBKR OAuth credentials are loaded from systemd $CREDENTIALS_DIRECTORY on the VM, or env vars in dev. Not in this file.",
   "strategy": {
-    "_comment_commission": "IBKR all-in SPX cost ~$1.15/leg/contract (~$0.65 IBKR Pro base + ~$0.45 CBOE index fee + ~$0.05 ORF/OCC/CAT) — replaces the Saxo-era $2.50 default. Display/reported-P&L only; does NOT affect entry/stop logic. Critical for B: at 10c × 4 legs × 4 slots, the Saxo-vs-IBKR gap is ~$200-450/day — judging B's dry-run at $2.50 would wrongly book phantom fees. Set 2026-05-29 at the IBKR cutover.",
     "commission_per_leg": 1.15,
-    "_comment_widths": "MKT-027 settings here are unused at runtime — strategy.brandon.narrow_spread.enabled=true overrides _get_vix_adjusted_spread_width with Brandon's 5/10pt rule. Values kept aligned with variant A's VM config (max=75pt) for consistency / debugging clarity.",
+    "_comment_widths": "MKT-027 settings here are unused at runtime \u2014 strategy.brandon.narrow_spread.enabled=true overrides _get_vix_adjusted_spread_width with Brandon's 5/10pt rule. Values kept aligned with variant A's VM config (max=75pt) for consistency / debugging clarity.",
     "underlying_symbol": "SPX",
-    "entry_times": ["09:45", "10:45", "11:15", "11:45"],
+    "entry_times": [
+      "09:45",
+      "10:15",
+      "10:45",
+      "11:15",
+      "11:45",
+      "12:15",
+      "12:45"
+    ],
     "entry_window_minutes": 5,
     "spread_vix_multiplier": 6.0,
     "min_spread_width": 25,
@@ -18,12 +25,12 @@
     "min_credit_per_side": 1.0,
     "max_credit_per_side": 1.75,
     "credit_balance_tolerance": 0.25,
-    "one_sided_entries_enabled": true,
-    "_comment_put_only_max_vix": "Lifted from HYDRA-baseline 15 → 28 because Brandon GEX-ADJ skip-and-route-as-put-only is a core part of his strategy when SPX is inside the call accel zone — capping the fallback at VIX < 15 would block it on most days (VIX 15-25 is normal, not extreme).",
+    "one_sided_entries_enabled": false,
+    "_comment_put_only_max_vix": "Lifted from HYDRA-baseline 15 \u2192 28 because Brandon GEX-ADJ skip-and-route-as-put-only is a core part of his strategy when SPX is inside the call accel zone \u2014 capping the fallback at VIX < 15 would block it on most days (VIX 15-25 is normal, not extreme).",
     "put_only_max_vix": 28.0,
     "min_viable_credit_per_side": 2.0,
     "min_viable_credit_put_side": 2.75,
-    "_comment_credit_floors": "Lowered ~10× vs original variant B because narrow_spread.enabled=true makes the IC 5pt or 10pt wide instead of 75pt — credits scale roughly proportionally with spread width, so HYDRA's standard $0.20/$0.30 floors would skip every entry.",
+    "_comment_credit_floors": "Lowered ~10\u00d7 vs original variant B because narrow_spread.enabled=true makes the IC 5pt or 10pt wide instead of 75pt \u2014 credits scale roughly proportionally with spread width, so HYDRA's standard $0.20/$0.30 floors would skip every entry.",
     "call_credit_floor": 0.02,
     "put_credit_floor": 0.03,
     "min_call_otm_distance": 25,
@@ -38,16 +45,16 @@
     "price_based_stop_points": null,
     "whipsaw_range_skip_mult": 1.75,
     "max_vix_entry": 999,
-    "contracts_per_entry": 10,
-    "_comment_safety_caps": "ORDER-006 caps tuned for B's 4-slot grid at 10c (2026-05-13 cut from 7×15c). Per-order cap 15 leaves headroom; per-underlying cap 60 = 1.5 ICs (10c × 4 legs × 1.5) — keeps B from monopolizing the shared $50,741 Saxo margin pool when A and C are also placing trades. With 6-IC account-wide concurrent-open ceiling, B's slice is ~1-2 simultaneous; the rest of B's 4 slots fire sequentially as TPs cycle.",
+    "contracts_per_entry": 7,
+    "_comment_safety_caps": "ORDER-006 caps for B's current 7-slot grid at 7c (live since the 2026-07-24 swap; was 4-slot/10c before). Per-order cap 15 leaves headroom; per-underlying cap 600 was raised (60\u2192200\u2192600) once B4 made the cap COUNT overlay contracts too, so it must clear ICs (7c \u00d7 4 legs \u00d7 up to 7 slots) plus up to ~14 overlay contracts without ever blocking legitimate defense.",
     "max_contracts_per_order": 15,
-    "max_contracts_per_underlying": 60,
-    "_comment_min_bp_per_ic": "ORDER-004 BP-per-contract floor lowered $5000 → $500 because narrow 5pt × $100 = $500/contract margin (Brandon narrow-spread economics). Default is sized for wide HYDRA-baseline (50pt × $100 = $5000); without this override, every entry trips required vs available — exactly what blocked all 7 entries on 2026-05-06.",
+    "max_contracts_per_underlying": 600,
+    "_comment_min_bp_per_ic": "ORDER-004 BP-per-contract floor lowered $5000 \u2192 $500 because narrow 5pt \u00d7 $100 = $500/contract margin (Brandon narrow-spread economics). Default is sized for wide HYDRA-baseline (50pt \u00d7 $100 = $5000); without this override, every entry trips required vs available \u2014 exactly what blocked all 7 entries on 2026-05-06.",
     "min_buying_power_per_ic": 500,
-    "_comment_pnl_bounds": "DATA-003 sanity bounds, scaled for narrow-spread × 10c (2026-05-13 cut from 15c). PER-CONTRACT figures multiplied by contracts at runtime: max_pnl_per_ic 100 × 10c = $1000 ceiling (covers full credit on 10pt high-VIX worst case), min_pnl_per_ic -1000 × 10c = -$10,000 floor (covers max loss 10pt × $100 × 10c = $10k). Without these overrides the 1c-baseline -$3000 floor would silently skip stop checks once a real drawdown developed.",
+    "_comment_pnl_bounds": "DATA-003 sanity bounds, scaled for narrow-spread \u00d7 7c (re-sized from 10c at the 2026-07-24 live swap). PER-CONTRACT figures multiplied by contracts at runtime: max_pnl_per_ic 100 \u00d7 7c = $700 ceiling (covers full credit on 10pt high-VIX worst case), min_pnl_per_ic -1000 \u00d7 7c = -$7,000 floor (covers max loss 10pt \u00d7 $100 \u00d7 7c = $7k). Without these overrides the 1c-baseline -$3000 floor would silently skip stop checks once a real drawdown developed.",
     "max_pnl_per_ic": 100,
     "min_pnl_per_ic": -1000,
-    "_comment_downday_callonly": "OFF on B (and should be OFF on C) — Brandon GEX adjuster is the sole side-selection logic on the Brandon stack; HYDRA's down-day call-only override would conflict with GEX zone reads.",
+    "_comment_downday_callonly": "OFF on B (and should be OFF on C) \u2014 Brandon GEX adjuster is the sole side-selection logic on the Brandon stack; HYDRA's down-day call-only override would conflict with GEX zone reads.",
     "downday_callonly_enabled": false,
     "downday_threshold_pct": 0.003,
     "downday_theoretical_put_credit": 2.6,
@@ -62,7 +69,7 @@
     "base_entry_downday_callonly_pct": null,
     "fomc_t1_skip_enabled": true,
     "fomc_t1_callonly_enabled": false,
-    "fomc_announcement_skip": false,
+    "fomc_announcement_skip": true,
     "cushion_nearstop_pct": null,
     "cushion_recovery_pct": null,
     "buffer_decay_start_mult": 2.5,
@@ -79,20 +86,59 @@
     "hold_check_lean_tolerance": 1.0,
     "min_entries_before_roc_gate": 3,
     "vix_regime": {
-      "_comment_max_entries": "After 2026-05-13 trim to 4 base slots, ceiling stays at 4 in the two lowest VIX zones (let all 4 fire if VIX < 22), then steps down with risk. High-VIX zones still capped because 10pt × 10c = $10k margin per IC.",
+      "_comment_max_entries": "2026-07-01: widened 4->7 base slots (09:45-12:45, 30min grid) as the per-slot TESTER for slot_edge; attempt all 7 every zone, gates filter. Was [4,4,3,2].",
       "enabled": true,
-      "breakpoints": [18.0, 22.0, 28.0],
-      "max_entries": [4, 4, 3, 2],
-      "put_stop_buffer": [null, 2.50, 1.50, null],
-      "call_stop_buffer": [null, 1.50, 1.00, null],
-      "_comment_min_credits": "Lowered ~10× vs variant A because narrow_spread.enabled=true makes the IC 5pt or 10pt wide instead of 75pt — credits scale roughly proportionally with spread width.",
-      "min_call_credit": [0.10, 0.05, 0.05, 0.05],
-      "min_put_credit": [0.15, 0.10, 0.05, 0.05],
-      "shadow_call_otm": [40.0, 50.0, 75.0, 75.0],
-      "shadow_put_otm": [50.0, 75.0, 110.0, 90.0]
+      "breakpoints": [
+        18.0,
+        22.0,
+        28.0
+      ],
+      "max_entries": [
+        7,
+        7,
+        7,
+        7
+      ],
+      "put_stop_buffer": [
+        null,
+        2.5,
+        1.5,
+        null
+      ],
+      "call_stop_buffer": [
+        null,
+        1.5,
+        1.0,
+        null
+      ],
+      "_comment_min_credits": "Lowered ~10\u00d7 vs variant A because narrow_spread.enabled=true makes the IC 5pt or 10pt wide instead of 75pt \u2014 credits scale roughly proportionally with spread width.",
+      "min_call_credit": [
+        0.1,
+        0.05,
+        0.05,
+        0.05
+      ],
+      "min_put_credit": [
+        0.15,
+        0.1,
+        0.05,
+        0.05
+      ],
+      "shadow_call_otm": [
+        40.0,
+        50.0,
+        75.0,
+        75.0
+      ],
+      "shadow_put_otm": [
+        50.0,
+        75.0,
+        110.0,
+        90.0
+      ]
     },
     "directional_pivot": {
-      "_comment": "Disabled in variant B — Brandon GEX-breach exit (live) plays the same role.",
+      "_comment": "Disabled in variant B \u2014 Brandon GEX-breach exit (live) plays the same role.",
       "enabled": false,
       "threshold_pct": 0.0025,
       "close_mode": "both_sides",
@@ -101,15 +147,15 @@
     "brandon": {
       "_comment": "Same Brandon stack as variant C (narrow 5/10pt widths). All Brandon features LIVE: TP, narrow_spread, GEX strike adjuster, GEX breach exit, defensive overlay. Only shadow behavior is hydra_stop_shadow for head-to-head comparison.",
       "enabled": true,
-      "_comment_disable_tightening": "MKT-020/MKT-022 progressive tightening is HYDRA's credit-chasing mechanism — it walks strikes inward when initial credit < floor. Brandon's strategy picks strikes per GEX zones and accepts low credit at safe strikes; if credit < gate the entry should SKIP, not move strikes onto a wall. 2026-05-07 incident: tightener walked B's E#5/E#6 puts from 125pt OTM (safe) to 35-40pt OTM (right on the 7330 GEX wall) chasing credit; when SPX broke the wall at 13:26 the resulting 4 breach exits cost ~$8.7K. With this flag set, MKT-020/MKT-022 skip on B and the strike stays where Brandon GEX-ADJ wants it.",
+      "_comment_disable_tightening": "MKT-020/MKT-022 progressive tightening is HYDRA's credit-chasing mechanism \u2014 it walks strikes inward when initial credit < floor. Brandon's strategy picks strikes per GEX zones and accepts low credit at safe strikes; if credit < gate the entry should SKIP, not move strikes onto a wall. 2026-05-07 incident: tightener walked B's E#5/E#6 puts from 125pt OTM (safe) to 35-40pt OTM (right on the 7330 GEX wall) chasing credit; when SPX broke the wall at 13:26 the resulting 4 breach exits cost ~$8.7K. With this flag set, MKT-020/MKT-022 skip on B and the strike stays where Brandon GEX-ADJ wants it.",
       "disable_progressive_tightening": true,
-      "_comment_delta_target": "Brandon-faithful strike selection: anchor short strikes to a delta target read from Polygon's option chain (8 delta default, inherited from strategy.target_delta). Replaces HYDRA's 'starting OTM = N × expected_move' approximation, which underestimates real risk on low-VIX days. When enabled, _calculate_strikes asks the GEX profile for the strike at the configured delta; downstream HYDRA pipeline (Brandon GEX-ADJ for accel-zone skip, narrow-spread width, MKT-045 chain snap) runs on top unchanged. Falls back to OTM-multiplier if Polygon greeks are unavailable.",
+      "_comment_delta_target": "Brandon-faithful strike selection: anchor short strikes to a delta target read from Polygon's option chain (8 delta default, inherited from strategy.target_delta). Replaces HYDRA's 'starting OTM = N \u00d7 expected_move' approximation, which underestimates real risk on low-VIX days. When enabled, _calculate_strikes asks the GEX profile for the strike at the configured delta; downstream HYDRA pipeline (Brandon GEX-ADJ for accel-zone skip, narrow-spread width, MKT-045 chain snap) runs on top unchanged. Falls back to OTM-multiplier if Polygon greeks are unavailable.",
       "delta_target_strike_selection": {
         "enabled": true
       },
       "take_profit": {
         "enabled": true,
-        "threshold": 0.80
+        "threshold": 0.8
       },
       "narrow_spread": {
         "enabled": true,
@@ -125,9 +171,10 @@
         "breach_exit_enabled": true,
         "breach_confirmation_seconds": 90,
         "decel_min_pct": 0.05,
-        "accel_min_pct": 0.10,
+        "accel_min_pct": 0.1,
         "max_shift_pts": 25.0,
-        "shift_buffer_pts": 5.0
+        "shift_buffer_pts": 5.0,
+        "breach_exit_advisory": true
       },
       "defensive_overlay": {
         "enabled": true,
@@ -140,7 +187,17 @@
         "_comment": "When true, computes HYDRA's existing credit+buffer stop every tick in parallel without acting. First fire per side per day is Telegrammed for head-to-head comparison against Brandon's GEX breach (which IS the live stop in B/C).",
         "enabled": true
       }
-    }
+    },
+    "narrow_spread_stop": {
+      "enabled": true,
+      "pct_of_width": 0.4,
+      "settlement_hold": {
+        "enabled": true,
+        "itm_pct_of_width": 0.7,
+        "minutes_before_close": 20
+      }
+    },
+    "api_pacing_multiplier": 2.5
   },
   "trend_filter": {
     "enabled": true,
@@ -171,12 +228,12 @@
     "fomc_blackout": true
   },
   "external_price_feed": {
-    "_comment": "Yahoo Finance fallback for VIX/SPX when the IBKR feed is unavailable. shared/config_loader.py defaults enabled=false in cloud — explicit override here so a transient IBKR market-data gap doesn't produce downstream None-VIX bugs in spread-width / vix_regime calculations. Read-only data so it doesn't compromise the LIVE-trading boundary. (The prior Saxo 'NoAccess' / FullTradingAndChat-contention rationale is obsolete post-IBKR cutover.)",
+    "_comment": "Yahoo Finance fallback for VIX/SPX (shared/external_price_feed.py). shared/config_loader.py defaults enabled=false in cloud/LIVE. HYDRA's own VIX read goes through self.broker.get_vix_price() -> IBClient.get_vix_price and does NOT consume this key \u2014 the external_price_feed feed is only wired into the shared/apollo path (services/apollo/market_data.py), so this flag has no effect on HYDRA's spread-width / vix_regime math today. (The old Saxo 'NoAccess' / FullTradingAndChat-contention rationale is obsolete post-IBKR cutover.)",
     "enabled": true
   },
   "google_sheets": {
-    "_comment": "Top-level google_sheets block — schema GoogleSheetsLogger.__init__ actually reads. Mirrors variant A's block, only spreadsheet_name differs.",
-    "enabled": true,
+    "_comment": "Top-level google_sheets block \u2014 schema GoogleSheetsLogger.__init__ actually reads. Mirrors variant A's block, only spreadsheet_name differs.",
+    "enabled": false,
     "credentials_file": "config/google_credentials.json",
     "spreadsheet_name": "Calypso_HYDRA_Variant_B",
     "worksheet_name": "Trades",

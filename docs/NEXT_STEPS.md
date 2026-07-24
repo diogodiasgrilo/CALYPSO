@@ -3,7 +3,8 @@
 > **This is the single, always-current "what's left" tracker.** Update it whenever work lands or a new
 > item appears. It complements (does not replace) [`docs/migration/PROJECT_STATUS.md`](migration/PROJECT_STATUS.md)
 > (project-wide state) and the per-effort design docs. When an item is done, check it off here and move the
-> detail into the relevant doc/commit. Last updated: **2026-07-14**.
+> detail into the relevant doc/commit. Last updated: **2026-07-24** (B↔C live-paper swap recorded in §0; body
+> otherwise still reflects 2026-07-14).
 
 ---
 
@@ -18,8 +19,12 @@
 - **Deployed to the VM:** the full dashboard (picker + group tabs + full-parity 0DTE view) AND **Strategy E
   running dry-run** (`hydra_variant_e` active; SPY resolves @~750.72; recorder DB created; available in the
   picker). `calypso-broker` was restarted for the new `shared/ib_client`; session healthy. VM tree clean.
-- **Still dry-run-LOCKED / NOT live:** E and D place **no real orders**. A/B/C unchanged (A=dry-run per its
-  config, C=live-paper). Real-money/live-paper go-live for E/D remains gated (§2b/§3).
+- **Still dry-run-LOCKED / NOT live:** E and D place **no real orders**. Real-money/live-paper go-live for E/D
+  remains gated (§2b/§3). **A/B/C status changed 2026-07-24:** the live-paper seat swapped from C to B
+  (`scripts/flip_bc_swap.sh`, per the researched+executed [`BC_SWAP_PLAN.md`](migration/BC_SWAP_PLAN.md)) — **B is
+  now live-paper** (7 contracts, 7-slot grid, dashboard PRIMARY), **C is now dry-run-shadow** (7 contracts),
+  **A is unchanged** (dry-run-shadow, 1 contract). See CLAUDE.md's Variant Comparison table for the current
+  reference and `RUNBOOKS.md` RB-9 for the swap/rollback procedure.
 - **🚀 Go-live — START HERE:** [`docs/GO_LIVE_MASTER.md`](GO_LIVE_MASTER.md) — the umbrella (two levels, the
   A/B/C/D/E status matrix, the tests+pass-criteria appendix, the flip procedure). Its own build/refresh TODO is §10.
 
@@ -250,15 +255,22 @@ To actually *show* TPs:
 > real-money relabel + scope banner, ~1918 test count, broker-era cred model, broker-first restart order (B1–B5);
 > **C1 stale D-doc line refs freshened** (6 drifted refs corrected, all cross-checked == current `def` line).
 > **Remaining: only the §8 build-gated artifacts** (E runbook, `flip_d/e_live.sh`, `broker_dc_smoke.py`,
-> RB-9/RB-10), which are blocked on the D/E real-order builds.
+> the D/E flip/flatten runbooks), which are blocked on the D/E real-order builds.
+>
+> **✅ B↔C live-paper swap EXECUTED 2026-07-24.** Researched + audited in
+> [`BC_SWAP_PLAN.md`](migration/BC_SWAP_PLAN.md) (2026-07-21), run via `scripts/flip_bc_swap.sh` — B is now the
+> live-paper seat (dashboard PRIMARY), C is now dry-run-shadow, A unchanged. `RUNBOOKS.md` RB-9 documents the
+> swap/rollback procedure. Docs reconciliation (CLAUDE.md, `PROJECT_STATUS.md`, this file, `BC_SWAP_PLAN.md`'s
+> own status banner) done 2026-07-24; `GO_LIVE_MASTER.md`'s A2 status matrix + any other B/C-status references
+> still need a pass to reflect the new seat (tracked in A2 above).
 
 ### A. Create `GO_LIVE_MASTER.md` (top-level umbrella — thin, links out, does NOT duplicate content)
 - [ ] **A1. Two-levels map + boundary.** Level (i) dry-run→live-PAPER (real paper orders) vs level (ii)
       live-paper→REAL MONEY (new live-OAuth keypair + approval — deliberately unwired on this branch). Make the
       boundary explicit; state up front that this branch is paper-only.
 - [ ] **A2. A/B/C/D/E status matrix** — columns: current mode · next gate · flip script · smoke test · edge/readiness
-      verdict. Source: CLAUDE.md Variant Comparison + §2b/§3/§5 + the D trio. (C = live-paper; A/B = dry-run;
-      D = NO-GO build; E = dry-run-locked.)
+      verdict. Source: CLAUDE.md Variant Comparison + §2b/§3/§5 + the D trio. (as of 2026-07-24: B = live-paper;
+      A/C = dry-run-shadow; D = NO-GO build; E = dry-run-locked.)
 - [ ] **A3. Consolidated tests + pass-criteria appendix** — one surface listing each check + WHAT it verifies +
       PASS criteria + how to run: `broker_paper_smoke.py` (paper-only + 6509='R' on SPX/VIX/leg + 1c round trip
       → ET sentinel); pytest suite (~1918 pass) + `tests/integration/test_ib_paper_smoke.py`; `pip-audit`

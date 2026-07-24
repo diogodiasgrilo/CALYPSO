@@ -149,4 +149,5 @@ Re-encrypt the changed credential (step 2) and `sudo systemctl restart calypso-b
   unattended (the live session token rotates cryptographically; the
   morning re-auth gate inside `calypso-broker` handles the daily reset —
   see `docs/migration/BROKER_SESSION_SERVICE_DESIGN.md` and
-  `docs/migration/P7_GO_LIVE_PLAN.md`).
+  `docs/migration/archive/P7_GO_LIVE_PLAN.md` — archived, superseded by
+  Gates 1-5 in `docs/migration/PROJECT_STATUS.md`).

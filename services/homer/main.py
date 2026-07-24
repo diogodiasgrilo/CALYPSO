@@ -538,9 +538,11 @@ def main():
         # actually journaled. Reading A's (sim, dry_run=true) state would mislabel a
         # LIVE variant's REAL trades as [DRY-RUN]. In db mode HOMER reads a specific
         # variant's backtesting.db (homer.read_db), so DERIVE that same variant's
-        # state file (e.g. data/variant_c/backtesting.db -> data/variant_c/hydra_state.json,
-        # C is live -> no marker). HOMER_DRY_RUN_STATE_FILE still overrides; the
-        # sheets/legacy default remains variant A (no regression).
+        # state file (e.g. data/variant_b/backtesting.db -> data/variant_b/hydra_state.json,
+        # B is live since the 2026-07-24 swap -> no marker; was C before). This is
+        # derived dynamically from read_db, so it needs no code change on a future swap.
+        # HOMER_DRY_RUN_STATE_FILE still overrides; the sheets/legacy default remains variant A
+        # (no regression).
         default_state = os.path.join(_project_root, "data", "hydra_state.json")
         _read_db = homer_config.get("read_db")
         if _read_db and str(homer_config.get("data_source", "")).lower() == "db":

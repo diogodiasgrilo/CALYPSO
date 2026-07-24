@@ -2,7 +2,7 @@
 
 **This file is the single-source-of-truth for the current state of the `hydra-ibkr-standalone` branch.** Any Claude session arriving at this repo should read this file first, before CLAUDE.md. CLAUDE.md is the operator reference (what the bot does, how to deploy, troubleshoot); this file is the *project state* (what's been done, what's in flight, what's blocked).
 
-**Last updated:** 2026-06-16
+**Last updated:** 2026-07-24 (B↔C live-paper swap recorded — see the dated section below; the rest of this file's narrative still stops at 2026-06-16 and is due a fuller refresh, see `docs/NEXT_STEPS.md` §10 for in-flight doc-consolidation work)
 **Base branch:** `hydra-ibkr-standalone` — last commit `d83d50b` + the AUD5 remediation commit (use `git rev-parse HEAD` to verify).
 **Active feature branch:** `feat/strategy-grouping-spy-calendar` (commits `f9e7d2a`…`9f9e7ad`, off `hydra-ibkr-standalone`) — strategy taxonomy/grouping + Strategy D go-live work + new Strategy E (SPY double calendar). **NOT merged.** See the "Strategy D go-live + Strategy E + strategy-grouping" section immediately below.
 **Commits ahead of `main`:** 153 + the AUD5 remediation commit (base branch) (use `git log --oneline main..HEAD | wc -l` to verify)
@@ -39,11 +39,24 @@ What landed on this branch:
 
 - **Strategy E ("SPY Double Calendar", `spy_double_calendar`, `BOT_NAME` SPYDC) — built, dry-run-LOCKED.** A *managed* SPY double calendar from an **OptionsKit** video (short ≈35 DTE + long ≈+1 week, ±1×expected-move strikes, low-IV entry gate, laddered early profit-take + trading-day time-exit, **no transformer, no hard stop**). Sibling of D: D's shared `_dc_*` machinery was lifted **verbatim** into the new `bots/hydra/calendar_strategy_base.py` (`CalendarStrategyBase`), which both `DoubleCalendarStrategy` (D — byte-identical) and `SpyDoubleCalendarStrategy` (E) subclass. E is fully simulated (NOT stubbed). SPY is American-exercise + dividend-paying, so early-assignment + dividend handling are go-live gates (net-new vs D's European SPXW). *(NB: an earlier "Theta Profits / Ahuja" spec was a superseded placeholder — the shipped strategy is the OptionsKit SPY double calendar.)*
 
-- **Strategy taxonomy + comparability groups** — new `shared/strategy_taxonomy.py` (stdlib-only) is the single source of truth: **5 variants / 2 groups** — `ic_0dte` (credit; **a** live, **b** dry-run-shadow, **c** live/primary) + `calendar_multiday` (debit; **d**, **e** both dry-run-locked). The letter stays the stable internal key; human display-names + groups are a presentation overlay. Credit-vs-debit comparison is refused **by construction** (a group carries a single `pnl_shape`), replacing the scattered `if vid=="d": continue` / `_VARIANT_IDS` exclusions. A startup fail-stop validates the static table against the runtime resolver; unknown letters degrade to a safe sentinel.
+- **Strategy taxonomy + comparability groups** — new `shared/strategy_taxonomy.py` (stdlib-only) is the single source of truth: **5 variants / 2 groups** — `ic_0dte` (credit; **a** dry-run-shadow, **b** live/primary, **c** dry-run-shadow — see the 2026-07-24 B↔C swap below) + `calendar_multiday` (debit; **d**, **e** both dry-run-locked). The letter stays the stable internal key; human display-names + groups are a presentation overlay. Credit-vs-debit comparison is refused **by construction** (a group carries a single `pnl_shape`), replacing the scattered `if vid=="d": continue` / `_VARIANT_IDS` exclusions. A startup fail-stop validates the static table against the runtime resolver; unknown letters degrade to a safe sentinel.
 
 - **Dashboard** — main-page **strategy picker** (grouped dropdown, dispatches IC vs calendar layout by `data_kind`), **group tabs** replacing A/B/C/D tabs (`/comparison/:groupId`; legacy `/comparison` + `/dc` redirect into it), a group-aware `/api/strategies` API + a **shape-distinct** calendar DB reader (debit-native; no IC-field leakage), and **EOD auto-update** (cumulative/summary widgets refresh live at the close, no page reload). Group-scoped `/compare` in Telegram + taxonomy display-names in alert/Telegram/email rendering (alert-wire `bot_name` + HOMER anchors FROZEN).
 
 **Status:** on the feature branch only, full suite green, dashboard deployed for a visual check, **NOT merged, nothing new is live.** Living **what's-left** tracker: [`docs/NEXT_STEPS.md`](../NEXT_STEPS.md) (remaining steps + Strategy D & E deployment paths). Design + as-shipped detail: [`docs/STRATEGY_GROUPING_REDESIGN.md`](../STRATEGY_GROUPING_REDESIGN.md) (§§1–8) and the [`docs/NEW_STRATEGY_PLAYBOOK.md`](../NEW_STRATEGY_PLAYBOOK.md) audit log.
+
+---
+
+## B↔C live-paper swap executed (2026-07-24)
+
+> **State change, not a code-work section — recorded here so this file doesn't silently drift from the live VM.** On 2026-07-24 (~03:04 ET) the operator manually executed the live-paper seat swap researched in [`BC_SWAP_PLAN.md`](./BC_SWAP_PLAN.md) (dated 2026-07-21) via `scripts/flip_bc_swap.sh`:
+>
+> - **B is now LIVE** (`dry_run=false`, real paper orders): 7 contracts/entry (down from its prior dry-run 10), widened to a 7-slot entry grid (09:45–12:45), `alerts.enabled=true`, dashboard PRIMARY.
+> - **C is now `dry_run_shadow`** (simulation only): 7 contracts, `alerts.enabled=false`.
+> - **A is unchanged** throughout — `dry_run_shadow`, 1 contract.
+> - The dashboard's canonical views (main page, WebSocket, iOS widget, legacy `/api/hydra/*`), Telegram alert identity, and the analyst agents (`services/agents_config.json` HERMES/CLIO/HOMER `read_db`) now all **dynamically follow whichever variant is live** via `dashboard/backend/services/variant_readers.py:live_seat_id()` — nothing is hardcoded to `c` anymore. Dashboard baseline date moved to 2026-07-24.
+> - Rollback tooling: `scripts/flip_bc_rollback.sh` (hard-aborts unless the paper account is flat first). Runbook: `RUNBOOKS.md` **RB-9**.
+> - **CLAUDE.md's Variant Comparison table + related sections are the current operator reference for this state** (already updated separately). `BC_SWAP_PLAN.md` is retained for historical/audit context and carries an "EXECUTED" banner at its top.
 
 ---
 
@@ -246,7 +259,7 @@ Read these for context as needed:
 | `docs/migration/RUNBOOKS.md` | RB-1..RB-7 incident runbooks | When an alert fires |
 | `docs/migration/DEFERRED_WORK.md` | DEF-1..DEF-7 explicitly-deferred items | When evaluating "should we fix X now?" |
 | `docs/migration/F*_DESIGN.md` | Per-phase design docs | When you need to understand a specific migration phase |
-| `docs/migration/P7_GO_LIVE_PLAN.md` | The original 6-step go-live sequence | Background only — superseded by Gates 1-5 above |
+| `docs/migration/archive/P7_GO_LIVE_PLAN.md` | The original 6-step go-live sequence (archived) | Background only — superseded by Gates 1-5 above |
 | `docs/migration/D_GOLIVE_RUNBOOK.md` | Strategy D ("DC Time Machine") canonical go-live runbook — arm-gate, flip/rollback/flatten, smoke, DG-1..DG-11 readiness | When working Strategy D go-live (D is dry-run-LOCKED) |
 | `docs/migration/D_GOLIVE_SCOPE_AND_AUDIT.md` | Strategy D go-live scope + audit with the explicit **NO-GO** verdict + risk register | When you need D's go/no-go rationale |
 | `docs/migration/D_MVL_PHASE1_PLAN.md` | Strategy D minimum-viable-live phase-1 plan (transformer stripped) | When planning D's first live phase |

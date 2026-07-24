@@ -135,7 +135,8 @@ saving available, on the largest infrastructure line item.
 ### 4. Polygon is 62% of the measured bill
 $29/mo, consumed only by variants B and C (`POLYGON_API_KEY`, `EnvironmentFile=-/etc/calypso/polygon.env`).
 If GEX features are ever retired, TP and narrow widths continue without it (they silently disable) —
-but C is the live dashboard-primary variant, so this is almost certainly a keep.
+but B is the live dashboard-primary variant (since the 2026-07-24 B↔C live-seat swap) and both B and C
+depend on Polygon/GEX for their Brandon stack, so this is almost certainly a keep.
 
 ---
 

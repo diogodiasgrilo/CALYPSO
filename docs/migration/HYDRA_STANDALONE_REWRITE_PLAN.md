@@ -1,7 +1,8 @@
 # HYDRA Standalone Rewrite — Implementation Plan
 
 **Status**: ✅ **F1–F7 + P1–P7 code-complete (2026-05-22).** See
-`P7_GO_LIVE_PLAN.md` for the go-live sequence and
+`archive/P7_GO_LIVE_PLAN.md` (archived; superseded by Gates 1-5 in
+`PROJECT_STATUS.md`) for the original go-live sequence and
 `P7_AUDIT_FINDINGS.md` for the multi-agent audit register. (Earlier
 "F5 in progress" status was stale — corrected 2026-05-22.)
 **Created**: 2026-05-19

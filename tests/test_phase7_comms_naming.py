@@ -118,7 +118,7 @@ def test_payload_carries_display_name_and_group_label(monkeypatch):
     svc, captured = _svc_with_capture("HYDRA_C")
     svc.send_alert(AlertType.STOP_LOSS, "Stop", "msg", priority=AlertPriority.HIGH)
     p = captured["payload"]
-    assert p["display_name"] == "Brandon Narrow (live)"
+    assert p["display_name"] == "Brandon Narrow (3-slot)"
     assert p["group_label"] == "0DTE Iron Condor"
     # bot_name unchanged alongside the additive fields.
     assert p["bot_name"] == "HYDRA_C"

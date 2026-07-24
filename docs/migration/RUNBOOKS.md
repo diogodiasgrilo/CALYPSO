@@ -547,6 +547,12 @@ Not a failure mode by itself — but referenced by `LIVE_READINESS_CHECKLIST.md`
 
 ## RB-8 — Flip a variant from dry-run to LIVE paper trading
 
+> **Historical example — see RB-9 below for the current live-seat-swap procedure.**
+> RB-8 documents the 2026-06-02 A+C go-live (`flip_ac_live.sh`),
+> which is still valid for flipping **A** on its own, but is NOT how the live paper seat is moved between
+> the narrow-width Brandon variants today — that's RB-9. Under stress, confirm which variant you actually
+> need to act on before running either script.
+
 **When:** an operator decides to take a variant from `dry_run:true` (simulation) to
 `dry_run:false` (real paper orders) — e.g. the 2026-06-02 A+C go-live. **This is a
 deliberate, manual operator action. There is intentionally NO auto-flip timer for
@@ -604,6 +610,98 @@ for fn in ("/opt/calypso/bots/hydra/config/config.json",
 PY
 sudo systemctl restart hydra hydra_variant_c
 ```
+
+---
+
+## RB-9 — Swap the live-paper seat between two 0DTE-IC variants (B↔C)
+
+**When:** an operator decides to move which 0DTE-IC variant (B or C) holds the live paper seat — e.g. the
+2026-07-24 swap that moved live trading from C to B (7c, 7-slot grid). Unlike RB-8 (which independently flips
+one variant from dry-run to live), this is a coordinated **two-variant swap**: the outgoing variant goes dry
+FIRST, then the incoming variant goes live — the narrow-width Brandon variants trade the same underlyings on
+the one shared paper account, so they must never both be live at once (IBKR merges positions at the same
+`(conid, side)`). **A is never touched by this procedure.**
+
+### Preconditions (`flip_bc_swap.sh` hard-gates on all of these)
+1. **Broker session healthy now:** `curl -s http://127.0.0.1:8788/health` shows `"connected": true`. Aborts
+   (exit 0, no change) if not.
+2. **A fresh same-ET-day paper-smoke PASS sentinel** at `/opt/calypso/data/smoke/last_pass.txt` — same
+   mechanism as RB-8's Guard 2.
+3. **The overlay over-placement fix is deployed** — `_brandon_unwind_overlay_legs` must exist in
+   `bots/hydra/brandon/strategy.py`. B places defensive overlays live; the pre-fix code over-placed each
+   overlay leg `contracts_per_entry`-fold and could truncate into a naked short. The swap refuses to put B on
+   the live seat on unpatched code.
+4. **B's concentration cap fits its overlay load (B4 coherence)** — with overlays enabled,
+   `max_contracts_per_underlying` must cover the full entry grid plus an equal overlay allowance, else every
+   overlay is silently unwound by ORDER-006 (quietly defeating B's defense). The script computes the required
+   cap and aborts if undersized (warns and proceeds only if it can't verify).
+5. **The shared paper account must be FLAT** — checked live against the broker (authoritative), not a state
+   file. Run this AFTER the close + after-hours settlement, once the day's 0DTE positions have expired.
+
+### Procedure — swap C → B (generalizes to any two 0DTE-IC variants)
+```bash
+# 1. Same ET day: run a fresh paper-smoke so the sentinel is today's
+sudo systemctl start broker-paper-smoke
+sudo journalctl -u broker-paper-smoke -n 40 --no-pager   # expect "wrote PASS sentinel … ET"
+
+# 2. Set the incoming variant's desired live sizing BEFORE swapping — the script does NOT
+#    change contract size or the position cap (edit config_variant_b.json: contracts_per_entry,
+#    max_contracts_per_underlying)
+
+# 3. AFTER the close + after-hours settlement, with the account flat: run the swap
+sudo /opt/calypso/scripts/flip_bc_swap.sh
+sudo journalctl -u hydra_variant_b -u hydra_variant_c -n 40 --no-pager
+
+# 4. Verify the flip stuck
+for v in b c; do
+  sudo -u calypso /opt/calypso/.venv/bin/python -c \
+    "import json;print('$v', json.load(open('/opt/calypso/bots/hydra/config/config_variant_$v.json'))['dry_run'])"
+done
+# Expect: b False ; c True
+```
+
+Order matters (swap-audit B5): C is set `dry_run:true` + `alerts.enabled:false` FIRST and restarted, THEN B is
+set `dry_run:false` + `alerts.enabled:true` and restarted, THEN `dashboard` is restarted so its WebSocket/widget
+canonical view re-resolves onto the new live seat (the request-scoped `/api/*` endpoints already follow the
+live seat per-request with no restart needed).
+
+### What the swap already handles — verify, don't manually redo
+The dashboard's canonical/WS/widget/legacy views, `is_live`/`is_primary`, the cumulative-card baseline, and the
+Telegram alert identity all resolve **dynamically** off the live seat
+(`dashboard/backend/services/variant_readers.py` `live_seat_id()`), and B/C's `dry_run` + `alerts.enabled` are
+flipped by the script itself. Post-flip, **verify** these rather than re-wiring them by hand:
+- Dashboard main page / picker shows the new live variant labeled live, the outgoing one labeled dry-run/shadow.
+- The cumulative card's baseline has moved to the new live seat and isn't blending the outgoing variant's
+  dry-run/live history into the incoming variant's "live" P&L.
+- `services/agents_config.json` (HERMES/CLIO/HOMER `data_source`/`read_db`) resolves against the new live
+  variant's DB — check the next HERMES/CLIO/HOMER report narrates the right variant before trusting it.
+- Telegram alerts arrive tagged for the new live variant.
+
+### Abort/skip behavior (by design)
+- Broker not connected → `"ABORT: broker /health not connected"` → leaves B/C unchanged.
+- No fresh ET-day sentinel → `"ABORT: no fresh (… ET) paper-smoke PASS"` → run the smoke first.
+- Overlay fix not deployed → `"ABORT: overlay over-placement fix NOT deployed"` → deploy the fix, clear
+  `__pycache__`, restart `hydra_variant_b`, then retry.
+- B's cap undersized for its overlay load → `"ABORT: B cap too small for its overlay load"` → raise
+  `max_contracts_per_underlying` in `config_variant_b.json` first.
+- Account not flat → `"ABORT: broker shows N open position(s)"` → wait for settlement, or flatten first
+  (`flatten_paper_account.py --execute`).
+
+### Rollback (hand the live seat back)
+```bash
+sudo /opt/calypso/scripts/flip_bc_rollback.sh
+```
+`flip_bc_rollback.sh` **hard-aborts unless the account is already flat** — flipping B to dry-run does NOT
+close, manage, or even monitor B's open positions, so a live position would ride to expiry **unmanaged**.
+Flatten B FIRST while it is still live:
+```bash
+sudo -u calypso CALYPSO_BROKER_URL=http://127.0.0.1:8788 \
+    /opt/calypso/.venv/bin/python /opt/calypso/scripts/flatten_paper_account.py --execute
+```
+then confirm flat and re-run. Easiest path: run it AFTER the close + settlement, once the day's 0DTE positions
+have expired on their own. Order-matters + dashboard-restart + verify-don't-redo notes apply in reverse (B off
+the live seat first, then C on, then `dashboard` restart, then re-verify the dynamic views/baseline/agents
+config followed C back).
 
 ---
 

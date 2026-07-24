@@ -114,7 +114,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         structure_family="iron_condor",
         pnl_shape="credit",
         dte_class="0DTE",
-        status="dry_run_shadow",
+        status="live",  # live paper seat since the 2026-07-24 B<->C swap (was dry_run_shadow before)
         bot_name_base="HYDRA",
     ),
     "c": StrategyMeta(
@@ -126,7 +126,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         structure_family="iron_condor",
         pnl_shape="credit",
         dte_class="0DTE",
-        status="live",
+        status="dry_run_shadow",  # dry-run sim since the 2026-07-24 B<->C swap (was live before)
         bot_name_base="HYDRA",
     ),
     "d": StrategyMeta(
