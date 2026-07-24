@@ -1,5 +1,5 @@
 [Unit]
-Description=HYDRA Variant C (Brandon Trojan Horse stack — narrow widths + canonical 3-slot grid — LIVE paper, 7c) | SIZING: 7c on the PAPER account; when switching to the LIVE real-money account, test at 1c first, then restore to 10c.
+Description=HYDRA Variant C (Brandon Trojan Horse stack — narrow widths + canonical 3-slot grid — dry-run paper, 7c) | SIZING: 7c on the PAPER account; when switching to the LIVE real-money account, test at 1c first, then restore to 10c.
 # OAuth 1.0a is gateway-free and headless — no IB Gateway, no token-keeper
 # service. network-online.target so the OAuth handshake to api.ibkr.com
 # has DNS+TLS available at startup. P7-audit / Polish A-X2: the previous

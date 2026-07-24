@@ -1,5 +1,5 @@
 [Unit]
-Description=HYDRA Variant B (Brandon Trojan Horse stack — narrow widths + 4-slot grid + 10c — dry-run paper)
+Description=HYDRA Variant B (Brandon Trojan Horse stack — narrow widths + 7-slot grid + 7c — LIVE paper)
 # OAuth 1.0a is gateway-free and headless — no IB Gateway, no token-keeper
 # service. network-online.target so the OAuth handshake to api.ibkr.com
 # has DNS+TLS available at startup. P7-audit / Polish A-X2: the previous
