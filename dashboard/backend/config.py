@@ -17,7 +17,12 @@ class Settings(BaseSettings):
     # `primary_label` is shown in the header so it's unambiguous which strategy
     # the main page is displaying. (To switch the primary back to A, point
     # these four at data/hydra_* + logs/hydra/ and set primary_label/bot_config_file.)
-    primary_label: str = "C · LIVE (Brandon narrow 5/10pt)"
+    # 2026-07-24: live seat swapped C->B. The dashboard follows the LIVE seat
+    # dynamically (variant_readers.live_seat_id); these static defaults are fallbacks.
+    # Fallback header label only — the header actually shows live_label() (the
+    # live seat's variant_*_label), which follows a B<->C swap. Kept in sync with
+    # the live seat as a belt-and-braces default. (2026-07-24: B is the live seat.)
+    primary_label: str = "B · LIVE (Brandon narrow, 7-slot grid)"
     bot_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_c.json")
     hydra_state_file: Path = Path("/opt/calypso/data/variant_c/hydra_state.json")
     hydra_metrics_file: Path = Path("/opt/calypso/data/variant_c/hydra_metrics.json")
@@ -77,7 +82,7 @@ class Settings(BaseSettings):
     variant_b_backtesting_db: Path = Path("/opt/calypso/data/variant_b/backtesting.db")
     variant_b_log_file: Path = Path("/opt/calypso/logs/hydra_variant_b/bot.log")
     variant_b_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_b.json")
-    variant_b_label: str = "B (Brandon narrow, 7-slot grid)"
+    variant_b_label: str = "B · LIVE (Brandon narrow, 7-slot grid)"
 
     # Variant C — Brandon Trojan Horse stack + Brandon's narrow 5/10pt spreads.
     # Same Brandon stack as B; only spread width differs (narrow_spread.enabled=true
@@ -87,7 +92,7 @@ class Settings(BaseSettings):
     variant_c_backtesting_db: Path = Path("/opt/calypso/data/variant_c/backtesting.db")
     variant_c_log_file: Path = Path("/opt/calypso/logs/hydra_variant_c/bot.log")
     variant_c_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_c.json")
-    variant_c_label: str = "C (LIVE · Brandon narrow 5/10pt)"
+    variant_c_label: str = "C (Brandon narrow 5/10pt · dry-run sim)"
 
     # ── Variant D — Strategy D "DC Time Machine" (PRE-STAGED, not yet active) ──
     # Paths defined here so Phase 7 (D-aware rendering) is a small diff, but 'd'
@@ -139,7 +144,7 @@ class Settings(BaseSettings):
     # (ISO YYYY-MM-DD).
     baseline_date: str = ""
     variant_a_baseline_date: str = ""
-    variant_b_baseline_date: str = ""
+    variant_b_baseline_date: str = "2026-07-24"  # B went live 2026-07-24; hide pre-live dry-run history from the cumulative card
     variant_c_baseline_date: str = ""
     # D & E (calendars): the dashboard hides every calendar ENTERED before the
     # baseline (so a pre-fix calendar can't reappear by closing later). NO DB

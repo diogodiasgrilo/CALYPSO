@@ -4,7 +4,8 @@ Each variant is a parallel HYDRA process with its own config + data tree
 (data/variant_<id>/* and logs/hydra_variant_<id>/). As of 2026-06-02, variant
 **C** is the LIVE canonical strategy and **A** is a dry-run shadow; both are
 listed here from their own variant_<id>_* settings. The main dashboard page
-reads the canonical hydra_* paths (pointed at the live variant, currently C).
+reads the canonical hydra_* paths (pointed at the LIVE seat, resolved dynamically
+by variant_readers.live_seat_id() — B as of 2026-07-24).
 
 The variant set is built at import time from ``settings`` — to add a new
 variant you only need to (1) add 5 ``variant_<id>_*`` fields to
