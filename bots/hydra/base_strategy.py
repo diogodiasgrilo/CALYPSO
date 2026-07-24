@@ -1,14 +1,16 @@
 """
 base_strategy.py - HYDRA's base strategy class (HYDRA-owned).
 
-⚠️ MIGRATION NOTE (P1 of HYDRA_STANDALONE_COMPLETION_PLAN.md, 2026-05-21):
+MIGRATION NOTE (P1 of docs/migration/archive/HYDRA_STANDALONE_COMPLETION_PLAN.md,
+2026-05-21 — plan DONE, archived 2026-07-24; see CLAUDE.md Migration History):
 This file is a copy of the former `bots/meic/strategy.py`, relocated
 into the HYDRA package so `HydraStrategy` no longer depends on
-`bots/meic/`. It is HYDRA-OWNED now — `bots/meic/` is a retired bot
-slated for deletion. The class is still named `MEICStrategy` during the
-transition; it is trimmed (P2: dead methods removed) and de-Saxo'd
-(P3/F6 + P4) by the subsequent completion-plan phases. Do NOT treat
-this as shared MEIC code — it serves HYDRA exclusively.
+`bots/meic/`. It is HYDRA-OWNED — `bots/meic/` was retired and deleted
+on this branch (P5a/P5b). The class is still named `MEICStrategy`
+(kept intentionally, not renamed); it has since been trimmed (P2: dead
+methods removed) and de-Saxo'd (P3/F6 + P4) per the completion plan —
+those phases are complete, not pending. Do NOT treat this as shared
+MEIC code — it serves HYDRA exclusively.
 
 Original module implemented Tammy Chambless's MEIC 0DTE strategy:
 - 6 scheduled iron condor entries per day (10:05, 10:35, 11:05, 11:35, 12:05, 12:35 AM ET)

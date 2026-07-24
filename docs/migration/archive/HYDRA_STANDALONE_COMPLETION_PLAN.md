@@ -1,5 +1,13 @@
 # HYDRA Standalone — Completion Plan (post-F5)
 
+> ✅ **ARCHIVED 2026-07-24 — the plan below is DONE.** Its P1–P7 sequencing is exactly the "7 cleanup
+> passes (P1–P7)" CLAUDE.md's Migration History table already documents as code-complete (2026-05-22):
+> reparent off MEIC, trim the HYDRA-owned base, F6 order-write-paths → IBKR, Saxo purge, dead-code
+> deletion, the docs sweep, and the final multi-agent audit + VM validation. Retained for historical
+> context (the "reparent, don't method-port" rationale in §2 is still the accurate explanation of why
+> `bots/hydra/base_strategy.py` exists as a copy). For current state see `CLAUDE.md`'s Migration History
+> section and `docs/migration/P7_AUDIT_FINDINGS.md`.
+
 **Status**: 📋 plan — the path from "F1–F5 done" to a standalone,
 Saxo-free, MEIC-free HYDRA.
 **Date**: 2026-05-21

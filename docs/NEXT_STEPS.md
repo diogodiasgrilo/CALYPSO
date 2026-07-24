@@ -3,8 +3,8 @@
 > **This is the single, always-current "what's left" tracker.** Update it whenever work lands or a new
 > item appears. It complements (does not replace) [`docs/migration/PROJECT_STATUS.md`](migration/PROJECT_STATUS.md)
 > (project-wide state) and the per-effort design docs. When an item is done, check it off here and move the
-> detail into the relevant doc/commit. Last updated: **2026-07-24** (B↔C live-paper swap recorded in §0; body
-> otherwise still reflects 2026-07-14).
+> detail into the relevant doc/commit. Last updated: **2026-07-24** (B↔C live-paper swap recorded in §0, §5,
+> §6; body otherwise still reflects 2026-07-14).
 
 ---
 
@@ -140,17 +140,28 @@ the VM (per its memory/journal). To take D live:
 
 ## 5. Backlog / nice-to-haves (from the audit + design)
 
-- [ ] **🎯 Entry-Schedule Lock review — target ~mid-August 2026 (~2026-08-11).** By then C has ~40+ live-paper
-      trading days (roughly double 07-14's ~22), so the 3 outlier days (07-02/06/13) stop dominating and real-fill
-      economics per slot become separable. At that review: (a) re-run `bots/hydra/slot_edge.py` for both B & C;
-      (b) run the real-fill credit-vs-(commission+measured-slippage) filter per C slot (C captures fills+mids at
-      100%); (c) LOCK the go-live entry schedule (which slots / how many / start size) on **economics + tail-risk +
-      regime-robustness**, NOT p-values (per-slot statistical significance takes months–years given ~$884 per-entry
-      std — do not wait for it). Default = C's proven sparse 3-slot/2-entry schedule at reduced size; only add B's
-      extra slots if separately proven on real fills (needs B's own paper account). This is the last strategy-side
-      gate before the operational go-live gates (§2b / LIVE_READINESS_CHECKLIST / RB-8). Data hygiene to do before
-      the review: exclude 07-06 + 07-07 from per-entry analysis (settlement-bug contaminated: B 07-07 gross 392 vs
-      entries +2925; C 07-06 gross 105 vs entries −2224), or correct them; keep 07-02/07-13 (real down-days).
+- [ ] **🎯 Entry-Schedule Lock review — RETARGETED after the 2026-07-24 B↔C live-seat swap.** The original
+      ~mid-August 2026 target and its premise ("C accumulates the real-fill sample") no longer hold: **C's
+      real-fill dataset is now FROZEN** at its 2026-05-05→2026-07-24 history (~29-30 live-paper days) — still
+      usable for historical analysis, but it stops growing. **B is the live-paper source of real fills going
+      forward, starting from ZERO real-fill history on 2026-07-24** (B's prior ~14+ days were dry-run
+      simulation, not real fills — see [[bc_live_seat_swap]] / [[per_slot_edge_and_realized_pnl]] memories).
+      Reaching a comparable sample on B will take a similar order of elapsed time to what it took C to reach
+      ~22 days by 07-14 (~10 weeks) — **do not trust a calendar-guessed date here; recompute the actual target
+      once B's real trading-day count is known** (`bots/hydra/slot_edge.py --variant b` reports its own sample
+      size). At that review: (a) re-run `bots/hydra/slot_edge.py` against **B's** DB (C's frozen dataset stays
+      available as a historical comparison, not a moving target); (b) run the real-fill
+      credit-vs-(commission+measured-slippage) filter per **B** slot (B now captures fills+mids at 100% since
+      it's the live variant); (c) LOCK the go-live entry schedule (which slots / how many / start size) on
+      **economics + tail-risk + regime-robustness**, NOT p-values (per-slot statistical significance takes
+      months–years given ~$884 per-entry std — do not wait for it). The old "B's extra slots need separate
+      proof on a separate paper account" contingency is now **MOOT** — B's 7-slot grid IS the live account's
+      real-fill data; the schedule-lock decision is now about which of B's 7 slots to keep, not whether to add
+      B's slots to C. This is the last strategy-side gate before the operational go-live gates (§2b /
+      LIVE_READINESS_CHECKLIST / RB-9). Data hygiene note (applies to C's frozen historical dataset if it's used as
+      a comparison, NOT to B's forward real-fill window which starts 2026-07-24, well after these dates):
+      exclude 07-06 + 07-07 from per-entry analysis (settlement-bug contaminated: B 07-07 gross 392 vs entries
+      +2925; C 07-06 gross 105 vs entries −2224), or correct them; keep 07-02/07-13 (real down-days).
 
 - [x] **A2-SHADOW %-of-width stop decision — RESOLVED 2026-07-14: do NOT flip C.** Ran `bots/hydra/stop_shadow.py`
       over both live variants' full history (2026-05-05 → 07-14). A tighter %-of-width stop is **net-negative at
@@ -188,14 +199,20 @@ Two fixes shipped 2026-06-22 (live on B/C): **MKT-048** (entry fillability gate 
 take profit on a mid mark when the real `short_ask − long_bid` + commission gives the gain back; defer to
 expiry instead). See `bots/hydra/__init__.py` version history.
 
-- [ ] **CONFIRM LIVE (P2.5):** over the next few live days, verify MKT-048 eliminates the leg-3 entry bleed and
-      MKT-049 cuts the close drag on C. Look for `MKT-048: … vetoing` and `MKT-049 … DEFERRED` in C's logs.
+- [ ] **CONFIRM LIVE (P2.5):** verify MKT-048 eliminates the leg-3 entry bleed and MKT-049 cuts the close drag
+      on the **live variant** — this was tracked against C's logs through 2026-07-24; **since the B↔C
+      live-seat swap, confirm against B's logs going forward** (`MKT-048: … vetoing` and `MKT-049 … DEFERRED`).
+      C's fixes remain live too (both features are config-driven on B/C alike, not variant-gated) but C is no
+      longer the real-fill confirmation source.
 - [ ] **Commission ratio (P2):** commission/gross is **invariant to contract count** (both scale with size);
-      it's driven by **credit-per-spread**. Over the live period ~45% of gross credit is lost to commission +
-      close slippage. Biggest recovered chunk = holding thin spreads to expiry (MKT-049). Keep measuring.
+      it's driven by **credit-per-spread**. Over C's live period (through 2026-07-24) ~45% of gross credit was
+      lost to commission + close slippage. Biggest recovered chunk = holding thin spreads to expiry (MKT-049).
+      Keep measuring — now against B's real fills as the live source.
 - [ ] **FUTURE TEST (parked — Lever 2, do NOT start yet):** test a **thicker-credit-per-spread** strike config
-      (wider / closer-to-money shorts → more credit per leg → lower commission ratio) on **B (dry-run shadow)**
-      for ~2 weeks, compare commission ratio + win rate vs C, THEN decide whether to bring to C. This is a
+      (wider / closer-to-money shorts → more credit per leg → lower commission ratio). Originally scoped as
+      "test on B (dry-run shadow), compare vs C, then bring to C" — that no longer maps cleanly post-swap since
+      **B is now the live variant and C is dry-run-shadow**; if revisited, test on **C (now dry-run-shadow)**,
+      compare commission ratio + win rate vs **B's live data**, then decide whether to bring it to B. This is a
       risk/reward change to Brandon's 8δ delta-target — parked until explicitly requested.
 
 ## 7. MVL-D vs Strategy E (2026-06-22 — IMPORTANT realization)
