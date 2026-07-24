@@ -99,12 +99,12 @@ async def get_widget_data():
     # history the rest of the dashboard excludes) — the iOS widget and the web
     # card disagreed by ~$1,966 (dashboard audit 2026-07-22).
     from dashboard.backend.services.db_reader import apply_db_cumulative
-    from dashboard.backend.services.variant_readers import canonical_db_reader
+    from dashboard.backend.services.variant_readers import canonical_db_reader, live_baseline_date
 
     cumulative_pnl = 0
     if metrics:
         try:
-            overrides = await canonical_db_reader().get_cumulative_overrides(settings.baseline_date)
+            overrides = await canonical_db_reader().get_cumulative_overrides(live_baseline_date())
             rebased = apply_db_cumulative(dict(metrics), overrides) or {}
             cumulative_pnl = rebased.get("cumulative_pnl", metrics.get("cumulative_pnl", 0))
         except Exception:

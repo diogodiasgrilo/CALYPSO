@@ -145,7 +145,7 @@ class Settings(BaseSettings):
     baseline_date: str = ""
     variant_a_baseline_date: str = ""
     variant_b_baseline_date: str = "2026-07-24"  # B went live 2026-07-24; hide pre-live dry-run history from the cumulative card
-    variant_c_baseline_date: str = ""
+    variant_c_baseline_date: str = "2026-06-11"  # C's live-history baseline (was the global default); used when C is the live seat
     # D & E (calendars): the dashboard hides every calendar ENTERED before the
     # baseline (so a pre-fix calendar can't reappear by closing later). NO DB
     # mutation — raw rows are preserved for the D/E validation work; only the view

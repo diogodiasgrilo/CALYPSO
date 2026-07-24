@@ -8,7 +8,7 @@ from dashboard.backend.config import settings
 from dashboard.backend.services.metrics_reader import MetricsFileReader
 from dashboard.backend.services.db_reader import apply_db_cumulative
 from dashboard.backend.services.variant_readers import (
-    canonical_db_reader, reader_for, live_metrics_file,
+    canonical_db_reader, reader_for, live_metrics_file, live_baseline_date,
 )
 from dashboard.backend.services.live_state import LiveStateProvider
 from dashboard.backend.services.market_status import get_today_et, is_after_market_close
@@ -70,12 +70,13 @@ async def get_cumulative():
     the resolved baseline is echoed back so the UI can caption "since <date>".
     """
     data = _live_metrics_reader().read_latest()
-    overrides = await canonical_db_reader().get_cumulative_overrides(settings.baseline_date)
+    _baseline = live_baseline_date()
+    overrides = await canonical_db_reader().get_cumulative_overrides(_baseline)
     data = apply_db_cumulative(data, overrides)
     if data is None:
         data = {}
     # Echo the rebase baseline (empty string = full history) for the UI caption.
-    data["cumulative_baseline_date"] = settings.baseline_date
+    data["cumulative_baseline_date"] = _baseline
     return data
 
 

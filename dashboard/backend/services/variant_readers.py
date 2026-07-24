@@ -92,6 +92,15 @@ def live_label() -> str:
     return _seat_field("label", settings.primary_label)
 
 
+def live_baseline_date() -> str:
+    """The rebase baseline for the PRIMARY cumulative card = the LIVE seat's own
+    baseline. After a C->B swap, B's card must start at B's go-live date (so its
+    pre-live dry-run history doesn't present as the live record) — NOT the global
+    settings.baseline_date, which was C's. Falls back to the global baseline when
+    the live seat has none set."""
+    return _seat_field("baseline_date", "") or settings.baseline_date
+
+
 # Per-variant DB readers, built lazily and cached by lowercased id.
 _variant_readers: dict[str, BacktestingDBReader] = {}
 
