@@ -35,6 +35,15 @@ google-cloud-secret-manager==2.28.0
 pytz==2026.2
 python-dateutil==2.9.0.post0
 
+# ─── HYDRA Dashboard — account login (2026-07-31 real-accounts + TOTP work) ─
+# NOTE: dashboard/backend's core deps (fastapi, uvicorn, pydantic-settings)
+# are a pre-existing gap — installed ad hoc into the shared venv, not pinned
+# here. Only pinning what THIS work added, to not silently expand scope.
+bcrypt==5.0.0                     # password hashing (dashboard accounts)
+pyotp==2.10.0                     # TOTP 2FA codes (dashboard accounts)
+qrcode==8.2                       # TOTP enrollment QR codes (dashboard accounts)
+pillow==12.3.0                    # qrcode[pil] image backend
+
 # ─── Development / test deps (uncomment locally; not installed on VM) ──────
 # pytest==9.0.3
 # pytest-cov==7.1.0

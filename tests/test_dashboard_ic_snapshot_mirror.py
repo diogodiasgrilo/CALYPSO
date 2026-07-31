@@ -38,8 +38,6 @@ from fastapi.testclient import TestClient  # noqa: E402
 from dashboard.backend.config import settings  # noqa: E402
 from dashboard.backend.services.market_status import get_today_et  # noqa: E402
 
-API_KEY = "test-mirror-key"
-
 TODAY = get_today_et()
 
 
@@ -143,7 +141,10 @@ def _seed_metrics(path: Path) -> None:
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    monkeypatch.setattr(settings, "api_key", API_KEY, raising=False)
+    # No dashboard accounts in this isolated temp auth DB → require_session is
+    # a no-op (dev-mode), so requests below need no auth header. Isolated from
+    # any real /opt/calypso auth DB.
+    monkeypatch.setattr(settings, "dashboard_auth_db", tmp_path / "dashboard_auth.db", raising=False)
 
     # Variant A (an IC variant) gets a full, OWN data tree under tmp_path.
     va = tmp_path / "variant_a"
@@ -175,13 +176,9 @@ def client(tmp_path, monkeypatch):
         yield c
 
 
-def _h():
-    return {"X-API-Key": API_KEY}
-
-
 class TestICSnapshotMirror:
     def test_available_ic_variant_has_mirror_keys(self, client):
-        r = client.get("/api/strategies/a/snapshot", headers=_h())
+        r = client.get("/api/strategies/a/snapshot")
         assert r.status_code == 200
         env = r.json()
         assert env["data_kind"] == "ic_state"
@@ -196,7 +193,7 @@ class TestICSnapshotMirror:
     def test_ohlc_is_the_shared_spx_bars_in_spxchart_shape(self, client):
         # SPX is the same index for every strategy → bars come from the SHARED main
         # market-data DB (dense), not each variant's throttled DB (2026-06-18 fix).
-        body = client.get("/api/strategies/a/snapshot", headers=_h()).json()["body"]
+        body = client.get("/api/strategies/a/snapshot").json()["body"]
         ohlc = body["ohlc"]
         assert isinstance(ohlc, list) and len(ohlc) == 3
         bar = ohlc[0]
@@ -207,7 +204,7 @@ class TestICSnapshotMirror:
         assert bar["close"] == 5002.0
 
     def test_cumulative_is_db_canonical_override_of_metrics_file(self, client):
-        body = client.get("/api/strategies/a/snapshot", headers=_h()).json()["body"]
+        body = client.get("/api/strategies/a/snapshot").json()["body"]
         cum = body["cumulative"]
         # DB override wins over the stale metrics-file 999.0.
         # daily_summaries: 120 - 50 + 80 = 150.
@@ -221,7 +218,7 @@ class TestICSnapshotMirror:
         assert "cumulative_baseline_date" in cum
 
     def test_performance_is_daily_pnls_plus_advanced(self, client):
-        body = client.get("/api/strategies/a/snapshot", headers=_h()).json()["body"]
+        body = client.get("/api/strategies/a/snapshot").json()["body"]
         perf = body["performance"]
         # /api/metrics/performance shape: a daily_pnls array (PerformanceMetrics
         # computes the ratios client-side).
@@ -234,7 +231,7 @@ class TestICSnapshotMirror:
 
     def test_missing_db_and_metrics_degrade_to_empty_not_500(self, client):
         # Variant B has a state file but NO db / metrics.
-        r = client.get("/api/strategies/b/snapshot", headers=_h())
+        r = client.get("/api/strategies/b/snapshot")
         assert r.status_code == 200
         body = r.json()["body"]
         assert body["available"] is True
@@ -251,6 +248,6 @@ class TestICSnapshotMirror:
             settings, "variant_a_state_file",
             tmp_path / "nope" / "hydra_state.json", raising=False,
         )
-        r = client.get("/api/strategies/a/snapshot", headers=_h())
+        r = client.get("/api/strategies/a/snapshot")
         assert r.status_code == 200
         assert r.json()["body"]["available"] is False

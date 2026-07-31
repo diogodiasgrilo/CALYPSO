@@ -8,12 +8,13 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
-from dashboard.backend.auth import require_api_key
+from dashboard.backend.auth import require_session
 from dashboard.backend.config import settings
 from dashboard.backend.ws.manager import ConnectionManager
 from dashboard.backend.ws.broadcaster import Broadcaster
 from dashboard.backend.ws import router as ws_router_module
-from dashboard.backend.routers import hydra, metrics, market, agents, widget, variants, dc, strategies
+from dashboard.backend.routers import auth as auth_router, hydra, metrics, market, agents, widget, variants, dc, strategies
+from dashboard.backend.services import auth_db
 from dashboard.backend.services.live_state import LiveStateProvider
 
 logging.basicConfig(
@@ -30,6 +31,14 @@ broadcaster = Broadcaster(manager)
 async def lifespan(app: FastAPI):
     """Start broadcaster on startup, stop on shutdown."""
     logger.info("HYDRA Dashboard starting")
+    auth_db.init_db(settings.dashboard_auth_db)
+    auth_db.cleanup_expired_sessions(settings.dashboard_auth_db)
+    if settings.require_accounts_configured and auth_db.count_users(settings.dashboard_auth_db) == 0:
+        raise RuntimeError(
+            "DASHBOARD_REQUIRE_ACCOUNTS_CONFIGURED is set but no dashboard accounts exist "
+            f"in {settings.dashboard_auth_db}. Refusing to start with the login gate open. "
+            "Run: python -m scripts.manage_dashboard_users add <username>"
+        )
     ws_router_module.set_dependencies(manager, broadcaster)
 
     # Wire up live data sources for REST endpoints (bridges gap until HOMER runs)
@@ -59,10 +68,14 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# REST routers — guarded by the optional API key (audit M12). When no
-# DASHBOARD_API_KEY is configured the dependency is a no-op (dev/local);
-# /api/health and the static frontend below stay open either way.
-_api_guard = [Depends(require_api_key)]
+# /api/auth is unguarded — it IS the login flow that issues the sessions
+# every other router below requires.
+app.include_router(auth_router.router)
+
+# REST routers — guarded by a real per-account session cookie (replaces the
+# old single-shared API key). When no accounts exist yet the dependency is a
+# no-op (dev/local); /api/health and the static frontend below stay open either way.
+_api_guard = [Depends(require_session)]
 app.include_router(hydra.router, dependencies=_api_guard)
 app.include_router(metrics.router, dependencies=_api_guard)
 app.include_router(market.router, dependencies=_api_guard)

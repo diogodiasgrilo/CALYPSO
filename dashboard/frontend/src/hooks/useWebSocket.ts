@@ -56,8 +56,10 @@ export function useWebSocket() {
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
-    const apiKey = localStorage.getItem("calypso-api-key") || "";
-    const url = `${protocol}//${host}/ws/dashboard?api_key=${apiKey}`;
+    // Session cookie rides along automatically (browsers always attach
+    // matching cookies to same-origin WebSocket handshakes) — no secret in
+    // the URL, unlike the old ?api_key= scheme.
+    const url = `${protocol}//${host}/ws/dashboard`;
 
     const ws = new WebSocket(url);
     wsRef.current = ws;

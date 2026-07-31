@@ -1,11 +1,10 @@
 """WebSocket endpoint for dashboard real-time updates."""
 
-import hmac
 import logging
 
-from fastapi import APIRouter, WebSocket, WebSocketDisconnect, Query
+from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 
-from dashboard.backend.config import settings
+from dashboard.backend.auth import SESSION_COOKIE_NAME, dev_mode_open, validate_and_refresh_session
 
 logger = logging.getLogger("dashboard.ws_router")
 
@@ -23,19 +22,20 @@ def set_dependencies(manager, broadcaster):
 
 
 @router.websocket("/ws/dashboard")
-async def websocket_dashboard(
-    websocket: WebSocket,
-    api_key: str = Query(default=""),
-):
+async def websocket_dashboard(websocket: WebSocket):
     """Main WebSocket endpoint for dashboard clients.
 
     Sends full snapshot on connect, then streams deltas.
     """
-    # API key validation (skip if no key configured). Constant-time compare to
-    # match the REST guard (auth.require_api_key) — no timing oracle on the key.
-    if settings.api_key and not hmac.compare_digest(api_key, settings.api_key):
-        await websocket.close(code=4001, reason="Invalid API key")
-        return
+    # Session-cookie validation (skip if no accounts configured — dev mode,
+    # same posture as the REST guard in auth.require_session). The cookie
+    # rides along automatically on same-origin WS handshakes — no more
+    # secret embedded in the URL.
+    if not dev_mode_open():
+        session = validate_and_refresh_session(websocket.cookies.get(SESSION_COOKIE_NAME))
+        if not session:
+            await websocket.close(code=4001, reason="Not authenticated")
+            return
 
     await _manager.connect(websocket)
 

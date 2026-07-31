@@ -8,7 +8,7 @@ import { formatPnL, formatCurrency, formatDateShort } from "../lib/formatters";
 // it does NOT belong in the 0DTE iron-condor /comparison view (net DEBIT vs net
 // credit is apples-to-oranges). Data source: GET /api/dc/status (the dashboard's
 // dc_reader, which reads D's dry-run sidecar + isolated dc_calendar.db). The
-// global apiKey fetch shim injects X-API-Key, so a plain fetch is fine.
+// browsers send the session cookie automatically on same-origin requests, so a plain fetch is fine.
 
 interface OpenCalendar {
   entry_number: number | null;

@@ -173,8 +173,28 @@ class Settings(BaseSettings):
     # Agent intel directories
     agent_intel_dir: Path = Path("/opt/calypso/intel")
 
-    # API security
-    api_key: str = ""
+    # ── Dashboard accounts (separate, read-write DB — never mixed with bot data) ──
+    # Real per-person login (username + bcrypt password + TOTP 2FA), replacing the
+    # old single-shared DASHBOARD_API_KEY. See dashboard/backend/services/auth_db.py
+    # + routers/auth.py. Managed via scripts/manage_dashboard_users.py (SSH/CLI,
+    # not a web admin panel). If the users table is empty, auth is a no-op
+    # (local-dev convenience, same posture the old empty-api_key had) — logs a
+    # loud warning. On the VM there is always >=1 account once bootstrapped.
+    dashboard_auth_db: Path = Path("/opt/calypso/dashboard/dashboard_auth.db")
+    session_idle_timeout_hours: float = 12.0
+    session_absolute_max_days: float = 30.0
+    login_lockout_threshold: int = 5
+    login_lockout_minutes: float = 15.0
+    # Session cookie requires HTTPS by default (Secure flag). Only disable for
+    # local http:// dev testing via DASHBOARD_SESSION_COOKIE_SECURE=false.
+    session_cookie_secure: bool = True
+    # Fail CLOSED (refuse to start) if zero accounts exist, instead of the
+    # dev-mode no-op posture. Off by default (keeps local dev frictionless).
+    # MUST be set true on the VM (found in review: without this, a cold-deploy
+    # race — service starts before the first `manage_dashboard_users.py add`
+    # runs — or a misconfigured dashboard_auth_db path silently serves the
+    # public dashboard with NO login gate at all, logged only as a WARNING).
+    require_accounts_configured: bool = False
 
     # Polling intervals (seconds)
     state_poll_interval: float = 1.0
@@ -193,6 +213,8 @@ class Settings(BaseSettings):
         "http://localhost:5173",
         "http://localhost:8080",
         "http://35.231.243.156:8080",
+        "https://domytrade.com",
+        "https://www.domytrade.com",
     ]
 
     model_config = {"env_prefix": "DASHBOARD_", "env_file": ".env", "extra": "ignore"}

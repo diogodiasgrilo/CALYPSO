@@ -29,6 +29,7 @@
 # Pygments. None of these belong in a production install.
 #
 # pip-audit clean: zero known vulnerabilities (PyPI + OSV sources).
+bcrypt==5.0.0
 certifi==2026.4.22
 cffi==2.0.0
 charset-normalizer==3.4.7
@@ -50,6 +51,7 @@ msal==1.36.0
 oauthlib==3.3.1
 Office365-REST-Python-Client==2.6.2
 packaging==26.2
+pillow==12.3.0
 proto-plus==1.28.0
 protobuf==6.33.6
 pyasn1==0.6.3
@@ -57,8 +59,10 @@ pyasn1_modules==0.4.2
 pycparser==3.0
 pycryptodome==3.23.0
 PyJWT==2.12.1
+pyotp==2.10.0
 python-dateutil==2.9.0.post0
 pytz==2026.2
+qrcode==8.2
 requests==2.34.1
 requests-oauthlib==2.0.0
 six==1.17.0

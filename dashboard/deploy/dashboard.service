@@ -27,6 +27,13 @@ Environment=DASHBOARD_AGENT_INTEL_DIR=/opt/calypso/intel
 # the broker-backed B/C now populate. (Off on Saxo too — this enables the full
 # multi-strategy functionality now that B/C run.)
 Environment=DASHBOARD_COMPARISON_MODE_ENABLED=true
+# 2026-07-31: real per-account login (bcrypt + TOTP) replaces the old shared
+# API key. Fail CLOSED if the accounts DB is empty — refuses to start rather
+# than silently serving the public dashboard with no login gate (found in
+# security review: a cold-deploy race or a misconfigured DB path would
+# otherwise fail open). Bootstrap the first account BEFORE starting this
+# service: .venv/bin/python -m scripts.manage_dashboard_users add <username>
+Environment=DASHBOARD_REQUIRE_ACCOUNTS_CONFIGURED=true
 
 # Resource limits
 MemoryMax=256M

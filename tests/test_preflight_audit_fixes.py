@@ -437,33 +437,40 @@ class TestTelegramTokenRedaction:
 
 
 # ─────────────────────────────────────────────────────────────────────────
-# M12 — dashboard REST API key auth (fastapi-only; skipped where absent)
+# M12 — dashboard REST API auth (fastapi-only; skipped where absent).
+# 2026-07-31: superseded by real per-account session-cookie auth (was a
+# single shared DASHBOARD_API_KEY) — see tests/test_dashboard_auth.py for
+# the full login/2FA/lockout/session coverage. This test now pins the same
+# no-op-when-no-accounts / enforced-once-an-account-exists contract for
+# require_session, the current guard wired into main.py's _api_guard.
 # ─────────────────────────────────────────────────────────────────────────
-class TestDashboardApiKeyAuth:
-    def test_require_api_key_enforced_when_configured(self):
+class TestDashboardSessionAuth:
+    def test_require_session_enforced_once_an_account_exists(self, tmp_path):
         pytest.importorskip("fastapi")
         import asyncio
         from fastapi import HTTPException
         from dashboard.backend import auth as dash_auth
         from dashboard.backend.config import settings as dash_settings
+        from dashboard.backend.services import auth_db, auth_crypto
 
-        original = dash_settings.api_key
+        original_db = dash_settings.dashboard_auth_db
         try:
-            # Disabled when empty → no raise.
-            dash_settings.api_key = ""
-            asyncio.run(dash_auth.require_api_key(x_api_key=None, api_key=None))
+            dash_settings.dashboard_auth_db = tmp_path / "auth.db"
+            auth_db.init_db(dash_settings.dashboard_auth_db)
 
-            # Enforced when configured.
-            dash_settings.api_key = "sekret"
+            # Disabled when no accounts exist (dev-mode) → no raise.
+            asyncio.run(dash_auth.require_session(calypso_session=None))
+
+            # Enforced once an account exists.
+            auth_db.create_user(
+                dash_settings.dashboard_auth_db, "diogo", auth_crypto.hash_password("x" * 20)
+            )
             with pytest.raises(HTTPException):
-                asyncio.run(dash_auth.require_api_key(x_api_key="wrong", api_key=None))
+                asyncio.run(dash_auth.require_session(calypso_session=None))
             with pytest.raises(HTTPException):
-                asyncio.run(dash_auth.require_api_key(x_api_key=None, api_key=None))
-            # Accepts the key via header OR query param.
-            asyncio.run(dash_auth.require_api_key(x_api_key="sekret", api_key=None))
-            asyncio.run(dash_auth.require_api_key(x_api_key=None, api_key="sekret"))
+                asyncio.run(dash_auth.require_session(calypso_session="not-a-real-token"))
         finally:
-            dash_settings.api_key = original
+            dash_settings.dashboard_auth_db = original_db
 
 
 class TestOrderWriteDoubleFillGuards:

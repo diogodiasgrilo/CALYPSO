@@ -3,12 +3,11 @@ import { createRoot } from "react-dom/client";
 import { BrowserRouter } from "react-router-dom";
 import "./index.css";
 import App from "./App";
-import { installApiKeyFetch } from "./apiKey";
 import { LoginGate } from "./components/auth/LoginGate";
 
-// audit M12: arm the API-key fetch shim before any request fires (no-op
-// until a key is provisioned via ?api_key= / localStorage / the login gate).
-installApiKeyFetch();
+// Session-cookie auth (see auth.ts) needs no request-level wiring — browsers
+// send cookies automatically on same-origin fetch/WS. LoginGate below is the
+// only place auth state is handled.
 
 createRoot(document.getElementById("root")!).render(
   <StrictMode>

@@ -9,7 +9,7 @@ Pins the new taxonomy-driven /api/strategies/* router:
     group's is credit-shaped.
   * a per-strategy snapshot for a not-yet-running variant returns
     available:false (never a 500).
-  * the router is behind the _api_guard (a configured API key is required).
+  * the router is behind the _api_guard (a valid account session is required).
 
 The dashboard backend runs in its own venv (FastAPI). Skip cleanly in the main
 bot suite where it isn't installed; this runs in the dashboard env (and the VM).
@@ -29,10 +29,37 @@ pytest.importorskip("fastapi")
 
 from fastapi.testclient import TestClient  # noqa: E402
 
+import pyotp  # noqa: E402
+
 import dashboard.backend.config as cfg_mod  # noqa: E402
 from dashboard.backend.config import settings  # noqa: E402
+from dashboard.backend.services import auth_crypto, auth_db  # noqa: E402
 
-API_KEY = "test-strategies-key"
+
+def _enroll_and_login(client, username="tester", password="initial-temp-password-1"):
+    """Create an account and complete the full login/2FA flow so the
+    TestClient's cookie jar carries a valid session for subsequent requests."""
+    # The /login + /verify-totp rate limiter is a module-level in-memory dict
+    # (dashboard/backend/routers/auth.py) shared across the whole pytest
+    # process — clear it so this fixture doesn't get 429'd by unrelated tests
+    # that already hit those endpoints from the same fake TestClient IP.
+    from dashboard.backend.routers import auth as auth_router_module
+    auth_router_module._rate_buckets.clear()
+    auth_router_module._pending.clear()
+
+    auth_db.init_db(settings.dashboard_auth_db)
+    auth_db.create_user(settings.dashboard_auth_db, username, auth_crypto.hash_password(password))
+    r = client.post("/api/auth/login", json={"username": username, "password": password})
+    pending = r.json()["pending_token"]
+    r = client.post(
+        "/api/auth/change-password",
+        json={"pending_token": pending, "new_password": "a-brand-new-strong-password-2"},
+    )
+    pending = r.json()["pending_token"]
+    r = client.post("/api/auth/setup-totp", json={"pending_token": pending})
+    secret = r.json()["secret"]
+    r = client.post("/api/auth/verify-totp", json={"pending_token": pending, "code": pyotp.TOTP(secret).now()})
+    assert r.status_code == 200, r.text
 
 
 # ---------------------------------------------------------------------------
@@ -69,12 +96,13 @@ def _seed_calendar_db(path: Path) -> None:
 
 @pytest.fixture
 def client(tmp_path, monkeypatch):
-    """A TestClient with the API key configured (so the _api_guard is ACTIVE)
-    and variant D pointed at a seeded calendar DB under tmp_path. The FastAPI
-    app's lifespan starts the broadcaster; TestClient(...) as a context manager
-    runs it, but we don't depend on it for these REST endpoints."""
-    # Turn the guard ON for this test (default is empty = disabled).
-    monkeypatch.setattr(settings, "api_key", API_KEY, raising=False)
+    """A TestClient with a real session cookie (so the _api_guard is ACTIVE —
+    require_session is only a no-op with zero accounts) and variant D pointed
+    at a seeded calendar DB under tmp_path. The FastAPI app's lifespan starts
+    the broadcaster; TestClient(...) as a context manager runs it, but we
+    don't depend on it for these REST endpoints."""
+    monkeypatch.setattr(settings, "dashboard_auth_db", tmp_path / "dashboard_auth.db", raising=False)
+    monkeypatch.setattr(settings, "session_cookie_secure", False, raising=False)
 
     # These tests verify the calendar payload SHAPE off pre-2026-07-07 seed data,
     # so pin the D/E baseline to full-history (the production default is 2026-07-07,
@@ -96,11 +124,8 @@ def client(tmp_path, monkeypatch):
 
     from dashboard.backend.main import app
     with TestClient(app) as c:
+        _enroll_and_login(c)
         yield c
-
-
-def _h():
-    return {"X-API-Key": API_KEY}
 
 
 # ---------------------------------------------------------------------------
@@ -109,12 +134,13 @@ def _h():
 
 
 class TestApiGuard:
-    def test_requires_api_key(self, client):
-        # No key → 401 (the guard is active because settings.api_key is set).
+    def test_requires_session(self, client):
+        # No session cookie → 401 (the guard is active because an account exists).
+        client.cookies.clear()
         assert client.get("/api/strategies/meta").status_code == 401
 
-    def test_accepts_valid_key(self, client):
-        assert client.get("/api/strategies/meta", headers=_h()).status_code == 200
+    def test_accepts_valid_session(self, client):
+        assert client.get("/api/strategies/meta").status_code == 200
 
 
 # ---------------------------------------------------------------------------
@@ -124,7 +150,7 @@ class TestApiGuard:
 
 class TestMeta:
     def test_two_groups_and_strategies_incl_e(self, client):
-        r = client.get("/api/strategies/meta", headers=_h())
+        r = client.get("/api/strategies/meta")
         assert r.status_code == 200
         body = r.json()
         assert body["primary_id"] == "c"
@@ -161,7 +187,7 @@ class TestMeta:
     def test_no_filesystem_paths_leaked(self, client):
         # The whole /meta payload must NOT contain any path-ish string.
         import json
-        raw = json.dumps(client.get("/api/strategies/meta", headers=_h()).json())
+        raw = json.dumps(client.get("/api/strategies/meta").json())
         assert "/opt/calypso" not in raw
         assert "/" not in raw  # no path separators anywhere
         assert ".json" not in raw and ".db" not in raw
@@ -192,7 +218,7 @@ def _collect_keys(obj, acc: set) -> None:
 
 class TestGroupComparisonShape:
     def test_calendar_group_is_debit_and_has_no_ic_keys(self, client):
-        r = client.get("/api/strategies/groups/calendar_multiday/comparison", headers=_h())
+        r = client.get("/api/strategies/groups/calendar_multiday/comparison")
         assert r.status_code == 200
         body = r.json()
         assert body["pnl_shape"] == "debit"
@@ -217,7 +243,7 @@ class TestGroupComparisonShape:
         assert not leaked, f"calendar payload leaked IC keys: {leaked}"
 
     def test_ic_group_is_credit_shaped(self, client):
-        r = client.get("/api/strategies/groups/ic_0dte/comparison", headers=_h())
+        r = client.get("/api/strategies/groups/ic_0dte/comparison")
         assert r.status_code == 200
         body = r.json()
         assert body["pnl_shape"] == "credit"
@@ -228,7 +254,7 @@ class TestGroupComparisonShape:
         assert body["leaderboard"]["baseline_id"] == "A"
 
     def test_unknown_group_404(self, client):
-        assert client.get("/api/strategies/groups/nope/comparison", headers=_h()).status_code == 404
+        assert client.get("/api/strategies/groups/nope/comparison").status_code == 404
 
 
 # ---------------------------------------------------------------------------
@@ -239,7 +265,7 @@ class TestGroupComparisonShape:
 class TestSnapshot:
     def test_missing_variant_is_available_false_not_500(self, client):
         # E has no state file / artifacts → available:false in the body, 200 OK.
-        r = client.get("/api/strategies/e/snapshot", headers=_h())
+        r = client.get("/api/strategies/e/snapshot")
         assert r.status_code == 200
         body = r.json()
         assert body["data_kind"] == "dc_calendar"
@@ -251,14 +277,14 @@ class TestSnapshot:
         # Point an IC variant at a missing state file → available:false, not 500.
         monkeypatch.setattr(settings, "variant_a_state_file",
                             tmp_path / "nope" / "hydra_state.json", raising=False)
-        r = client.get("/api/strategies/a/snapshot", headers=_h())
+        r = client.get("/api/strategies/a/snapshot")
         assert r.status_code == 200
         assert r.json()["data_kind"] == "ic_state"
         assert r.json()["body"]["available"] is False
 
     def test_unknown_letter_degrades_gracefully(self, client):
         # An unregistered letter → safe sentinel (ic_state default), no crash.
-        r = client.get("/api/strategies/z/snapshot", headers=_h())
+        r = client.get("/api/strategies/z/snapshot")
         assert r.status_code == 200
         assert r.json()["body"]["available"] is False
 
@@ -270,7 +296,7 @@ class TestSnapshot:
 
 class TestGroupAggregate:
     def test_calendar_aggregate_debit_no_ic_keys(self, client):
-        r = client.get("/api/strategies/groups/calendar_multiday/aggregate", headers=_h())
+        r = client.get("/api/strategies/groups/calendar_multiday/aggregate")
         assert r.status_code == 200
         body = r.json()
         assert body["pnl_shape"] == "debit"
@@ -285,7 +311,7 @@ class TestGroupAggregate:
         assert not (keys & _IC_FORBIDDEN_KEYS)
 
     def test_ic_aggregate_credit(self, client):
-        r = client.get("/api/strategies/groups/ic_0dte/aggregate", headers=_h())
+        r = client.get("/api/strategies/groups/ic_0dte/aggregate")
         assert r.status_code == 200
         body = r.json()
         assert body["pnl_shape"] == "credit"

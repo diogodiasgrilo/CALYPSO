@@ -1,6 +1,7 @@
 import { Volume2, VolumeX, LogOut } from "lucide-react";
 import { useLocation } from "react-router-dom";
-import { getApiKey, clearApiKey } from "../../apiKey";
+import { useEffect, useState } from "react";
+import * as auth from "../../auth";
 import { useHydraStore } from "../../store/hydraStore";
 import { formatPrice } from "../../lib/formatters";
 import { vixColor, colors } from "../../lib/tradingColors";
@@ -11,7 +12,6 @@ import { useStrategyMeta } from "../../hooks/useStrategyMeta";
 import { useSelectedStrategy } from "../../hooks/useSelectedStrategy";
 import { useSelectedSnapshotStore } from "../dashboard/selectedSnapshotStore";
 import { StrategyPicker } from "../shared/StrategyPicker";
-import { useState } from "react";
 import type { ICSnapshotBody } from "../../hooks/useStrategySnapshot";
 
 export function Header() {
@@ -22,6 +22,11 @@ export function Header() {
   const { strategy, isPrimarySelected } = useSelectedStrategy();
   const selectedSnapshot = useSelectedSnapshotStore((s) => s.snapshot);
   const location = useLocation();
+  const [username, setUsername] = useState<string | null>(null);
+
+  useEffect(() => {
+    auth.getCurrentUser().then(setUsername);
+  }, []);
 
   // The picker drives the Dashboard live view AND (since 2026-06-22) the
   // per-strategy History/Analytics tabs. It's hidden on tabs it does NOT
@@ -251,17 +256,22 @@ export function Header() {
         >
           {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
         </button>
-        {getApiKey() && (
-          <button
-            onClick={() => {
-              clearApiKey();
-              window.location.reload();
-            }}
-            className="text-text-secondary hover:text-loss transition-colors"
-            title="Sign out (clear access key from this browser)"
-          >
-            <LogOut size={16} />
-          </button>
+        {username && (
+          <div className="flex items-center gap-2">
+            <span className="text-text-secondary text-xs hidden sm:inline" title="Signed in">
+              {username}
+            </span>
+            <button
+              onClick={async () => {
+                await auth.logout();
+                window.location.reload();
+              }}
+              className="text-text-secondary hover:text-loss transition-colors"
+              title="Sign out"
+            >
+              <LogOut size={16} />
+            </button>
+          </div>
         )}
       </div>
     </header>
