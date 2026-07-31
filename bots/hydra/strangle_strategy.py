@@ -475,6 +475,13 @@ class StrangleStrategy(HydraStrategy):
             success = self._simulate_entry(entry) if self.dry_run else self._execute_entry(entry)
             if not success:
                 self.daily_state.entries_failed += 1
+                # 2026-07-31: see _record_failed_entry's docstring — this is the
+                # same class of gap fixed in the main strategy.py entry path.
+                # Strangle is currently unused/dry-run-locked (not wired to a
+                # live variant), fixed here for consistency.
+                self._record_failed_entry(
+                    entry_num, "strangle: placement unsuccessful", used_retry_loop=False
+                )
                 self._next_entry_index += 1
                 return f"Entry #{entry_num} failed - placement unsuccessful"
 

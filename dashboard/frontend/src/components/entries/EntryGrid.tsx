@@ -21,9 +21,18 @@ function findEntryByNumber(
  *  position. The bot records it so the dashboard can show WHAT was skipped and
  *  WHY, but it must never be presented as an open/real entry — that made a
  *  $0-capital skip read as a 10:45 "entry" (2026-06-30). A legitimate one-sided
- *  entry skips only ONE side, so a true skip requires BOTH sides skipped. */
+ *  entry skips only ONE side, so a true skip requires BOTH sides skipped.
+ *
+ *  2026-07-31: a genuine order-EXECUTION FAILURE (broker accepted the order
+ *  but it never filled after exhausting retries) ALSO sets both sides
+ *  skipped=True (see EntryCard.tsx's getEntryStatus() comment for the full
+ *  incident) — it must NOT be bucketed into the generic "Skipped — no
+ *  position" strip below, which only shows a plain gray skip_reason line
+ *  with no visual distinction from a routine strategic skip. Excluding it
+ *  here routes it through the `positions`/EntryCard path instead, where it
+ *  already renders as a visually distinct red "failed" card. */
 function isFullySkipped(e: HydraEntry): boolean {
-  return Boolean(e.call_side_skipped && e.put_side_skipped);
+  return Boolean(e.call_side_skipped && e.put_side_skipped) && !e.execution_failed;
 }
 
 /** Compact "HH:MM" from the bot-stamped entry_time (ISO, ET). */

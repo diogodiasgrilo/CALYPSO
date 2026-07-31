@@ -20,6 +20,14 @@ function getEntryStatus(e: HydraEntry): {
   stoppedSide?: "call" | "put";
 } {
   if (!e.entry_time) return { status: "pending" };
+  // 2026-07-31: a genuine order-placement FAILURE (broker accepted the order
+  // but it never filled after exhausting retries) also sets call_side_skipped
+  // AND put_side_skipped=True (so downstream "no real position" checks keep
+  // working), so this must be checked BEFORE the generic skipped branch below
+  // — otherwise a failure silently renders as a routine strategic skip, which
+  // is exactly the bug this fixes (see skip_reason for the human-readable
+  // detail either way).
+  if (e.execution_failed) return { status: "failed" };
   if (e.call_side_skipped && e.put_side_skipped) return { status: "skipped" };
 
   // Prefer the explicit close_reason set at close time. The Brandon TP / breach
@@ -152,6 +160,40 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
   const { status, stoppedSide } = getEntryStatus(entry);
   const totalCredit = entry.call_spread_credit + entry.put_spread_credit;
   const displayLabel = label ?? `E${entry.entry_number}`;
+
+  // Execution FAILURE (2026-07-31): the broker accepted the order but it never
+  // filled after exhausting retries — a broker/execution-layer problem, not a
+  // strategic choice. Distinct from "skipped" deliberately: full opacity (not
+  // faded) and a loss-colored left border so it's impossible to mistake for a
+  // routine skip at a glance. Reuses skip_reason for the error detail (set to
+  // a clear "Execution failed after N attempts: ..." message by the backend).
+  if (status === "failed") {
+    return (
+      <div
+        className="bg-card rounded-lg p-3 border border-border-dim"
+        style={{
+          borderLeftColor: colors.loss,
+          borderLeftWidth: 3,
+          borderLeftStyle: "solid",
+        }}
+      >
+        <div className="flex items-center justify-between mb-2">
+          <span className="font-semibold text-sm" style={{ color: colors.loss }}>
+            {displayLabel}
+          </span>
+          <StatusBadge status="failed" />
+        </div>
+        <div className="text-xs text-text-secondary mb-1">
+          {entry.entry_time ? formatTime(entry.entry_time) : "--:--"}
+        </div>
+        {entry.skip_reason && (
+          <div className="text-[10px] leading-tight" style={{ color: colors.loss }}>
+            {entry.skip_reason}
+          </div>
+        )}
+      </div>
+    );
+  }
 
   // Fully-skipped entry: minimal card with reason (guard handles legacy data without skip_reason)
   if (status === "skipped") {

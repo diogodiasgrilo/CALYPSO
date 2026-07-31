@@ -36,6 +36,50 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Entry-execution-FAILURE recording + alerting (2026-07-31, live incident on
+  variant B). Entry #3 exhausted all order-placement retries — IBKR's paper
+  matching engine accepted a market order but never filled it (confirmed via a
+  direct broker query: the order was genuinely accepted, not rejected, and sat
+  with zero fill despite a live moving 5-cent-wide market; a documented IBKR
+  paper-API reliability issue, not a HYDRA logic bug) — and the failure
+  produced ZERO operator-visible signal: no DB row, no dashboard detail (the
+  entry-slot card rendered as a blank "window passed", indistinguishable from a
+  slot that never happened), no alert — only a raw log line and an incremented
+  in-memory counter (`daily_state.entries_failed`) nothing surfaced. FIX: new
+  `_record_failed_entry` (HydraStrategy) reuses `_record_skipped_entry`'s
+  plumbing (append to `daily_state.entries`, `skipped_entries` DB row) but sets
+  a new `execution_failed` field/DB column (schema v14, additive
+  `skipped_entries.execution_failed INTEGER NOT NULL DEFAULT 0`) and alerts via
+  a new `AlertType.ENTRY_EXECUTION_FAILED` at explicit `priority=HIGH` — never
+  inherited/LOW, since LOW/MEDIUM alerts are silently dropped when a variant's
+  `alerts.enabled=false` (the severity bypass in `shared/alert_service.py` only
+  lets HIGH/CRITICAL through regardless). Wired into the 4 retries-exhausted
+  sinks: `strategy.py` (the live path — covers A directly, B/C by inheritance
+  through Brandon's override), `double_calendar_strategy.py` (D) and
+  `spy_double_calendar_strategy.py` (E) with `send_alert=False` (their configs
+  document "dry-run path emits none" as an intentional no-paging invariant —
+  DB visibility only, no Telegram), and `strangle_strategy.py` (unused). D/E/
+  Strangle also pass `used_retry_loop=False` (they place in a single attempt,
+  no retry ladder — the message correctly says "on the first attempt" instead
+  of claiming a retry count that never happened). Dashboard: a new "FAILED"
+  disposition (backend `_entry_disposition`, checked before "SKIPPED" — a
+  failure sets both `call_side_skipped`/`put_side_skipped=True` too, for
+  backward-compat with existing "no real position" checks) rendered as a
+  visually distinct red card/badge/dot across every surface that previously
+  computed skip status independently and would otherwise have silently
+  collapsed a failure into a routine skip: `EntryCard.tsx`, `EntryTimeline.tsx`,
+  `Comparison.tsx`, `EntryGrid.tsx`, the iOS Scriptable widget, and the
+  `/api/widget` backend. HERMES's daily analyst (`services/hermes/
+  data_collector.py`) also checks `execution_failed` first in both
+  `_classify_outcome` and its `entry_type` classification — before this fix it
+  would have narrated the failure as a clean, uneventful $0 "put_only" trade.
+  Found and fixed via 3 rounds of adversarial review (8 findings total across
+  rounds 1-2, converged clean on round 3) after implementing against a written
+  plan. +26 tests: 4 new files (test_entry_execution_failure.py,
+  test_execution_failed_v14.py, test_calendar_execution_failure.py,
+  test_hermes_execution_failed_classification.py) plus updates to
+  test_strangle_strategy.py and test_dashboard_variant_buffer_margin.py. Full
+  suite 2056 passed / 15 skipped / 0 failed.
 - Skipped-entry reasons rewritten for humans (2026-07-22). The dashboard
   skip-reason strings carried backend jargon (MKT-011 / MKT-032 / MKT-010 /
   Downday-035 / Upday-035 / "require-both-sides: one-sided (GEX-skip)

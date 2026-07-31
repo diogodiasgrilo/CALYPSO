@@ -415,6 +415,15 @@ class IronCondorEntry:
     put_side_expired: bool = False   # Put spread expired worthless (PROFIT - kept credit)
     call_side_skipped: bool = False  # Call side was never opened (HYDRA one-sided entry)
     put_side_skipped: bool = False   # Put side was never opened (HYDRA one-sided entry)
+    # execution_failed (2026-07-31): True when this "skip" is actually a genuine order-
+    # placement FAILURE (broker accepted the order but it never filled after exhausting
+    # all retries) rather than a deliberate strategic skip (credit gate, illiquidity,
+    # whipsaw, etc). Set by _record_failed_entry, alongside call_side_skipped/
+    # put_side_skipped=True (so existing "no real position" checks keep working
+    # unchanged) — this flag exists purely so the dashboard/DB/alert layers can tell
+    # "we chose not to trade" apart from "the broker failed us". See skip_reason for
+    # the human-readable detail either way.
+    execution_failed: bool = False
     # Directional-pivot close (directional_pivot, introduced 2026-05-01): closed mid-day
     # because SPX moved >= 0.25% from session open. Distinguished from
     # *_side_stopped (which uses credit+buffer threshold) so the journal /

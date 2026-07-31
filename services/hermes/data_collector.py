@@ -196,7 +196,12 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
         put_credit = e.get("put_spread_credit", 0) or 0
         total_credit = call_credit + put_credit
 
-        if e.get("call_side_skipped"):
+        # 2026-07-31: an execution FAILURE also sets both *_side_skipped flags
+        # (see _classify_outcome docstring) — must be checked first, else it
+        # falls into the call_side_skipped branch and is mislabeled "put_only".
+        if e.get("execution_failed"):
+            entry_type = "execution_failed"
+        elif e.get("call_side_skipped"):
             entry_type = "put_only"
         elif e.get("put_side_skipped"):
             entry_type = "call_only"
@@ -438,14 +443,24 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
 
 def _classify_outcome(entry: Dict) -> str:
     """Classify entry outcome: clean, take_profit, early_closed, call_stopped,
-    put_stopped, or double_stopped.
+    put_stopped, double_stopped, or execution_failed.
 
     A Brandon take-profit / GEX-breach / MKT-018 close sets BOTH *_side_stopped
     flags as a generic "closed" marker, so the flags alone mislabel a profitable
     take-profit as a "double_stopped". The state entry's close_reason ("TP" /
     "BREACH" / "STOP" / "EXPIRED") is the authoritative disposition — consult it
     before any flag inference.
+
+    2026-07-31: a genuine order-EXECUTION FAILURE (broker accepted the order but
+    it never filled after exhausting retries) also sets BOTH call_side_skipped
+    and put_side_skipped=True with no close_reason and no *_side_stopped flags —
+    without this check it fell through to "clean" (a real incident: HERMES would
+    have narrated a $0-credit put_only trade as a routine, uneventful entry
+    instead of flagging a broker/execution problem). Must be checked before any
+    other branch since a failure has none of the other markers set.
     """
+    if entry.get("execution_failed"):
+        return "execution_failed"
     reason = str(entry.get("close_reason", "") or "").upper()
     if reason == "TP":
         return "take_profit"

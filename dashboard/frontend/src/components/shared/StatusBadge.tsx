@@ -9,6 +9,7 @@ export type EntryStatus =
   | "stopped"
   | "stopped_single"
   | "skipped"
+  | "failed"
   | "pending"
   | "placing";
 
@@ -26,6 +27,7 @@ function getLabel(status: EntryStatus, stoppedSide?: "call" | "put"): string {
   if (status === "take_profit") return "Take Profit";
   if (status === "breach") return "Breach Exit";
   if (status === "flattened") return "Flattened";
+  if (status === "failed") return "Execution Failed";
   return status;
 }
 

@@ -39,8 +39,16 @@ def _entry_dot(e: dict) -> str:
     falling through to 'expired' — 'expired' reads as a kept-credit win, so a
     no-trade day of skips would otherwise look like a day of winners (dashboard
     audit 2026-07-22).
+
+    2026-07-31: a genuine order-EXECUTION FAILURE also sets both *_side_skipped
+    flags (see dashboard/backend/routers/variants.py _entry_disposition's
+    docstring for the full incident) — must be checked before the generic
+    'skipped' branch, else it renders identically to a routine strategic skip
+    on the widget too, the same blind spot this fix closes everywhere else.
     """
     if e.get("is_complete"):
+        if e.get("execution_failed"):
+            return "failed"
         if e.get("call_side_stopped") or e.get("put_side_stopped"):
             return "stopped"
         if e.get("call_side_skipped") and e.get("put_side_skipped"):

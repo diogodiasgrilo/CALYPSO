@@ -54,6 +54,11 @@ export interface HydraEntry {
   put_side_expired: boolean;
   call_side_skipped: boolean;
   put_side_skipped: boolean;
+  // execution_failed (2026-07-31): True when this "skip" is actually a genuine
+  // order-placement FAILURE (broker accepted the order but it never filled
+  // after exhausting retries) rather than a deliberate strategic skip.
+  // Optional — absent on state files written before this field existed.
+  execution_failed?: boolean;
   // close_reason / early_closed: set when an entry is CLOSED early (Brandon TP
   // / GEX-breach / MKT-018), not stopped. The TP path also flips the *_stopped
   // flags as a generic "side closed" marker, so close_reason is the only

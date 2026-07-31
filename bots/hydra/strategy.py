@@ -5115,6 +5115,113 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             logger.warning(f"Failed to send skip alert for Entry #{entry_num}: {e}")
 
+    def _record_failed_entry(self, entry_num: int, error_detail: str,
+                             send_alert: bool = True, used_retry_loop: bool = True):
+        """
+        Record a genuine order-EXECUTION FAILURE (2026-07-31) — distinct from a
+        deliberate strategic skip. Fires when order placement exhausts all
+        retries (e.g. the broker accepted an order but it never filled — an
+        IBKR paper-engine matching anomaly confirmed live on 2026-07-31, not a
+        HYDRA logic bug). Before this method existed, a failure like this
+        produced ZERO operator-visible signal: no DB row, no dashboard detail
+        (the entry-slot card rendered as a blank "window passed", indistinguishable
+        from a slot that never happened), and no alert — only a raw log line and
+        an incremented in-memory counter (daily_state.entries_failed) that
+        nothing surfaced proactively.
+
+        Reuses `_record_skipped_entry`'s plumbing (daily_state.entries append +
+        skipped_entries DB row + shadow-entry log) so the failure flows through
+        the SAME dashboard/DB pipeline a skip already uses — but marks
+        `execution_failed=True` (schema v14 discriminator) so every layer
+        (dashboard card, skipped_entries DB rows, Hermes/Clio analytics) can
+        tell "we chose not to trade" apart from "the broker failed us", and
+        sends a HIGH-priority alert (never LOW — LOW/MEDIUM alerts are silently
+        dropped when a variant's alerts.enabled=false; HIGH/CRITICAL are the
+        only priorities guaranteed to publish regardless, per the severity
+        bypass in shared/alert_service.py — this makes the alert correct
+        whichever variant hits this path, live or dry-run).
+
+        Args:
+            entry_num: The entry number (1-7)
+            error_detail: The underlying error (e.g. "Entry execution failed",
+                or an exception message) — folded into a clear, greppable
+                skip_reason so the DB row/dashboard/alert all read the same way.
+            send_alert: Whether to send a Telegram alert (default True; a
+                caller that already sends its own bespoke alert for this
+                failure can pass False, mirroring _record_skipped_entry).
+            used_retry_loop: True (default) for the main strategy.py entry
+                path, which retries ENTRY_MAX_RETRIES times before giving up
+                — the message says "after N attempts". False for callers
+                (D/E/Strangle) whose single-shot placement has no retry
+                ladder, so the message says "on the first attempt" instead —
+                claiming a retry count that never happened would be its own
+                small instance of the "looks fine but is misleading" problem
+                this method exists to fix.
+        """
+        now = get_us_market_time()
+        failed = HydraIronCondorEntry(entry_number=entry_num)
+        failed.is_complete = True
+        failed.call_side_skipped = True
+        failed.put_side_skipped = True
+        failed.execution_failed = True
+        attempt_phrase = (
+            f"after {ENTRY_MAX_RETRIES} attempts" if used_retry_loop
+            else "on the first attempt (no retry loop for this entry type)"
+        )
+        skip_reason = f"Execution failed {attempt_phrase}: {error_detail}"
+        failed.skip_reason = skip_reason
+        failed.entry_time = now
+        self.daily_state.entries.append(failed)
+
+        # Record to SQLite (before alert guard — must run even when send_alert=False)
+        if self._data_recorder:
+            try:
+                self._data_recorder.record_skipped_entry({
+                    "date": now.strftime('%Y-%m-%d'),
+                    "entry_number": entry_num,
+                    "skip_time": now.strftime('%Y-%m-%d %H:%M:%S'),
+                    "skip_reason": skip_reason,
+                    "spx_at_skip": self.current_price,
+                    "vix_at_skip": self.current_vix,
+                    "estimated_call_credit": None,
+                    "estimated_put_credit": None,
+                    "contracts": 0,
+                    "execution_failed": 1,
+                })
+            except Exception:
+                pass
+
+            self._record_shadow_entry(
+                entry_num=entry_num,
+                actual_entry=None,
+                is_skipped=True,
+                skip_reason=skip_reason,
+            )
+
+        if not send_alert:
+            return
+
+        time_str = now.strftime('%H:%M ET')
+        alert_msg = (
+            f"Entry #{entry_num} FAILED to execute at {time_str}\n"
+            f"{error_detail}\n\n"
+            f"The order was submitted to the broker but never filled, {attempt_phrase}. "
+            f"This is a broker/execution-layer issue, not a strategic decision — "
+            f"verify no partial position was left open."
+        )
+
+        try:
+            self.alert_service.send_alert(
+                alert_type=AlertType.ENTRY_EXECUTION_FAILED,
+                title=f"Entry #{entry_num} Execution FAILED",
+                message=alert_msg,
+                priority=AlertPriority.HIGH,
+                details={"entry_number": entry_num, "reason": error_detail},
+                contracts=self.contracts_per_entry,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send execution-failure alert for Entry #{entry_num}: {e}")
+
     # ========================================================================
     # DataRecorder: Real-time SQLite writes (non-critical, fire-and-forget)
     # ========================================================================
@@ -6852,6 +6959,13 @@ class HydraStrategy(MEICStrategy):
         # All retries exhausted
         self.daily_state.entries_failed += 1
         self._record_api_result(False, f"Entry #{entry_num} failed: {last_error}")
+        # 2026-07-31: this used to be a silent counter bump — no DB row, no
+        # dashboard detail, no alert (see _record_failed_entry's docstring for
+        # the full incident). _record_api_result above only feeds the circuit
+        # breaker's consecutive-failure bookkeeping; it does not alert unless
+        # this is the Nth consecutive failure, a much higher bar than "this one
+        # entry failed to place."
+        self._record_failed_entry(entry_num, last_error or "unknown error")
         self._next_entry_index += 1
 
         self._entry_in_progress = False
@@ -11362,6 +11476,10 @@ class HydraStrategy(MEICStrategy):
                     "override_reason": getattr(entry, 'override_reason', None),
                     # Skip tracking: reason when entry is fully skipped
                     "skip_reason": getattr(entry, 'skip_reason', ""),
+                    # execution_failed (2026-07-31): distinguishes a genuine order-placement
+                    # FAILURE from a deliberate strategic skip — see field docstring on
+                    # IronCondorEntry (base_strategy.py).
+                    "execution_failed": getattr(entry, 'execution_failed', False),
                     # Fill prices (for /entry display after restart)
                     "short_call_fill_price": entry.short_call_fill_price,
                     "long_call_fill_price": entry.long_call_fill_price,
@@ -13337,6 +13455,10 @@ class HydraStrategy(MEICStrategy):
                 restored_entry.actual_put_stop_debit = entry_data.get("actual_put_stop_debit", 0.0)
                 # v1.16.0: Restore skip reason for dashboard display
                 restored_entry.skip_reason = entry_data.get("skip_reason", "")
+                # 2026-07-31: restore the skip-vs-failure discriminator too, else a
+                # mid-day restart would silently downgrade a FAILED card back to a
+                # generic SKIPPED one.
+                restored_entry.execution_failed = entry_data.get("execution_failed", False)
                 # 2026-05-05: position IDs + UICs were silently dropped on
                 # restore. In live mode the Saxo recovery path (the other
                 # branch in _recover_positions_from_saxo) repopulates these

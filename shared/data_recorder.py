@@ -34,7 +34,9 @@ Schema v10 (2026-06-12) adds: a first-class `date` column on spread_snapshots
 backfilled from the timestamp prefix, with an index — so per-day queries and
 per-day maintenance match every other table (date, entry_number).
 
-Current SCHEMA_VERSION = 10 (see the module constant).
+Current SCHEMA_VERSION = 14 (see the module constant; this docstring intro
+describes v10 as an example of the migration pattern, not the current version —
+see the dated comment blocks above each MIGRATION_V{N}_SQL for the full history).
 """
 
 import json
@@ -46,7 +48,7 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 13
+SCHEMA_VERSION = 14
 
 # ============================================================================
 # Schema Migration SQL
@@ -184,6 +186,20 @@ MIGRATION_V13_SQL = [
     "ALTER TABLE daily_summaries ADD COLUMN unattributed_overlay_pnl REAL",
 ]
 
+# v14 (2026-07-31): execution_failed discriminator on skipped_entries. Before this,
+# a genuine order-placement FAILURE (broker accepted the order but it never filled
+# after exhausting all retries — e.g. an IBKR paper-engine matching anomaly) was
+# recorded identically to a deliberate strategic SKIP (credit gate, illiquidity,
+# whipsaw, etc.) — or, before the accompanying strategy.py fix, not recorded at all.
+# This column lets the dashboard/Hermes/Clio/slot_edge tell "we chose not to trade"
+# apart from "the broker failed us" without parsing skip_reason text. 0 = skip
+# (default, preserves all historical rows' meaning), 1 = execution failure.
+# Additive + defaulted — historical rows read as 0 (skip), which is correct since
+# this discriminator didn't exist before the entries it would apply to were fixed.
+MIGRATION_V14_SQL = [
+    "ALTER TABLE skipped_entries ADD COLUMN execution_failed INTEGER NOT NULL DEFAULT 0",
+]
+
 # v7: shadow entries table — records what OTM-based selection WOULD have chosen
 # at each entry attempt, for retroactive comparison vs credit-based selection.
 # Pure observation — does not affect trading behavior.
@@ -248,6 +264,7 @@ CREATE TABLE IF NOT EXISTS skipped_entries (
     estimated_put_credit REAL,
     would_have_stopped INTEGER,
     theoretical_pnl REAL,
+    execution_failed INTEGER NOT NULL DEFAULT 0,
     PRIMARY KEY (date, entry_number)
 );
 """
@@ -413,6 +430,9 @@ class DataRecorder:
                 if current_version < 13:
                     # v13: per-day unattributed-overlay P&L on daily_summaries
                     migration_sql += MIGRATION_V13_SQL
+                if current_version < 14:
+                    # v14: execution_failed discriminator on skipped_entries
+                    migration_sql += MIGRATION_V14_SQL
 
                 for sql in migration_sql:
                     try:
@@ -664,10 +684,16 @@ class DataRecorder:
                 "theoretical_short_call", "theoretical_long_call",
                 "theoretical_short_put", "theoretical_long_put",
                 "estimated_call_credit", "estimated_put_credit",
+                "execution_failed",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
-            values = tuple(skip_data.get(c) for c in cols)
+            # execution_failed is NOT NULL DEFAULT 0 (v14) — null-safe like `contracts`
+            # in record_stop, since legacy callers won't pass this key at all.
+            values = tuple(
+                (skip_data.get(c) or 0) if c == "execution_failed" else skip_data.get(c)
+                for c in cols
+            )
 
             with self._connect() as conn:
                 conn.execute(

@@ -142,6 +142,7 @@ class AlertType(Enum):
 
     # Entry Events
     ENTRY_SKIPPED = "entry_skipped"  # Entry skipped (credit gate, VIX gate, illiquidity, etc.)
+    ENTRY_EXECUTION_FAILED = "entry_execution_failed"  # Order placement exhausted all retries — broker/API failure, not a strategic skip
 
     # Variant comparison (1v1 dry-run experiment) — fires once at end-of-day
     # from variant A only. Variant B never fires (alerts.enabled=false in
@@ -161,6 +162,7 @@ DEFAULT_PRIORITIES = {
     AlertType.MAX_LOSS: AlertPriority.HIGH,
     AlertType.WING_BREACH: AlertPriority.HIGH,
     AlertType.ROLL_FAILED: AlertPriority.HIGH,
+    AlertType.ENTRY_EXECUTION_FAILED: AlertPriority.HIGH,  # order accepted but never filled after retries — distinct from a routine skip
     AlertType.DELTA_BREACH: AlertPriority.HIGH,
     AlertType.API_ERROR: AlertPriority.HIGH,
     AlertType.PREMARKET_GAP: AlertPriority.HIGH,  # Big gap affects positions

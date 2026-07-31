@@ -906,6 +906,32 @@ function EntryRow({ entry, accent, spx }: { entry: VariantEntry; accent: string;
   const time = entry.entry_time?.slice(11, 16) ?? "—";
   const disposition = entry.disposition ?? "LIVE";
 
+  // 2026-07-31: a genuine order-EXECUTION FAILURE (broker accepted the order
+  // but it never filled after exhausting retries) also sets call_side_skipped
+  // AND put_side_skipped=True (see the backend's _entry_disposition docstring
+  // for the full incident) — must be its own branch, checked BEFORE the
+  // generic fullySkipped collapse below, else it renders as an indistinguishable
+  // gray "skipped" strip on this comparison page too (the same blind spot
+  // already fixed on the main dashboard's EntryCard/EntryTimeline/widget).
+  if (disposition === "FAILED") {
+    return (
+      <div className="rounded border p-2 text-xs flex items-center justify-between"
+        style={{ borderColor: colors.loss, backgroundColor: `${colors.loss}10` }}
+      >
+        <span className="font-mono">
+          <span style={{ color: accent }}>#{num}</span>{" "}
+          <span className="text-text-secondary">{time}</span>
+        </span>
+        <span
+          className="text-[10px] font-mono uppercase tracking-wider"
+          style={{ color: colors.loss }}
+        >
+          failed{entry.skip_reason ? ` · ${entry.skip_reason}` : ""}
+        </span>
+      </div>
+    );
+  }
+
   // A fully-skipped slot: collapse to one clean line — no phantom "0/0 $0".
   const fullySkipped =
     disposition === "SKIPPED" ||

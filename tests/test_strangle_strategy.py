@@ -278,6 +278,13 @@ class TestInitiateEntry:
         s._log_entry = lambda e: None
         s._record_entry_to_db = lambda e: None
         s._record_skipped_entry = lambda *a, **k: None
+        # 2026-07-31: _record_failed_entry (execution-failure recording/alert
+        # fix) is a real inherited HydraStrategy method now exercised by the
+        # placement-failure path below — wire its dependencies so it runs for
+        # real rather than needing another blanket no-op stub.
+        s._data_recorder = MagicMock()
+        s.alert_service = MagicMock()
+        s._record_shadow_entry = lambda **kw: None
         return s
 
     def test_successful_entry_books_everything(self):
@@ -321,13 +328,29 @@ class TestInitiateEntry:
         assert s.daily_state.entries == []
 
     def test_placement_failure_counts_failed(self):
+        # 2026-07-31: before the execution-failure fix, a placement failure was
+        # a complete blind spot — no DB row, no dashboard detail, no alert (see
+        # tests/test_entry_execution_failure.py for the full incident writeup).
+        # This test now pins the FIXED behavior end-to-end through Strangle's
+        # (simpler, single-attempt) entry path, not just the counter bump.
         s = self._strat()
         s._simulate_entry = lambda e: False
         result = s._initiate_entry()
         assert "failed" in result
         assert s.daily_state.entries_failed == 1
         assert s._next_entry_index == 1
-        assert s.daily_state.entries == []
+        # The failure is now recorded, not silently dropped.
+        assert len(s.daily_state.entries) == 1
+        recorded = s.daily_state.entries[0]
+        assert recorded.execution_failed is True
+        assert recorded.call_side_skipped is True
+        assert recorded.put_side_skipped is True
+        assert s._data_recorder.record_skipped_entry.called
+        (db_kwargs,), _ = s._data_recorder.record_skipped_entry.call_args
+        assert db_kwargs["execution_failed"] == 1
+        assert s.alert_service.send_alert.called
+        _, alert_kwargs = s.alert_service.send_alert.call_args
+        assert alert_kwargs["priority"].name == "HIGH"
 
 
 class TestSettlement:

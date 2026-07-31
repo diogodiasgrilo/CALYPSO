@@ -100,3 +100,42 @@ class TestDispositionSettling:
     def test_expired_both_sides(self):
         e = _active_entry(call_side_expired=True, put_side_expired=True)
         assert _entry_disposition(e, after_close=True) == "EXPIRED"
+
+
+# ─── _entry_disposition: FAILED (2026-07-31) — the execution-failure fix ──
+class TestDispositionFailed:
+    """A genuine order-placement FAILURE (broker accepted the order but it
+    never filled after exhausting retries) sets call_side_skipped AND
+    put_side_skipped=True too, so it must be checked BEFORE the generic
+    SKIPPED branch — otherwise it silently renders as a routine skip, which
+    is exactly the incident this fixes (see tests/test_entry_execution_failure.py)."""
+
+    def test_execution_failed_wins_over_skipped(self):
+        e = _active_entry(
+            call_side_skipped=True, put_side_skipped=True, execution_failed=True,
+        )
+        assert _entry_disposition(e, after_close=False) == "FAILED"
+
+    def test_execution_failed_wins_over_close_reason(self):
+        # Defensive: a failed entry never realistically has a close_reason
+        # (nothing was ever opened to close), but FAILED must still win if
+        # one is somehow present.
+        e = _active_entry(
+            call_side_skipped=True, put_side_skipped=True, execution_failed=True,
+            close_reason="TP",
+        )
+        assert _entry_disposition(e, after_close=False) == "FAILED"
+
+    def test_regular_skip_unaffected(self):
+        # Without execution_failed, both-sides-skipped still reads as a
+        # routine SKIPPED — the fix must not change existing skip behavior.
+        e = _active_entry(call_side_skipped=True, put_side_skipped=True)
+        assert _entry_disposition(e, after_close=False) == "SKIPPED"
+
+    def test_execution_failed_false_is_not_failed(self):
+        # The default/legacy value (False, or absent on old state files) must
+        # not be mistaken for a failure.
+        e = _active_entry(
+            call_side_skipped=True, put_side_skipped=True, execution_failed=False,
+        )
+        assert _entry_disposition(e, after_close=False) == "SKIPPED"

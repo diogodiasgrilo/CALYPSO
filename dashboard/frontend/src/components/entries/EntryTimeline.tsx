@@ -27,6 +27,11 @@ function timeToMinutes(timeStr: string): number {
 
 function getStatus(entry: HydraEntry | undefined): EntryStatus {
   if (!entry || !entry.entry_time) return "pending";
+  // 2026-07-31: a genuine execution FAILURE also sets both *_side_skipped
+  // flags — must be checked before the generic skipped branch below, same
+  // fix as EntryCard.tsx's getEntryStatus() (see its comment for the full
+  // incident writeup).
+  if (entry.execution_failed) return "failed";
   if (entry.call_side_skipped && entry.put_side_skipped) return "skipped";
 
   // Prefer close_reason: a Brandon TP/breach sets *_side_stopped as a generic

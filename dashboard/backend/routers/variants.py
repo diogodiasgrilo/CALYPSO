@@ -331,7 +331,7 @@ def _compute_buffer_margin(entry: dict) -> dict:
 def _entry_disposition(entry: dict, after_close: bool = False) -> str:
     """Compute a human-readable disposition tag for an entry.
 
-    Returns one of: TP, BREACH, STOP, EXPIRED, SKIPPED, SETTLING, LIVE.
+    Returns one of: TP, BREACH, STOP, EXPIRED, FAILED, SKIPPED, SETTLING, LIVE.
 
     ``after_close`` (market is past the 4 PM / early-close cash settlement):
     an entry whose placed sides aren't finalized is shown as SETTLING rather
@@ -348,7 +348,16 @@ def _entry_disposition(entry: dict, after_close: bool = False) -> str:
 
     is_complete is intentionally ignored — it's True from the moment of
     placement, not from lifecycle end.
+
+    2026-07-31: `execution_failed` distinguishes a genuine order-placement
+    FAILURE (broker accepted the order but it never filled after exhausting
+    retries) from a deliberate strategic SKIP. Both set call_side_skipped/
+    put_side_skipped=True (so a failed entry still resolves placed_sides_done
+    correctly below), so this must be checked BEFORE the generic SKIPPED
+    branch — otherwise a failure would silently render as a routine skip.
     """
+    if entry.get("execution_failed"):
+        return "FAILED"
     explicit = entry.get("close_reason")
     if explicit:
         return explicit

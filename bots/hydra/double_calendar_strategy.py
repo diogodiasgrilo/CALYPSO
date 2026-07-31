@@ -494,6 +494,23 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
 
             if not self._dc_simulate_entry(entry):
                 self.daily_state.entries_failed += 1
+                # 2026-07-31: skipped_entries DB row via the inherited HydraStrategy
+                # method (CalendarEntry subclasses IronCondorEntry, so the shared
+                # fields it sets are compatible) — fixes the DB blind spot (this
+                # never happened once in D's history, but was previously invisible
+                # even to a manual SQL query if it did). send_alert=False: D's
+                # config _comment_alerts explicitly documents "D's dry-run path
+                # emits none" as an intentional invariant (avoids paging on a
+                # scaffold/NO-GO variant) — this fix must not silently break that.
+                # A daily-summary alert still surfaces the count via entries_failed
+                # (shared/alert_service.py daily_summary_ic). NOTE: this does NOT
+                # appear on D's dedicated /dc calendar dashboard (which reads
+                # dc_calendar.db, a separate recorder) — only in skipped_entries.
+                # Full /dc-view parity is a separate follow-up.
+                self._record_failed_entry(
+                    entry_num, "could not price/simulate calendar",
+                    send_alert=False, used_retry_loop=False,
+                )
                 self._next_entry_index += 1
                 return f"Entry #{entry_num} failed - could not price/simulate calendar"
 

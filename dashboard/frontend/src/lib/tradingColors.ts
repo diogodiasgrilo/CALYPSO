@@ -51,7 +51,7 @@ export function cushionColor(pct: number): string {
 
 /** Entry status badge colors. */
 export function statusColor(
-  status: "active" | "expired" | "flattened" | "stopped" | "stopped_single" | "skipped" | "pending" | "placing" | "take_profit" | "breach"
+  status: "active" | "expired" | "flattened" | "stopped" | "stopped_single" | "skipped" | "failed" | "pending" | "placing" | "take_profit" | "breach"
 ): string {
   switch (status) {
     case "active":
@@ -72,6 +72,11 @@ export function statusColor(
       return colors.warning; // single stop = amber/yellow
     case "skipped":
       return colors.textDim;
+    case "failed":
+      // Broker/execution failure, not a strategic choice — same severity color
+      // as a double stop (colors.loss) so it visually stands apart from the
+      // neutral gray "skipped" badge.
+      return colors.loss;
     case "pending":
       return colors.textDim;
   }
