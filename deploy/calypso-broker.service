@@ -56,10 +56,22 @@ Restart=always
 RestartSec=30
 TimeoutStartSec=120
 
-# Graceful stop: the FastAPI shutdown hook runs ib.disconnect() (stop Tickler +
-# logout) so the IBKR session is released cleanly rather than left competing.
+# Graceful stop: the FastAPI shutdown hook (_shutdown_broker,
+# services/broker/main.py) sets shared.ib_retry.SHUTDOWN_EVENT so any
+# in-flight session/market/portfolio/history-family retry aborts within ~1
+# tick instead of completing its backoff schedule (2026-08-03 fix — see that
+# module for the incident this closes: 84 processes SIGKILLed when SIGTERM
+# landed mid OAuth-rehandshake), joins the maintenance thread, THEN runs
+# ib.disconnect() (stop Tickler + logout) so the IBKR session is released
+# cleanly rather than left competing.
+# 90s (was 30s, bumped 2026-08-03, corrected from an initial 45s that a
+# review caught as still too short): the 'orders' family is DELIBERATELY
+# NEVER abortable (shared/ib_retry.py — aborting an in-flight order retry
+# risks a naked/partial leg), and its own documented worst case is ~63s
+# (RetryPolicy: 6 attempts, ~46s of backoff + the final attempt). 90s gives
+# real margin above that rather than another undersized guess.
 KillSignal=SIGTERM
-TimeoutStopSec=30
+TimeoutStopSec=90
 
 StandardOutput=journal
 StandardError=journal

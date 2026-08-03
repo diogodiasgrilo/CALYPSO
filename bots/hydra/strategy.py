@@ -45,6 +45,7 @@ from enum import Enum
 
 from bots.hydra.order_types import BuySell
 from bots.hydra.leg import LEG_NAMES
+from bots.hydra.calendar_entry import CalendarEntry
 from shared import market_data_adapter
 from shared.ib_client import (
     IBClient, AmbiguousOrderError, RatePenaltyError, _normalize_position_dict,
@@ -5041,7 +5042,11 @@ class HydraStrategy(MEICStrategy):
 
     def _record_skipped_entry(self, entry_num: int, skip_reason: str,
                               alert_details: str = "", send_alert: bool = True,
-                              est_call: float = 0.0, est_put: float = 0.0):
+                              est_call: float = 0.0, est_put: float = 0.0,
+                              hydration_pct: Optional[float] = None,
+                              achieved_delta: Optional[float] = None,
+                              target_delta: Optional[float] = None,
+                              delta_floor: Optional[float] = None):
         """
         Record a skipped entry in daily_state.entries and optionally send Telegram alert.
 
@@ -5056,6 +5061,10 @@ class HydraStrategy(MEICStrategy):
             send_alert: Whether to send a Telegram alert (False when caller sends its own alert)
             est_call: Estimated call credit in cents (0 if not available)
             est_put: Estimated put credit in cents (0 if not available)
+            hydration_pct/achieved_delta/target_delta/delta_floor: schema v15
+                telemetry for the Brandon delta-target degraded-data guard
+                (bots/hydra/brandon/strategy.py) — None for every other skip
+                reason, which is the correct "not applicable" value.
         """
         now = get_us_market_time()
         skipped = HydraIronCondorEntry(entry_number=entry_num)
@@ -5083,6 +5092,12 @@ class HydraStrategy(MEICStrategy):
                     # v8: contracts=0 means "no entry placed" (skip); signals to analytics
                     # that this row should not be counted in per-contract aggregations.
                     "contracts": 0,
+                    # v15: Brandon delta-target degraded-data guard telemetry — None
+                    # (correct "not applicable") for every other skip reason.
+                    "hydration_pct": hydration_pct,
+                    "achieved_delta": achieved_delta,
+                    "target_delta": target_delta,
+                    "delta_floor": delta_floor,
                 })
             except Exception:
                 pass
@@ -6006,7 +6021,19 @@ class HydraStrategy(MEICStrategy):
         self._current_entry = None
         self.state = MEICState.MONITORING
         self._next_entry_index += 1
-        self._record_skipped_entry(entry_num, reason)
+        # v15 telemetry: the Brandon delta-target floor stashes hydration/delta
+        # values on `entry` when it sets abort_entry_reason (see
+        # bots/hydra/brandon/strategy.py) — thread them through if present.
+        # None for any other degraded-data-skip caller (e.g. the dry-run
+        # net-credit-floor honesty check), which is the correct "not
+        # applicable" value for those columns.
+        self._record_skipped_entry(
+            entry_num, reason,
+            hydration_pct=getattr(entry, "abort_entry_hydration_pct", None),
+            achieved_delta=getattr(entry, "abort_entry_achieved_delta", None),
+            target_delta=getattr(entry, "abort_entry_target_delta", None),
+            delta_floor=getattr(entry, "abort_entry_delta_floor", None),
+        )
         return f"Entry #{entry_num} skipped - degraded data"
 
     # OVERRIDE: Entry initiation with trend detection
@@ -11539,6 +11566,28 @@ class HydraStrategy(MEICStrategy):
                 # Compute net P&L: realized + unrealized (active sides) + surviving longs - commission
                 net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
                 for entry in active_entries:
+                    if isinstance(entry, CalendarEntry):
+                        # Calendars are a debit purchase, not a credit sale — the
+                        # credit-vertical math below (call_spread_credit -
+                        # call_spread_value) is meaningless for them: their
+                        # call_spread_credit/put_spread_credit are always ~0, while
+                        # call_spread_value/put_spread_value are OVERRIDDEN to mean
+                        # the calendar's own mark value, not IC cost-to-close.
+                        # Plugging those into the IC formula silently produced
+                        # net_pnl ≈ -calendar_value instead of the correct
+                        # calendar_value - net_debit (found 2026-08-03: dashboard
+                        # showed -$164 on a position whose real P&L was -$8).
+                        # entry.unrealized_pnl is the authoritative, phase-aware
+                        # formula already used everywhere else calendar P&L is
+                        # surfaced (DB snapshots, sidecar, heartbeat log) — reuse
+                        # it instead of hand-rolling calendar math here too.
+                        entry_age = (now - entry.entry_time).total_seconds() if entry.entry_time else 999.0
+                        is_fresh = entry_age < 60.0
+                        if is_fresh and entry.calendar_value == 0:
+                            pass  # marks not loaded yet this minute — contribute 0, not -net_debit
+                        else:
+                            net_pnl += entry.unrealized_pnl
+                        continue
                     call_active = (not entry.call_side_stopped and not entry.call_side_skipped
                                    and not entry.call_side_expired)
                     put_active = (not entry.put_side_stopped and not entry.put_side_skipped

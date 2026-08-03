@@ -81,11 +81,21 @@ TimeoutStartSec=120
 Restart=always
 RestartSec=30
 
-# Graceful stop: ibind registers a SIGTERM handler that runs oauth_shutdown
-# (stop Tickler + logout). Give it time so the IBKR session is released
-# cleanly rather than left as a competing session.
+# Graceful stop: bots/hydra/main.py's own SIGTERM handler sets a
+# shutdown_requested flag (checked at the top of the main loop and inside
+# interruptible_sleep) — NOT an ibind-level oauth_shutdown handler; this
+# process talks to IBKR via BrokerClient (CALYPSO_BROKER_URL, broker-proxy
+# mode) and owns no direct ibind session of its own to shut down.
+# 75s (was 30s, bumped 2026-08-03, corrected from an initial undersized 45s
+# a review caught): a full root-cause of an observed same-day shutdown delay
+# on this process is still open (see bots/hydra/__init__.py version history)
+# — this is a conservative mitigation, not a closed fix. Must comfortably
+# exceed a single in-flight BrokerClient HTTP call's worst-case timeout — for
+# a 7-contract entry (B/C) that's place_and_wait_for_fill's server-side
+# fill_timeout (min(30+3*(n-1), 45) = 45s, strategy.py) plus BrokerClient's
+# +10s pad = 55s; 45s (the old value) was UNDER that, not over it.
 KillSignal=SIGTERM
-TimeoutStopSec=30
+TimeoutStopSec=75
 
 StandardOutput=journal
 StandardError=journal

@@ -19,8 +19,20 @@ from shared.ib_retry import (
     CircuitBreakerOpen,
     CircuitState,
     RetryPolicy,
+    ShutdownRequested,
+    SHUTDOWN_EVENT,
     retry_with_backoff,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_shutdown_event():
+    """SHUTDOWN_EVENT is process-wide global state (shared.ib_retry) — clear
+    it before AND after every test in this file so a test that sets it (or a
+    future test added carelessly) can never leak into an unrelated test."""
+    SHUTDOWN_EVENT.clear()
+    yield
+    SHUTDOWN_EVENT.clear()
 
 
 # ─── CircuitBreaker ─────────────────────────────────────────────────────────
@@ -415,3 +427,108 @@ class TestCircuitBreakerWindowCutoff:
         # Now record one fresh success
         cb.record_success()
         assert cb.state == CircuitState.CLOSED
+
+
+# ─── Cooperative shutdown (2026-08-03) ──────────────────────────────────────
+# Found in the 2026-08-03 full-day audit: calypso-broker's shutdown hook
+# blocked the full 30s systemd grace period on an in-flight retry backoff
+# sleep, forcing a SIGKILL of 84 processes. SHUTDOWN_EVENT lets an abortable
+# retry bail out immediately instead. See shared/ib_retry.py's module-level
+# docstring for the full incident.
+class TestShutdownAbort:
+    def test_set_before_call_aborts_immediately_fn_never_invoked(self):
+        SHUTDOWN_EVENT.set()
+        fn = MagicMock(return_value="ok")
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=5, base_delay_s=0.001)
+        )(fn)
+        with pytest.raises(ShutdownRequested):
+            wrapped()
+        assert fn.call_count == 0
+
+    def test_set_mid_backoff_aborts_without_exhausting_attempts(self):
+        # fn's first call sets SHUTDOWN_EVENT (simulating SIGTERM arriving
+        # while a retryable failure is being handled) then raises — the
+        # subsequent SHUTDOWN_EVENT.wait(delay) must return True immediately
+        # (the event is already set) rather than sleeping the full delay,
+        # and the wrapper must raise ShutdownRequested instead of retrying.
+        def _side_effect():
+            SHUTDOWN_EVENT.set()
+            raise ConnectionError("connection reset")
+
+        fn = MagicMock(side_effect=_side_effect)
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=5, base_delay_s=5.0, jitter_fraction=0)
+        )(fn)
+        start = time.monotonic()
+        with pytest.raises(ShutdownRequested):
+            wrapped()
+        elapsed = time.monotonic() - start
+        assert fn.call_count == 1  # aborted after the first failure, no retry
+        assert elapsed < 1.0, (
+            f"took {elapsed:.2f}s — should abort near-instantly, not sleep "
+            f"the full 5s backoff"
+        )
+
+    def test_shutdown_requested_chains_the_original_exception(self):
+        def _side_effect():
+            SHUTDOWN_EVENT.set()
+            raise ConnectionError("connection reset")
+
+        fn = MagicMock(side_effect=_side_effect)
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=5, base_delay_s=0.001, jitter_fraction=0)
+        )(fn)
+        try:
+            wrapped()
+            pytest.fail("expected ShutdownRequested")
+        except ShutdownRequested as e:
+            assert isinstance(e.__cause__, ConnectionError)
+
+    def test_abortable_false_ignores_shutdown_runs_full_schedule(self):
+        # THE safety-critical negative test: order-family calls
+        # (abortable_on_shutdown=False, wired in shared/ib_client.py:_ib_call
+        # for family='orders') must NEVER abort early — abandoning an
+        # in-flight order retry risks leaving a naked/partial leg untracked.
+        SHUTDOWN_EVENT.set()
+        fn = MagicMock(side_effect=Exception("503 Service Unavailable"))
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=3, base_delay_s=0.001, jitter_fraction=0),
+            abortable_on_shutdown=False,
+        )(fn)
+        with pytest.raises(Exception, match="503"):
+            wrapped()
+        assert fn.call_count == 3  # full schedule ran despite SHUTDOWN_EVENT
+
+    def test_abortable_false_succeeds_normally_even_with_shutdown_set(self):
+        SHUTDOWN_EVENT.set()
+        fn = MagicMock(return_value="ok")
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=3, base_delay_s=0.001),
+            abortable_on_shutdown=False,
+        )(fn)
+        assert wrapped() == "ok"
+        assert fn.call_count == 1
+
+    def test_non_retryable_exception_not_masked_by_shutdown_check(self):
+        # A non-retryable error must still propagate as itself (not get
+        # swallowed/reclassified) regardless of SHUTDOWN_EVENT state.
+        SHUTDOWN_EVENT.clear()
+        fn = MagicMock(side_effect=ValueError("bad input"))
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=5, base_delay_s=0.001)
+        )(fn)
+        with pytest.raises(ValueError, match="bad input"):
+            wrapped()
+        assert fn.call_count == 1
+
+    def test_clear_shutdown_event_restores_normal_retry_behavior(self):
+        # Sanity check on the autouse fixture itself: a previously-set event
+        # (cleared by the fixture between tests) must not leak.
+        assert not SHUTDOWN_EVENT.is_set()
+        fn = MagicMock(side_effect=[Exception("503 Service Unavailable"), "ok"])
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=3, base_delay_s=0.001, jitter_fraction=0)
+        )(fn)
+        assert wrapped() == "ok"
+        assert fn.call_count == 2

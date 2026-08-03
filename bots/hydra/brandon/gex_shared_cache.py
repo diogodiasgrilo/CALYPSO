@@ -109,6 +109,11 @@ def load_shared_profile(
                 )
                 for d in data.get("deltas", [])
             ),
+            # .get(..., 0) so a cache file written by pre-2026-08-03 code
+            # (no chain_total/hydrated_count keys) degrades to "unknown"
+            # instead of raising KeyError.
+            chain_total=int(data.get("chain_total", 0)),
+            hydrated_count=int(data.get("hydrated_count", 0)),
         )
     except (OSError, json.JSONDecodeError, KeyError, ValueError, TypeError) as exc:
         logger.warning("Brandon GEX shared cache read failed (%s): %s", path, exc)
@@ -145,6 +150,8 @@ def save_shared_profile(profile: GEXProfile, *, underlying: str) -> None:
                 }
                 for d in profile.deltas
             ],
+            "chain_total": int(profile.chain_total),
+            "hydrated_count": int(profile.hydrated_count),
         }
         fd, tmp = tempfile.mkstemp(dir=str(cache_dir), prefix=".gex_", suffix=".tmp")
         try:

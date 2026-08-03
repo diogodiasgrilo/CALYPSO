@@ -36,6 +36,111 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Three fixes from a full-day, all-5-strategy audit (2026-08-03). A deep-dive
+  audit (5 parallel agents, every entry for the day checked against DB+logs+
+  state) found zero wrong trading decisions but surfaced 3 real issues, fixed
+  to varying degrees of completeness based on confidence in the root cause and
+  risk on live-trading code — implemented against a written plan, then 3
+  rounds of adversarial review (found and closed 4 real issues across rounds
+  1-2, converged clean on round 3).
+  (1) CALENDAR DASHBOARD P&L BUG (D/E, schema-neutral, display-only) — FULLY
+  FIXED. `_save_state_to_disk`'s `pnl_history` builder (`strategy.py`) used the
+  credit-vertical formula (`call_spread_credit - call_spread_value`, written
+  for A/B/C) unmodified for `CalendarEntry` (D/E), whose fields mean something
+  structurally different (a calendar is a debit purchase, not a credit sale).
+  Confirmed live: dashboard showed -$164 on E's open position; real P&L
+  (`dc_calendar_snapshots` DB / `dc_open_trades.json` sidecar / heartbeat log,
+  all agreeing) was -$8 — wrong in BOTH open phases (CALENDAR and TRANSFORMED),
+  accidentally correct only in CLOSED. FIX: `isinstance(entry, CalendarEntry)`
+  branch adds `entry.unrealized_pnl` (the existing, correct, phase-aware
+  formula already used everywhere else calendar P&L is shown) instead, with a
+  fresh/marks-not-loaded-yet guard mirroring the pre-existing IC pattern. No
+  consumer changes needed (traced every reader of `pnl_history`; D/E's live
+  dashboard already bypasses this field via the sidecar, but the underlying
+  state-file data was objectively wrong and any future feature reading it
+  would have silently inherited the bug). New tests reproduce the actual -$164
+  vs -$8 incident numbers and pin a byte-identical non-regression test for the
+  untouched A/B/C math (which had no direct test before either).
+  (2) BROKER + STRATEGY-PROCESS SHUTDOWN HANG — BROKER FULLY FIXED, STRATEGY
+  PROCESSES CONSERVATIVELY MITIGATED, ROOT CAUSE STILL OPEN. Today's deploy
+  restart needed a forced SIGKILL across `calypso-broker` (84 processes) and
+  `hydra`/`hydra_variant_{b,d,e}` — first occurrence in 2+ weeks of restarts.
+  Broker root cause PROVEN: `_on_shutdown`'s `maintain_thread.join(timeout=30)`
+  couldn't interrupt an in-flight `ensure_connected()` retry backoff (a plain
+  `time.sleep()`, ~63s documented worst case) — landed exactly while the
+  broker was mid OAuth-rehandshake. FIX: `shared/ib_retry.py` gained a
+  process-wide `SHUTDOWN_EVENT` + `ShutdownRequested` exception + a new
+  `abortable_on_shutdown` flag on `retry_with_backoff` (default True); the
+  sleep between retry attempts is now `SHUTDOWN_EVENT.wait(delay)` instead of
+  `time.sleep(delay)`, aborting within one tick once the event fires.
+  `shared/ib_client.py:_ib_call` passes `abortable_on_shutdown=(family !=
+  "orders")` — order placement/cancel/modify is DELIBERATELY NEVER abortable
+  (bailing mid order-retry risks a naked/partial leg, strictly worse than a
+  slow shutdown); every other family (session/market/portfolio/history/oauth)
+  is fast-abortable, which is what actually fixes the broker (`ensure_connected`
+  is family='session'). `_on_shutdown`'s body was extracted to a standalone,
+  directly-testable `_shutdown_broker()` (`services/broker/main.py`) that sets
+  `SHUTDOWN_EVENT` before joining; also added a specific `except
+  ib_retry.ShutdownRequested: ... break` in the maintenance loop so a
+  deliberate shutdown-abort can't be miscounted as a real re-auth failure and
+  fire a false "session re-auth FAILED" alert (caught in round-1 review).
+  STRATEGY PROCESSES (hydra/A, B, C, D, E): unlike the broker, these talk to
+  IBKR only via `BrokerClient` (HTTP proxy, no `retry_with_backoff` of their
+  own) and were NOT stuck in any order-placement retry at restart time (fleet
+  was flat) — the exact mechanism that made them need SIGKILL is NOT fully
+  root-caused. Deliberately did not guess at a fix inside the order-placement/
+  emergency-close retry loops on a live-trading process without solid
+  evidence. Instead: (a) `TimeoutStopSec` raised on all 6 units — broker
+  30s->90s (comfortably above the ~63s non-abortable orders-family worst
+  case), hydra*.service 30s->75s (above the 55s worst case for a SINGLE
+  in-flight order HTTP call on a 7-contract B/C entry: `place_and_wait_for_
+  fill`'s `min(30+3*(qty-1),45)=45s` server-side timeout + `BrokerClient`'s
+  +10s pad). ROUND-2 REVIEW CAVEAT, STILL OPEN: this only bounds a single
+  HTTP call — a full iron-condor entry can leg in up to 4 legs x 5 retry rungs
+  each (`base_strategy.py`'s `PROGRESSIVE_RETRY_SEQUENCE`) with no
+  shutdown-flag check between rungs/legs, so `TimeoutStopSec=75` does NOT
+  guarantee a graceful stop if SIGTERM lands mid-entry-placement — it narrows
+  the window materially (75s vs the old 30s, and vs the true worst case of
+  session-hangs that used to compound across MULTIPLE calls) without closing
+  it completely. Do not treat this as a closed fix for the strategy-process
+  side. (b) `bots/hydra/main.py`'s `signal_handler` now logs a best-effort
+  diagnostic snapshot (strategy state, in-progress entry number) on SIGTERM —
+  read-only, try/except-wrapped, cannot affect shutdown behavior — so a
+  recurrence's logs pinpoint the cause instead of requiring another round of
+  journalctl archaeology.
+  (3) B/C DELTA-TARGET "DEGRADED-DATA" GUARD — TELEMETRY ADDED, NO BEHAVIOR
+  CHANGE (BY DESIGN). The guard (`brandon/strategy.py`, 4δ floor vs an 8δ
+  target, added 2026-07-18 after a real -$138 phantom-loss incident) fired 4x
+  in one afternoon on B, previously believed rare. Investigation: NOT a bug —
+  the ~16% chain-hydration ratio observed is the near-deterministic output of
+  a hardcoded `max_contracts_to_hydrate=80` cap on a ~500-strike chain, and a
+  quiet/trending low-VIX session routinely pushes the 8δ target outside that
+  window. This is a live-trading risk-parameter question (loosen the floor?
+  raise the hydration cap and accept more Polygon load? leave it?), not
+  something to decide unilaterally mid-fix — so this ships PURE TELEMETRY,
+  zero behavior change. Schema v15 (`skipped_entries`: `hydration_pct`,
+  `achieved_delta`, `target_delta`, `delta_floor`, all nullable, populated only
+  on this specific skip path). ROUND-1 REVIEW CAUGHT A REAL BUG IN THE
+  TELEMETRY ITSELF: hydration counts were first tracked as a per-instance
+  counter, updated only on a fresh Polygon fetch — but the skip site always
+  calls `_brandon_get_gex_profile(force_refresh=True)`, which can return a
+  SIBLING VARIANT's just-cached profile (B and C share entry slots) without
+  updating that counter, so `hydration_pct` could silently describe a
+  DIFFERENT decision than the one it was attached to (or be stale/None) while
+  the delta/target/floor fields were fine. FIXED properly, not patched around:
+  `chain_total`/`hydrated_count` are now fields ON `GEXProfile` itself
+  (`gex_provider.py`), stamped via `dataclasses.replace()` the moment a fresh
+  fetch completes, before the profile is stored/cached anywhere — every reuse
+  path (in-process TTL cache, cross-process shared-cache file, sibling-variant
+  reuse under the fetch lock) now automatically carries correct counts with
+  it, by construction, with no separate bookkeeping. `gex_shared_cache.py`'s
+  JSON save/load updated to persist the two fields (`.get(...,0)`
+  backward-compat for pre-2026-08-03 cache files).
+  Full suite: 2153 passed / 15 skipped / 0 failed. New/updated test files:
+  test_pnl_history_calendar_fix.py, test_delta_target_telemetry_v15.py,
+  test_ib_retry.py (+7), test_ib_client.py (+1), test_broker_shutdown_hang_
+  fix.py, test_main_sigterm_diagnostic.py, test_brandon_degraded_delta_guard_
+  2026_07_18.py (+6), test_brandon_gex_shared_cache.py (+2).
 - Entry-execution-FAILURE recording + alerting (2026-07-31, live incident on
   variant B). Entry #3 exhausted all order-placement retries — IBKR's paper
   matching engine accepted a market order but never filled it (confirmed via a

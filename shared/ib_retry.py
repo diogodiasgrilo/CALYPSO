@@ -245,6 +245,38 @@ class CircuitBreaker:
             self._outcomes.clear()
 
 
+# ─── Cooperative shutdown (2026-08-03) ──────────────────────────────────────
+# Found in the 2026-08-03 full-day audit: calypso-broker's shutdown hook
+# (services/broker/main.py:_on_shutdown) calls maintain_thread.join(timeout=30)
+# to wait out any in-flight ensure_connected() retry — but that retry's
+# backoff sleep (below) was a plain, non-cancellable time.sleep(), so the join
+# always blocked the full 30s whenever SIGTERM landed mid-retry (confirmed:
+# first occurrence in 2+ weeks of restarts, coincident with a deploy that hit
+# the broker mid OAuth-rehandshake). systemd's TimeoutStopSec then elapsed and
+# SIGKILLed the whole cgroup — 84 processes killed in that incident.
+#
+# SHUTDOWN_EVENT is a process-wide flag (not threaded through every call site
+# — "we are shutting down" is inherently global state) that retry_with_backoff
+# can check to abort a doomed retry immediately instead of sleeping through
+# the full backoff schedule (worst case ~46s per attempt, ~63s total per this
+# module's own docstring).
+#
+# Deliberately NOT honored for the 'orders' family (see shared/ib_client.py
+# :_ib_call, which passes abortable_on_shutdown=False for that family only):
+# abandoning an in-flight order-placement retry mid-sequence risks leaving a
+# naked/partial leg untracked — a strictly worse outcome than a slow shutdown.
+# That path must always run to completion; only session/market/portfolio/
+# history/oauth calls (session re-auth, quote reads, etc.) are fast-abortable.
+SHUTDOWN_EVENT = threading.Event()
+
+
+class ShutdownRequested(Exception):
+    """Raised by retry_with_backoff when SHUTDOWN_EVENT is set and this call
+    is abortable_on_shutdown — lets a cooperative shutdown skip the remaining
+    retry/backoff instead of blocking through it. NOT raised for calls made
+    with abortable_on_shutdown=False (order placement/cancel/modify)."""
+
+
 # ─── Retry decorator ────────────────────────────────────────────────────────
 
 
@@ -379,6 +411,7 @@ class RetryPolicy:
 def retry_with_backoff(
     policy: Optional[RetryPolicy] = None,
     breaker: Optional[CircuitBreaker] = None,
+    abortable_on_shutdown: bool = True,
 ) -> Callable:
     """Decorator factory: applies retry + circuit-breaker logic to a callable.
 
@@ -393,6 +426,12 @@ def retry_with_backoff(
         policy: RetryPolicy instance (uses defaults if None)
         breaker: CircuitBreaker instance; if OPEN at call time, the wrapped
                  function raises CircuitBreakerOpen WITHOUT calling.
+        abortable_on_shutdown: when True (default), a set SHUTDOWN_EVENT
+                 aborts this call/retry immediately (raises ShutdownRequested)
+                 instead of running to completion — see the SHUTDOWN_EVENT
+                 docstring above. Callers on the order-placement path MUST
+                 pass False (shared/ib_client.py:_ib_call does this for the
+                 'orders' family) — see that module-level docstring for why.
 
     Breaker semantics — PINNED:
       • Only **retryable** exceptions (HTTP 429/5xx + transient network
@@ -419,7 +458,13 @@ def retry_with_backoff(
         @wraps(fn)
         def wrapper(*args, **kwargs):
             br = pol.breaker
+            name = getattr(fn, "__name__", repr(fn))
             for attempt in range(1, pol.max_attempts + 1):
+                if abortable_on_shutdown and SHUTDOWN_EVENT.is_set():
+                    raise ShutdownRequested(
+                        f"{name}: aborting before attempt {attempt}/{pol.max_attempts} "
+                        f"— shutdown in progress"
+                    )
                 if br is not None and not br.allow_request():
                     raise CircuitBreakerOpen(
                         f"Circuit breaker '{br.name}' is OPEN — refusing call"
@@ -442,7 +487,6 @@ def retry_with_backoff(
                         if br is not None:
                             br.release_probe()
                         raise
-                    name = getattr(fn, "__name__", repr(fn))
                     if attempt >= pol.max_attempts:
                         logger.error(
                             "%s exhausted %d retries; last error: %s",
@@ -454,7 +498,20 @@ def retry_with_backoff(
                         "%s attempt %d/%d failed (%s); retrying in %.2fs",
                         name, attempt, pol.max_attempts, exc, delay,
                     )
-                    time.sleep(delay)
+                    if abortable_on_shutdown:
+                        # Event.wait() doubles as the sleep AND the abort
+                        # check — returns True immediately once SHUTDOWN_EVENT
+                        # is set (whether already set or set during the
+                        # wait), or False after the full delay if it never
+                        # fires. Either way this never sleeps longer than a
+                        # non-abortable call would.
+                        if SHUTDOWN_EVENT.wait(delay):
+                            raise ShutdownRequested(
+                                f"{name}: aborting mid-backoff (attempt {attempt}/"
+                                f"{pol.max_attempts}) — shutdown in progress"
+                            ) from exc
+                    else:
+                        time.sleep(delay)
             # Unreachable: the loop always exits via return or raise.
             raise RuntimeError(  # pragma: no cover
                 "retry_with_backoff: invariant violated — loop exited without raise/return"

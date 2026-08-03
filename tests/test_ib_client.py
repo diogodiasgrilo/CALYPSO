@@ -516,3 +516,40 @@ class TestRetryAndCircuitBreakers:
             assert status == {"status": "Filled"}
             # Breaker stayed CLOSED throughout the successful call
             assert client.circuit_breakers["orders"].state == CircuitState.CLOSED
+
+    def test_orders_family_is_not_abortable_on_shutdown(
+        self, paper_config, mock_ibkr_client,
+    ):
+        """2026-08-03: _ib_call must pass abortable_on_shutdown=False for the
+        'orders' family only — abandoning an in-flight order-placement retry
+        mid-shutdown risks leaving a naked/partial leg untracked, a strictly
+        worse outcome than a slow shutdown. Every other family is
+        fast-abortable (this is what actually fixes the confirmed
+        calypso-broker shutdown hang — ensure_connected is family='session').
+        Spies on the real retry_with_backoff (not a stub) so the underlying
+        retry behavior stays exercised, not just the call signature."""
+        import shared.ib_client as ib_client_module
+        from shared.ib_retry import retry_with_backoff as real_retry_with_backoff
+
+        captured: list[bool] = []
+
+        def _spy(*args, **kwargs):
+            captured.append(kwargs.get("abortable_on_shutdown"))
+            return real_retry_with_backoff(*args, **kwargs)
+
+        with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr_client):
+            client = IBClient(paper_config)
+            client.connect()
+
+        with patch.object(ib_client_module, "retry_with_backoff", side_effect=_spy):
+            client._ib_call("orders", lambda: "ok")
+            client._ib_call("session", lambda: "ok")
+            client._ib_call("market", lambda: "ok")
+            client._ib_call("portfolio", lambda: "ok")
+            client._ib_call("history", lambda: "ok")
+            client._ib_call("oauth", lambda: "ok")
+
+        assert captured == [False, True, True, True, True, True], (
+            "only 'orders' should be non-abortable; every other family must "
+            "be fast-abortable — got: " + repr(captured)
+        )

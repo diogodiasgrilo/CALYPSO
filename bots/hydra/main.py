@@ -77,11 +77,35 @@ USE_WEBSOCKET_STREAMING = False
 # Global flag for graceful shutdown
 shutdown_requested = False
 
+# 2026-08-03: a reference to the running strategy instance, set once
+# build_strategy() succeeds (see run_bot()) — purely so signal_handler can log
+# a "what were you doing" snapshot on SIGTERM. Found in the full-day audit:
+# hydra/hydra_variant_{b,d,e} needed a forced SIGKILL during a same-day
+# restart and the exact reason was NOT fully root-caused (unlike
+# calypso-broker's confirmed ensure_connected-retry hang, fixed separately in
+# shared/ib_retry.py) — this diagnostic exists so, IF it recurs, the next
+# incident's logs pinpoint exactly what the process was doing instead of
+# requiring another round of journalctl archaeology. Read-only / best-effort;
+# never used to alter shutdown behavior.
+_active_strategy = None
+
 
 def signal_handler(signum, frame):
     """Handle shutdown signals (CTRL+C, SIGTERM)."""
     global shutdown_requested
     logger.info(f"\nShutdown signal received ({signum}). Initiating graceful shutdown...")
+    try:
+        strat = _active_strategy
+        if strat is not None:
+            state = getattr(strat, "state", None)
+            current_entry = getattr(strat, "_current_entry", None)
+            entry_num = getattr(current_entry, "entry_number", None) if current_entry else None
+            logger.info(
+                "SIGTERM-DIAG: strategy state=%s entry_in_progress=%s current_entry=%s",
+                state, getattr(strat, "_entry_in_progress", None), entry_num,
+            )
+    except Exception as diag_exc:  # noqa: BLE001 — diagnostics must never block shutdown
+        logger.warning("SIGTERM-DIAG: snapshot failed (non-fatal): %s", diag_exc)
     shutdown_requested = True
 
 
@@ -318,6 +342,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
             f"({_tax.display_name()} [{_tax.variant_id().upper()}] · {_tax.group().label})"
         )
         strategy = build_strategy(config, broker, trade_logger, dry_run=dry_run)
+        global _active_strategy
+        _active_strategy = strategy
     except Exception as e:
         trade_logger.log_error(f"Failed to initialize strategy: {e}")
         logger.exception("Strategy initialization failed")

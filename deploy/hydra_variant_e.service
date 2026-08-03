@@ -52,8 +52,14 @@ ExecStart=/opt/calypso/.venv/bin/python -m bots.hydra.main --config bots/hydra/c
 TimeoutStartSec=120
 Restart=always
 RestartSec=30
+# 75s (was 30s, bumped 2026-08-03, corrected from an initial undersized
+# 45s a review caught): safety margin while a same-day shutdown-delay
+# finding on this process family is still open (root cause unconfirmed
+# — see bots/hydra/__init__.py version history and hydra.service's
+# TimeoutStopSec comment for the exact worst-case math this must exceed:
+# a 7-contract order-fill HTTP call can legitimately block ~55s).
 KillSignal=SIGTERM
-TimeoutStopSec=30
+TimeoutStopSec=75
 
 StandardOutput=journal
 StandardError=journal

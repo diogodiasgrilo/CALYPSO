@@ -34,7 +34,7 @@ Schema v10 (2026-06-12) adds: a first-class `date` column on spread_snapshots
 backfilled from the timestamp prefix, with an index — so per-day queries and
 per-day maintenance match every other table (date, entry_number).
 
-Current SCHEMA_VERSION = 14 (see the module constant; this docstring intro
+Current SCHEMA_VERSION = 15 (see the module constant; this docstring intro
 describes v10 as an example of the migration pattern, not the current version —
 see the dated comment blocks above each MIGRATION_V{N}_SQL for the full history).
 """
@@ -48,7 +48,7 @@ from typing import Any, Callable, Dict, List, Optional
 logger = logging.getLogger(__name__)
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 14
+SCHEMA_VERSION = 15
 
 # ============================================================================
 # Schema Migration SQL
@@ -200,6 +200,29 @@ MIGRATION_V14_SQL = [
     "ALTER TABLE skipped_entries ADD COLUMN execution_failed INTEGER NOT NULL DEFAULT 0",
 ]
 
+# v15 (2026-08-03): structured telemetry for the Brandon delta-target
+# "degraded-data" guard (bots/hydra/brandon/strategy.py — skips an entry when
+# the resolved short strike's delta falls below min_delta_pct_of_target ×
+# target_delta, protecting against picking a near-worthless far-OTM strike off
+# a thinly-hydrated Polygon chain). Before this, the ONLY record of why/how
+# often this fires was free-text in skip_reason + a raw log line — no way to
+# query "how often does this happen" or "what hydration ratio triggers it"
+# without grepping application logs. Found in the 2026-08-03 full-day audit:
+# this guard fired 4 consecutive times on B in one afternoon (previously
+# believed to be rare); investigation concluded it's the guard working
+# CORRECTLY against a hardcoded 80-contract hydration cap on a ~500-strike
+# chain (~16%), not a live data outage — but there was no data to confirm that
+# beyond one day's log grep. This is pure observability: NO trading behavior
+# changes. All four columns are NULL except on the specific degraded-data skip
+# path; every other skip reason (credit gate, GEX accel-zone, etc.) leaves
+# them NULL, same additive/nullable pattern as v13's unattributed_overlay_pnl.
+MIGRATION_V15_SQL = [
+    "ALTER TABLE skipped_entries ADD COLUMN hydration_pct REAL",
+    "ALTER TABLE skipped_entries ADD COLUMN achieved_delta REAL",
+    "ALTER TABLE skipped_entries ADD COLUMN target_delta REAL",
+    "ALTER TABLE skipped_entries ADD COLUMN delta_floor REAL",
+]
+
 # v7: shadow entries table — records what OTM-based selection WOULD have chosen
 # at each entry attempt, for retroactive comparison vs credit-based selection.
 # Pure observation — does not affect trading behavior.
@@ -265,6 +288,10 @@ CREATE TABLE IF NOT EXISTS skipped_entries (
     would_have_stopped INTEGER,
     theoretical_pnl REAL,
     execution_failed INTEGER NOT NULL DEFAULT 0,
+    hydration_pct REAL,
+    achieved_delta REAL,
+    target_delta REAL,
+    delta_floor REAL,
     PRIMARY KEY (date, entry_number)
 );
 """
@@ -433,6 +460,9 @@ class DataRecorder:
                 if current_version < 14:
                     # v14: execution_failed discriminator on skipped_entries
                     migration_sql += MIGRATION_V14_SQL
+                if current_version < 15:
+                    # v15: Brandon delta-target degraded-data guard telemetry
+                    migration_sql += MIGRATION_V15_SQL
 
                 for sql in migration_sql:
                     try:
@@ -685,6 +715,9 @@ class DataRecorder:
                 "theoretical_short_put", "theoretical_long_put",
                 "estimated_call_credit", "estimated_put_credit",
                 "execution_failed",
+                # v15: Brandon delta-target degraded-data guard telemetry —
+                # only populated by that specific skip path; NULL otherwise.
+                "hydration_pct", "achieved_delta", "target_delta", "delta_floor",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)

@@ -1410,8 +1410,17 @@ class IBClient:
                 f"refusing non-risk-critical {family} call to avoid escalation "
                 f"toward a permanent block"
             )
+        # 2026-08-03: 'orders' calls must run their full retry schedule to
+        # completion even during a cooperative shutdown — bailing mid-retry
+        # risks leaving a naked/partial leg untracked, a strictly worse
+        # outcome than a slow shutdown. Every other family (session/market/
+        # portfolio/history/oauth) is fast-abortable — this is what actually
+        # fixes the confirmed calypso-broker shutdown hang (ensure_connected
+        # is family='session'). See shared/ib_retry.py's SHUTDOWN_EVENT
+        # docstring for the full incident + rationale.
         wrapped = retry_with_backoff(
             policy=_policy or self._retry_policy, breaker=breaker,
+            abortable_on_shutdown=(family != "orders"),
         )(_invoke)
         try:
             return self._unwrap(wrapped())

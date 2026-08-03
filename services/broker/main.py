@@ -24,6 +24,7 @@ import time
 from datetime import datetime
 
 from bots.hydra.alert_hooks import IBKRAlertHooks
+from shared import ib_retry
 from shared.alert_service import AlertService
 from shared.broker_service import BrokerDispatcher, create_app
 from shared.ib_client import IBClient, IBConfig
@@ -101,6 +102,49 @@ def _should_alert_reauth(consec_failures: int, in_market_hours: bool,
     return last_alert is None or (now - last_alert) >= interval
 
 
+def _shutdown_broker(ib: IBClient, stop: threading.Event,
+                     maintain_thread: threading.Thread, join_timeout: float = 30) -> None:
+    """The broker's graceful-shutdown sequence — extracted from the FastAPI
+    shutdown hook (2026-08-03) so it's directly unit-testable rather than only
+    exercisable by starting the whole app.
+
+    Findings #36/#67: stop.set() only short-circuits the NEXT loop iteration
+    — it cannot interrupt an in-flight ensure_connected() that already entered
+    the disconnect()+connect() reconnect. If we called ib.disconnect() now,
+    the maintenance thread could finish building a brand-new IbkrClient (fresh
+    Tickler + live ssodh/init session) AFTER our teardown, orphaning a live
+    IBKR brokerage session and risking the one-session-per-username eviction
+    war this service exists to avoid. So join the maintenance thread first
+    (bounded, since it's a daemon and connect()/disconnect() are serialized
+    under IBClient._call_lock) so no reconnect is in flight, THEN release the
+    session — making this final disconnect() authoritative over whatever
+    client exists.
+
+    2026-08-03: stop.set() alone still left the join blocking the full 30s
+    whenever SIGTERM landed mid-ensure_connected() retry (confirmed incident:
+    84 processes SIGKILLed when a deploy restart coincided with the broker
+    mid OAuth-rehandshake). ensure_connected() routes through
+    IBClient._ib_call(family='session', ...), which is
+    abortable_on_shutdown=True by default (every family except 'orders' — see
+    shared/ib_retry.py) — setting SHUTDOWN_EVENT here lets any in-flight
+    retry backoff abort within one tick instead of completing its ~46s
+    schedule, so the join below now resolves in ~1s in the common case
+    instead of the full `join_timeout`.
+    """
+    ib_retry.SHUTDOWN_EVENT.set()
+    stop.set()
+    maintain_thread.join(timeout=join_timeout)
+    if maintain_thread.is_alive():
+        logger.warning(
+            "broker-maintain thread did not stop within %ss; releasing "
+            "session anyway (reconnect may still be in flight)", join_timeout,
+        )
+    try:
+        ib.disconnect()
+    except Exception:
+        pass
+
+
 def main() -> None:
     logger.info("calypso-broker starting — paper account, single shared session")
     # connect() raises on failure → systemd Restart=always retries (matches the
@@ -155,6 +199,19 @@ def main() -> None:
                 fail_reason = "broker session re-auth gate"
                 try:
                     reauth_ok = ib.ensure_connected()
+                except ib_retry.ShutdownRequested:
+                    # 2026-08-03: this is _shutdown_broker deliberately aborting
+                    # an in-flight retry (SHUTDOWN_EVENT was just set), NOT a
+                    # real broker/IBKR problem — falling through to the
+                    # consec_reauth_failures counting below would risk firing a
+                    # misleading "session re-auth FAILED" alert on a routine,
+                    # successful shutdown (this codebase has fought false
+                    # re-auth-alert noise before — see REAUTH_ALERT_INTERVAL_S
+                    # above). stop.wait() on the next loop check will exit the
+                    # thread momentarily anyway; break now rather than waiting
+                    # for that tick.
+                    logger.info("session re-auth check aborted — shutdown in progress")
+                    break
                 except Exception as e:  # noqa: BLE001
                     fail_reason = f"ensure_connected exception: {type(e).__name__}: {e}"
                     logger.error("ensure_connected error: %s: %s", type(e).__name__, e)
@@ -193,28 +250,7 @@ def main() -> None:
 
     @app.on_event("shutdown")
     def _on_shutdown() -> None:  # graceful: stop the loop + release the session
-        # Findings #36/#67: stop.set() only short-circuits the NEXT loop
-        # iteration — it cannot interrupt an in-flight ensure_connected() that
-        # already entered the disconnect()+connect() reconnect. If we called
-        # ib.disconnect() now, the maintenance thread could finish building a
-        # brand-new IbkrClient (fresh Tickler + live ssodh/init session) AFTER
-        # our teardown, orphaning a live IBKR brokerage session and risking the
-        # one-session-per-username eviction war this service exists to avoid.
-        # So join the maintenance thread first (bounded, since it's a daemon and
-        # connect()/disconnect() are serialized under IBClient._call_lock) so no
-        # reconnect is in flight, THEN release the session — making this final
-        # disconnect() authoritative over whatever client exists.
-        stop.set()
-        maintain_thread.join(timeout=30)
-        if maintain_thread.is_alive():
-            logger.warning(
-                "broker-maintain thread did not stop within 30s; releasing "
-                "session anyway (reconnect may still be in flight)"
-            )
-        try:
-            ib.disconnect()
-        except Exception:
-            pass
+        _shutdown_broker(ib, stop, maintain_thread)
 
     import uvicorn
     logger.info("serving broker RPC on http://%s:%d", HOST, PORT)

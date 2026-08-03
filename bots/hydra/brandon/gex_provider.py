@@ -111,6 +111,18 @@ class GEXProfile:
     # so we don't issue a second chain fetch per entry. Empty tuple if the
     # chain didn't carry greeks (Brandon falls back to OTM-multiplier).
     deltas: tuple[StrikeDelta, ...] = field(default_factory=tuple)
+    # Chain-hydration telemetry (2026-08-03) — how many contracts were in the
+    # raw chain vs. how many actually carried usable greeks/IV from this
+    # fetch. Embedded on the profile itself (not tracked as a separate
+    # per-instance counter) specifically so it travels correctly through
+    # every reuse path — in-process TTL cache, cross-process shared-cache
+    # hit, sibling-variant reuse under the fetch lock — instead of going
+    # stale/mismatched whenever a variant reuses a PROFILE it didn't fetch
+    # itself (found in the 2026-08-03 telemetry review: B and C share entry
+    # slots, so this is a routine occurrence, not an edge case). 0 = unknown
+    # (e.g. a profile built by test code or before this field existed).
+    chain_total: int = 0
+    hydrated_count: int = 0
 
     def gex_at(self, strike: float, tolerance: float = 0.01) -> float:
         for sg in self.strikes:

@@ -82,7 +82,7 @@ class TestReturnDeltaContract:
 
 
 # ==================================================== Fix 1b/2: delta-floor guard
-def _bstrat(min_pct=0.5):
+def _bstrat(min_pct=0.5, chain_total=0, hydrated_count=0):
     s = BrandonHydraStrategy.__new__(BrandonHydraStrategy)
     s.brandon_delta_target_enabled = True
     s.current_price = 7468.0
@@ -95,8 +95,14 @@ def _bstrat(min_pct=0.5):
     s._brandon_send_telegram = MagicMock()
     s._brandon_estimate_t_years_to_close = MagicMock(return_value=0.001)
     s._get_vix_adjusted_spread_width = MagicMock(return_value=5)
+    # chain_total/hydrated_count are embedded on the profile itself (2026-08-03
+    # fix — see GEXProfile in gex_provider.py) so the degraded-data skip site
+    # reads them straight off whatever profile find_strike_at_delta actually
+    # used, not a separate per-instance counter that could describe a
+    # DIFFERENT decision (e.g. a sibling variant's cached fetch).
     s._brandon_get_gex_profile = MagicMock(return_value=SimpleNamespace(
-        deltas=({"x": 1},), fetched_at=datetime.now(timezone.utc), spot=7468.0))
+        deltas=({"x": 1},), fetched_at=datetime.now(timezone.utc), spot=7468.0,
+        chain_total=chain_total, hydrated_count=hydrated_count))
     return s
 
 
@@ -145,6 +151,124 @@ class TestDeltaFloorGuard:
                    side_effect=[(7570.0, 0.008), (7325.0, -0.005)]):
             s._calculate_strikes(e)
         assert not getattr(e, "abort_entry_reason", None)
+
+
+# ==================================================== v15: hydration/delta telemetry
+class TestDegradedDataTelemetry:
+    """2026-08-03: schema v15 adds structured hydration/delta telemetry to the
+    degraded-data skip path (found in the full-day audit: this guard fired 4x
+    in one afternoon and there was no way to query how often/at what hydration
+    level beyond grepping raw logs). Pure observability — these tests pin the
+    values landing on `entry` correctly, independent of the DB-write tests in
+    tests/test_delta_target_telemetry_v15.py."""
+
+    def test_hydration_pct_computed_from_last_chain_fetch(self):
+        s = _bstrat(min_pct=0.5, chain_total=492, hydrated_count=80)
+        e = _entry()
+        with patch("bots.hydra.brandon.gex_provider.find_strike_at_delta",
+                   side_effect=[(7570.0, 0.008), (7325.0, -0.005)]):
+            s._calculate_strikes(e)
+        assert getattr(e, "abort_entry_reason", None)
+        assert e.abort_entry_hydration_pct == round(100.0 * 80 / 492, 2)
+        assert e.abort_entry_target_delta == 0.08
+        assert e.abort_entry_delta_floor == 0.04  # 0.5 * 0.08
+
+    def test_achieved_delta_matches_the_worse_side(self):
+        # call fine (7δ), put is the offender (0.5δ) — achieved_delta must be
+        # the PUT's delta (the one that actually tripped the guard), not the call's.
+        s = _bstrat(min_pct=0.5, chain_total=500, hydrated_count=100)
+        e = _entry()
+        with patch("bots.hydra.brandon.gex_provider.find_strike_at_delta",
+                   side_effect=[(7570.0, 0.07), (7325.0, -0.005)]):
+            s._calculate_strikes(e)
+        assert e.abort_entry_achieved_delta == 0.005
+
+    def test_missing_chain_telemetry_yields_null_hydration_pct_not_a_crash(self):
+        # The profile's chain_total is 0 (unknown — e.g. a pre-2026-08-03
+        # shared-cache file loaded via the .get(..., 0) default, see
+        # gex_shared_cache.load_shared_profile) — must degrade to None, not
+        # divide-by-zero.
+        s = _bstrat(min_pct=0.5, chain_total=0, hydrated_count=0)
+        e = _entry()
+        with patch("bots.hydra.brandon.gex_provider.find_strike_at_delta",
+                   side_effect=[(7570.0, 0.008), (7325.0, -0.005)]):
+            s._calculate_strikes(e)
+        assert getattr(e, "abort_entry_reason", None)
+        assert e.abort_entry_hydration_pct is None
+
+    def test_profile_entirely_missing_telemetry_fields_degrades_gracefully(self):
+        # Defense-in-depth: a profile object that doesn't even HAVE
+        # chain_total/hydrated_count attributes (e.g. some future/foreign
+        # profile-like object) — getattr(profile, ..., 0) must protect this,
+        # not raise AttributeError.
+        s = _bstrat(min_pct=0.5)
+        s._brandon_get_gex_profile = MagicMock(return_value=SimpleNamespace(
+            deltas=({"x": 1},), fetched_at=datetime.now(timezone.utc), spot=7468.0,
+            # deliberately no chain_total / hydrated_count attrs at all
+        ))
+        e = _entry()
+        with patch("bots.hydra.brandon.gex_provider.find_strike_at_delta",
+                   side_effect=[(7570.0, 0.008), (7325.0, -0.005)]):
+            s._calculate_strikes(e)
+        assert getattr(e, "abort_entry_reason", None)
+        assert e.abort_entry_hydration_pct is None
+
+    def test_non_degraded_skip_leaves_no_telemetry_attrs(self):
+        s = _bstrat(min_pct=0.5, chain_total=492, hydrated_count=80)
+        e = _entry()
+        with patch("bots.hydra.brandon.gex_provider.find_strike_at_delta",
+                   side_effect=[(7570.0, 0.07), (7325.0, -0.09)]):  # both fine
+            s._calculate_strikes(e)
+        assert not getattr(e, "abort_entry_reason", None)
+        assert not hasattr(e, "abort_entry_hydration_pct")
+
+
+# ============================================== v15: _skip_degraded_entry threading
+class TestSkipDegradedEntryTelemetryThreading:
+    def test_telemetry_threaded_from_entry_to_record_skipped_entry(self):
+        from bots.hydra.base_strategy import MEICState
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.daily_state = SimpleNamespace(entries_skipped=0, credit_gate_skips=0)
+        s._entry_in_progress = True
+        s._current_entry = object()
+        s.state = None
+        s._next_entry_index = 3
+        s._log_safety_event = MagicMock()
+        s._record_skipped_entry = MagicMock()
+
+        e = _entry()
+        e.abort_entry_hydration_pct = 16.26
+        e.abort_entry_achieved_delta = 0.035
+        e.abort_entry_target_delta = 0.08
+        e.abort_entry_delta_floor = 0.04
+
+        s._skip_degraded_entry(e, 4, "chain under-hydrated, picked garbage")
+        s._record_skipped_entry.assert_called_once()
+        _, kwargs = s._record_skipped_entry.call_args
+        assert kwargs["hydration_pct"] == 16.26
+        assert kwargs["achieved_delta"] == 0.035
+        assert kwargs["target_delta"] == 0.08
+        assert kwargs["delta_floor"] == 0.04
+
+    def test_missing_telemetry_attrs_pass_none_not_a_crash(self):
+        # A caller of _skip_degraded_entry OTHER than the delta-target floor
+        # (e.g. the dry-run net-credit-floor honesty check) never sets these
+        # attrs on entry — must pass None, not raise AttributeError.
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.daily_state = SimpleNamespace(entries_skipped=0, credit_gate_skips=0)
+        s._entry_in_progress = True
+        s._current_entry = object()
+        s.state = None
+        s._next_entry_index = 3
+        s._log_safety_event = MagicMock()
+        s._record_skipped_entry = MagicMock()
+
+        s._skip_degraded_entry(_entry(), 4, "net-credit floor honesty check")
+        _, kwargs = s._record_skipped_entry.call_args
+        assert kwargs["hydration_pct"] is None
+        assert kwargs["achieved_delta"] is None
+        assert kwargs["target_delta"] is None
+        assert kwargs["delta_floor"] is None
 
 
 # ==================================================== Fix 1c: _skip_degraded_entry

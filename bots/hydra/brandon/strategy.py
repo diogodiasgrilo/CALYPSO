@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import logging
 import os
+from dataclasses import replace
 from datetime import datetime, timezone  # AUD2-L9: removed unused `timedelta`
 from typing import Optional
 
@@ -526,6 +527,32 @@ class BrandonHydraStrategy(HydraStrategy):
                     "BRANDON-DELTA-TARGET E#%s: %s → SKIPPING entry (degraded data).",
                     getattr(entry, "entry_number", "?"), reason,
                 )
+                # v15 telemetry: stash on the entry so _skip_degraded_entry ->
+                # _record_skipped_entry can persist it to skipped_entries —
+                # before this, the ONLY record of hydration/delta at skip time
+                # was this log line, so "how often does this fire, at what
+                # hydration level" required grepping raw logs (found in the
+                # 2026-08-03 full-day audit). Pure observability, no behavior
+                # change — see MIGRATION_V15_SQL for the full rationale.
+                # Read straight off `profile` (chain_total/hydrated_count are
+                # embedded on the GEXProfile itself, not a separate
+                # per-instance counter) — this is THE profile find_strike_at_delta
+                # actually used for this decision, correct even when it came
+                # from a sibling variant's shared-cache write rather than this
+                # process's own fetch (found in review: B/C share entry slots,
+                # so that reuse path is routine, not an edge case — a
+                # per-instance "last fetch" counter would silently describe a
+                # DIFFERENT decision in that case). 0 = unknown (e.g. a
+                # pre-2026-08-03 cache file, or a profile built by test code).
+                chain_total = getattr(profile, "chain_total", 0)
+                hydrated = getattr(profile, "hydrated_count", 0)
+                entry.abort_entry_hydration_pct = (
+                    round(100.0 * hydrated / chain_total, 2)
+                    if chain_total else None
+                )
+                entry.abort_entry_achieved_delta = round(abs(dlt), 4)
+                entry.abort_entry_target_delta = round(target, 4)
+                entry.abort_entry_delta_floor = round(min_delta, 4)
                 self._brandon_send_telegram(
                     message=(
                         f"Entry #{getattr(entry, 'entry_number', '?')}: delta-target picked a "
@@ -2182,6 +2209,26 @@ class BrandonHydraStrategy(HydraStrategy):
                 self._brandon_gex_failure_at = now
                 return self._brandon_gex_profile  # keep last good profile if any
 
+            # Surface chain coverage so a sudden gap (e.g., Polygon dropping
+            # Greeks on most strikes) shows up in the journal, AND embed it on
+            # the profile itself (2026-08-03) so it travels correctly through
+            # every reuse path — in-process TTL cache, cross-process shared
+            # cache, sibling-variant reuse under the fetch lock — instead of
+            # a separate per-instance counter that goes stale/mismatched
+            # whenever a variant reuses a profile it didn't fetch itself
+            # (found in review: B and C share entry slots, so that's routine,
+            # not an edge case). GEXProfile is frozen, so replace() rebuilds
+            # it with the two new fields set; every consumer of `profile`
+            # from here on (in-process cache, shared-cache write, the return
+            # value) sees the SAME object with counts attached.
+            chain_total = len(contracts)
+            with_greeks_or_iv = sum(
+                1 for c in contracts
+                if (c.get("greeks") or {}).get("gamma") is not None
+                or c.get("implied_volatility") is not None
+            )
+            profile = replace(profile, chain_total=chain_total, hydrated_count=with_greeks_or_iv)
+
             self._brandon_gex_profile = profile
             self._brandon_gex_profile_fetched_at = now
             self._brandon_gex_failure_at = None
@@ -2193,16 +2240,6 @@ class BrandonHydraStrategy(HydraStrategy):
                 profile, underlying=self.brandon_polygon_underlying
             )
 
-            # Surface chain coverage so a sudden gap (e.g., Polygon dropping
-            # Greeks on most strikes) shows up in the journal. Normal: dropped
-            # few. If this number spikes, GEX cluster strength is being
-            # underestimated.
-            chain_total = len(contracts)
-            with_greeks_or_iv = sum(
-                1 for c in contracts
-                if (c.get("greeks") or {}).get("gamma") is not None
-                or c.get("implied_volatility") is not None
-            )
             contributed = len(profile.strikes)
             dropped = chain_total - contributed
             logger.info(
