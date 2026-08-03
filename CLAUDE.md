@@ -600,6 +600,19 @@ Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
 - Separate systemd service — `systemctl stop dashboard` has zero effect on HYDRA
 - Resource capped: 256MB RAM, 25% CPU
 
+### Access & auth (2026-08-03 — real accounts, not a shared key)
+
+Public URL: **`https://domytrade.com`** (real Let's Encrypt cert via certbot, auto-renewing; nginx config `dashboard/deploy/nginx-dashboard-public.conf`). The old bare-IP self-signed-cert setup and the single shared `DASHBOARD_API_KEY` are retired — every visitor now has their own account (username + bcrypt password + TOTP 2FA), issued a DB-backed, instantly-revocable session cookie. Auth code: `dashboard/backend/{auth.py,routers/auth.py,services/auth_db.py,services/auth_crypto.py}`.
+
+**Accounts are managed via SSH + CLI only** (no self-signup, no web admin panel — matches every other operational task in this doc):
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --project=calypso-trading-bot --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m scripts.manage_dashboard_users {add,list,disable,enable,reset-password,reset-2fa} [username]'"
+```
+
+`dashboard.service` **fails closed at startup** (`DASHBOARD_REQUIRE_ACCOUNTS_CONFIGURED=true`) if zero accounts exist — it will not silently serve an open dashboard. Bootstrap the first account with `add` before the service can start.
+
+**Critical nginx invariant:** `_client_ip()` (the login rate limiter, `dashboard/backend/routers/auth.py`) trusts `X-Forwarded-For` because uvicorn only ever sees nginx's loopback address. This is only safe because `nginx-dashboard-public.conf` **overwrites** the header with `proxy_set_header X-Forwarded-For $remote_addr;` — never change that back to nginx's default `$proxy_add_x_forwarded_for` (which appends to client-supplied values), or the rate limiter becomes trivially spoofable (found + fixed in the 2026-08-03 security review).
+
 ### Commands
 
 ```bash
