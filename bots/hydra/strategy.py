@@ -50,7 +50,7 @@ from shared import market_data_adapter
 from shared.ib_client import (
     IBClient, AmbiguousOrderError, RatePenaltyError, _normalize_position_dict,
 )
-from shared.alert_service import AlertService, AlertType, AlertPriority
+from shared.alert_service import AlertService, AlertType, AlertPriority, describe_exception
 from shared import strategy_taxonomy
 from shared.market_hours import get_us_market_time, is_early_close_day
 from shared.technical_indicators import get_current_ema, calculate_atr
@@ -12134,7 +12134,7 @@ class HydraStrategy(MEICStrategy):
                 contracts=getattr(self, "contracts_per_entry", 1),
             )
         except Exception as exc:
-            logger.debug(f"orphan-sweep alert send failed (non-fatal): {exc}")
+            logger.error(f"orphan-sweep alert send failed: {describe_exception(exc)}")
         return len(orphans)
 
     def _reset_for_new_day(self):

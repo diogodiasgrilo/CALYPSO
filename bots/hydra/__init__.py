@@ -36,6 +36,116 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Alert-delivery reliability hardening (2026-08-04). While checking for
+  anything left half-dug from the 2026-08-03 audit, live logs showed a NEW
+  bug on every strategy restart that night: `shared/alert_service.py`'s
+  Pub/Sub publish-failure handler logged `f"Failed to publish alert to
+  Pub/Sub: {e}"`, but the underlying call (`future.result(timeout=5)`) raises
+  a bare `concurrent.futures.TimeoutError()` on timeout — which stringifies
+  to `""` — so the log line was `"Failed to publish alert to Pub/Sub: "` with
+  nothing after the colon. Confirmed via 30-day history this recurs (5x/30d
+  fleet-wide), not a one-off. User's directive, verbatim: "I wanna do it
+  properly... this is going to be a world class product used by a lot of
+  people in the future... make the basics 100% correct" — same rigor as the
+  2026-08-03 fixes: plan -> implement -> test -> adversarial review to
+  convergence (3 rounds; rounds 1-2 found 8 real issues across the surface
+  the fix touched, round 3 converged clean).
+  CORE FIX (`shared/alert_service.py`): a `describe_exception(e)` helper
+  (`f"{type(e).__name__}: {text}" if text else type(e).__name__` — never
+  blank) applied at every exception-log site in the file. Publish failures on
+  CRITICAL/HIGH now get ONE retry (2 attempts total, ~11s worst case) before
+  giving up — this alert may be the last thing a process does before shutting
+  down (e.g. an emergency-exit alert), so it's worth the bounded second try;
+  MEDIUM/LOW stay at 1 attempt (keeps the common case — routine
+  bot_started/bot_stopped alerts on every restart — at the old latency). A
+  publisher that failed to construct at process start (`_initialized=False`)
+  no longer stays permanently local-only for the process's life: `send_alert`
+  now lazily retries `_initialize()` on a 60s cooldown. Alerts that still
+  fail after the retry budget get a durable, independent record appended to
+  `data/failed_alerts.jsonl` (`FAILED_ALERTS_PATH`) — greppable without
+  journalctl/GCP access, so a lost alert isn't purely a line in a log file
+  that rotates.
+  ADVERSARIAL REVIEW FOUND AND FIXED REAL BUGS IN THE FIX ITSELF (this is the
+  point of the process): (1) the lazy-reinit block originally reused the
+  pre-existing `_gate_lock` (acquired by `_apply_alert_gate` on EVERY
+  send_alert call) while holding it across `_initialize()` — an UNBOUNDED
+  call (GCP metadata-server discovery has no timeout). A hung reinit on one
+  thread would have blocked every OTHER thread's alerts, including a
+  concurrent CRITICAL alert from the Telegram poller thread on variant A.
+  FIXED: dedicated `_reinit_lock`, acquired NON-BLOCKING
+  (`acquire(blocking=False)`) — if another thread is already mid-reinit, the
+  caller falls straight through to local-log-only instead of waiting on a
+  possibly-hung call. Proven with a real multi-threaded test (not mocked):
+  thread A stuck in a faked hanging `_initialize()`, thread B (same instance)
+  returns in <1s instead of blocking. (2) `_write_dead_letter`'s
+  `fcntl.flock()` was originally a plain BLOCKING call with no timeout — this
+  file is shared by every process that constructs an AlertService (variants
+  A-E and calypso-broker), and a real Pub/Sub outage (the scenario this file
+  exists for) tends to hit them all near-simultaneously, and the write can
+  fire synchronously from the main trading loop. FIXED to match this
+  codebase's own established `LOCK_EX|LOCK_NB` polling pattern
+  (`shared/token_coordinator.py`'s `_acquire_lock`) with a 2.0s bound
+  (`DEAD_LETTER_LOCK_TIMEOUT_S`) — skips the write on contention rather than
+  blocking. Proven with a real 12-thread concurrent-write test asserting the
+  file stays fully parseable, not just that flock() was called. (3) the
+  shutdown-margin comment originally claimed the ~11s CRITICAL/HIGH retry
+  worst case was "well inside" the 2026-08-03 TimeoutStopSec budgets —
+  corrected to an honest accounting: it CAN stack with a single non-abortable
+  order-family retry's ~55s worst case within the same shutdown sequence
+  (55+11=66s of the 75s hydra-unit budget), leaving materially less headroom
+  than the original comment implied, though the remaining shutdown steps are
+  fast/local/no-further-network-calls so this should still be sufficient —
+  not closed to zero risk, just accurately described now. Deliberately NOT
+  wired to `shared.ib_retry.SHUTDOWN_EVENT` (unlike IBKR session/market
+  retries): continuing to retry a CRITICAL/HIGH alert during shutdown has
+  real safety value (it's often the alert telling an operator something
+  needs attention), so aborting it the instant shutdown begins would defeat
+  the point — this is a deliberate difference from the 2026-08-03 pattern,
+  not an oversight.
+  SAME BUG CLASS, FOUND ELSEWHERE BY REVIEW, NOT THE ORIGINAL SWEEP: 4 sites
+  in `bots/hydra/base_strategy.py`/`strategy.py` where a CRITICAL/HIGH
+  alert's OWN send-failure was logged at `logger.debug` (invisible in
+  production) and mislabeled "(non-fatal)" — an untracked orphan broker leg,
+  a deferred settlement booking, a failed short buy-back, and (found by
+  round-1 review, not the original sweep) a STUCK EMERGENCY CLOSE
+  (`_emergency_close_alert_once`) — arguably the most severe of the four, on
+  the escalation path for a live unhedged/stuck position. All 4 now
+  `logger.error` + `describe_exception`, matching 5 other "alert send failed"
+  sites in the same two files that already used warning/error (these were
+  regressions from that established convention, not intentional design).
+  ROUND-2 REVIEW FOUND THE ENTIRE `bots/hydra/brandon/strategy.py` MODULE —
+  the code that runs LIVE on variant B and dry-run-shadow on C — had NEVER
+  BEEN CHECKED (the original sweep and round 1 both stopped at
+  base_strategy.py/strategy.py). Fixed 5 sites: the chokepoint
+  `_brandon_send_telegram` that every single Brandon alert call routes
+  through (the fix that actually matters — includes CRITICAL alerts like the
+  overlay-partial-fill naked-position warning), 3 call sites whose own
+  try/except around that chokepoint is dead code today (the chokepoint never
+  raises) but fixed for consistency/defense-in-depth, and one adjacent
+  non-alert site (`log_daily_summary`'s settlement-booking except block) with
+  the identical blank-message + misleading "(non-fatal)" pattern on a real
+  P&L-mismatch risk (same class as the 2026-07-21 dashboard/cumulative
+  mismatch documented elsewhere in this file).
+  Also fixed: `services/argus/notify.py` (ARGUS's own health-check alert
+  delivery) and `shared/data_recorder.py`'s `_safe_write` (wraps
+  record_entry/record_stop/record_daily_summary — real trade-record
+  persistence), same blank-`str(e)` pattern, diagnostics-only.
+  NOT DONE, DELIBERATELY: a fully independent (bypass-Pub/Sub) delivery
+  channel (e.g. direct Telegram API as a last resort when Pub/Sub itself is
+  down) — confirmed ARGUS shares the same Pub/Sub-dependent path today, so it
+  can't watchdog a full Pub/Sub outage either. Genuinely valuable, but
+  expands the alert-delivery attack surface and secrets footprint; deserves
+  its own discussion, not a decision folded into this fix. `data/
+  failed_alerts.jsonl` has no retention sweep (unlike `pre_start_snapshot.sh`'s
+  50-snapshot cap) — deliberately: this file grows only on genuine Pub/Sub
+  failures (~5/30 days fleet-wide historically, each a few KB), an entirely
+  different growth profile from a per-restart snapshot file; flagged, not
+  forgotten.
+  Full suite: 2182 passed / 15 skipped / 0 failed (was 2153 before this fix).
+  New test files: test_alert_publish_reliability.py (18, incl. 2 real
+  multi-threaded concurrency tests), test_alert_send_failure_logging_
+  2026_08_04.py (7), test_alert_diagnostics_argus_and_data_recorder_
+  2026_08_04.py (3), test_brandon_alert_failure_logging_2026_08_04.py (6).
 - Three fixes from a full-day, all-5-strategy audit (2026-08-03). A deep-dive
   audit (5 parallel agents, every entry for the day checked against DB+logs+
   state) found zero wrong trading decisions but surfaced 3 real issues, fixed

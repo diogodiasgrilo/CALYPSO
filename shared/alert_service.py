@@ -18,7 +18,12 @@ IMPORTANT: Alerts are sent AFTER actions complete, with ACTUAL results.
 Benefits:
     - Accurate: Alerts contain real outcomes, not predictions
     - Non-blocking: Bot doesn't wait for Telegram/Gmail API (saves 1-2s per alert)
-    - Reliable: Pub/Sub retries for 7 days, dead-letter queue captures failures
+    - Reliable once published: Pub/Sub retries delivery to the Cloud Function
+      for 7 days, and a subscription-side dead-letter queue captures failures
+      AFTER that point. This does NOT cover a publish-time failure (the
+      message never reaching the topic at all, e.g. a client-side timeout) —
+      that case is handled locally by send_alert's own retry + the
+      data/failed_alerts.jsonl dead-letter fallback (see send_alert).
     - Auditable: Full trail in Cloud Logging
     - Scalable: Add new alert channels without changing bot code
 
@@ -52,6 +57,7 @@ Usage:
     )
 """
 
+import fcntl
 import json
 import logging
 import os
@@ -70,6 +76,31 @@ from shared.secret_manager import is_running_on_gcp, get_project_id
 US_EASTERN = pytz.timezone('America/New_York')
 
 logger = logging.getLogger(__name__)
+
+# Dead-letter file for alerts that failed to publish even after retry — see
+# AlertService._write_dead_letter. Module-level (not computed inline) so
+# tests can monkeypatch it to a tmp path.
+FAILED_ALERTS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "failed_alerts.jsonl"
+)
+
+# Bounded wait for the dead-letter file's flock — see _write_dead_letter.
+# Best-effort record of an already-failed alert; skipping it on contention
+# beats blocking the caller (which can be the main trading loop).
+DEAD_LETTER_LOCK_TIMEOUT_S = 2.0
+
+
+def describe_exception(e: Exception) -> str:
+    """Render an exception for logging without ever producing a blank string.
+
+    Some common exceptions here (notably ``concurrent.futures.TimeoutError``,
+    raised by ``Future.result(timeout=...)`` on Pub/Sub publish timeout) have
+    an empty ``str(e)`` — a bare f"...: {e}" then logs nothing useful about
+    WHY an alert failed. Always prefix the exception type so the log line is
+    diagnosable even when the message body is empty.
+    """
+    text = str(e)
+    return f"{type(e).__name__}: {text}" if text else type(e).__name__
 
 
 class AlertPriority(Enum):
@@ -229,6 +260,12 @@ class AlertService:
         self._publisher = None
         self._topic_path = None
         self._initialized = False
+        # Monotonic timestamp of the last (re-)init attempt. Lets send_alert
+        # retry a failed publisher construction (e.g. a transient GCP
+        # auth/network hiccup at process start) on a cooldown instead of
+        # staying permanently local-only for the process's whole life. See
+        # the lazy-reinit block in send_alert.
+        self._last_init_attempt: float = 0.0
         self._dry_run = os.environ.get("ALERT_DRY_RUN", "").lower() == "true"
 
         # Alert configuration from config file
@@ -250,6 +287,16 @@ class AlertService:
         self._dedup_suppressed: Dict[str, int] = {}    # fingerprint -> #suppressed since last send
         self._type_buckets: Dict[Any, Dict[str, float]] = {}  # alert_type -> token bucket
         self._email_times: list = []                   # monotonic ts of recent EMAILS (ceiling)
+
+        # Dedicated lock for the lazy-reinit block below — deliberately NOT
+        # _gate_lock. _apply_alert_gate acquires _gate_lock on EVERY send_alert
+        # call; _initialize() can block for an unbounded time (GCP credential/
+        # metadata-server discovery inside pubsub_v1.PublisherClient() has no
+        # explicit timeout). Reusing _gate_lock here would mean a stuck reinit
+        # on one thread blocks every OTHER thread's send_alert — including a
+        # concurrent CRITICAL alert from the Telegram poller thread on variant
+        # A — on the anti-spam gate, which has nothing to do with reinit.
+        self._reinit_lock = threading.Lock()
 
         self._initialize()
 
@@ -298,7 +345,7 @@ class AlertService:
                 "google-cloud-pubsub not installed. Run: pip install google-cloud-pubsub"
             )
         except Exception as e:
-            logger.error(f"Failed to initialize Pub/Sub publisher: {e}")
+            logger.error(f"Failed to initialize Pub/Sub publisher: {describe_exception(e)}")
 
     def send_alert(
         self,
@@ -363,7 +410,9 @@ class AlertService:
                 alert_type, priority, title, details, send_email
             )
         except Exception as e:  # pragma: no cover - defensive
-            logger.error("Alert gate error (failing open, alert sent): %s", e)
+            logger.error(
+                "Alert gate error (failing open, alert sent): %s", describe_exception(e)
+            )
             allow, gate_note = True, ""
         if not allow:
             logger.info(
@@ -414,7 +463,7 @@ class AlertService:
                 display_name = _m.display_name
                 group_label = _tax.group(_vid).label
         except Exception as e:  # pragma: no cover - defensive; never block an alert
-            logger.debug("Alert display-name resolution skipped: %s", e)
+            logger.debug("Alert display-name resolution skipped: %s", describe_exception(e))
 
         # Build alert payload
         payload = {
@@ -465,25 +514,167 @@ class AlertService:
             logger.info(f"DRY RUN - Would publish: {json.dumps(payload, indent=2)}")
             return True
 
+        # Lazy re-init: a publisher that failed to construct (e.g. a transient
+        # GCP auth/network hiccup at process start, or a prior publish-time
+        # outage) must not stay permanently local-only for the rest of this
+        # process's life. Retry at most once a minute — cheap, self-healing.
+        #
+        # Guarded by _reinit_lock (NOT _gate_lock — see its definition in
+        # __init__), and the acquire is NON-BLOCKING: _initialize() can hang
+        # for an unbounded time (GCP metadata-server discovery has no
+        # explicit timeout), and a blocking acquire here would mean every
+        # thread that sees _initialized=False piles up waiting for the SAME
+        # possibly-hung call — including the Telegram poller thread on
+        # variant A trying to send an unrelated CRITICAL alert. If another
+        # thread is already mid-reinit, just fall through to the
+        # not-initialized branch below instead of waiting for it.
+        if (
+            not self._initialized
+            and not self._dry_run
+            and is_running_on_gcp()
+            and self._reinit_lock.acquire(blocking=False)
+        ):
+            try:
+                if (
+                    not self._initialized
+                    and time.monotonic() - self._last_init_attempt > 60
+                ):
+                    self._last_init_attempt = time.monotonic()
+                    logger.info("Retrying Pub/Sub publisher initialization...")
+                    self._initialize()
+            finally:
+                self._reinit_lock.release()
+
         # Local mode - just log
         if not self._initialized or not self._publisher:
             logger.info(f"Alert logged (Pub/Sub not available): {json.dumps(payload)}")
             return False
 
-        # Publish to Pub/Sub
+        # Publish to Pub/Sub. CRITICAL/HIGH get one retry (2 attempts total) —
+        # this alert may be the last thing a process does before shutting
+        # down (e.g. an emergency-exit alert), so it's worth a bounded second
+        # try rather than losing it to a single transient timeout. MEDIUM/LOW
+        # get one attempt only, keeping the common case (routine
+        # bot_started/bot_stopped alerts fired on every restart) at today's
+        # latency.
+        #
+        # This sleep is deliberately NOT wired to shared.ib_retry.SHUTDOWN_EVENT
+        # (the 2026-08-03 shutdown-hang fix's cooperative-abort mechanism):
+        # unlike an IBKR session/market retry, continuing to retry a CRITICAL/
+        # HIGH alert during shutdown has real safety value (it's often the
+        # alert telling an operator something needs attention), so aborting it
+        # the instant shutdown begins would defeat the point.
+        #
+        # Worst case here is ~11s (2×5s timeout + a 1s gap). This is bounded,
+        # but NOT a comfortable margin: it CAN stack, within the same shutdown
+        # sequence, with a single non-abortable in-flight order-family retry's
+        # documented ~55s worst case (shared/ib_retry.py — order placement is
+        # deliberately excluded from shutdown-abort) if a close/entry was mid-
+        # flight when SIGTERM arrived — 55s + 11s = 66s, leaving only ~9s of
+        # the 75s hydra-unit TimeoutStopSec for whatever remains in the
+        # shutdown sequence after that (Telegram-thread stop, status-summary
+        # logging — fast, local, no further network calls, so 9s should be
+        # sufficient, but this is a real accounting, not a wide safety
+        # margin). See bots/hydra/__init__.py version history (2026-08-03 and
+        # 2026-08-04 entries) for the full numbers.
+        max_attempts = 2 if priority in (AlertPriority.CRITICAL, AlertPriority.HIGH) else 1
+        last_error: Optional[Exception] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                data = json.dumps(payload).encode("utf-8")
+                future = self._publisher.publish(self._topic_path, data)
+                message_id = future.result(timeout=5)  # Wait up to 5 seconds per attempt
+
+                logger.debug(f"Alert published to Pub/Sub with message ID: {message_id}")
+                return True
+
+            except Exception as e:
+                last_error = e
+                if attempt < max_attempts:
+                    logger.warning(
+                        f"Pub/Sub publish attempt {attempt}/{max_attempts} failed "
+                        f"({describe_exception(e)}) — retrying"
+                    )
+                    time.sleep(1)
+
+        error_desc = describe_exception(last_error)
+        logger.error(f"Failed to publish alert to Pub/Sub: {error_desc}")
+        # Still log the alert locally
+        logger.warning(f"Alert content (failed to publish): {json.dumps(payload)}")
+        self._write_dead_letter(payload, priority, error_desc)
+        return False
+
+    def _write_dead_letter(
+        self, payload: Dict[str, Any], priority: AlertPriority, error: str
+    ) -> None:
+        """Append a durable, independent record of a lost alert.
+
+        Last line of defense after publish + retry both failed: the alert
+        already didn't reach Pub/Sub, so this must not itself depend on
+        Pub/Sub, and must never raise — a broken dead-letter write must not
+        mask or replace the original publish failure already logged by the
+        caller. One JSON line per failure in data/failed_alerts.jsonl,
+        independent of any single bot's log file (which rotates and is easy
+        to miss) and readable without journalctl/GCP access.
+
+        This ONE file is shared by every process that constructs an
+        AlertService (variants A-E and calypso-broker) — and a real Pub/Sub
+        outage (the scenario this file exists for) tends to hit them all at
+        once, making concurrent writers more likely than usual, not less. An
+        flock() around the write prevents interleaved partial JSON lines from
+        multiple processes corrupting the file; it's a best-effort advisory
+        lock (POSIX-only, matches this codebase's Debian-VM deploy target —
+        no Windows support anywhere in this repo) released automatically when
+        the file closes even if something raises in between.
+
+        The lock acquire is bounded (LOCK_NB + a short polling timeout), NOT
+        a plain blocking flock() — this can be called synchronously from the
+        main trading loop, and an unbounded blocking lock acquire would hang
+        the loop indefinitely if some other writer were stuck holding it
+        (paused process, degraded disk — a live process dying, even via
+        SIGKILL, releases its flock immediately, so only a genuinely stuck-
+        but-alive holder is a risk, but "no watchdog on a blocking call" is
+        exactly the class of bug this codebase has fixed everywhere else it
+        appears — see the CLAUDE.md "Bot frozen" troubleshooting entry).
+        Matches the established LOCK_EX|LOCK_NB polling pattern already used
+        by shared/token_coordinator.py's _acquire_lock. On a timeout, skip
+        the write (still hits the outer except below, which just logs a
+        warning) rather than block.
+        """
         try:
-            data = json.dumps(payload).encode("utf-8")
-            future = self._publisher.publish(self._topic_path, data)
-            message_id = future.result(timeout=5)  # Wait up to 5 seconds
-
-            logger.debug(f"Alert published to Pub/Sub with message ID: {message_id}")
-            return True
-
+            record = {
+                "timestamp": datetime.now(US_EASTERN).isoformat(),
+                "bot_name": self.bot_name,
+                "priority": priority.value,
+                "alert_type": payload.get("alert_type"),
+                "title": payload.get("title"),
+                "error": error,
+                "payload": payload,
+            }
+            os.makedirs(os.path.dirname(FAILED_ALERTS_PATH), exist_ok=True)
+            with open(FAILED_ALERTS_PATH, "a") as f:
+                locked = False
+                deadline = time.monotonic() + DEAD_LETTER_LOCK_TIMEOUT_S
+                while time.monotonic() < deadline:
+                    try:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        locked = True
+                        break
+                    except OSError:
+                        time.sleep(0.1)
+                if not locked:
+                    raise TimeoutError(
+                        f"could not acquire dead-letter file lock within "
+                        f"{DEAD_LETTER_LOCK_TIMEOUT_S}s"
+                    )
+                try:
+                    f.write(json.dumps(record) + "\n")
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
         except Exception as e:
-            logger.error(f"Failed to publish alert to Pub/Sub: {e}")
-            # Still log the alert locally
-            logger.warning(f"Alert content (failed to publish): {json.dumps(payload)}")
-            return False
+            logger.warning(
+                f"Could not write dead-letter record for failed alert: {describe_exception(e)}"
+            )
 
     # =========================================================================
     # DELIVERY CHANNEL ROUTING

@@ -47,6 +47,18 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _describe_exception(e: Exception) -> str:
+    """Render an exception for logging without ever producing a blank string
+    (e.g. sqlite3.OperationalError variants and some stdlib exceptions can
+    have an empty str()). Small local copy of the same helper in
+    shared/alert_service.py — kept local rather than cross-imported since
+    this module (SQLite persistence) has no other reason to depend on the
+    alerting module."""
+    text = str(e)
+    return f"{type(e).__name__}: {text}" if text else type(e).__name__
+
+
 # Schema version this module expects/creates
 SCHEMA_VERSION = 15
 
@@ -342,7 +354,9 @@ class DataRecorder:
             fn()
             return True
         except Exception as e:
-            logger.warning(f"DataRecorder.{operation_name} failed (non-critical): {e}")
+            logger.warning(
+                f"DataRecorder.{operation_name} failed (non-critical): {_describe_exception(e)}"
+            )
             return False
 
     # ========================================================================

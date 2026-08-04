@@ -114,7 +114,7 @@ def main():
         return
 
     try:
-        from shared.alert_service import AlertService, AlertType, AlertPriority
+        from shared.alert_service import AlertService, AlertType, AlertPriority, describe_exception
 
         alert_service = AlertService(config, "ARGUS")
         alert_service.send_alert(
@@ -126,7 +126,7 @@ def main():
         _record_alert(fingerprint)
         logger.info("Alert sent successfully")
     except Exception as e:
-        logger.error(f"Failed to send alert: {e}")
+        logger.error(f"Failed to send alert: {describe_exception(e)}")
         # Print to stdout as fallback (captured by journalctl)
         print(f"ALERT DELIVERY FAILED: {message}")
 

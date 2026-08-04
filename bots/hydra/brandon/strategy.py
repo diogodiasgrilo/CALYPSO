@@ -1552,7 +1552,8 @@ class BrandonHydraStrategy(HydraStrategy):
                 alert_type_name="DATA_QUALITY",
             )
         except Exception as exc:
-            logger.debug("BRANDON-GEX-FALLBACK alert send failed (non-fatal): %s", exc)
+            from shared.alert_service import describe_exception
+            logger.error("BRANDON-GEX-FALLBACK alert send failed: %s", describe_exception(exc))
 
     # ------------------------------------------------------------------
     # Defensive overlay (LIVE) — debit / butterfly hedge placement
@@ -1875,7 +1876,8 @@ class BrandonHydraStrategy(HydraStrategy):
                 alert_type_name="CRITICAL_INTERVENTION",
             )
         except Exception as exc:
-            logger.debug("BRANDON-OVERLAY partial alert send failed (non-fatal): %s", exc)
+            from shared.alert_service import describe_exception
+            logger.error("BRANDON-OVERLAY partial alert send failed: %s", describe_exception(exc))
 
     def _expected_position_quantities(self):
         """Brandon override (L-H6): fold LIVE overlay hedge legs into the
@@ -2059,7 +2061,11 @@ class BrandonHydraStrategy(HydraStrategy):
                 # _brandon_settle_hedges' persistence note).
                 self._save_state_to_disk()
         except Exception as exc:
-            logger.error("BRANDON-OVERLAY settlement failed (non-fatal): %s", exc)
+            from shared.alert_service import describe_exception
+            # Not "non-fatal": per the comment above, a failure here is the
+            # exact same class of bug as the 2026-07-21 state/DB P&L mismatch
+            # (dashboard "today" card silently diverging from cumulative).
+            logger.error("BRANDON-OVERLAY settlement failed: %s", describe_exception(exc))
         super().log_daily_summary()
 
     # ------------------------------------------------------------------
@@ -2485,7 +2491,8 @@ class BrandonHydraStrategy(HydraStrategy):
                 details={"entry_number": getattr(entry, "entry_number", None), "side": side},
             )
         except Exception as exc:
-            logger.debug("orphan-close alert failed (non-fatal): %s", exc)
+            from shared.alert_service import describe_exception
+            logger.error("orphan-close alert failed: %s", describe_exception(exc))
 
     def _brandon_send_telegram(
         self,
@@ -2511,7 +2518,7 @@ class BrandonHydraStrategy(HydraStrategy):
         if alert is None:
             return
         try:
-            from shared.alert_service import AlertPriority, AlertType
+            from shared.alert_service import AlertPriority, AlertType, describe_exception
             priority = getattr(AlertPriority, priority_name, AlertPriority.MEDIUM)
             alert_type = getattr(AlertType, alert_type_name, AlertType.STOP_LOSS)
             alert.send_alert(
@@ -2522,7 +2529,13 @@ class BrandonHydraStrategy(HydraStrategy):
                 details=details,
             )
         except Exception as exc:
-            logger.debug("BRANDON Telegram send failed (non-fatal): %s", exc)
+            # This is the single chokepoint every Brandon alert call site
+            # (GEX-fallback, overlay-partial-fill, orphan-close, and any
+            # future caller) routes through — including CRITICAL alerts like
+            # the overlay-partial-fill naked-position warning on the LIVE
+            # (variant B) paper account. logger.debug here made every one of
+            # those failures invisible in production (2026-08-04 review).
+            logger.error("BRANDON alert send failed: %s", describe_exception(exc))
 
     # ------------------------------------------------------------------
     # Daily reset — clear Brandon-specific caches

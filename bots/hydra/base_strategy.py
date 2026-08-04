@@ -53,7 +53,7 @@ from enum import Enum
 from shared.ib_client import IBClient
 from bots.hydra.order_types import BuySell, OrderType
 from bots.hydra.leg import LEG_NAMES, Leg, _new_legset, bind_leg_bridge
-from shared.alert_service import AlertService, AlertType, AlertPriority
+from shared.alert_service import AlertService, AlertType, AlertPriority, describe_exception
 from shared.market_hours import get_us_market_time, is_market_open, is_early_close_day, get_market_close_time
 from shared.event_calendar import is_fomc_meeting_day, is_fomc_announcement_day
 from shared.position_registry import PositionRegistry
@@ -3566,8 +3566,8 @@ class MEICStrategy(abc.ABC):
                 priority=AlertPriority.CRITICAL,
                 details={"bot": getattr(self, "BOT_NAME", "?")},
             )
-        except Exception as exc:  # pragma: no cover - alert is best-effort
-            logger.debug(f"settlement-deferred alert send failed (non-fatal): {exc}")
+        except Exception as exc:
+            logger.error(f"settlement-deferred alert send failed: {describe_exception(exc)}")
 
     def _alert_short_close_failed(self, entry, side_name: str) -> None:
         """B2: alert (once per entry/side per ET day) that a side's SHORT buy-back
@@ -3596,8 +3596,8 @@ class MEICStrategy(abc.ABC):
                 priority=AlertPriority.HIGH,
                 details={"bot": getattr(self, "BOT_NAME", "?"), "entry": getattr(entry, "entry_number", "?")},
             )
-        except Exception as exc:  # pragma: no cover - best-effort
-            logger.debug(f"short-close-failed alert send failed (non-fatal): {exc}")
+        except Exception as exc:
+            logger.error(f"short-close-failed alert send failed: {describe_exception(exc)}")
 
     def _handle_naked_short(self, naked_info: Tuple[str, str, int]):
         """
@@ -4444,7 +4444,7 @@ class MEICStrategy(abc.ABC):
                 priority=priority, details={"conid": uic},
             )
         except Exception as exc:
-            logger.debug("emergency-close alert failed (non-fatal): %s", exc)
+            logger.error("emergency-close alert failed: %s", describe_exception(exc))
 
     def _close_position_with_retry_ib(
         self, position_id: str, leg_name: str, uic: int = None,
