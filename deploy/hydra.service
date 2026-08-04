@@ -27,6 +27,13 @@ User=calypso
 Group=calypso
 WorkingDirectory=/opt/calypso
 Environment="PYTHONUNBUFFERED=1"
+# Matches calypso-broker.service's existing setting. Lets
+# shared/secret_manager.py's is_running_on_gcp()/get_project_id() short-
+# circuit on the env var instead of two metadata-server HTTP round-trips
+# (up to 1s + 2s = 3s worst case) before every Secret Manager fetch —
+# added 2026-08-04 while tightening the direct-Telegram bypass alert
+# channel's worst-case blocking time (see TimeoutStopSec's comment below).
+Environment="GCP_PROJECT=calypso-trading-bot"
 
 # ─── Shared IBKR session (broker-proxy mode) ────────────────────────────
 # bots/hydra/main.py:_build_broker() returns a BrokerClient (proxying the
@@ -86,16 +93,42 @@ RestartSec=30
 # interruptible_sleep) — NOT an ibind-level oauth_shutdown handler; this
 # process talks to IBKR via BrokerClient (CALYPSO_BROKER_URL, broker-proxy
 # mode) and owns no direct ibind session of its own to shut down.
-# 75s (was 30s, bumped 2026-08-03, corrected from an initial undersized 45s
-# a review caught): a full root-cause of an observed same-day shutdown delay
-# on this process is still open (see bots/hydra/__init__.py version history)
-# — this is a conservative mitigation, not a closed fix. Must comfortably
-# exceed a single in-flight BrokerClient HTTP call's worst-case timeout — for
-# a 7-contract entry (B/C) that's place_and_wait_for_fill's server-side
-# fill_timeout (min(30+3*(n-1), 45) = 45s, strategy.py) plus BrokerClient's
-# +10s pad = 55s; 45s (the old value) was UNDER that, not over it.
+# 100s (2026-08-04, bumped from 75s — see the 2026-08-04 golden-loop pass in
+# bots/hydra/__init__.py version history for the full derivation). History:
+# 30s originally -> 75s on 2026-08-03 (corrected from an initial undersized
+# 45s a review caught) -> 100s on 2026-08-04 when the direct-Telegram bypass
+# alert channel (shared/telegram_direct.py) added new worst-case blocking
+# time to the SAME failure tail. Full worst-case chain, must comfortably
+# exceed all of it:
+#   - a single in-flight BrokerClient HTTP call (7-contract B/C entry):
+#     place_and_wait_for_fill's server-side fill_timeout
+#     (min(30+3*(n-1), 45) = 45s, strategy.py) + BrokerClient's +10s pad = 55s
+#   - PLUS a CRITICAL/HIGH alert's own Pub/Sub publish+retry, if one fires in
+#     the same shutdown sequence (shared/alert_service.py): ~11s
+#   - PLUS _write_dead_letter's bounded file-lock wait (shared/
+#     alert_service.py, DEAD_LETTER_LOCK_TIMEOUT_S), which runs on this same
+#     failure tail BEFORE the Telegram bypass: 2s (round-2 review caught
+#     this term missing from an earlier version of this comment)
+#   - PLUS the Telegram bypass that now follows a failed Pub/Sub publish for
+#     CRITICAL/HIGH (shared/alert_service.py::_attempt_telegram_bypass): up
+#     to ~20s (10s Secret Manager credential fetch on a cache miss + 10s for
+#     send_telegram_direct's own 2x5s Markdown-then-plaintext retry; capped
+#     at 20s not 30s because the credential fetch happens at most once per
+#     attempt, not twice — see the 2026-08-04 version-history entry for the
+#     double-fetch bug this closes). The 10s credential-fetch figure assumes
+#     GCP_PROJECT is set (see the Environment= line above) so
+#     is_running_on_gcp()/get_project_id() skip their own metadata-server
+#     round-trips (up to 3s) before the actual Secret Manager call — also
+#     added 2026-08-04, after round-2 review found the hydra units (unlike
+#     calypso-broker.service, which already set this) were paying that
+#     extra latency on every credential fetch, not just this bypass.
+#   Total: 55 + 11 + 2 + 10 + 10 = 88s. 100s leaves ~12s margin — real, and
+#   the remaining shutdown steps after this point are fast/local/no-further-
+#   network-calls. A full root-cause of the ORIGINAL same-day shutdown delay
+#   finding that motivated the 2026-08-03 bump is still open — this remains
+#   a conservative mitigation on top of that, not a closed fix.
 KillSignal=SIGTERM
-TimeoutStopSec=75
+TimeoutStopSec=100
 
 StandardOutput=journal
 StandardError=journal

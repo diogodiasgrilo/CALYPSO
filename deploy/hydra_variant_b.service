@@ -28,6 +28,9 @@ Group=calypso
 WorkingDirectory=/opt/calypso
 Environment="HYDRA_VARIANT_ID=b"
 Environment="PYTHONUNBUFFERED=1"
+# Matches calypso-broker.service's existing setting — see hydra.service's
+# copy of this comment for the full reasoning (2026-08-04).
+Environment="GCP_PROJECT=calypso-trading-bot"
 # Route all IBKR access through the shared broker (drop-in default committed so
 # a clean redeploy reproduces broker-proxy mode, not direct-session mode).
 Environment="CALYPSO_BROKER_URL=http://127.0.0.1:8788"
@@ -68,14 +71,16 @@ ExecStart=/opt/calypso/.venv/bin/python -m bots.hydra.main --config bots/hydra/c
 TimeoutStartSec=120
 Restart=always
 RestartSec=30
-# 75s (was 30s, bumped 2026-08-03, corrected from an initial undersized
-# 45s a review caught): safety margin while a same-day shutdown-delay
+# 100s (was 30s, bumped 75s on 2026-08-03, bumped again 2026-08-04 when the
+# direct-Telegram bypass alert channel added new worst-case blocking time
+# to the same failure tail): safety margin while a same-day shutdown-delay
 # finding on this process family is still open (root cause unconfirmed
 # — see bots/hydra/__init__.py version history and hydra.service's
 # TimeoutStopSec comment for the exact worst-case math this must exceed:
-# a 7-contract order-fill HTTP call can legitimately block ~55s).
+# 55s order-fill HTTP call + 11s Pub/Sub alert retry + 2s dead-letter flock
+# + 10s Telegram-bypass credential fetch + 10s Telegram POST retry = 88s).
 KillSignal=SIGTERM
-TimeoutStopSec=75
+TimeoutStopSec=100
 
 StandardOutput=journal
 StandardError=journal

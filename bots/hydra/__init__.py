@@ -36,6 +36,96 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Direct-Telegram bypass for CRITICAL/HIGH alerts (2026-08-04, THE GOLDEN
+  LOOP). Closes the gap the SAME-DAY "alert-delivery reliability hardening"
+  entry below explicitly deferred ("NOT DONE, DELIBERATELY: a fully
+  independent bypass-Pub/Sub channel") — that fix made Pub/Sub publish
+  failures retry + dead-letter, but every path still depended on Pub/Sub
+  itself; a real Pub/Sub outage would still silence a CRITICAL/HIGH alert
+  completely. User: "let's fix it properly... that is how we should do
+  every single feature or fix on this project too" — referring to THE
+  GOLDEN LOOP, ported the same day from the Adventist Intelligence project
+  (`feedback_golden_loop.md`): plan -> AUDIT-BEFORE -> implement -> test
+  (with explicit negative-control proof) -> AUDIT-AFTER (4 rounds here, not
+  3 — round 3 found something non-cosmetic) -> converge. This entry is
+  written in that shape.
+  AUDIT-BEFORE (done before writing a line of code, not assumed): the
+  codebase already talks to the Telegram Bot API directly in THREE places —
+  bots/hydra/telegram_commands.py's command-poller reply (variant-A-only,
+  unusable as a bypass from B/C/D/E), services/homer/main.py's
+  send_telegram_alert (closest shape — standalone, no poller coupling),
+  cloud_functions/alert_processor/main.py's own send (IS the Pub/Sub path
+  itself). None share code. shared/secret_manager.py had getters for every
+  OTHER credential type but no get_telegram_credentials(). Conclusion: add
+  ONE new getter + ONE new small module, don't write a 4th duplicate, don't
+  refactor the other 3 (live, working, unrelated code paths — out of scope).
+  IMPLEMENT: shared/secret_manager.py gained get_telegram_credentials()
+  (byte-identical pattern to get_saxo_credentials() etc.). New module
+  shared/telegram_direct.py: send_telegram_direct(message, title,
+  credentials=None) -> bool, POSTs directly to api.telegram.org, Markdown-
+  then-plaintext-on-non-200 fallback (mirrors HOMER's proven pattern), 5s
+  timeout/attempt, never raises. shared/alert_service.py::AlertService
+  gained _attempt_telegram_bypass, called from send_alert's failure tail for
+  CRITICAL/HIGH only, right after _write_dead_letter — credentials cached
+  on the instance (only on success, so a transient fetch failure retries
+  next trigger rather than being treated as permanent).
+  4 ROUNDS OF REVIEW FOUND AND FIXED REAL BUGS (this is what AUDIT-AFTER is
+  for):
+  Round 1 — (a) a double-fetch bug: the original wiring passed a still-None
+  credential cache straight into send_telegram_direct, which would then
+  re-fetch internally, doubling Secret Manager timeout exposure on exactly
+  the failure path the worst-case accounting cares about most. Fixed to
+  short-circuit (skip the Telegram POST attempt entirely) if the one fetch
+  attempt already failed. (b) a bot-token leak risk: a `requests` connection
+  exception can embed the token in the URL it's raised from; telegram_
+  direct.py's except block now redacts it before logging (the SAME risk
+  bots/hydra/telegram_commands.py's _TokenRedactingFilter was built to close
+  for that module — this is a second instance of the identical lesson, not
+  covered by that filter since it's instance-based and this is a stateless
+  function). (c) recomputed + corrected the shutdown-margin accounting
+  (TimeoutStopSec raised 75s->95s hydra units / 90s->110s broker at this
+  point in the review).
+  Round 2 — found the round-1 "95s" figure still undercounted two terms:
+  _write_dead_letter's own 2s bounded flock wait, and (bigger) that the 5
+  hydra*.service units — unlike calypso-broker.service — never set
+  GCP_PROJECT, so shared/secret_manager.py's is_running_on_gcp()/
+  get_project_id() were paying ~3s of metadata-server HTTP round-trips
+  before EVERY Secret Manager fetch on those units, not just this bypass.
+  Fixed properly, not just re-documented: added Environment="GCP_PROJECT=
+  calypso-trading-bot" to all 5 hydra*.service files, matching the broker's
+  own already-proven-in-production setting — this actually removes the
+  latency system-wide rather than just accounting around it. TimeoutStopSec
+  raised again to 100s (hydra units, 88s worst case) / confirmed 110s
+  (broker, 96s worst case) still held.
+  Round 3 — found something non-cosmetic: the "Pub/Sub client never
+  initialized at all" branch in send_alert (not on GCP, or a sustained
+  outage the lazy-reinit hasn't recovered from) used to return early WITHOUT
+  ever writing a dead-letter record or attempting the bypass — a MORE severe
+  case of the exact "Pub/Sub is down" scenario this whole feature exists
+  for, silently unprotected by it. Fixed: that branch now falls through to
+  the same dead-letter-write + CRITICAL/HIGH-bypass logic as the publish-
+  exception tail. Also caught a stale "95s" left in one comment by an
+  earlier edit pass that didn't match the actual 100s directive four lines
+  later — corrected.
+  Round 4 — converged, no new findings. Independently reproduced the full
+  suite pass count and confirmed no stray dead-letter files were left by
+  the test run.
+  Every fix above was proven, not just asserted: THREE separate negative
+  controls were actually run during this work (not hypothetical) — the
+  bypass call itself disabled -> 6 tests red, restored -> green; the
+  credential short-circuit fix disabled -> the specific test for it red
+  (showing the double-fetch), restored -> green; the round-3
+  never-initialized fix disabled -> its 2 new tests red, restored -> green.
+  Full suite: 2208 passed / 15 skipped / 0 failed (was 2182 before this
+  feature, climbing from 2153 across the whole 2026-08-04 alert-reliability
+  day of work). New test file: tests/test_alert_telegram_bypass.py (26
+  tests).
+  NOT DONE, DELIBERATELY: telegram_commands.py's and HOMER's existing
+  Telegram-send call sites are NOT refactored to use the new shared module
+  (scope discipline — live, working, unrelated code paths). Email is not
+  given a second bypass channel (Telegram-only; email already shares the
+  same Cloud Function as Telegram in the normal path, and Telegram is the
+  higher-value "operator's phone, immediate visibility" target).
 - Alert-delivery reliability hardening (2026-08-04). While checking for
   anything left half-dug from the 2026-08-03 audit, live logs showed a NEW
   bug on every strategy restart that night: `shared/alert_service.py`'s
@@ -130,17 +220,22 @@ Version History:
   delivery) and `shared/data_recorder.py`'s `_safe_write` (wraps
   record_entry/record_stop/record_daily_summary — real trade-record
   persistence), same blank-`str(e)` pattern, diagnostics-only.
-  NOT DONE, DELIBERATELY: a fully independent (bypass-Pub/Sub) delivery
-  channel (e.g. direct Telegram API as a last resort when Pub/Sub itself is
-  down) — confirmed ARGUS shares the same Pub/Sub-dependent path today, so it
-  can't watchdog a full Pub/Sub outage either. Genuinely valuable, but
-  expands the alert-delivery attack surface and secrets footprint; deserves
-  its own discussion, not a decision folded into this fix. `data/
+  NOT DONE, DELIBERATELY (AT THE TIME): a fully independent (bypass-Pub/Sub)
+  delivery channel (e.g. direct Telegram API as a last resort when Pub/Sub
+  itself is down) — confirmed ARGUS shares the same Pub/Sub-dependent path
+  today, so it can't watchdog a full Pub/Sub outage either. Genuinely
+  valuable, but expands the alert-delivery attack surface and secrets
+  footprint; deserved its own discussion, not a decision folded into this
+  fix. **SHIPPED LATER THE SAME DAY** — see the "Direct-Telegram bypass for
+  CRITICAL/HIGH alerts" entry ABOVE this one; this note is kept for the
+  historical record of the decision, not as a current gap. `data/
   failed_alerts.jsonl` has no retention sweep (unlike `pre_start_snapshot.sh`'s
   50-snapshot cap) — deliberately: this file grows only on genuine Pub/Sub
   failures (~5/30 days fleet-wide historically, each a few KB), an entirely
   different growth profile from a per-restart snapshot file; flagged, not
-  forgotten.
+  forgotten. (Still true even with the bypass channel — the bypass reduces
+  how OFTEN a lost alert needs the dead-letter file as its only record, it
+  doesn't change the file's own growth profile.)
   Full suite: 2182 passed / 15 skipped / 0 failed (was 2153 before this fix).
   New test files: test_alert_publish_reliability.py (18, incl. 2 real
   multi-threaded concurrency tests), test_alert_send_failure_logging_

@@ -64,14 +64,25 @@ TimeoutStartSec=120
 # landed mid OAuth-rehandshake), joins the maintenance thread, THEN runs
 # ib.disconnect() (stop Tickler + logout) so the IBKR session is released
 # cleanly rather than left competing.
-# 90s (was 30s, bumped 2026-08-03, corrected from an initial 45s that a
-# review caught as still too short): the 'orders' family is DELIBERATELY
-# NEVER abortable (shared/ib_retry.py — aborting an in-flight order retry
-# risks a naked/partial leg), and its own documented worst case is ~63s
-# (RetryPolicy: 6 attempts, ~46s of backoff + the final attempt). 90s gives
-# real margin above that rather than another undersized guess.
+# 110s (was 30s, bumped 90s on 2026-08-03, bumped again 2026-08-04 when the
+# direct-Telegram bypass alert channel added new worst-case blocking time):
+# the 'orders' family is DELIBERATELY NEVER abortable (shared/ib_retry.py —
+# aborting an in-flight order retry risks a naked/partial leg), and its own
+# documented worst case is ~63s (RetryPolicy: 6 attempts, ~46s of backoff +
+# the final attempt). calypso-broker also constructs its own AlertService
+# for breaker/warmup alerting (IBKRAlertHooks) — a CRITICAL/HIGH alert whose
+# Pub/Sub publish fails adds ~11s of retry, then _write_dead_letter's bounded
+# file-lock wait (2s, DEAD_LETTER_LOCK_TIMEOUT_S), then (2026-08-04) up to
+# ~20s more for the Telegram bypass (10s Secret Manager credential fetch on
+# a cache miss + 10s for send_telegram_direct's own retry — 10s assumes
+# GCP_PROJECT is set, which this unit already does, above, so
+# is_running_on_gcp()/get_project_id() skip their own metadata-server
+# round-trips — see shared/alert_service.py and bots/hydra/__init__.py
+# version history for the full derivation). Total: 63 + 11 + 2 + 20 = 96s.
+# 110s gives ~14s real margin above that, generous since this is the single
+# shared IBKR session owner.
 KillSignal=SIGTERM
-TimeoutStopSec=90
+TimeoutStopSec=110
 
 StandardOutput=journal
 StandardError=journal

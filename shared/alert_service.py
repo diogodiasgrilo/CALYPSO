@@ -298,6 +298,13 @@ class AlertService:
         # A — on the anti-spam gate, which has nothing to do with reinit.
         self._reinit_lock = threading.Lock()
 
+        # Cache for the direct-Telegram bypass (see _attempt_telegram_bypass /
+        # shared/telegram_direct.py) — only ever populated on a SUCCESSFUL
+        # credential fetch. Stays None on a failed fetch so a later bypass
+        # trigger retries rather than treating a transient Secret Manager
+        # blip as a permanent failure.
+        self._telegram_creds_cache: Optional[Dict[str, Any]] = None
+
         self._initialize()
 
     def _initialize(self) -> None:
@@ -545,9 +552,25 @@ class AlertService:
             finally:
                 self._reinit_lock.release()
 
-        # Local mode - just log
+        # Local mode - Pub/Sub was never initialized (not on GCP — the
+        # expected, harmless case for local dev — or a sustained outage the
+        # lazy-reinit above hasn't recovered from yet). Round-3 review
+        # (2026-08-04) caught that this branch used to return early without
+        # ever writing a dead-letter record or attempting the CRITICAL/HIGH
+        # Telegram bypass below — silently dropping exactly the alerts the
+        # bypass exists to protect (a Pub/Sub outage that prevents the
+        # client from even CONSTRUCTING is a more severe case of the same
+        # "Pub/Sub is down" scenario a per-publish-call failure covers, and
+        # the original code only handled the latter). Fixed to fall through
+        # to the same dead-letter + bypass logic used below. In local dev
+        # (not on GCP) this is harmless and fast: _write_dead_letter just
+        # writes locally, and the bypass's own credential fetch short-
+        # circuits immediately via the same not-on-GCP check.
         if not self._initialized or not self._publisher:
             logger.info(f"Alert logged (Pub/Sub not available): {json.dumps(payload)}")
+            self._write_dead_letter(payload, priority, "Pub/Sub not initialized/available")
+            if priority in (AlertPriority.CRITICAL, AlertPriority.HIGH):
+                self._attempt_telegram_bypass(display_title, message)
             return False
 
         # Publish to Pub/Sub. CRITICAL/HIGH get one retry (2 attempts total) —
@@ -570,13 +593,20 @@ class AlertService:
         # sequence, with a single non-abortable in-flight order-family retry's
         # documented ~55s worst case (shared/ib_retry.py — order placement is
         # deliberately excluded from shutdown-abort) if a close/entry was mid-
-        # flight when SIGTERM arrived — 55s + 11s = 66s, leaving only ~9s of
-        # the 75s hydra-unit TimeoutStopSec for whatever remains in the
-        # shutdown sequence after that (Telegram-thread stop, status-summary
-        # logging — fast, local, no further network calls, so 9s should be
-        # sufficient, but this is a real accounting, not a wide safety
-        # margin). See bots/hydra/__init__.py version history (2026-08-03 and
-        # 2026-08-04 entries) for the full numbers.
+        # flight when SIGTERM arrived — 55s + 11s = 66s.
+        #
+        # ON TOP OF THAT (2026-08-04 golden-loop pass, round-1 review): a
+        # failed CRITICAL/HIGH publish also triggers _attempt_telegram_bypass
+        # below, adding up to ~20s more worst case (10s Secret Manager fetch
+        # on a cache miss + 10s for the Telegram POST's own 2×5s retry;
+        # capped at 20s, not 30s, because the double-fetch bug round-1 review
+        # caught was fixed — the bypass now fetches credentials at most once
+        # per attempt). Grand total worst case: 66s + 20s = 86s (hydra units)
+        # / 63s(broker's own order-family worst case) + 11s + 20s = 94s
+        # (calypso-broker, which also constructs its own AlertService for
+        # breaker/warmup alerting). TimeoutStopSec raised accordingly — see
+        # bots/hydra/__init__.py version history (2026-08-03 and 2026-08-04
+        # entries) for the full numbers and the deploy/*.service values.
         max_attempts = 2 if priority in (AlertPriority.CRITICAL, AlertPriority.HIGH) else 1
         last_error: Optional[Exception] = None
         for attempt in range(1, max_attempts + 1):
@@ -602,7 +632,64 @@ class AlertService:
         # Still log the alert locally
         logger.warning(f"Alert content (failed to publish): {json.dumps(payload)}")
         self._write_dead_letter(payload, priority, error_desc)
+
+        # Last resort: Pub/Sub is the ONLY delivery path above, so a Pub/Sub
+        # outage silences even a CRITICAL alert unless something bypasses it
+        # entirely. CRITICAL/HIGH only — MEDIUM/LOW already stop at the
+        # dead-letter record, matching every other priority-gated behavior in
+        # this method (retry count, email routing, NEVER_SUPPRESS).
+        if priority in (AlertPriority.CRITICAL, AlertPriority.HIGH):
+            self._attempt_telegram_bypass(display_title, message)
+
         return False
+
+    def _attempt_telegram_bypass(self, title: str, message: str) -> None:
+        """Pub/Sub-independent last resort for a CRITICAL/HIGH alert whose
+        normal publish+retry both failed. See shared/telegram_direct.py for
+        why this is a separate module rather than a 4th duplicate of the
+        Telegram-send pattern already in bots/hydra/telegram_commands.py /
+        services/homer/main.py / cloud_functions/alert_processor/main.py.
+
+        Never raises — this runs inside the failure path of send_alert
+        itself; a bug here must not mask the original publish failure
+        already logged and dead-lettered above it.
+        """
+        try:
+            from shared.telegram_direct import send_telegram_direct
+            from shared.secret_manager import get_telegram_credentials
+
+            if self._telegram_creds_cache is None:
+                self._telegram_creds_cache = get_telegram_credentials()
+
+            # Round-1 review (2026-08-04) caught a real bug here: passing a
+            # still-None cache straight into send_telegram_direct would have
+            # made IT fetch credentials again internally (send_telegram_direct
+            # fetches fresh whenever credentials=None), doubling the Secret
+            # Manager timeout exposure on exactly the failure path the
+            # worst-case shutdown accounting cares most about. Short-circuit
+            # instead: if we already know credentials aren't available, don't
+            # attempt the Telegram POST at all — one fetch attempt, not two.
+            if self._telegram_creds_cache is None:
+                logger.error(
+                    "Bypass Telegram alert ALSO failed (no credentials) — "
+                    "alert is only in the dead-letter file "
+                    "(data/failed_alerts.jsonl)"
+                )
+                return
+
+            if send_telegram_direct(
+                message, title=title, credentials=self._telegram_creds_cache
+            ):
+                logger.warning(
+                    "Bypass Telegram alert delivered (Pub/Sub unavailable)"
+                )
+            else:
+                logger.error(
+                    "Bypass Telegram alert ALSO failed — alert is only in "
+                    "the dead-letter file (data/failed_alerts.jsonl)"
+                )
+        except Exception as e:
+            logger.error(f"Telegram bypass attempt raised: {describe_exception(e)}")
 
     def _write_dead_letter(
         self, payload: Dict[str, Any], priority: AlertPriority, error: str

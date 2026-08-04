@@ -27,6 +27,7 @@ SECRET_NAMES = {
     "google_sheets_credentials": "calypso-google-sheets-credentials",
     "account_config": "calypso-account-config",
     "email_config": "calypso-email-config",
+    "telegram_credentials": "calypso-telegram-credentials",
 }
 
 
@@ -149,6 +150,31 @@ def get_saxo_credentials() -> Optional[Dict[str, Any]]:
             return json.loads(secret_value)
         except json.JSONDecodeError as e:
             logger.error(f"Failed to parse Saxo credentials JSON: {e}")
+    return None
+
+
+def get_telegram_credentials() -> Optional[Dict[str, Any]]:
+    """
+    Get Telegram bot credentials (bot_token, chat_id) from Secret Manager.
+
+    Previously loaded independently (each re-implementing the same
+    get_secret()+json.loads() boilerplate) by bots/hydra/telegram_commands.py,
+    services/homer/main.py, and cloud_functions/alert_processor/main.py — this
+    is the first shared getter for it, matching the pattern of the other
+    get_*_credentials() functions in this module. Existing call sites are
+    intentionally NOT refactored to use this (out of scope — see
+    shared/telegram_direct.py, the first consumer).
+
+    Returns:
+        dict: {"bot_token": ..., "chat_id": ...}.
+              Returns None if not on GCP or if fetch/parse fails.
+    """
+    secret_value = get_secret(SECRET_NAMES["telegram_credentials"])
+    if secret_value:
+        try:
+            return json.loads(secret_value)
+        except json.JSONDecodeError as e:
+            logger.error(f"Failed to parse Telegram credentials JSON: {e}")
     return None
 
 
