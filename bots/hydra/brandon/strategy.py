@@ -122,6 +122,13 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_gex_profile: Optional[GEXProfile] = None
         self._brandon_gex_profile_fetched_at: Optional[datetime] = None
         self._brandon_gex_failure_at: Optional[datetime] = None
+        # The previous INDEPENDENT GEX read seen by the strike adjuster (rotated
+        # in _brandon_apply_strike_adjuster, keyed off profile.fetched_at — a
+        # cache-hit reuse within one entry evaluation does not count as a new
+        # read). Powers the accel-peak persistence gate (2026-08-12): per-variant,
+        # in-memory, unpersisted by design (B and C run different entry-slot
+        # grids, so "the previous read" is inherently a per-variant concept).
+        self._brandon_prior_gex_profile: Optional[GEXProfile] = None
         self._brandon_breach_states: dict[tuple[int, str], gex_breach_exit.BreachState] = {}
         self._brandon_overlay_placed: set[tuple[int, str]] = set()
         self._brandon_hydra_shadow_fired: set[tuple[int, str]] = set()
@@ -249,6 +256,13 @@ class BrandonHydraStrategy(HydraStrategy):
         self.brandon_max_shift_pts = float(gex.get("max_shift_pts", 25.0))
         self.brandon_shift_buffer_pts = float(gex.get("shift_buffer_pts", 5.0))
         self.brandon_accel_peak_locality_pts = float(gex.get("accel_peak_locality_pts", 25.0))
+        # 2026-08-12: require 2 independent GEX reads to agree on a peak before
+        # trusting it enough to veto an entry. Ships OFF (code-only deploy) —
+        # see bots/hydra/__init__.py version history for the staged rollout.
+        self.brandon_accel_peak_persistence_enabled = bool(gex.get("accel_peak_persistence_enabled", False))
+        self.brandon_accel_peak_persistence_tolerance_pts = float(
+            gex.get("accel_peak_persistence_tolerance_pts", 10.0)
+        )
 
         ov = bcfg.get("defensive_overlay") or {}
         self.brandon_overlay_enabled = bool(ov.get("enabled", False))
@@ -651,6 +665,12 @@ class BrandonHydraStrategy(HydraStrategy):
 
         Failure (no GEX profile yet, missing strikes, etc.) is a no-op so
         order placement falls through to the standard credit-scan strikes.
+
+        Call-side is always evaluated first; the put-side block below checks
+        `already_aborted` before mutating anything (2026-08-12) — a call-side
+        require-both-sides abort no longer short-circuits the function, so the
+        put side still gets evaluated + logged (observability), it just never
+        mutates a strike on an entry that's being discarded either way.
         """
         if not (self.brandon_gex_enabled and self.brandon_strike_adjuster_enabled):
             return
@@ -661,18 +681,47 @@ class BrandonHydraStrategy(HydraStrategy):
         if profile is None:
             return
 
+        # Persistence-gate bookkeeping (2026-08-12): capture the PREVIOUS
+        # independent read before rolling the pointer forward. A cache-hit
+        # reuse of the same profile within one entry evaluation (same
+        # fetched_at) does not count as a new read and must not roll forward.
+        prior_profile = self._brandon_prior_gex_profile
+        if profile.fetched_at != getattr(prior_profile, "fetched_at", None):
+            self._brandon_prior_gex_profile = profile
+        # Review fix (2026-08-12): the rotation guard above only stops the
+        # POINTER from being reassigned on a repeat sighting — it does NOT
+        # stop that already-rotated pointer from being read back out as
+        # `prior_profile` here and handed to the confirm check against the
+        # very profile it was set from. That happens on any entry retry that
+        # reuses the same force-refresh cache write (ENTRY_RETRY_DELAY_SECONDS
+        # < the force-refresh sibling-reuse window), or on any of
+        # _brandon_get_gex_profile's stale-fallback branches (failure
+        # cooldown, spot<=0, fetch exception) returning the same cached
+        # profile — in either case `prior_profile` and `profile` would be the
+        # SAME object, and the adjuster would trivially self-confirm (0pt
+        # "drift") instead of requiring a genuinely independent second read.
+        # A prior that shares the current profile's own fetched_at is not an
+        # independent read — treat it the same as "no prior yet".
+        if prior_profile is not None and prior_profile.fetched_at == profile.fetched_at:
+            prior_profile = None
+
         cfg = gex_strike_adjuster.AdjusterConfig(
             accel_min_pct=self.brandon_accel_min_pct,
             decel_min_pct=self.brandon_decel_min_pct,
             max_shift_pts=self.brandon_max_shift_pts,
             shift_buffer_pts=self.brandon_shift_buffer_pts,
             accel_peak_locality_pts=self.brandon_accel_peak_locality_pts,
+            accel_peak_persistence_enabled=self.brandon_accel_peak_persistence_enabled,
+            accel_peak_persistence_tolerance_pts=self.brandon_accel_peak_persistence_tolerance_pts,
             strike_increment=self.strike_increment,
         )
+
+        already_aborted = False
 
         if entry.short_call_strike and not getattr(entry, "call_side_skipped", False):
             r = gex_strike_adjuster.adjust_call_strike(
                 spot=spot, proposed_short=entry.short_call_strike, profile=profile, config=cfg,
+                prior_profile=prior_profile,
             )
             if r.action == gex_strike_adjuster.AdjustAction.SHIFT and r.new_strike is not None:
                 width = entry.long_call_strike - entry.short_call_strike
@@ -685,22 +734,26 @@ class BrandonHydraStrategy(HydraStrategy):
             elif r.action == gex_strike_adjuster.AdjustAction.SKIP:
                 if not getattr(self, "one_sided_entries_enabled", True):
                     # require-both-sides: refuse to route one-sided; abort the entry.
+                    # Do NOT return here — let the put side still run below for
+                    # observability (2026-08-12); already_aborted blocks any
+                    # further mutation.
                     logger.warning(
                         "BRANDON-GEX-ADJ E#%s call: SKIP — %s. one_sided_entries_enabled=false "
                         "→ ABORTING entry (require both sides).",
                         entry.entry_number, r.reason,
                     )
                     entry.require_both_abort = True
-                    return
-                logger.warning(
-                    "BRANDON-GEX-ADJ E#%s call: SKIP — %s. Routing as put-only entry.",
-                    entry.entry_number, r.reason,
-                )
-                entry.call_side_skipped = True
-                entry.short_call_strike = 0.0
-                entry.long_call_strike = 0.0
-                if hasattr(entry, "put_only"):
-                    entry.put_only = True
+                    already_aborted = True
+                else:
+                    logger.warning(
+                        "BRANDON-GEX-ADJ E#%s call: SKIP — %s. Routing as put-only entry.",
+                        entry.entry_number, r.reason,
+                    )
+                    entry.call_side_skipped = True
+                    entry.short_call_strike = 0.0
+                    entry.long_call_strike = 0.0
+                    if hasattr(entry, "put_only"):
+                        entry.put_only = True
             else:
                 # KEEP — log so we have visibility on no-op decisions. Without
                 # this the journal looked like the adjuster wasn't running.
@@ -712,34 +765,56 @@ class BrandonHydraStrategy(HydraStrategy):
         if entry.short_put_strike and not getattr(entry, "put_side_skipped", False):
             r = gex_strike_adjuster.adjust_put_strike(
                 spot=spot, proposed_short=entry.short_put_strike, profile=profile, config=cfg,
+                prior_profile=prior_profile,
             )
             if r.action == gex_strike_adjuster.AdjustAction.SHIFT and r.new_strike is not None:
-                width = entry.short_put_strike - entry.long_put_strike
-                logger.info(
-                    "BRANDON-GEX-ADJ E#%s put: SHIFT %.0f → %.0f (width %.0f preserved) — %s",
-                    entry.entry_number, entry.short_put_strike, r.new_strike, width, r.reason,
-                )
-                entry.short_put_strike = r.new_strike
-                entry.long_put_strike = r.new_strike - width
+                if already_aborted:
+                    logger.info(
+                        "BRANDON-GEX-ADJ E#%s put: SHIFT %.0f → %.0f suggested, but entry already "
+                        "aborted (call-side require-both-sides) — observability only, not mutating.",
+                        entry.entry_number, entry.short_put_strike, r.new_strike,
+                    )
+                else:
+                    width = entry.short_put_strike - entry.long_put_strike
+                    logger.info(
+                        "BRANDON-GEX-ADJ E#%s put: SHIFT %.0f → %.0f (width %.0f preserved) — %s",
+                        entry.entry_number, entry.short_put_strike, r.new_strike, width, r.reason,
+                    )
+                    entry.short_put_strike = r.new_strike
+                    entry.long_put_strike = r.new_strike - width
             elif r.action == gex_strike_adjuster.AdjustAction.SKIP:
                 if not getattr(self, "one_sided_entries_enabled", True):
-                    # require-both-sides: refuse to route one-sided; abort the entry.
-                    logger.warning(
-                        "BRANDON-GEX-ADJ E#%s put: SKIP — %s. one_sided_entries_enabled=false "
-                        "→ ABORTING entry (require both sides).",
+                    if already_aborted:
+                        logger.info(
+                            "BRANDON-GEX-ADJ E#%s put: SKIP — %s. Entry already aborted "
+                            "(call-side require-both-sides) — observability only.",
+                            entry.entry_number, r.reason,
+                        )
+                    else:
+                        # require-both-sides: refuse to route one-sided; abort the entry.
+                        logger.warning(
+                            "BRANDON-GEX-ADJ E#%s put: SKIP — %s. one_sided_entries_enabled=false "
+                            "→ ABORTING entry (require both sides).",
+                            entry.entry_number, r.reason,
+                        )
+                        entry.require_both_abort = True
+                        already_aborted = True
+                elif already_aborted:
+                    logger.info(
+                        "BRANDON-GEX-ADJ E#%s put: SKIP — %s suggested, but entry already aborted "
+                        "(call-side require-both-sides) — observability only, not routing call-only.",
                         entry.entry_number, r.reason,
                     )
-                    entry.require_both_abort = True
-                    return
-                logger.warning(
-                    "BRANDON-GEX-ADJ E#%s put: SKIP — %s. Routing as call-only entry.",
-                    entry.entry_number, r.reason,
-                )
-                entry.put_side_skipped = True
-                entry.short_put_strike = 0.0
-                entry.long_put_strike = 0.0
-                if hasattr(entry, "call_only"):
-                    entry.call_only = True
+                else:
+                    logger.warning(
+                        "BRANDON-GEX-ADJ E#%s put: SKIP — %s. Routing as call-only entry.",
+                        entry.entry_number, r.reason,
+                    )
+                    entry.put_side_skipped = True
+                    entry.short_put_strike = 0.0
+                    entry.long_put_strike = 0.0
+                    if hasattr(entry, "call_only"):
+                        entry.call_only = True
             else:
                 # KEEP — log so we can audit no-op decisions. The 2026-05-07
                 # incident was hidden because the put adjuster returned KEEP
@@ -2546,6 +2621,7 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_gex_profile = None
         self._brandon_gex_profile_fetched_at = None
         self._brandon_gex_failure_at = None
+        self._brandon_prior_gex_profile = None
         self._brandon_breach_states.clear()
         self._brandon_overlay_placed.clear()
         self._brandon_hydra_shadow_fired.clear()

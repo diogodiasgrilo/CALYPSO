@@ -36,6 +36,120 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- GEX accel-zone peak persistence gate (2026-08-12, THE GOLDEN LOOP). Ships
+  INERT — accel_peak_persistence_enabled defaults False in both AdjusterConfig
+  and the strategy config-read; config_variant_b.json/config_variant_c.json
+  are NOT edited by this change, so this deploy is a behavioral no-op on both
+  live B and shadow C. Flipping it on is a deliberate, separate follow-up
+  (C first, observe, then B) — see below.
+  CONTEXT: a workflow-driven forensic investigation (source-read + 45-day DB
+  baseline + per-event GEX/price detail + price-action counterfactual) into
+  B/C's 3-consecutive-zero-entry-day streak (2026-08-10 -> 08-12) found the
+  cause: the GEX accel-zone strike-veto — which can abort an ENTIRE entry via
+  require-both-sides — fires off a single, unsmoothed GEX-profile read.
+  Stable-peak days (08-10) correctly predicted a real pin; drifting-peak days
+  (08-11, early 08-12, peak moving 15-40pt between entry-slot reads) did not
+  — SPX moved away and never returned. ~1-in-3 hit rate across the week's 18
+  events. Not new to this week either: the mechanism has been the dominant
+  skip cause fleet-wide since one_sided_entries_enabled=false shipped
+  2026-07-16 (C ran an even longer 6-day solo dead streak 07-17->07-24 at
+  HIGHER VIX, ruling out "low VIX explains it").
+  AUDIT-BEFORE (verified directly against source, not assumed): gex_provider.
+  py's _detect_clusters/_flush_cluster recompute GEXCluster.peak_strike fresh
+  from scratch on every build_profile() call — zero persistence anywhere.
+  gex_strike_adjuster.py's AdjusterConfig.accel_peak_locality_pts defaults
+  25.0, unoverridden in either config_variant_b.json or config_variant_c.json.
+  strategy.py's _brandon_get_gex_profile has a 3-min TTL cache; _calculate_
+  strikes (delta-target picker) is the ONLY call site using force_refresh=
+  True, meaning exactly one genuinely-fresh Polygon read happens per entry-
+  slot attempt (B's slots are 30 min apart — well beyond the TTL and Polygon's
+  own ~15-min update cadence, so consecutive entry slots are genuinely
+  independent reads). _brandon_apply_strike_adjuster's call-side
+  require-both-sides abort used to `return` immediately, so the put side
+  never even ran — zero log evidence of what it would have decided.
+  DESIGN: adjust_call_strike/adjust_put_strike gain a `prior_profile` param
+  and two new AdjusterConfig fields (accel_peak_persistence_enabled=False,
+  accel_peak_persistence_tolerance_pts=10.0). When enabled and a prior read
+  is supplied, an in-locality accel-zone SKIP only fires if `prior_profile`
+  ALSO shows a covering accel cluster (same expiry) whose peak is within
+  tolerance of the current peak — otherwise the decision falls through to the
+  existing decel/SHIFT check, then KEEP, exactly as if this accel zone
+  weren't in locality range at all (no bolt-on "downgrade to KEEP" branch
+  needed — a bare `continue` reuses the function's existing fallthrough).
+  strategy.py tracks `self._brandon_prior_gex_profile` (per-variant, in-
+  memory, unpersisted — B and C run different entry-slot grids, so "the
+  previous read" is inherently a per-variant concept; a restart or the first
+  slot of the day simply runs with no prior, falling back to today's single-
+  read behavior for that one slot). SECONDARY FIX: the call-side
+  require-both-sides abort no longer `return`s immediately — an
+  `already_aborted` flag now lets the put side still evaluate + log (never
+  mutate) after a call-side abort, closing the observability gap.
+  REVIEW — 2 rounds, both with independent adversarial verification of every
+  finding (not just asserted):
+  Round 1 (3 parallel dimension reviewers — correctness, live-trading
+  blast-radius, test-coverage — each finding independently re-derived by a
+  fresh verifier) found and fixed: (a) HIGH — a self-comparison bug. The
+  rotation guard only stopped the POINTER (self._brandon_prior_gex_profile)
+  from being reassigned on a repeat sighting of the same profile; it did NOT
+  stop that already-rotated pointer from being read back out and handed to
+  the confirm check as `prior_profile` against the very profile it was set
+  from — a real self-comparison (trivially "confirmed" at 0pt drift,
+  indistinguishable in the log/reason string from a genuine independent
+  second read). Reproducible via an entry retry reusing the same
+  force-refresh cache write (ENTRY_RETRY_DELAY_SECONDS=15s < the 30s
+  force-refresh sibling-reuse window), or via any of _brandon_get_gex_
+  profile's stale-fallback branches (failure cooldown, spot<=0, fetch
+  exception) returning the same cached profile. Fixed: `prior_profile` is
+  nulled to None (treated the same as "no prior yet") whenever its
+  fetched_at matches the current profile's — a prior that IS the current
+  read is not an independent read. (b) LOW — a misleading "no matching
+  accel zone in prior read" log message when a covering cluster WAS found
+  but on a mismatched expiry; split into an explicit 3-way branch. (c)
+  MEDIUM test-coverage gaps — missing put-side mirrors for two call-side
+  tests, no exact-tolerance-boundary test, no dual-side (call+put
+  simultaneously) integration test, and the existing same-fetched_at
+  rotation test only asserted the pointer (trivially true either way),
+  never the actual confirm-check outcome — all closed with new tests,
+  including a precise unittest.mock.patch.object spy test asserting
+  prior_profile=None is what actually gets PASSED to the adjuster on a
+  same-fetched_at reuse (the mechanism-level proof, since the SKIP/KEEP
+  ACTION alone can coincide between "self-confirmed" and "no-prior-
+  available" when the peak is in locality either way).
+  Round 2 (fresh independent reviewer, no knowledge of round 1's findings,
+  + independent verification) converged: traced every return path of
+  _brandon_get_gex_profile by hand and confirmed the fetched_at-based guard
+  is generically correct across all of them; confirmed the new tests
+  genuinely exercise what they claim (no tautological asserts); found only
+  a trivial unresolved forward-reference type hint (GEXCluster referenced
+  but not imported in gex_strike_adjuster.py — fixed) and this same
+  version-history pointer gap (closed by this entry). No new logic defects.
+  4 SEPARATE NEGATIVE CONTROLS actually run (sabotage -> confirm RED ->
+  restore -> confirm GREEN), not just asserted: the persistence-confirmation
+  check itself; the prior-profile rotation ordering (reproducing the
+  self-comparison bug by re-deriving prior_profile AFTER rotating instead of
+  before); the put-side observability fix (restoring the old early-return);
+  and the round-1-fix itself (disabling the fetched_at-nulling guard,
+  confirmed the new spy test goes red).
+  Full suite: 2234 passed / 15 skipped / 0 failed (was 2228 immediately after
+  round 1's new tests, 2208 before this feature).
+  New/extended tests: tests/test_brandon_gex_strike_adjuster.py (17 new,
+  32 total) and tests/test_brandon_strategy_integration.py (9 new, 86
+  total).
+  NOT DONE, DELIBERATELY: accel_peak_locality_pts (the 25pt buffer) itself
+  is untouched — the same distance range produced both this week's one
+  correct veto and its incorrect ones, so shrinking it would trade one
+  error type for another without fixing the actual (unsmoothed-single-read)
+  defect. one_sided_entries_enabled is untouched — every skip this week was
+  call-side; loosening require-both-sides would produce put-only entries,
+  the exact pattern the onesided_entry_negative_expectancy memory documents
+  as net-negative. No 3-read/2-of-3 confirmation window — a simple 2-reads-
+  agree gate is the right first step; a longer window would push the
+  earliest possible confirmed veto to ~1 hour into the session for
+  marginal, currently-unvalidatable robustness gain against an 18-23-event
+  forensic sample. config_variant_b.json/config_variant_c.json are NOT
+  edited here — flipping accel_peak_persistence_enabled on is a deliberate,
+  separate, auditable follow-up: C first (zero live risk), observe
+  entries-taken vs. SKIP-avoided over a handful of trading days, then B.
 - Direct-Telegram bypass for CRITICAL/HIGH alerts (2026-08-04, THE GOLDEN
   LOOP). Closes the gap the SAME-DAY "alert-delivery reliability hardening"
   entry below explicitly deferred ("NOT DONE, DELIBERATELY: a fully

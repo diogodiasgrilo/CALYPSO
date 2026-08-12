@@ -43,6 +43,8 @@ def _make_instance(**brandon_attrs):
         brandon_max_shift_pts=25.0,
         brandon_shift_buffer_pts=5.0,
         brandon_accel_peak_locality_pts=25.0,
+        brandon_accel_peak_persistence_enabled=False,
+        brandon_accel_peak_persistence_tolerance_pts=10.0,
         brandon_overlay_enabled=False,
         brandon_overlay_trigger_distance_pts=25.0,
         brandon_overlay_butterfly_width=10,
@@ -59,6 +61,7 @@ def _make_instance(**brandon_attrs):
         _brandon_gex_profile=None,
         _brandon_gex_profile_fetched_at=None,
         _brandon_gex_failure_at=None,
+        _brandon_prior_gex_profile=None,
         _brandon_breach_states={},
         _brandon_overlay_placed=set(),
         _brandon_hydra_shadow_fired=set(),
@@ -985,6 +988,276 @@ class TestStrikeAdjusterLive:
         # explicit-True set, which is checkable).
         assert e.put_only is True
         assert e.call_side_skipped is True
+
+    def test_call_side_abort_still_evaluates_and_logs_put_side(self, caplog):
+        """2026-08-12 observability fix: before this, a call-side
+        require-both-sides abort `return`ed immediately, so the put side
+        never even ran — zero log evidence of what it would have decided.
+        Now it still evaluates + logs, but must NOT mutate any put-side
+        strike on an entry that's being discarded either way.
+        """
+        import logging
+        prof = self._profile_with_accel_at_call_short()
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_strike_adjuster_enabled=True,
+            brandon_accel_min_pct=0.05, current_price=6800,
+            one_sided_entries_enabled=False,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
+        e = self._entry()
+        with caplog.at_level(logging.INFO, logger="bots.hydra.brandon.strategy"):
+            inst._brandon_apply_strike_adjuster(e)
+        assert getattr(e, "require_both_abort", False) is True
+        # Put side strikes must be UNMUTATED — the entry is discarded regardless.
+        assert e.short_put_strike == 6750
+        assert e.long_put_strike == 6675
+        assert e.put_side_skipped is False
+        assert e.call_only is False
+        put_log_lines = [r.message for r in caplog.records if "put:" in r.message]
+        assert any("BRANDON-GEX-ADJ" in msg and str(e.entry_number) in msg for msg in put_log_lines), (
+            f"expected a put-side BRANDON-GEX-ADJ log line even after the call-side abort, got: {put_log_lines}"
+        )
+
+
+class TestAccelPeakPersistenceRotation:
+    """2026-08-12: _brandon_apply_strike_adjuster tracks the previous
+    INDEPENDENT GEX read (self._brandon_prior_gex_profile) so the persistence
+    gate can compare consecutive entry-slot reads. Rotation must be keyed on
+    profile.fetched_at, not merely "did the function run again" — a cache-hit
+    reuse of the same profile within one entry evaluation must not count as
+    a second independent confirmation.
+    """
+
+    def _entry(self, **kw):
+        e = MagicMock()
+        e.entry_number = 1
+        e.contracts = 1
+        e.short_call_strike = 6850
+        e.long_call_strike = 6925
+        e.short_put_strike = 6750
+        e.long_put_strike = 6675
+        e.call_side_skipped = False
+        e.put_side_skipped = False
+        e.call_only = False
+        e.put_only = False
+        for k, v in kw.items():
+            setattr(e, k, v)
+        return e
+
+    def _accel_profile(self, peak_strike, spot=6800, fetched_at=None):
+        from datetime import date
+        from bots.hydra.brandon.gex_provider import build_profile
+        contracts = [{"details": {"strike_price": peak_strike, "contract_type": "call"}, "open_interest": 200000, "greeks": {"gamma": 0.001}}]
+        for offset in range(-30, 35, 5):
+            if offset != 0:
+                k = peak_strike + offset
+                contracts.append({"details": {"strike_price": k, "contract_type": "call"}, "open_interest": 2000, "greeks": {"gamma": 0.001}})
+        return build_profile(
+            contracts, spot=spot, expiry=date(2026, 5, 5), time_to_expiry=1 / 365.0,
+            fetched_at=fetched_at,
+        )
+
+    def _dual_accel_profile(self, call_peak, put_peak, spot=6800, fetched_at=None):
+        """Two separate, non-overlapping dominant-OI bands — one near a call
+        short, one near a put short — so call/put persistence can be tested
+        independently within a single profile (both bands use "call"
+        contract_type; acceleration is sign-based, not side-based).
+
+        _detect_clusters breaks a "run" only on a SIGN change in the
+        strike-sorted list, not on a numeric strike gap — two same-sign
+        (both "call") bands with nothing between them merge into ONE
+        cluster regardless of distance (this is exactly the SpotGamma
+        hemisphere-merge pathology accel_peak_locality_pts exists to guard
+        against). A small put-type (positive-sign) contract strictly between
+        the two bands breaks the run so they detect as two independent
+        clusters, matching how a real chain (calls above spot, puts below)
+        naturally separates them.
+        """
+        from datetime import date
+        from bots.hydra.brandon.gex_provider import build_profile
+        contracts = [{"details": {"strike_price": 6790, "contract_type": "put"}, "open_interest": 5000, "greeks": {"gamma": 0.001}}]
+        for peak in (call_peak, put_peak):
+            contracts.append({"details": {"strike_price": peak, "contract_type": "call"}, "open_interest": 200000, "greeks": {"gamma": 0.001}})
+            for offset in range(-25, 30, 5):
+                if offset != 0:
+                    contracts.append({"details": {"strike_price": peak + offset, "contract_type": "call"}, "open_interest": 2000, "greeks": {"gamma": 0.001}})
+        return build_profile(
+            contracts, spot=spot, expiry=date(2026, 5, 5), time_to_expiry=1 / 365.0,
+            fetched_at=fetched_at,
+        )
+
+    def test_dual_side_evaluation_reaches_independent_verdicts_from_shared_prior(self):
+        """Call and put sides are evaluated with the SAME prior_profile
+        within one _brandon_apply_strike_adjuster call — confirm each side
+        reaches its own independent confirmed/unconfirmed verdict from that
+        shared prior, closing the gap where only single-side scenarios were
+        covered (2026-08-12 review finding)."""
+        from datetime import datetime, timezone
+        # Call peak unchanged between reads (6840 both) -> confirmed.
+        # Put peak drifted 15pt (6725 -> 6740, > default 10pt tolerance) -> unconfirmed.
+        prior = self._dual_accel_profile(6840, 6725, fetched_at=datetime(2026, 8, 12, 14, 45, 0, tzinfo=timezone.utc))
+        current = self._dual_accel_profile(6840, 6740, fetched_at=datetime(2026, 8, 12, 15, 15, 0, tzinfo=timezone.utc))
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_strike_adjuster_enabled=True,
+            brandon_accel_min_pct=0.01, current_price=6800,
+            brandon_accel_peak_persistence_enabled=True,
+            brandon_accel_peak_persistence_tolerance_pts=10.0,
+            _brandon_prior_gex_profile=prior,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: current
+        e = self._entry()
+        inst._brandon_apply_strike_adjuster(e)
+        # Call side: peak confirmed by the shared prior -> SKIP -> routes one-sided
+        # (one_sided_entries_enabled defaults True when unset on _make_instance).
+        assert e.call_side_skipped is True
+        assert e.put_only is True
+        # Put side: peak UNCONFIRMED by the same shared prior -> falls through,
+        # no decel wall in this fixture -> KEEP, strike unchanged.
+        assert e.put_side_skipped is False
+        assert e.short_put_strike == 6750
+
+    def test_first_call_with_no_prior_sets_prior_profile(self):
+        from datetime import datetime, timezone
+        prof = self._accel_profile(6820, fetched_at=datetime(2026, 8, 12, 14, 45, 0, tzinfo=timezone.utc))
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_strike_adjuster_enabled=True,
+            brandon_accel_min_pct=0.01, current_price=6800,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
+        assert inst._brandon_prior_gex_profile is None
+        inst._brandon_apply_strike_adjuster(self._entry())
+        assert inst._brandon_prior_gex_profile is prof
+
+    def test_second_call_with_different_fetched_at_rotates(self):
+        from datetime import datetime, timezone
+        prof1 = self._accel_profile(6820, fetched_at=datetime(2026, 8, 12, 14, 45, 0, tzinfo=timezone.utc))
+        prof2 = self._accel_profile(6805, fetched_at=datetime(2026, 8, 12, 15, 15, 0, tzinfo=timezone.utc))
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_strike_adjuster_enabled=True,
+            brandon_accel_min_pct=0.01, current_price=6800,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof1
+        inst._brandon_apply_strike_adjuster(self._entry())
+        assert inst._brandon_prior_gex_profile is prof1
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof2
+        inst._brandon_apply_strike_adjuster(self._entry())
+        assert inst._brandon_prior_gex_profile is prof2
+
+    def test_second_call_with_same_fetched_at_does_not_rerotate(self):
+        """A TTL-cache-hit reuse (same fetched_at) within/near one entry
+        evaluation must not roll 'prior' forward to itself — otherwise a
+        profile could get compared against itself (trivially 'confirmed')."""
+        from datetime import datetime, timezone
+        fetched = datetime(2026, 8, 12, 14, 45, 0, tzinfo=timezone.utc)
+        prof = self._accel_profile(6820, fetched_at=fetched)
+        older_prior = self._accel_profile(6600, fetched_at=datetime(2026, 8, 12, 14, 15, 0, tzinfo=timezone.utc))
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_strike_adjuster_enabled=True,
+            brandon_accel_min_pct=0.01, current_price=6800,
+            _brandon_prior_gex_profile=older_prior,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
+        inst._brandon_apply_strike_adjuster(self._entry())
+        assert inst._brandon_prior_gex_profile is prof  # rotated once (older_prior -> prof)
+        # Second call reuses the SAME profile object/fetched_at (cache hit) —
+        # prior must stay pinned at `prof`, not roll forward onto itself.
+        inst._brandon_apply_strike_adjuster(self._entry())
+        assert inst._brandon_prior_gex_profile is prof
+
+    def test_same_fetched_at_reuse_never_passes_self_as_prior_profile(self):
+        """2026-08-12 review fix: the ROTATION guard alone only stops the
+        POINTER from being reassigned on a repeat sighting — it does not stop
+        that already-rotated pointer from being read back out and handed to
+        the confirm check as `prior_profile` against the very profile it was
+        set from (a real self-comparison, trivially "confirmed" with 0pt
+        drift — indistinguishable in the reason string from a genuine
+        independent second read). Assert directly on what gets PASSED to the
+        adjuster functions (not just the SKIP/KEEP outcome, which can
+        coincide between "self-confirmed" and "no-prior-available" when the
+        peak is in locality either way — the call-args assertion is the
+        precise, mechanism-level proof)."""
+        from datetime import datetime, timezone
+        from bots.hydra.brandon import gex_strike_adjuster
+        fetched = datetime(2026, 8, 12, 14, 45, 0, tzinfo=timezone.utc)
+        prof = self._accel_profile(6840, fetched_at=fetched)  # within 25pt locality of 6850
+        older_prior = self._accel_profile(6600, fetched_at=datetime(2026, 8, 12, 14, 15, 0, tzinfo=timezone.utc))
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_strike_adjuster_enabled=True,
+            brandon_accel_min_pct=0.01, current_price=6800,
+            brandon_accel_peak_persistence_enabled=True,
+            _brandon_prior_gex_profile=older_prior,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
+        with patch.object(
+            gex_strike_adjuster, "adjust_call_strike",
+            wraps=gex_strike_adjuster.adjust_call_strike,
+        ) as spy_call:
+            inst._brandon_apply_strike_adjuster(self._entry())
+            first_call_prior = spy_call.call_args.kwargs["prior_profile"]
+            assert first_call_prior is older_prior  # genuine independent prior — correct
+
+            # Second call: SAME profile object/fetched_at reused (cache hit).
+            inst._brandon_apply_strike_adjuster(self._entry())
+            second_call_prior = spy_call.call_args.kwargs["prior_profile"]
+            assert second_call_prior is None, (
+                f"expected prior_profile=None on a same-fetched_at reuse (not the profile "
+                f"comparing against itself), got {second_call_prior!r}"
+            )
+
+    def test_end_to_end_drifted_peak_does_not_skip_when_persistence_enabled(self):
+        """The scenario this whole fix targets: a raw single-read locality
+        check would SKIP (peak in range), but persistence + a drifted prior
+        read means the entry is NOT vetoed."""
+        from datetime import datetime, timezone
+        # Peaks chosen so proposed_short (6850, from _entry()) is within the
+        # default 25pt accel_peak_locality_pts of BOTH reads (10pt and 25pt
+        # away respectively) — otherwise the accel-SKIP branch would never
+        # even be reached and this test would pass for the wrong reason.
+        prior = self._accel_profile(6825, fetched_at=datetime(2026, 8, 12, 14, 45, 0, tzinfo=timezone.utc))
+        current = self._accel_profile(6840, fetched_at=datetime(2026, 8, 12, 15, 15, 0, tzinfo=timezone.utc))
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_strike_adjuster_enabled=True,
+            brandon_accel_min_pct=0.01, current_price=6800,
+            brandon_accel_peak_persistence_enabled=True,
+            brandon_accel_peak_persistence_tolerance_pts=10.0,
+            _brandon_prior_gex_profile=prior,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: current
+        e = self._entry()
+        inst._brandon_apply_strike_adjuster(e)
+        # Would have SKIP'd (aborting, one_sided default True → routes put-only)
+        # under the OLD single-read behavior; persistence gate keeps it KEEP.
+        assert e.call_side_skipped is False
+        assert e.short_call_strike == 6850  # unchanged — KEEP, not SHIFT/SKIP
+
+    def test_first_read_of_day_still_skips_even_with_persistence_enabled(self):
+        """No prior read yet (first entry slot of the day) → falls back to
+        today's single-read behavior for this one slot, persistence or not."""
+        from datetime import datetime, timezone
+        # peak within the default 25pt locality of proposed_short (6850)
+        current = self._accel_profile(6840, fetched_at=datetime(2026, 8, 12, 13, 45, 0, tzinfo=timezone.utc))
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_strike_adjuster_enabled=True,
+            brandon_accel_min_pct=0.01, current_price=6800,
+            brandon_accel_peak_persistence_enabled=True,
+            _brandon_prior_gex_profile=None,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: current
+        e = self._entry()
+        inst._brandon_apply_strike_adjuster(e)
+        assert e.call_side_skipped is True  # one_sided default True → routes one-sided
+
+    def test_reset_for_new_day_clears_prior_gex_profile(self):
+        """Mirrors the existing manual-clear convention for this bare
+        (__new__-constructed) instance — we can't call the real
+        _reset_for_new_day (it chains to super(), which needs full init).
+        """
+        from datetime import datetime, timezone
+        prof = self._accel_profile(6820, fetched_at=datetime(2026, 8, 11, 14, 45, 0, tzinfo=timezone.utc))
+        inst = _make_instance(_brandon_prior_gex_profile=prof)
+        assert inst._brandon_prior_gex_profile is prof
+        inst._brandon_prior_gex_profile = None  # the new line added to _reset_for_new_day
+        assert inst._brandon_prior_gex_profile is None
 
 
 class TestRequireBothSidesGuards:
