@@ -76,6 +76,9 @@ Version History:
   existing decel/SHIFT check, then KEEP, exactly as if this accel zone
   weren't in locality range at all (no bolt-on "downgrade to KEEP" branch
   needed — a bare `continue` reuses the function's existing fallthrough).
+  A third `force_unconfirmed` param (added in round 3, see below) makes that
+  same fallthrough reachable even with `prior_profile=None`, for the case
+  where the only "prior" available IS the current read itself (see round 3).
   strategy.py tracks `self._brandon_prior_gex_profile` (per-variant, in-
   memory, unpersisted — B and C run different entry-slot grids, so "the
   previous read" is inherently a per-variant concept; a restart or the first
@@ -84,7 +87,7 @@ Version History:
   require-both-sides abort no longer `return`s immediately — an
   `already_aborted` flag now lets the put side still evaluate + log (never
   mutate) after a call-side abort, closing the observability gap.
-  REVIEW — 2 rounds, both with independent adversarial verification of every
+  REVIEW — 3 rounds, all with independent adversarial verification of every
   finding (not just asserted):
   Round 1 (3 parallel dimension reviewers — correctness, live-trading
   blast-radius, test-coverage — each finding independently re-derived by a
@@ -99,41 +102,77 @@ Version History:
   force-refresh cache write (ENTRY_RETRY_DELAY_SECONDS=15s < the 30s
   force-refresh sibling-reuse window), or via any of _brandon_get_gex_
   profile's stale-fallback branches (failure cooldown, spot<=0, fetch
-  exception) returning the same cached profile. Fixed: `prior_profile` is
-  nulled to None (treated the same as "no prior yet") whenever its
-  fetched_at matches the current profile's — a prior that IS the current
-  read is not an independent read. (b) LOW — a misleading "no matching
-  accel zone in prior read" log message when a covering cluster WAS found
-  but on a mismatched expiry; split into an explicit 3-way branch. (c)
-  MEDIUM test-coverage gaps — missing put-side mirrors for two call-side
-  tests, no exact-tolerance-boundary test, no dual-side (call+put
-  simultaneously) integration test, and the existing same-fetched_at
-  rotation test only asserted the pointer (trivially true either way),
-  never the actual confirm-check outcome — all closed with new tests,
-  including a precise unittest.mock.patch.object spy test asserting
+  exception) returning the same cached profile. Fixed in round 1: `prior_
+  profile` is nulled to None whenever its fetched_at matches the current
+  profile's — a prior that IS the current read is not an independent read.
+  (Refined in round 3 below — nulling to None alone turned out to conflate
+  this case with "no prior has ever been read," which needs different
+  handling; `force_unconfirmed` is the final mechanism.) (b) LOW — a
+  misleading "no matching accel zone in prior read" log message when a
+  covering cluster WAS found but on a mismatched expiry; split into an
+  explicit 3-way branch. (c) MEDIUM test-coverage gaps — missing put-side
+  mirrors for two call-side tests, no exact-tolerance-boundary test, no
+  dual-side (call+put simultaneously) integration test, and the existing
+  same-fetched_at rotation test only asserted the pointer (trivially true
+  either way), never the actual confirm-check outcome — all closed with new
+  tests, including a precise unittest.mock.patch.object spy test asserting
   prior_profile=None is what actually gets PASSED to the adjuster on a
   same-fetched_at reuse (the mechanism-level proof, since the SKIP/KEEP
   ACTION alone can coincide between "self-confirmed" and "no-prior-
   available" when the peak is in locality either way).
   Round 2 (fresh independent reviewer, no knowledge of round 1's findings,
-  + independent verification) converged: traced every return path of
-  _brandon_get_gex_profile by hand and confirmed the fetched_at-based guard
-  is generically correct across all of them; confirmed the new tests
-  genuinely exercise what they claim (no tautological asserts); found only
-  a trivial unresolved forward-reference type hint (GEXCluster referenced
-  but not imported in gex_strike_adjuster.py — fixed) and this same
-  version-history pointer gap (closed by this entry). No new logic defects.
-  4 SEPARATE NEGATIVE CONTROLS actually run (sabotage -> confirm RED ->
-  restore -> confirm GREEN), not just asserted: the persistence-confirmation
-  check itself; the prior-profile rotation ordering (reproducing the
-  self-comparison bug by re-deriving prior_profile AFTER rotating instead of
-  before); the put-side observability fix (restoring the old early-return);
-  and the round-1-fix itself (disabling the fetched_at-nulling guard,
-  confirmed the new spy test goes red).
-  Full suite: 2234 passed / 15 skipped / 0 failed (was 2228 immediately after
-  round 1's new tests, 2208 before this feature).
-  New/extended tests: tests/test_brandon_gex_strike_adjuster.py (17 new,
-  32 total) and tests/test_brandon_strategy_integration.py (9 new, 86
+  + independent verification) converged on the round-1 mechanism: traced
+  every return path of _brandon_get_gex_profile by hand and confirmed the
+  fetched_at-based guard is generically correct across all of them;
+  confirmed the new tests genuinely exercise what they claim (no
+  tautological asserts); found only a trivial unresolved forward-reference
+  type hint (GEXCluster referenced but not imported in gex_strike_adjuster.
+  py — fixed) and a version-history pointer gap. No logic defects.
+  Round 3: triggered by a SEPARATE follow-up review (a 3-lens interaction
+  check — breach-exit, defensive overlay, and a full state-assumption sweep
+  across bots/hydra/brandon/ — run specifically to clear the feature for its
+  first real activation, accel_peak_persistence_enabled=true on variant C
+  only) whose adversarial verifier, while confirming all three lenses clear,
+  independently surfaced a real gap the three lenses themselves weren't
+  scoped to catch: round 1's "null to None whenever fetched_at matches" fix
+  made a same-profile ENTRY RETRY (ENTRY_RETRY_DELAY_SECONDS=15s, comfortably
+  inside the 30s force-refresh sibling-reuse window, so a retry 15s later
+  reads back its own prior write) collapse to prior_profile=None — which the
+  adjuster treats identically to "no prior has EVER been read," the
+  intentional legacy-SKIP path for the genuinely first evaluation of a day.
+  Fail-safe in direction (skews toward MORE skipping, never toward placing
+  something a clean read would have blocked) but it silently reverted some
+  retried entries to pre-persistence-gate behavior while looking identical
+  in the logs to a genuine decision — directly undermining the point of the
+  C-only observation trial this flip exists to run. Fixed: a new
+  `force_unconfirmed: bool = False` param on adjust_call_strike/
+  adjust_put_strike, set by the caller specifically for the same-fetched_at
+  case, distinct from `prior_profile=None`. It routes straight to
+  "unconfirmed" (fall through to SHIFT/KEEP with a distinct log detail:
+  "re-evaluating the same GEX read as before — no new independent
+  confirmation available yet") without touching prior_profile at all,
+  leaving the true "no prior ever" first-of-day path untouched. A follow-up
+  fresh-eyes round on this specific fix (single reviewer + independent
+  verifier) converged: threading verified symmetric across call/put, all 4
+  combinations of (persistence enabled/disabled) x (force_unconfirmed
+  True/False) traced and confirmed correct, no AttributeError path, both
+  strategy.py call sites verified correct, the retry-timing premise
+  re-verified against current source (not stale) — no new logic defects.
+  5 SEPARATE NEGATIVE CONTROLS actually run across all 3 rounds (sabotage ->
+  confirm RED -> restore -> confirm GREEN), not just asserted: the
+  persistence-confirmation check itself; the prior-profile rotation
+  ordering (reproducing the round-1 self-comparison bug by re-deriving
+  prior_profile AFTER rotating instead of before); the put-side
+  observability fix (restoring the old early-return); the round-1 fix
+  itself (disabling the fetched_at-nulling guard, confirmed the spy test
+  goes red); and the round-3 force_unconfirmed fix (reproducing the exact
+  retry-collapse-to-SKIP bug, confirmed both the mechanism-level spy
+  assertion and a new outcome-level test — an entry that should KEEP on
+  retry instead SKIPs — go red, then green on restore).
+  Full suite: 2239 passed / 15 skipped / 0 failed (was 2234 after round 2,
+  2228 after round 1, 2208 before this feature).
+  New/extended tests: tests/test_brandon_gex_strike_adjuster.py (21 new,
+  36 total) and tests/test_brandon_strategy_integration.py (10 new, 87
   total).
   NOT DONE, DELIBERATELY: accel_peak_locality_pts (the 25pt buffer) itself
   is untouched — the same distance range produced both this week's one

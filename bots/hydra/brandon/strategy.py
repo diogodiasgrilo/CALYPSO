@@ -701,8 +701,26 @@ class BrandonHydraStrategy(HydraStrategy):
         # SAME object, and the adjuster would trivially self-confirm (0pt
         # "drift") instead of requiring a genuinely independent second read.
         # A prior that shares the current profile's own fetched_at is not an
-        # independent read — treat it the same as "no prior yet".
-        if prior_profile is not None and prior_profile.fetched_at == profile.fetched_at:
+        # independent read.
+        #
+        # Round-2 review fix (2026-08-12): nulling it to plain "no prior"
+        # here would be WRONG — "no prior" is the intentional legacy-SKIP
+        # path for the genuinely first evaluation of the day, but this is
+        # NOT that case: a prior existed, it's simply identical to the
+        # current read (a same-profile entry-retry reusing the force-refresh
+        # cache write within ENTRY_RETRY_DELAY_SECONDS, or a stale-fallback
+        # branch in _brandon_get_gex_profile returning the same cached
+        # profile). Collapsing this into "no prior" would silently revert
+        # some retried entries to the pre-persistence-gate unconditional-SKIP
+        # behavior while looking identical in the logs to a genuine
+        # persistence-gate decision — undermining the whole point of
+        # observing this feature's real effect once enabled. Use a distinct
+        # force_unconfirmed signal instead: no NEW independent confirmation
+        # is available, so treat any in-locality accel zone as unconfirmed
+        # (fall through to SHIFT/KEEP) rather than falling all the way back
+        # to "trust a single read".
+        force_unconfirmed = prior_profile is not None and prior_profile.fetched_at == profile.fetched_at
+        if force_unconfirmed:
             prior_profile = None
 
         cfg = gex_strike_adjuster.AdjusterConfig(
@@ -721,7 +739,7 @@ class BrandonHydraStrategy(HydraStrategy):
         if entry.short_call_strike and not getattr(entry, "call_side_skipped", False):
             r = gex_strike_adjuster.adjust_call_strike(
                 spot=spot, proposed_short=entry.short_call_strike, profile=profile, config=cfg,
-                prior_profile=prior_profile,
+                prior_profile=prior_profile, force_unconfirmed=force_unconfirmed,
             )
             if r.action == gex_strike_adjuster.AdjustAction.SHIFT and r.new_strike is not None:
                 width = entry.long_call_strike - entry.short_call_strike
@@ -765,7 +783,7 @@ class BrandonHydraStrategy(HydraStrategy):
         if entry.short_put_strike and not getattr(entry, "put_side_skipped", False):
             r = gex_strike_adjuster.adjust_put_strike(
                 spot=spot, proposed_short=entry.short_put_strike, profile=profile, config=cfg,
-                prior_profile=prior_profile,
+                prior_profile=prior_profile, force_unconfirmed=force_unconfirmed,
             )
             if r.action == gex_strike_adjuster.AdjustAction.SHIFT and r.new_strike is not None:
                 if already_aborted:

@@ -114,6 +114,7 @@ def adjust_call_strike(
     profile: GEXProfile,
     config: AdjusterConfig = AdjusterConfig(),
     prior_profile: Optional[GEXProfile] = None,
+    force_unconfirmed: bool = False,
 ) -> AdjustResult:
     """Decide whether to keep, shift, or skip the proposed call short.
 
@@ -129,6 +130,17 @@ def adjust_call_strike(
     SKIP if `prior_profile` shows a matching accel zone at roughly the same
     peak — otherwise the decision falls through to the SHIFT/KEEP checks
     below, exactly as if this accel zone weren't in locality range at all.
+
+    `force_unconfirmed`: set by the caller (2026-08-12 round-2 review fix)
+    when the only "prior" available IS this exact read (a same-profile
+    entry-retry, or a stale-fallback branch reusing the last cached
+    profile) — i.e. no NEW independent confirmation has happened since the
+    last evaluation. This is deliberately distinct from `prior_profile=None`
+    (which means "no prior has EVER been read" — the intentional, tested
+    legacy-SKIP path for the genuinely first evaluation of the day).
+    Collapsing the retry case into `prior_profile=None` would silently
+    revert some retried entries to unconditional-SKIP while looking
+    identical in the logs to a genuine persistence-gate decision.
     """
     if proposed_short <= spot:
         return AdjustResult(AdjustAction.KEEP, None, "proposed short below spot — caller bug, skipping adjust")
@@ -138,23 +150,29 @@ def adjust_call_strike(
     for c in accel_zones:
         if c.strike_low <= proposed_short <= c.strike_high:
             if abs(proposed_short - c.peak_strike) <= config.accel_peak_locality_pts:
-                if config.accel_peak_persistence_enabled and prior_profile is not None:
-                    prior_c = _cluster_covering(
-                        prior_profile.negative_clusters(min_strength_pct=config.accel_min_pct),
-                        proposed_short,
-                    )
-                    confirmed = (
-                        prior_c is not None
-                        and prior_profile.expiry == profile.expiry
-                        and abs(prior_c.peak_strike - c.peak_strike) <= config.accel_peak_persistence_tolerance_pts
-                    )
+                if config.accel_peak_persistence_enabled and (force_unconfirmed or prior_profile is not None):
+                    if force_unconfirmed:
+                        prior_c = None
+                        confirmed = False
+                    else:
+                        prior_c = _cluster_covering(
+                            prior_profile.negative_clusters(min_strength_pct=config.accel_min_pct),
+                            proposed_short,
+                        )
+                        confirmed = (
+                            prior_c is not None
+                            and prior_profile.expiry == profile.expiry
+                            and abs(prior_c.peak_strike - c.peak_strike) <= config.accel_peak_persistence_tolerance_pts
+                        )
                     if not confirmed:
                         # Unconfirmed by the prior independent read — don't trust
                         # a single noisy snapshot enough to veto the whole entry.
                         # Fall through to the decel/SHIFT check, then KEEP — but
                         # remember why, so an operator can tell "no signal at all"
                         # apart from "signal present but not yet trusted".
-                        if prior_c is None:
+                        if force_unconfirmed:
+                            detail = "(re-evaluating the same GEX read as before — no new independent confirmation available yet)"
+                        elif prior_c is None:
                             detail = "(no matching accel zone in prior read)"
                         elif prior_profile.expiry != profile.expiry:
                             detail = "(prior read has a different expiry — not comparable)"
@@ -201,6 +219,7 @@ def adjust_put_strike(
     profile: GEXProfile,
     config: AdjusterConfig = AdjusterConfig(),
     prior_profile: Optional[GEXProfile] = None,
+    force_unconfirmed: bool = False,
 ) -> AdjustResult:
     """Decide whether to keep, shift, or skip the proposed put short.
 
@@ -209,8 +228,8 @@ def adjust_put_strike(
         - "wing further OTM" = smaller strike
         - shift target = wall.strike_low - shift_buffer_pts
 
-    `prior_profile`: see adjust_call_strike — same persistence-gate semantics,
-    mirrored.
+    `prior_profile` / `force_unconfirmed`: see adjust_call_strike — same
+    persistence-gate semantics, mirrored.
     """
     if proposed_short >= spot:
         return AdjustResult(AdjustAction.KEEP, None, "proposed short above spot — caller bug, skipping adjust")
@@ -220,18 +239,24 @@ def adjust_put_strike(
     for c in accel_zones:
         if c.strike_low <= proposed_short <= c.strike_high:
             if abs(proposed_short - c.peak_strike) <= config.accel_peak_locality_pts:
-                if config.accel_peak_persistence_enabled and prior_profile is not None:
-                    prior_c = _cluster_covering(
-                        prior_profile.negative_clusters(min_strength_pct=config.accel_min_pct),
-                        proposed_short,
-                    )
-                    confirmed = (
-                        prior_c is not None
-                        and prior_profile.expiry == profile.expiry
-                        and abs(prior_c.peak_strike - c.peak_strike) <= config.accel_peak_persistence_tolerance_pts
-                    )
+                if config.accel_peak_persistence_enabled and (force_unconfirmed or prior_profile is not None):
+                    if force_unconfirmed:
+                        prior_c = None
+                        confirmed = False
+                    else:
+                        prior_c = _cluster_covering(
+                            prior_profile.negative_clusters(min_strength_pct=config.accel_min_pct),
+                            proposed_short,
+                        )
+                        confirmed = (
+                            prior_c is not None
+                            and prior_profile.expiry == profile.expiry
+                            and abs(prior_c.peak_strike - c.peak_strike) <= config.accel_peak_persistence_tolerance_pts
+                        )
                     if not confirmed:
-                        if prior_c is None:
+                        if force_unconfirmed:
+                            detail = "(re-evaluating the same GEX read as before — no new independent confirmation available yet)"
+                        elif prior_c is None:
                             detail = "(no matching accel zone in prior read)"
                         elif prior_profile.expiry != profile.expiry:
                             detail = "(prior read has a different expiry — not comparable)"

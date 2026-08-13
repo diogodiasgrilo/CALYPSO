@@ -429,6 +429,67 @@ class TestAccelPeakPersistencePut:
         assert "UNCONFIRMED" in r.reason
 
 
+class TestAccelPeakForceUnconfirmed:
+    """2026-08-12 round-2 review fix: `force_unconfirmed` is a distinct
+    signal from `prior_profile=None` — the caller uses it when the only
+    "prior" available IS the current read itself (a same-profile entry
+    retry or stale-fallback reuse), so no NEW independent confirmation has
+    happened. This must fall through to KEEP/SHIFT like an unconfirmed
+    accel zone, NOT collapse to the "no prior ever" unconditional-SKIP path
+    — otherwise a retried entry would silently revert to pre-persistence-gate
+    behavior while looking identical in the logs to a genuine decision."""
+
+    def test_force_unconfirmed_falls_through_to_keep_with_no_prior_profile(self):
+        current = _accel_profile(6820, spot=6800)
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg,
+            prior_profile=None, force_unconfirmed=True,
+        )
+        assert r.action == AdjustAction.KEEP
+        assert "UNCONFIRMED" in r.reason
+        assert "no new independent confirmation" in r.reason
+
+    def test_force_unconfirmed_falls_through_to_shift_when_decel_wall_present(self):
+        contracts = [_contract(6820, "call", 200000)]
+        for offset in range(-30, 35, 5):
+            if offset != 0:
+                contracts.append(_contract(6820 + offset, "call", 2000))
+        contracts += [_contract(6870, "put", 100000), _contract(6875, "put", 100000)]
+        current = _profile(contracts, spot=6800)
+        cfg = AdjusterConfig(
+            accel_min_pct=0.01, decel_min_pct=0.01, max_shift_pts=70,
+            accel_peak_persistence_enabled=True,
+        )
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg,
+            prior_profile=None, force_unconfirmed=True,
+        )
+        assert r.action == AdjustAction.SHIFT
+        assert "UNCONFIRMED" in r.reason
+
+    def test_force_unconfirmed_ignored_when_persistence_disabled(self):
+        # Kill switch still wins — force_unconfirmed must not matter if the
+        # feature itself is off.
+        current = _accel_profile(6820, spot=6800)
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=False)
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg,
+            prior_profile=None, force_unconfirmed=True,
+        )
+        assert r.action == AdjustAction.SKIP
+
+    def test_put_side_force_unconfirmed_falls_through_to_keep(self):
+        current = _accel_profile(6780, spot=6800)
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_put_strike(
+            spot=6800, proposed_short=6780, profile=current, config=cfg,
+            prior_profile=None, force_unconfirmed=True,
+        )
+        assert r.action == AdjustAction.KEEP
+        assert "UNCONFIRMED" in r.reason
+
+
 class TestAccelPeakPersistenceToleranceBoundary:
     """<= semantics on accel_peak_persistence_tolerance_pts: a drift exactly
     equal to the tolerance must still count as confirmed (not just strictly

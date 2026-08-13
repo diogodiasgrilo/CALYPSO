@@ -1203,6 +1203,55 @@ class TestAccelPeakPersistenceRotation:
                 f"expected prior_profile=None on a same-fetched_at reuse (not the profile "
                 f"comparing against itself), got {second_call_prior!r}"
             )
+            # Round-2 fix: must ALSO signal force_unconfirmed=True on this call —
+            # None alone is ambiguous with "no prior has ever been read", which
+            # would (wrongly) let SKIP fire unconditionally on a retry.
+            assert spy_call.call_args.kwargs.get("force_unconfirmed") is True, (
+                "expected force_unconfirmed=True on a same-fetched_at reuse, so the "
+                "adjuster falls through to KEEP/SHIFT instead of the legacy "
+                "unconditional-SKIP 'no prior ever' path"
+            )
+
+    def test_entry_retry_reusing_same_gex_read_does_not_collapse_to_unconditional_skip(self):
+        """Reproduces the exact scenario a round-2 reviewer found: an entry
+        retry (ENTRY_RETRY_DELAY_SECONDS=15s, well under the 30s force-refresh
+        sibling-reuse window) can re-evaluate the strike adjuster against the
+        SAME cached GEX profile as the first attempt. Before this fix, that
+        collapsed to prior_profile=None -> unconditional SKIP (silently
+        reverting to pre-persistence-gate behavior while looking identical in
+        the logs to a genuine decision). After this fix it must fall through
+        to KEEP instead — proven at the outcome level, not just the call-args
+        level (test_same_fetched_at_reuse_never_passes_self_as_prior_profile
+        already covers the mechanism; this covers the actual trading outcome
+        that scenario produces)."""
+        from datetime import datetime, timezone
+        fetched = datetime(2026, 8, 12, 14, 45, 0, tzinfo=timezone.utc)
+        # peak within the default 25pt locality of proposed_short (6850)
+        prof = self._accel_profile(6840, fetched_at=fetched)
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_strike_adjuster_enabled=True,
+            brandon_accel_min_pct=0.01, current_price=6800,
+            brandon_accel_peak_persistence_enabled=True,
+            _brandon_prior_gex_profile=None,  # first entry of the day — no prior yet
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: prof
+
+        # Attempt 1 (first evaluation): no prior at all -> legacy SKIP, intentional.
+        e1 = self._entry()
+        inst._brandon_apply_strike_adjuster(e1)
+        assert e1.call_side_skipped is True  # correct: genuinely first look, matches pre-fix behavior
+
+        # Attempt 2 (retry: a NEW entry object, but _brandon_get_gex_profile
+        # returns the SAME cached profile — same fetched_at, simulating the
+        # force-refresh sibling-reuse window). Must NOT silently re-SKIP for
+        # a reason that has nothing to do with a real, independent GEX read.
+        e2 = self._entry()
+        inst._brandon_apply_strike_adjuster(e2)
+        assert e2.call_side_skipped is False, (
+            "a retry reusing the same GEX read must fall through to KEEP, not "
+            "silently collapse to the legacy unconditional-SKIP path"
+        )
+        assert e2.short_call_strike == 6850  # KEEP — unchanged
 
     def test_end_to_end_drifted_peak_does_not_skip_when_persistence_enabled(self):
         """The scenario this whole fix targets: a raw single-read locality
