@@ -174,3 +174,38 @@ class TestBrandonOverlayGuardPersistence:
         }))
         assert s._load_state_file_history() is False  # stale → neither restored
         assert s._brandon_overlay_booked == set()
+
+
+class TestLastSpxPricePrefersLiveOverRecovered:
+    """2026-08-13: a full-fleet audit found `last_spx_price` frozen hundreds of
+    points stale on A, B, and C — every save silently preferred the ONE-TIME
+    recovery-time `self.spx_price` (set once, at process init/state-recovery)
+    over the continuously-refreshed `self.current_price`, because a stale-but-
+    truthy value always wins a plain `or` chain. This field feeds the
+    settlement-verification fallback the 2026-06-17 phantom-P&L fix depends on
+    — a stale value here silently defeats that protection on the next
+    post-close restart. Fixed: current_price now takes priority; spx_price is
+    only a fallback for the genuine edge case where no live tick has landed
+    yet."""
+
+    def test_live_current_price_wins_over_stale_recovered_spx_price(self, tmp_path):
+        s = _make_strategy(tmp_path)
+        s.spx_price = 7488.06     # frozen at recovery/init, hours/days stale
+        s.current_price = 7794.36  # live, continuously-refreshed
+        s._save_state_to_disk()
+        data = json.loads(Path(s.state_file).read_text())
+        assert data["last_spx_price"] == 7794.36
+
+    def test_falls_back_to_recovered_spx_price_when_no_live_tick_yet(self, tmp_path):
+        s = _make_strategy(tmp_path)
+        s.spx_price = 7488.06
+        s.current_price = 0.0  # genuine edge case: no live tick landed yet
+        s._save_state_to_disk()
+        data = json.loads(Path(s.state_file).read_text())
+        assert data["last_spx_price"] == 7488.06
+
+    def test_defaults_to_zero_when_neither_price_is_available(self, tmp_path):
+        s = _make_strategy(tmp_path)  # no spx_price/current_price attrs set at all
+        s._save_state_to_disk()
+        data = json.loads(Path(s.state_file).read_text())
+        assert data["last_spx_price"] == 0.0

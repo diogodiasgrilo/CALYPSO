@@ -46,6 +46,18 @@ class TestSettlementSpxFallback:
         s = _strat(live_price=0.0, spx_price=0.0, current_price=7419.0)
         assert s._settlement_spx_level() == 7419.0
 
+    def test_current_price_wins_over_stale_recovered_spx_price(self):
+        """2026-08-13: mirrors the same fix in _save_state_to_disk. spx_price
+        is a strategy-level attribute set exactly ONCE at process init/state-
+        recovery and can be stale by days if the process hasn't restarted
+        since; current_price is the last LIVE tick this process actually
+        saw. This is the highest-stakes reader of the two (it directly gates
+        ITM-vs-worthless settlement booking), so both being nonzero and
+        DIFFERING must resolve to current_price, not whichever happened to
+        be set first."""
+        s = _strat(live_price=None, spx_price=7488.06, current_price=7794.36)
+        assert s._settlement_spx_level() == 7794.36
+
     def test_worthless_only_when_no_reference_at_all(self):
         s = _strat(live_price=None, spx_price=0.0, current_price=0.0)
         assert s._settlement_spx_level() is None   # genuinely unknown → legacy worthless

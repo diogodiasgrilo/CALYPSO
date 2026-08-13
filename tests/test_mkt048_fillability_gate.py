@@ -72,6 +72,116 @@ def _entry(n=1):
     return types.SimpleNamespace(entry_number=n)
 
 
+class TestNonviableSide:
+    """2026-08-13: `_check_credit_gate` now returns a 5th `nonviable_side`
+    value ("both"/"call"/"put"/"") naming which side(s) the FINAL viability
+    determination actually rejected on a "skip" result. Added because the
+    caller's skip-message builder previously re-derived this from the raw
+    estimated-credit numbers, which can disagree with the final decision once
+    MKT-029 fallback / MKT-048 fillability-veto have flipped a side's
+    viability — producing a factually wrong "both spreads below minimum"
+    message on some one-sided-disabled skips where only one side had
+    actually failed (found via a full-fleet audit, C's 2026-08-13 Entry #2)."""
+
+    # call_min=10.0 → MKT-029 floor = call_min-5 = 5.0; put_min=15.0 → floor = 10.0.
+    # "Non-viable" test values must sit BELOW the floor, not just below the
+    # primary threshold, or MKT-029's graduated fallback rescues them.
+
+    def test_both_nonviable_reports_both(self):
+        s = _gate_strat(one_sided=False, call_min=10.0, put_min=15.0)
+        _with_estimate(s, mid_call=3.0, mid_put=3.0, fill_call=0.10, fill_put=0.10)
+        result, worked, est_c, est_p, nonviable = s._check_credit_gate(_entry())
+        assert result == "skip"
+        assert nonviable == "both"
+
+    def test_call_nonviable_one_sided_disabled_reports_call_only(self):
+        # Put is genuinely viable ($0.20 >= $0.15 min) — only call fails.
+        s = _gate_strat(one_sided=False, call_min=10.0, put_min=15.0)
+        _with_estimate(s, mid_call=3.0, mid_put=20.0, fill_call=0.10, fill_put=0.10)
+        result, worked, est_c, est_p, nonviable = s._check_credit_gate(_entry())
+        assert result == "skip"
+        assert nonviable == "call"
+        assert est_p >= 15.0  # put really was viable — proves "call" is accurate, not "both"
+
+    def test_put_nonviable_one_sided_disabled_reports_put_only(self):
+        # Call is genuinely viable — only put fails.
+        s = _gate_strat(one_sided=False, call_min=10.0, put_min=15.0)
+        _with_estimate(s, mid_call=20.0, mid_put=3.0, fill_call=0.10, fill_put=0.10)
+        result, worked, est_c, est_p, nonviable = s._check_credit_gate(_entry())
+        assert result == "skip"
+        assert nonviable == "put"
+        assert est_c >= 10.0  # call really was viable — proves "put" is accurate, not "both"
+
+    def test_call_nonviable_vix_too_high_for_put_only_reports_call(self):
+        # one_sided ENABLED, but VIX blocks the put-only fallback (MKT-032).
+        s = _gate_strat(one_sided=True, vix=30.0, put_only_max_vix=25.0,
+                         call_min=10.0, put_min=15.0)
+        _with_estimate(s, mid_call=3.0, mid_put=20.0, fill_call=0.10, fill_put=0.10)
+        result, worked, est_c, est_p, nonviable = s._check_credit_gate(_entry())
+        assert result == "skip"
+        assert nonviable == "call"
+
+    def test_proceed_result_reports_empty_nonviable_side(self):
+        s = _gate_strat(call_min=10.0, put_min=15.0)
+        _with_estimate(s, mid_call=20.0, mid_put=25.0, fill_call=0.10, fill_put=0.10)
+        result, worked, est_c, est_p, nonviable = s._check_credit_gate(_entry())
+        assert result == "proceed"
+        assert nonviable == ""
+
+
+class TestCreditGateSkipMessage:
+    """2026-08-13: _build_credit_gate_skip_message (extracted from
+    _initiate_entry) must never assert a viability claim the actual
+    determination doesn't back — pins the exact message text for each
+    nonviable_side value, not just the underlying signal."""
+
+    def _strat(self, *, call_min=10.0, put_min=15.0, vix=17.4, put_only_max_vix=25.0,
+               one_sided=True):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.min_viable_credit_per_side = call_min
+        s.min_viable_credit_put_side = put_min
+        s.current_vix = vix
+        s.put_only_max_vix = put_only_max_vix
+        s.one_sided_entries_enabled = one_sided
+        return s
+
+    def test_both_message_claims_both_below_minimum(self):
+        s = self._strat()
+        reason, details = s._build_credit_gate_skip_message("both", est_call=3.0, est_put=3.0)
+        assert "both spreads" in reason
+        assert "$0.03" in reason and "$0.03" in reason
+
+    def test_call_one_sided_disabled_does_not_claim_put_is_below_minimum(self):
+        s = self._strat(one_sided=False)
+        reason, details = s._build_credit_gate_skip_message("call", est_call=3.0, est_put=20.0)
+        assert "one-sided entries are" in reason
+        assert "put spread $0.20 was fine" in reason
+        # Must NOT claim the put spread is below minimum — this is the exact
+        # regression the fix closes (was: "both... below our minimum credit").
+        assert "both" not in reason.lower()
+        assert "NON-VIABLE" in details and "viable, but one-sided" in details
+
+    def test_put_one_sided_disabled_does_not_claim_call_is_below_minimum(self):
+        s = self._strat(one_sided=False)
+        reason, details = s._build_credit_gate_skip_message("put", est_call=20.0, est_put=3.0)
+        assert "one-sided entries are" in reason
+        assert "call spread $0.20 was fine" in reason
+        assert "both" not in reason.lower()
+
+    def test_call_vix_gate_mentions_volatility_not_one_sided_disabled(self):
+        s = self._strat(one_sided=True, vix=30.0, put_only_max_vix=25.0)
+        reason, details = s._build_credit_gate_skip_message("call", est_call=3.0, est_put=20.0)
+        assert "volatility" in reason.lower()
+        assert "30.0" in reason
+        assert "one-sided entries are" not in reason
+
+    def test_unknown_nonviable_side_never_asserts_a_specific_wrong_claim(self):
+        s = self._strat()
+        reason, details = s._build_credit_gate_skip_message("", est_call=3.0, est_put=20.0)
+        assert "both" not in reason.lower()
+        assert "below our minimum" not in reason
+
+
 class TestGateVeto:
     def test_call_mid_viable_but_unfillable_routes_put_only(self):
         # The 2026-06-22 C Entry#1 case: call mid $0.15 (>= $0.10), but its
@@ -79,7 +189,7 @@ class TestGateVeto:
         # put viable + VIX calm → put-only (no leg-3 bleed).
         s = _gate_strat(vix=17.4, put_only_max_vix=25.0)
         _with_estimate(s, mid_call=15.0, mid_put=35.0, fill_call=-0.10, fill_put=0.20)
-        result, worked, est_c, est_p = s._check_credit_gate(_entry())
+        result, worked, est_c, est_p, _nonviable = s._check_credit_gate(_entry())
         assert result == "put_only"
         assert worked is True
         s._log_safety_event.assert_called()  # MKT-048 event emitted

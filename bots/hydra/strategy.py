@@ -4018,7 +4018,89 @@ class HydraStrategy(MEICStrategy):
     # MKT-011: Credit Gate for HYDRA
     # =========================================================================
 
-    def _check_credit_gate(self, entry: HydraIronCondorEntry) -> Tuple[str, bool, float, float]:
+    def _build_credit_gate_skip_message(
+        self, nonviable_side: str, est_call: float, est_put: float
+    ) -> Tuple[str, str]:
+        """Build the (skip_reason, skip_details) pair for a credit-gate SKIP.
+
+        Extracted (2026-08-13) from _initiate_entry so this pure formatting
+        logic is directly unit-testable without the full entry-orchestration
+        harness. Keyed directly off `nonviable_side` — the authoritative,
+        final (post-MKT-029-fallback, post-MKT-048-fillability-veto)
+        determination from _check_credit_gate itself, not re-derived from the
+        raw estimated numbers. Re-deriving from raw numbers alone previously
+        produced a factually wrong "both spreads below minimum" message on
+        one-sided-disabled skips where only one side had actually failed —
+        e.g. C's 2026-08-13 Entry #2, where the put spread was genuinely
+        above its own minimum.
+        """
+        _min_call = self.min_viable_credit_per_side / 100
+        _min_put = self.min_viable_credit_put_side / 100
+        if nonviable_side == "both":
+            skip_reason = (
+                f"Not enough premium — both spreads came in below our minimum credit. "
+                f"Call spread ${est_call / 100:.2f} (need ≥ ${_min_call:.2f}), "
+                f"put spread ${est_put / 100:.2f} (need ≥ ${_min_put:.2f}). "
+                f"Skipped (credit gate)."
+            )
+            skip_details = (
+                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f})\n"
+                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f})"
+            )
+        elif nonviable_side == "call" and self.one_sided_entries_enabled:
+            # MKT-032: call non-viable; put-only would otherwise be
+            # offered, but VIX is too high to accept an unhedged put.
+            skip_reason = (
+                f"Call spread too cheap (${est_call / 100:.2f}, need ≥ ${_min_call:.2f}) and "
+                f"VIX {self.current_vix:.1f} is above our {self.put_only_max_vix:.1f} ceiling for a "
+                f"put-only fallback — we don't run a one-sided put in high volatility. "
+                f"Skipped (credit gate + volatility filter)."
+            )
+            skip_details = (
+                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f})\n"
+                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f})\n"
+                f"• VIX: {self.current_vix:.1f} (max {self.put_only_max_vix:.1f} for a put-only fallback)"
+            )
+        elif nonviable_side == "call":
+            # One-sided entries disabled: only the call side
+            # actually failed — the put side may be perfectly
+            # viable, but require-both-sides skips the whole entry.
+            skip_reason = (
+                f"Call spread ${est_call / 100:.2f} is below our ${_min_call:.2f} minimum "
+                f"(put spread ${est_put / 100:.2f} was fine) — but one-sided entries are "
+                f"disabled, so a full iron condor is required. Skipped (credit gate)."
+            )
+            skip_details = (
+                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f}) — NON-VIABLE\n"
+                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f}) — viable, but one-sided entries disabled"
+            )
+        elif nonviable_side == "put":
+            # One-sided entries disabled: only the put side failed.
+            skip_reason = (
+                f"Put spread ${est_put / 100:.2f} is below our ${_min_put:.2f} minimum "
+                f"(call spread ${est_call / 100:.2f} was fine) — but one-sided entries are "
+                f"disabled, so a full iron condor is required. Skipped (credit gate)."
+            )
+            skip_details = (
+                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f}) — viable, but one-sided entries disabled\n"
+                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f}) — NON-VIABLE"
+            )
+        else:
+            # Defensive fallback — _check_credit_gate's only skip
+            # paths set nonviable_side to "both"/"call"/"put", so
+            # this should be unreachable. Never assert a specific
+            # claim we can't back with the actual determination.
+            skip_reason = (
+                f"Credit gate rejected this entry (call ${est_call / 100:.2f}, "
+                f"put ${est_put / 100:.2f}). Skipped (credit gate)."
+            )
+            skip_details = (
+                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f})\n"
+                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f})"
+            )
+        return skip_reason, skip_details
+
+    def _check_credit_gate(self, entry: HydraIronCondorEntry) -> Tuple[str, bool, float, float, str]:
         """
         MKT-011 + MKT-032/MKT-039/MKT-040: Check if estimated credit is above minimum viable threshold.
 
@@ -4032,11 +4114,22 @@ class HydraStrategy(MEICStrategy):
             entry: HydraIronCondorEntry with strikes calculated
 
         Returns:
-            Tuple of (result, estimation_worked, estimated_call, estimated_put):
+            Tuple of (result, estimation_worked, estimated_call, estimated_put, nonviable_side):
             - result: "proceed", "put_only", "call_only", or "skip"
             - estimation_worked: True if we got valid quotes, False if estimation failed
             - estimated_call: estimated call credit in cents (0.0 if failed)
             - estimated_put: estimated put credit in cents (0.0 if failed)
+            - nonviable_side: only meaningful when result=="skip" — "both", "call", or
+              "put", naming which side(s) the FINAL (post-MKT-029-fallback,
+              post-MKT-048-fillability-veto) viability determination actually
+              rejected. "" for every other result. Added (2026-08-13) so callers
+              building a human-readable skip message never have to re-derive
+              viability from the raw estimated-credit numbers, which can
+              disagree with the final decision once MKT-029/MKT-048 have
+              flipped a side's viability after the initial threshold check —
+              re-deriving from raw numbers alone previously produced a
+              factually wrong "both spreads below minimum" message on some
+              one-sided-disabled skips where only one side had actually failed.
         """
         estimated_call, estimated_put = self._estimate_entry_credit(entry)
 
@@ -4047,7 +4140,7 @@ class HydraStrategy(MEICStrategy):
                 f"MKT-011: Could not estimate credit for Entry #{entry.entry_number} - "
                 f"falling back to MKT-010 illiquidity check"
             )
-            return ("proceed", False, 0.0, 0.0)  # estimation_worked = False
+            return ("proceed", False, 0.0, 0.0, "")  # estimation_worked = False
 
         # Separate thresholds: calls use min_viable_credit_per_side, puts use
         # min_viable_credit_put_side. Both are VIX-regime-dependent in live config —
@@ -4150,7 +4243,7 @@ class HydraStrategy(MEICStrategy):
                 f"Call ${estimated_call / 100:.2f} (min: ${call_min / 100:.2f}), "
                 f"Put ${estimated_put / 100:.2f} (min: ${put_min / 100:.2f})"
             )
-            return ("proceed", True, estimated_call, estimated_put)
+            return ("proceed", True, estimated_call, estimated_put, "")
 
         if not call_viable and not put_viable:
             logger.warning(
@@ -4163,7 +4256,7 @@ class HydraStrategy(MEICStrategy):
                 f"Entry #{entry.entry_number} - call ${estimated_call / 100:.2f}, put ${estimated_put / 100:.2f}",
                 "Skipped"
             )
-            return ("skip", True, estimated_call, estimated_put)
+            return ("skip", True, estimated_call, estimated_put, "both")
 
         # One side viable, other not
         if not call_viable:
@@ -4185,7 +4278,7 @@ class HydraStrategy(MEICStrategy):
                     f"put ${estimated_put / 100:.2f} → put-only (VIX {self.current_vix:.1f})",
                     "Put-Only"
                 )
-                return ("put_only", True, estimated_call, estimated_put)
+                return ("put_only", True, estimated_call, estimated_put, "")
             elif self.one_sided_entries_enabled and not vix_allows_put_only:
                 # MKT-032: VIX too high for put-only → skip
                 logger.warning(
@@ -4200,7 +4293,7 @@ class HydraStrategy(MEICStrategy):
                     f">= {self.put_only_max_vix} → skip (no unhedged put-only)",
                     "Skipped"
                 )
-                return ("skip", True, estimated_call, estimated_put)
+                return ("skip", True, estimated_call, estimated_put, "call")
             else:
                 # One-sided disabled → skip entirely
                 logger.warning(
@@ -4213,7 +4306,7 @@ class HydraStrategy(MEICStrategy):
                     f"Entry #{entry.entry_number} - call non-viable, one-sided disabled",
                     "Skipped"
                 )
-                return ("skip", True, estimated_call, estimated_put)
+                return ("skip", True, estimated_call, estimated_put, "call")
         else:
             # MKT-040: Put non-viable, call viable → convert to call-only
             # Data: low-credit call-only entries have 89% WR, +$46 EV per entry.
@@ -4230,7 +4323,7 @@ class HydraStrategy(MEICStrategy):
                     f"call ${estimated_call / 100:.2f} → call-only",
                     "Call-Only"
                 )
-                return ("call_only", True, estimated_call, estimated_put)
+                return ("call_only", True, estimated_call, estimated_put, "")
             else:
                 logger.warning(
                     f"MKT-011: Entry #{entry.entry_number} put credit non-viable "
@@ -4242,7 +4335,7 @@ class HydraStrategy(MEICStrategy):
                     f"Entry #{entry.entry_number} - put non-viable, one-sided disabled",
                     "Skipped"
                 )
-                return ("skip", True, estimated_call, estimated_put)
+                return ("skip", True, estimated_call, estimated_put, "put")
 
     def _alert_rate_penalty(self, where: str, exc: Exception) -> None:
         """Surface a rate-limit penalty box (429) that refused chain resolution.
@@ -6374,7 +6467,7 @@ class HydraStrategy(MEICStrategy):
                     # Still check call credit viability (with MKT-029 configurable floor)
                     # NOTE: do NOT zero put strikes yet — _estimate_entry_credit needs real
                     # strike values to look up UICs (zeroing causes estimation to fail → skip)
-                    _, _, est_call, _ = self._check_credit_gate(entry)
+                    _, _, est_call, _, _ = self._check_credit_gate(entry)
                     call_floor = self.call_credit_floor  # MKT-029 floor (regime-overwritten to min - $0.10)
                     if est_call < call_floor:
                         logger.info(
@@ -6411,7 +6504,7 @@ class HydraStrategy(MEICStrategy):
                     )
 
                     # Check put credit viability (MKT-029 configurable floor)
-                    _, _, _, est_put = self._check_credit_gate(entry)
+                    _, _, _, est_put, _ = self._check_credit_gate(entry)
                     put_floor = self.put_credit_floor  # MKT-029 floor (regime-overwritten to min - $0.10)
                     if est_put < put_floor:
                         logger.info(
@@ -6452,7 +6545,7 @@ class HydraStrategy(MEICStrategy):
                         )
 
                         # Check call credit viability (MKT-029 configurable floor)
-                        _, _, est_call, _ = self._check_credit_gate(entry)
+                        _, _, est_call, _, _ = self._check_credit_gate(entry)
                         call_floor = self.call_credit_floor  # MKT-029 floor (regime-overwritten to min - $0.10)
                         if est_call < call_floor:
                             logger.info(
@@ -6489,7 +6582,7 @@ class HydraStrategy(MEICStrategy):
                     )
 
                     # Check call credit viability (MKT-029 configurable floor)
-                    _, _, est_call, _ = self._check_credit_gate(entry)
+                    _, _, est_call, _, _ = self._check_credit_gate(entry)
                     call_floor = self.call_credit_floor  # MKT-029 floor (regime-overwritten to min - $0.10)
                     if est_call < call_floor:
                         logger.info(
@@ -6517,7 +6610,7 @@ class HydraStrategy(MEICStrategy):
                 # filter dry entries too, otherwise low-credit entries place
                 # without the realistic skip behavior.
                 if not credit_gate_handled:
-                    gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
+                    gate_result, estimation_worked, est_call, est_put, nonviable_side = self._check_credit_gate(entry)
 
                     # Stash the MKT-011 per-contract estimates (in cents) so the
                     # realized-credit guard can optionally compare realized-vs-estimate
@@ -6526,7 +6619,8 @@ class HydraStrategy(MEICStrategy):
                     entry._mkt011_est_put = est_put if estimation_worked else None
 
                     if gate_result == "skip":
-                        # Skip: both non-viable, or MKT-032 VIX too high for put-only
+                        # Skip: both non-viable, MKT-032 VIX too high for put-only,
+                        # or one side non-viable with one-sided entries disabled.
                         # Fix #79: Increment skip counters (was missing - all other skip paths have this)
                         self.daily_state.entries_skipped += 1
                         self.daily_state.credit_gate_skips += 1
@@ -6534,42 +6628,10 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
-                        # Determine specific skip reason for dashboard/alert
-                        _min_call = self.min_viable_credit_per_side / 100
-                        _min_put = self.min_viable_credit_put_side / 100
-                        if estimation_worked and est_call < self.min_viable_credit_per_side and est_put < self.min_viable_credit_put_side:
-                            skip_reason = (
-                                f"Not enough premium — both spreads came in below our minimum credit. "
-                                f"Call spread ${est_call / 100:.2f} (need ≥ ${_min_call:.2f}), "
-                                f"put spread ${est_put / 100:.2f} (need ≥ ${_min_put:.2f}). "
-                                f"Skipped (credit gate)."
-                            )
-                            skip_details = (
-                                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f})\n"
-                                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f})"
-                            )
-                        elif self.current_vix and self.current_vix >= self.put_only_max_vix:
-                            skip_reason = (
-                                f"Call spread too cheap (${est_call / 100:.2f}, need ≥ ${_min_call:.2f}) and "
-                                f"VIX {self.current_vix:.1f} is above our {self.put_only_max_vix:.1f} ceiling for a "
-                                f"put-only fallback — we don't run a one-sided put in high volatility. "
-                                f"Skipped (credit gate + volatility filter)."
-                            )
-                            skip_details = (
-                                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f})\n"
-                                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f})\n"
-                                f"• VIX: {self.current_vix:.1f} (max {self.put_only_max_vix:.1f} for a put-only fallback)"
-                            )
-                        else:
-                            skip_reason = (
-                                f"Not enough premium to justify the risk — call spread ${est_call / 100:.2f} and "
-                                f"put spread ${est_put / 100:.2f}, both below our minimum credit "
-                                f"(call ≥ ${_min_call:.2f}, put ≥ ${_min_put:.2f}). Skipped (credit gate)."
-                            )
-                            skip_details = (
-                                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f})\n"
-                                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f})"
-                            )
+                        # Determine specific skip reason for dashboard/alert.
+                        skip_reason, skip_details = self._build_credit_gate_skip_message(
+                            nonviable_side, est_call, est_put
+                        )
                         self._record_skipped_entry(entry_num, skip_reason, skip_details,
                                                     est_call=est_call, est_put=est_put)
                         return f"Entry #{entry_num} skipped - credit gate (MKT-011/MKT-032)"
@@ -11664,8 +11726,21 @@ class HydraStrategy(MEICStrategy):
             # ITM-settled short is mis-booked as WORTHLESS = a phantom profit
             # (the 06-17 variant-C +$336.70-vs-actual-(-$3.1k) bug). Consumed by
             # _settlement_spx_level's fallback chain.
+            #
+            # 2026-08-13 fix: `self.current_price` (refreshed on every live tick,
+            # base_strategy.py) must come FIRST — `self.spx_price` is a strategy-
+            # level attribute set exactly ONCE, at process __init__/state-recovery
+            # (strategy.py's _load_state_file_history), and never touched again by
+            # the live feed. The old `spx_price or current_price` order meant this
+            # frozen recovery value — always truthy once set — permanently won the
+            # `or`, silently overwriting the live price on every save for the rest
+            # of that process's life (found via a full-fleet audit: A/B/C were all
+            # persisting an SPX level hundreds of points stale). current_price
+            # falls back to the recovered spx_price only in the genuine edge case
+            # where no live tick has landed yet (e.g. the first instant after a
+            # fresh restart).
             state_data["last_spx_price"] = (
-                getattr(self, "spx_price", 0.0) or getattr(self, "current_price", 0.0) or 0.0
+                getattr(self, "current_price", 0.0) or getattr(self, "spx_price", 0.0) or 0.0
             )
 
             state_data["last_saved"] = get_us_market_time().isoformat()
@@ -12508,7 +12583,17 @@ class HydraStrategy(MEICStrategy):
         # BEFORE assuming worthless — otherwise an ITM-settled short is mis-booked
         # as a full-credit profit (the variant-C +$336.70-vs-actual-(-$3.1k) bug).
         # Only assume worthless when we have NO reference at all.
-        fallback = getattr(self, "spx_price", 0.0) or getattr(self, "current_price", 0.0) or 0.0
+        #
+        # 2026-08-13 fix: `self.current_price` (the last LIVE tick this process
+        # actually saw — at/after the close that's the real settlement price)
+        # must come first, mirroring the same fix in _save_state_to_disk.
+        # `self.spx_price` is a strategy-level attribute set exactly ONCE, at
+        # process __init__/state-recovery, and can be stale by days if this
+        # process hasn't restarted since — this is the highest-stakes reader
+        # of that field (it directly gates ITM-vs-worthless settlement
+        # booking), so getting the priority right here matters more than in
+        # any other consumer.
+        fallback = getattr(self, "current_price", 0.0) or getattr(self, "spx_price", 0.0) or 0.0
         if fallback and fallback > 0:
             logger.warning(
                 f"  Settlement SPX live read unavailable; using last-known SPX "
