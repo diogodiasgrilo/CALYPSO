@@ -224,8 +224,16 @@ def main() -> None:
                 else:
                     consec_reauth_failures += 1
                     if consec_reauth_failures == 1:
-                        logger.warning("session re-auth failed (cycle 1) — likely the routine "
-                                       "~01:00 ET IBKR reset; retrying next cycle, no alert yet")
+                        # Don't claim a specific cause (e.g. "the ~01:00 ET reset") — a
+                        # single-cycle blip can happen at any time of day (observed: an
+                        # ad-hoc IBKR-side 500 on a Saturday at 11:12 ET, nowhere near
+                        # the routine reset). The historical pattern this suppression
+                        # relies on is "clears within one more cycle", not "only happens
+                        # at 01:00 ET" — say that instead (2026-08-17, found investigating
+                        # a misattributed log line during an unrelated dashboard audit).
+                        logger.warning("session re-auth failed (cycle 1) — usually clears "
+                                       "within one more cycle (routine reset or a brief "
+                                       "IBKR-side blip); retrying, no alert yet")
                     else:
                         logger.error("session re-auth FAILED x%d consecutive", consec_reauth_failures)
                         try:
