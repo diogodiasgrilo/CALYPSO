@@ -31,6 +31,7 @@ from dashboard.backend.services.state_reader import StateFileReader
 from dashboard.backend.services.metrics_reader import MetricsFileReader
 from dashboard.backend.services.db_reader import BacktestingDBReader
 from dashboard.backend.services.market_status import get_today_et, is_after_market_close
+from dashboard.backend.services.brandon_hedge_reader import read_overlays_by_entry
 
 logger = logging.getLogger("dashboard.variants")
 
@@ -521,6 +522,50 @@ def _latest_spx_from_db(db_path) -> float | None:
         return None
 
 
+def _overlay_valuation_spx(db_path, state: dict) -> Optional[float]:
+    """The SPX to value Brandon overlays at, for display.
+
+    Once settlement has written the daily summary, use its ``spx_close`` — that is
+    exactly the value the overlays SETTLED against and the bot booked their P&L at,
+    so the displayed overlay P&L matches the record. Intraday (no summary yet) use
+    the latest live tick; the state's ``last_spx_price`` can be stale post-close (it
+    froze at 7488.06 on 07-21 while the real close was 7507.44), so it's a last
+    resort only.
+
+    (Moved here from routers/strategies.py 2026-08-15 so ws/broadcaster.py can
+    reuse it too without strategies.py <-> variants.py becoming a two-way import
+    cycle — strategies.py already imports this module as ``variants_router``.)
+    """
+    date = state.get("date")
+    if db_path and date:
+        try:
+            import sqlite3
+
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                row = con.execute(
+                    "SELECT spx_close FROM daily_summaries WHERE date=?", (date,)
+                ).fetchone()
+            finally:
+                con.close()
+            if row and row[0]:
+                return float(row[0])
+        except Exception:
+            pass
+    return _latest_spx_from_db(db_path) or state.get("last_spx_price")
+
+
+def _hedge_sidecar_path(state_file) -> Optional[Path]:
+    """The Brandon defensive-overlay hedge sidecar for a variant, derived from
+    its state file's directory (data/variant_<id>/brandon_hedge_legs.json).
+    None when no state file is configured. Safe to pass to
+    read_overlays_by_entry() even for non-Brandon variants — it tolerates a
+    missing file and returns {}."""
+    if state_file is None:
+        return None
+    return Path(state_file).parent / "brandon_hedge_legs.json"
+
+
 def _min_buffer_margin_pct(entries: list[dict], db_path=None) -> dict:
     """SMALLEST call/put buffer MARGIN (cushion) reached across today's entries —
     the tightest the day got, in the SAME convention as the live cards
@@ -626,6 +671,13 @@ def _variant_payload(vid: str) -> dict:
 
     state = _state_readers[vid].read_latest() or {}
     entries = state.get("entries", [])
+    # Brandon defensive overlays — same enrichment strategies.py:_ic_snapshot
+    # already does; this path (comparison + /{id}/state) was previously
+    # omitting it, so every entry here always got overlays: [] (2026-08-15 fix).
+    overlays_by_entry = read_overlays_by_entry(
+        str(_hedge_sidecar_path(state_file)) if state_file else None,
+        _overlay_valuation_spx(paths["backtesting_db"], state),
+    )
 
     return {
         "id": vid.upper(),
@@ -634,7 +686,7 @@ def _variant_payload(vid: str) -> dict:
         "state_file_age_seconds": round(state_age, 1),
         "config": _read_variant_config(paths["config_file"]),
         "summary": _summary_from_state(state),
-        "entries": _enrich_entries(entries),
+        "entries": _enrich_entries(entries, overlays_by_entry),
         "pnl_history": state.get("pnl_history", []),
         "min_buffer_margin": _min_buffer_margin_pct(entries, db_path=paths["backtesting_db"]),
         # Live SPX from market_ticks (the state file only persists daily OHLC) —

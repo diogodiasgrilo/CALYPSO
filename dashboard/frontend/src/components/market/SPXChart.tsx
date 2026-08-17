@@ -85,11 +85,37 @@ function parseET(ts: string, fallbackDate?: string): number {
   return 0;
 }
 
-/** Stable hash of entry fields relevant to markers/price lines. */
+/** Stable hash of entry fields relevant to markers/price lines. Includes each
+ *  overlay's placed_at so a hedge appearing mid-day (with no other entry field
+ *  changing) still triggers a marker/price-line rebuild. */
 function entriesHash(entries: HydraEntry[]): string {
   return entries.map(e =>
-    `${e.entry_number}|${e.entry_time}|${e.call_side_stopped}|${e.put_side_stopped}|${e.call_side_expired}|${e.put_side_expired}|${e.call_side_skipped}|${e.put_side_skipped}|${e.short_call_strike}|${e.short_put_strike}`
+    `${e.entry_number}|${e.entry_time}|${e.call_side_stopped}|${e.put_side_stopped}|${e.call_side_expired}|${e.put_side_expired}|${e.call_side_skipped}|${e.put_side_skipped}|${e.short_call_strike}|${e.short_put_strike}|${(e.overlays ?? []).map(o => o.placed_at).join(",")}`
   ).join("~");
+}
+
+/** Build one chart marker per Brandon defensive-overlay hedge placement
+ *  (a debit spread before 12:30 ET, a butterfly after — see EntryCard.tsx's
+ *  overlay block for the same data rendered as a card). Amber to match the
+ *  entry card's overlay accent color; positioned by which IC side the hedge
+ *  is defending, mirroring the stop-marker convention below. */
+function hedgeMarkersFromEntries(entries: HydraEntry[]) {
+  const out: { time: Time; position: "aboveBar" | "belowBar"; color: string; shape: "square"; text: string }[] = [];
+  for (const e of entries) {
+    for (const ov of e.overlays ?? []) {
+      if (!ov.placed_at) continue;
+      const t = parseET(ov.placed_at);
+      if (t <= 0) continue;
+      out.push({
+        time: t as Time,
+        position: ov.threatened_side === "put" ? "belowBar" : "aboveBar",
+        color: colors.warning,
+        shape: "square",
+        text: `⚡H${e.entry_number}`,
+      });
+    }
+  }
+  return out;
 }
 
 /** Derive belowBar stop markers from entries' per-side *_stop_time fields.
@@ -354,7 +380,9 @@ export function SPXChart({ ohlc: ohlcProp, entries: entriesProp, date: dateProp 
       })
       .filter((m) => (m.time as number) > 0);
 
-    const allMarkers = [...markers, ...stopMarkers].sort(
+    const hedgeMarkers = hedgeMarkersFromEntries(entries);
+
+    const allMarkers = [...markers, ...stopMarkers, ...hedgeMarkers].sort(
       (a, b) => (a.time as number) - (b.time as number)
     );
 
@@ -403,6 +431,28 @@ export function SPXChart({ ohlc: ohlcProp, entries: entriesProp, date: dateProp 
           });
           priceLinesRef.current.push(line);
         }
+      });
+
+      // Brandon defensive-overlay hedge leg strikes — dashed amber, distinct
+      // from the solid/dotted red IC strike lines above. A butterfly has up
+      // to 4 legs at up to 3 distinct strikes; label by entry + leg index so
+      // overlapping legs at the same strike don't collide silently.
+      entries.forEach((e) => {
+        (e.overlays ?? []).forEach((ov, ovIdx) => {
+          ov.legs.forEach((leg, legIdx) => {
+            if (!(leg.strike > 0)) return;
+            const line = series.createPriceLine({
+              price: leg.strike,
+              color: colors.warning,
+              lineWidth: 1,
+              lineStyle: 2, // dashed
+              axisLabelVisible: false,
+              axisLabelColor: colors.warning,
+              title: `H${e.entry_number}${ovIdx > 0 ? `.${ovIdx + 1}` : ""}L${legIdx + 1}`,
+            });
+            priceLinesRef.current.push(line);
+          });
+        });
       });
     }
   }, [entries, stopEvents, showStrikes, stateDate, seriesVersion]);

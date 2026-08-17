@@ -3,6 +3,7 @@
 import asyncio
 import logging
 import time
+from pathlib import Path
 
 from dashboard.backend.config import settings
 from dashboard.backend.services.state_reader import StateFileReader
@@ -13,6 +14,7 @@ from dashboard.backend.services.live_ohlc import LiveOHLCBuilder
 from dashboard.backend.services.live_state import LiveStateProvider
 from dashboard.backend.services.market_status import get_current_status, get_today_et
 from dashboard.backend.services.agent_reports import AgentReportReader
+from dashboard.backend.services.brandon_hedge_reader import read_overlays_by_entry
 from dashboard.backend.ws.manager import ConnectionManager
 
 logger = logging.getLogger("dashboard.broadcaster")
@@ -42,6 +44,13 @@ class Broadcaster:
         self.state_reader = StateFileReader(live_state_file())
         self.metrics_reader = MetricsFileReader(live_metrics_file())
         self.db_reader = BacktestingDBReader(live_backtesting_db())
+        # Brandon defensive-overlay hedge sidecar for the live seat — resolved
+        # once at startup like the readers above (a B<->C swap needs a
+        # dashboard restart to follow, same as every other "live" path here).
+        # Harmless when the live variant isn't a Brandon strategy: the reader
+        # returns {} for a missing sidecar file.
+        self._hedge_sidecar_path = Path(live_state_file()).parent / "brandon_hedge_legs.json"
+        self._live_db_path = live_backtesting_db()
         # SPX/VIX price chart is account-agnostic — source it from the densest
         # recorder (config.market_data_db, e.g. A at ~4-8 ticks/min) so candles
         # have real bodies, not the flat dojis C's ~1 tick/min produces.
@@ -120,6 +129,31 @@ class Broadcaster:
 
         return self.live_ohlc.get_ohlc_bars()
 
+    def _merge_overlays(self, entries: list[dict], state: dict) -> list[dict]:
+        """Attach Brandon defensive-overlay hedge data (the debit spread /
+        butterfly placed against a threatened IC side) to each entry, the
+        same enrichment strategies.py:_ic_snapshot already does for the
+        non-primary polled-snapshot path — this is the primary/live WS path,
+        which never carried it (2026-08-15 fix; overlays regularly drive most
+        of B's daily P&L but were invisible on the default dashboard view).
+
+        Cheap no-op when there's nothing to attach (no sidecar file yet, or a
+        non-Brandon live variant) — returns entries unchanged rather than
+        copying every dict on every 1s poll tick for no reason.
+        """
+        from dashboard.backend.routers.variants import _overlay_valuation_spx
+
+        spx = _overlay_valuation_spx(self._live_db_path, state)
+        overlays_by_entry = read_overlays_by_entry(str(self._hedge_sidecar_path), spx)
+        if not overlays_by_entry:
+            return entries
+        merged = []
+        for e in entries:
+            e2 = dict(e)
+            e2["overlays"] = overlays_by_entry.get(str(e2.get("entry_number")), [])
+            merged.append(e2)
+        return merged
+
     async def get_snapshot(self) -> dict:
         """Build a full snapshot for newly connected clients."""
         state = self.state_reader.read_latest()
@@ -149,6 +183,8 @@ class Broadcaster:
             for ls in live_stops:
                 if (ls["entry_number"], ls["side"]) not in db_keys:
                     stops.append(ls)
+
+        entries = self._merge_overlays(entries, state)
 
         ohlc = await self._get_merged_ohlc()
         market = get_current_status()
@@ -241,6 +277,9 @@ class Broadcaster:
                 self._check_day_rollover()
                 data = self.state_reader.read_if_changed()
                 if data is not None:
+                    if isinstance(data.get("entries"), list):
+                        data = dict(data)
+                        data["entries"] = self._merge_overlays(data["entries"], data)
                     await self.manager.broadcast({
                         "type": "state_update",
                         "data": data,

@@ -209,7 +209,7 @@ function PolledICView({ body }: { body: ICSnapshotBody; accent: string }) {
             <SPXChart ohlc={ohlc} entries={entries} date={body.date ?? null} />
           </div>
           <div className="col-span-4 max-lg:col-span-1">
-            <DailyPnLCard summary={body.summary} cumulative={body.cumulative ?? {}} />
+            <DailyPnLCard summary={body.summary} cumulative={body.cumulative ?? {}} entries={entries} />
           </div>
         </div>
 

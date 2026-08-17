@@ -154,35 +154,6 @@ def _state_file_for(vid: str) -> Optional[Path]:
     return getattr(settings, f"variant_{vid}_state_file", None)
 
 
-def _overlay_valuation_spx(db_path, state: dict) -> Optional[float]:
-    """The SPX to value Brandon overlays at, for display.
-
-    Once settlement has written the daily summary, use its ``spx_close`` — that is
-    exactly the value the overlays SETTLED against and the bot booked their P&L at,
-    so the displayed overlay P&L matches the record. Intraday (no summary yet) use
-    the latest live tick; the state's ``last_spx_price`` can be stale post-close (it
-    froze at 7488.06 on 07-21 while the real close was 7507.44), so it's a last
-    resort only.
-    """
-    date = state.get("date")
-    if db_path and date:
-        try:
-            import sqlite3
-
-            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
-            try:
-                row = con.execute(
-                    "SELECT spx_close FROM daily_summaries WHERE date=?", (date,)
-                ).fetchone()
-            finally:
-                con.close()
-            if row and row[0]:
-                return float(row[0])
-        except Exception:
-            pass
-    return variants_router._latest_spx_from_db(db_path) or state.get("last_spx_price")
-
-
 def _is_available(vid: str) -> bool:
     """True iff the variant's state file exists (its bot has run)."""
     sf = _state_file_for(vid)
@@ -489,7 +460,7 @@ def _ic_snapshot(vid: str, m: tax.StrategyMeta) -> dict:
     # value each overlay at the current/close SPX for display so B's overlay activity
     # (which drives most of its P&L) is no longer invisible (2026-07-21).
     vd = _variant_dir(vid)
-    _spx_for_overlay = _overlay_valuation_spx(db_path, state)
+    _spx_for_overlay = variants_router._overlay_valuation_spx(db_path, state)
     overlays_by_entry = read_overlays_by_entry(
         str(vd / "brandon_hedge_legs.json") if vd else None, _spx_for_overlay)
     body = {

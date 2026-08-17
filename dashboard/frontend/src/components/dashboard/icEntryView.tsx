@@ -12,6 +12,7 @@
  */
 
 import { colors, pnlColor, cushionColor } from "../../lib/tradingColors";
+import { formatPnL } from "../../lib/formatters";
 import type { ICSnapshotEntry } from "../../hooks/useStrategySnapshot";
 
 export type ICEntry = ICSnapshotEntry;
@@ -290,6 +291,38 @@ export function ICEntryRow({ entry, accent, spx }: { entry: ICEntry; accent: str
         <SideLine tag="C" info={call} />
         <SideLine tag="P" info={put} />
       </div>
+
+      {/* Brandon defensive overlay(s) — same block as EntryCard.tsx's primary-view
+          rendering, ported here so the Comparison page shows the identical hedge
+          detail instead of silently dropping it (2026-08-15). */}
+      {Array.isArray(entry.overlays) && entry.overlays.length > 0 && (
+        <div className="mt-2 space-y-1">
+          {entry.overlays.map((ov, i) => {
+            const strikes = ov.legs.map((l) => l.strike).join("/");
+            const name = `${ov.threatened_side} ${String(ov.structure).replace(/_/g, " ")}`;
+            return (
+              <div
+                key={i}
+                className="rounded px-2 py-1 text-[10px]"
+                style={{ backgroundColor: colors.bgElevated, borderLeft: `2px solid ${colors.warning}` }}
+              >
+                <div className="flex items-center justify-between">
+                  <span className="uppercase tracking-wide" style={{ color: colors.warning }}>
+                    ⚡ Overlay · {name}
+                  </span>
+                  {ov.pnl != null && (
+                    <span style={{ color: pnlColor(ov.pnl) }}>{formatPnL(ov.pnl, 0)}</span>
+                  )}
+                </div>
+                <div className="flex items-center justify-between mt-0.5 text-text-secondary">
+                  <span>{strikes}</span>
+                  <span>debit ${Math.abs(ov.debit).toFixed(0)}</span>
+                </div>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

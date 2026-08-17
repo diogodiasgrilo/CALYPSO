@@ -62,9 +62,13 @@ interface DailyPnLCardProps {
   /** Polled non-primary snapshot's lifetime cumulative metrics. When provided,
    *  the "Cumulative" section reads from THIS instead of the WS metrics store. */
   cumulative?: ICSnapshotCumulative;
+  /** Polled non-primary snapshot's entries — only needed for the Hedge Mark
+   *  stat cell below (everything else in "Today" already comes from `summary`).
+   *  Omitted on the primary path, which reads entries from the WS store instead. */
+  entries?: HydraEntry[];
 }
 
-export function DailyPnLCard({ summary, cumulative }: DailyPnLCardProps = {}) {
+export function DailyPnLCard({ summary, cumulative, entries: entriesProp }: DailyPnLCardProps = {}) {
   // Hooks always called; props (when present) override the WS-store reads so the
   // primary path is unchanged when no prop is passed.
   const { hydraState, metrics: wsMetrics, comparisons: wsComparisons } = useHydraStore();
@@ -90,6 +94,25 @@ export function DailyPnLCard({ summary, cumulative }: DailyPnLCardProps = {}) {
     (hydraState?.put_stops_triggered ?? 0);
   const wsRealizedPnl = hydraState?.total_realized_pnl ?? 0;
   const wsUnrealizedPnl = useMemo(() => computeUnrealizedPnl(entries), [entries]);
+
+  // Brandon defensive-overlay hedge mark — a LIVE, informational recomputation
+  // (matches brandon_hedge_reader.py's own documented display-only P&L), NOT
+  // folded into netPnl above: once a hedge SETTLES, its P&L is already inside
+  // the bot's own total_realized_pnl (folded in by _book_realized_pnl in
+  // brandon/strategy.py), so adding it again here would double-count. This
+  // cell only shows what an OPEN hedge is currently worth. Zero/hidden on
+  // every day without one (non-Brandon variants, or no threat this session).
+  //
+  // Prop (polled/non-primary) mode: `entries` above is the WS store's, which
+  // isn't the picked variant off-primary — use the passed `entriesProp`
+  // instead. Deliberately NOT wrapped in useMemo (flatMap over a handful of
+  // entries is cheap, and a conditional source expression defeats the React
+  // Compiler's ability to preserve memoization on this line vs. the untouched
+  // `entries` above, which the pre-existing wsUnrealizedPnl memo depends on).
+  const hedgeEntries = usingProps ? (entriesProp ?? []) : entries;
+  const hedgeOverlays = hedgeEntries.flatMap((e) => e.overlays ?? []);
+  const hedgeMark = hedgeOverlays.reduce((sum, o) => sum + (o.pnl ?? 0), 0);
+  const hasHedge = hedgeOverlays.length > 0;
 
   const commission = summary ? summary.total_commission ?? 0 : wsCommission;
   const credit = summary ? summary.total_credit_received ?? 0 : wsCredit;
@@ -159,8 +182,8 @@ export function DailyPnLCard({ summary, cumulative }: DailyPnLCardProps = {}) {
           )}
         </div>
 
-        {/* Stat grid — 4 columns, centered */}
-        <div className="grid grid-cols-4 gap-1 pt-3 border-t border-border-dim">
+        {/* Stat grid — 4 columns, 5 when a Brandon hedge is (or was) open today */}
+        <div className={`grid ${hasHedge ? "grid-cols-5" : "grid-cols-4"} gap-1 pt-3 border-t border-border-dim`}>
           <StatCell label="Entries">
             {baseEntries}/{slotsDenominator}
             {conditionalEntries > 0 && (
@@ -180,6 +203,11 @@ export function DailyPnLCard({ summary, cumulative }: DailyPnLCardProps = {}) {
           <StatCell label="Comm.">
             ${commission.toFixed(0)}
           </StatCell>
+          {hasHedge && (
+            <StatCell label="Hedge Mark">
+              <span style={{ color: pnlColor(hedgeMark) }}>{formatPnL(hedgeMark, 0)}</span>
+            </StatCell>
+          )}
         </div>
       </div>
 
