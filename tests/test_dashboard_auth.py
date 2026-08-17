@@ -273,6 +273,45 @@ class TestSessions:
         assert auth_db.get_session_with_user(db_path, "alive") is not None
 
 
+class TestGetSessionRaw:
+    """2026-08-17: get_session_raw() bypasses the expiry/revoked filter that
+    get_session_with_user() applies — added to diagnose a live incident where
+    a WS auth rejection gave zero visibility into WHY (unknown token vs a
+    genuinely-known-but-expired/revoked one look identical from the outside
+    otherwise)."""
+
+    def test_unknown_token_is_none(self, db_path):
+        assert auth_db.get_session_raw(db_path, "does-not-exist") is None
+
+    def test_expired_token_still_returned(self, db_path):
+        uid = auth_db.create_user(db_path, "diogo", "h")
+        auth_db.create_session(db_path, "hash1", uid, time.time() - 10)
+        # The filtered lookup correctly hides it...
+        assert auth_db.get_session_with_user(db_path, "hash1") is None
+        # ...but the raw lookup still finds it, with expired info intact.
+        row = auth_db.get_session_raw(db_path, "hash1")
+        assert row is not None
+        assert row["expires_at"] < time.time()
+        assert row["revoked"] == 0
+
+    def test_revoked_token_still_returned(self, db_path):
+        uid = auth_db.create_user(db_path, "diogo", "h")
+        auth_db.create_session(db_path, "hash1", uid, time.time() + 3600)
+        auth_db.revoke_session(db_path, "hash1")
+        assert auth_db.get_session_with_user(db_path, "hash1") is None
+        row = auth_db.get_session_raw(db_path, "hash1")
+        assert row is not None and row["revoked"] == 1
+
+    def test_valid_token_returned_without_username(self, db_path):
+        # No JOIN to users — confirms this is the "raw sessions row" contract,
+        # not a drop-in replacement for get_session_with_user.
+        uid = auth_db.create_user(db_path, "diogo", "h")
+        auth_db.create_session(db_path, "hash1", uid, time.time() + 3600)
+        row = auth_db.get_session_raw(db_path, "hash1")
+        assert row is not None
+        assert "username" not in row
+
+
 class TestFailClosedStartup:
     def test_refuses_to_start_with_zero_accounts_when_required(self, tmp_path, monkeypatch):
         # Security-review fix: a cold-deploy race or a misconfigured DB path
@@ -548,3 +587,79 @@ class TestLoginFlowEndToEnd:
             headers={"X-Forwarded-For": "9.9.9.9, 203.0.113.9"},
         )
         assert exhausted.status_code == 429
+
+
+class TestWebSocketAuthRejection:
+    """2026-08-17: a real incident looked like a live dashboard-deploy
+    regression (every WS reconnect for a logged-in user rejected 403,
+    continuously, not self-healing) but was actually a browser tab open for
+    5 days, retrying forever with a session that had simply hit its idle
+    timeout hours earlier — a genuinely dead session, correctly rejected.
+    The real gap: ws/router.py gave no diagnostic signal for WHY, and the
+    frontend retried an already-and-forever-doomed connection indefinitely
+    instead of ever sending the user back to a login screen. This pins both
+    the diagnostic (auth_db.get_session_raw + _diagnose_ws_auth_failure) and
+    the close-code contract the frontend fix (useWebSocket.ts) depends on."""
+
+    def test_expired_session_closes_with_4001_not_generic_reject(self, app_client, caplog):
+        import time as time_mod
+
+        client, settings = app_client
+        from dashboard.backend.services import auth_db as adb, auth_crypto as ac
+        from starlette.websockets import WebSocketDisconnect
+
+        uid = adb.create_user(settings.dashboard_auth_db, "diogo", ac.hash_password("x" * 20))
+        token = ac.generate_session_token()
+        # Expired 10 hours ago — exactly the shape of the real incident.
+        adb.create_session(settings.dashboard_auth_db, ac.hash_token(token), uid, time_mod.time() - 36000)
+        client.cookies.set("calypso_session", token)
+
+        with caplog.at_level("WARNING", logger="dashboard.ws_router"):
+            with pytest.raises(WebSocketDisconnect) as exc_info:
+                with client.websocket_connect("/ws/dashboard"):
+                    pass
+        assert exc_info.value.code == 4001
+
+        # The diagnostic log must actually distinguish "known but expired"
+        # from "unknown token" — this is the exact signal that resolved the
+        # incident (it wasn't a code regression, it was a 5-day-old cookie).
+        rejected_logs = [r.message for r in caplog.records if "WS auth rejected" in r.message]
+        assert rejected_logs, "expected a WS auth rejected log line"
+        assert "known_token" in rejected_logs[0]
+        assert "expired=True" in rejected_logs[0]
+        # Never leak the raw bearer token into logs — only a hash prefix.
+        assert token not in rejected_logs[0]
+
+    def test_no_cookie_at_all_distinguished_from_unknown_token(self, app_client, caplog):
+        client, settings = app_client
+        from dashboard.backend.services import auth_db as adb, auth_crypto as ac
+        from starlette.websockets import WebSocketDisconnect
+
+        adb.create_user(settings.dashboard_auth_db, "diogo", ac.hash_password("x" * 20))
+        client.cookies.clear()
+
+        with caplog.at_level("WARNING", logger="dashboard.ws_router"):
+            with pytest.raises(WebSocketDisconnect):
+                with client.websocket_connect("/ws/dashboard"):
+                    pass
+
+        rejected_logs = [r.message for r in caplog.records if "WS auth rejected" in r.message]
+        assert rejected_logs and "no_cookie_sent" in rejected_logs[0]
+
+    def test_valid_session_connects_and_logs_nothing(self, app_client, caplog):
+        import time as time_mod
+
+        client, settings = app_client
+        from dashboard.backend.services import auth_db as adb, auth_crypto as ac
+
+        uid = adb.create_user(settings.dashboard_auth_db, "diogo", ac.hash_password("x" * 20))
+        token = ac.generate_session_token()
+        adb.create_session(settings.dashboard_auth_db, ac.hash_token(token), uid, time_mod.time() + 3600)
+        client.cookies.set("calypso_session", token)
+
+        with caplog.at_level("WARNING", logger="dashboard.ws_router"):
+            with client.websocket_connect("/ws/dashboard") as ws:
+                snapshot = ws.receive_json()
+                assert snapshot["type"] == "snapshot"
+
+        assert not [r for r in caplog.records if "WS auth rejected" in r.message]

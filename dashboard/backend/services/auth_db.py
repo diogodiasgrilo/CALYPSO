@@ -298,6 +298,22 @@ def create_session(db_path: Path, token_hash: str, user_id: int, expires_at: flo
         conn.close()
 
 
+def get_session_raw(db_path: Path, token_hash: str) -> Optional[dict]:
+    """Like get_session_with_user, but returns a KNOWN token's row even if
+    expired/revoked (no user join, no filtering) — for diagnosing an auth
+    rejection (ws/router.py) without duplicating this query's WHERE clause
+    elsewhere. None means the token is unknown to this DB at all."""
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT expires_at, revoked FROM sessions WHERE token_hash = ?",
+            (token_hash,),
+        ).fetchone()
+        return dict(row) if row else None
+    finally:
+        conn.close()
+
+
 def get_session_with_user(db_path: Path, token_hash: str) -> Optional[dict]:
     """Returns the joined session+user row, or None if missing/revoked/expired."""
     conn = _connect(db_path)

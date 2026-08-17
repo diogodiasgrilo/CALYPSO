@@ -18,6 +18,7 @@ import { useEffect, useState, type FormEvent, type ReactNode } from "react";
 import { Lock, ShieldCheck, Loader2, KeyRound, Copy, Check } from "lucide-react";
 import * as auth from "../../auth";
 import { colors } from "../../lib/tradingColors";
+import { useHydraStore } from "../../store/hydraStore";
 
 type Step =
   | "checking"
@@ -31,6 +32,8 @@ export function LoginGate({ children }: { children: ReactNode }) {
   const [step, setStep] = useState<Step>("checking");
   const [error, setError] = useState("");
   const [submitting, setSubmitting] = useState(false);
+  const [expiredNotice, setExpiredNotice] = useState(false);
+  const connectionStatus = useHydraStore((s) => s.connectionStatus);
 
   // Login form
   const [username, setUsername] = useState("");
@@ -53,6 +56,21 @@ export function LoginGate({ children }: { children: ReactNode }) {
     auth.getCurrentUser().then((u) => setStep(u ? "authed" : "login"));
   }, []);
 
+  // A tab can sit open for hours/days with no other signal that its session
+  // died — the WS is the only thing that keeps talking to the server, and
+  // ws/router.py rejects a dead cookie with an explicit "not authenticated"
+  // close (4001) BEFORE ever accepting the connection. Previously the app had
+  // no reaction to that at all: useWebSocket() just retried forever, every
+  // attempt failing identically, while the UI sat frozen with no explanation.
+  // Since this only fires once App (and useWebSocket) is mounted, it can only
+  // happen while step is "authed" — react by unmounting App (render the login
+  // form instead of children) so a fresh login gets a real WS reconnect.
+  useEffect(() => {
+    if (connectionStatus !== "auth_expired" || step !== "authed") return;
+    setExpiredNotice(true);
+    setStep("login");
+  }, [connectionStatus, step]);
+
   const resetError = () => setError("");
 
   const handleLogin = async (e: FormEvent) => {
@@ -61,6 +79,7 @@ export function LoginGate({ children }: { children: ReactNode }) {
     setSubmitting(true);
     try {
       const res = await auth.login(username.trim(), password);
+      setExpiredNotice(false);
       setPassword("");
       setPendingToken(res.pending_token);
       if (res.step === "change_password") {
@@ -178,6 +197,14 @@ export function LoginGate({ children }: { children: ReactNode }) {
 
         {step === "login" && (
           <form onSubmit={handleLogin} className="mt-7 space-y-3">
+            {expiredNotice && (
+              <div
+                className="text-xs font-medium rounded-lg px-3 py-2"
+                style={{ color: colors.warning, backgroundColor: "rgba(230, 180, 40, 0.1)" }}
+              >
+                Your session expired — please sign in again.
+              </div>
+            )}
             <input
               type="text"
               autoFocus

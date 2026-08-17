@@ -93,6 +93,7 @@ export function Header() {
       : connectionStatus === "connecting"
       ? "bg-warning"
       : "bg-loss";
+  const connLabel = connectionStatus === "auth_expired" ? "signed out" : connectionStatus;
 
   const handleMuteToggle = () => {
     toggleMute();
@@ -168,7 +169,7 @@ export function Header() {
         <div className="flex items-center gap-1.5 ml-2 max-sm:ml-1">
           <div className={`w-2 h-2 rounded-full ${connDot}`} />
           <span className="text-text-secondary text-xs capitalize hidden sm:inline">
-            {connectionStatus}
+            {connLabel}
           </span>
         </div>
       </div>

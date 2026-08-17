@@ -218,7 +218,13 @@ export interface Toast {
   timestamp: number;
 }
 
-export type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error";
+// "auth_expired": the server explicitly closed the WS with "not authenticated"
+// (session dead — expired/revoked), as opposed to "disconnected"/"error" which
+// cover ordinary network drops that a plain reconnect can recover from. A
+// stale tab's session can die hours after page load with no other signal —
+// LoginGate watches for this value to send the user back through login
+// instead of retrying a WS handshake that will never succeed (2026-08-17).
+export type ConnectionStatus = "connecting" | "connected" | "disconnected" | "error" | "auth_expired";
 
 // ── Selected-strategy persistence (main-dashboard picker) ──
 // The picker only changes WHICH read source the main page queries + a UI pref.

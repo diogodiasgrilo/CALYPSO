@@ -138,10 +138,19 @@ export function useWebSocket() {
       }
     };
 
-    ws.onclose = () => {
-      setConnectionStatus("disconnected");
+    ws.onclose = (event) => {
       wsRef.current = null;
       if (heartbeatTimer.current) clearTimeout(heartbeatTimer.current);
+      // 4001 = ws/router.py's explicit "Not authenticated" close (session
+      // expired/revoked, checked BEFORE accept()) — not a network blip.
+      // Retrying forever here just re-fails identically every ~30s (a real
+      // stale tab did this for hours). Stop and let LoginGate re-check auth
+      // and send the user back through login instead.
+      if (event.code === 4001) {
+        setConnectionStatus("auth_expired");
+        return;
+      }
+      setConnectionStatus("disconnected");
       scheduleReconnect();
     };
 

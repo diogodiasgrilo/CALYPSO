@@ -13,26 +13,20 @@ logger = logging.getLogger("dashboard.ws_router")
 
 
 def _diagnose_ws_auth_failure(raw_cookie) -> str:
-    """TEMPORARY (2026-08-17) — diagnosing a live incident: a session that
-    successfully logged in and connected via WS twice is now failing every WS
-    reconnect with 403, continuously, not self-healing, since a dashboard
-    restart. validate_and_refresh_session() gives no visibility into WHY a
-    cookie fails (no cookie sent? unknown token? known-but-expired/revoked?).
-    This does one extra raw lookup (bypassing the expiry/revoked filter) to
-    distinguish those cases, logging only a hash PREFIX (never the raw token
-    — the token itself is a bearer credential). Remove once root-caused."""
+    """Explain a WS auth rejection for the log: validate_and_refresh_session()
+    itself only returns None, with no visibility into WHY (no cookie sent?
+    unknown token? known-but-expired/revoked?). Distinguishing these mattered
+    for a real 2026-08-17 incident that looked like a live regression but
+    turned out to be a browser tab open since 2026-08-12, retrying forever
+    with a session that had simply hit its idle timeout hours earlier — kept
+    permanently since a WS auth rejection with no context is otherwise a dead
+    end to investigate. Logs only a hash PREFIX, never the raw token (a bearer
+    credential) or its full hash."""
     if not raw_cookie:
         return "no_cookie_sent"
     token_hash = auth_crypto.hash_token(raw_cookie)
     try:
-        conn = auth_db._connect(settings.dashboard_auth_db)
-        try:
-            row = conn.execute(
-                "SELECT expires_at, revoked FROM sessions WHERE token_hash = ?",
-                (token_hash,),
-            ).fetchone()
-        finally:
-            conn.close()
+        row = auth_db.get_session_raw(settings.dashboard_auth_db, token_hash)
     except Exception as e:
         return f"lookup_error:{e!r}"
     if row is None:

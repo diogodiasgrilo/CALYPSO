@@ -129,7 +129,7 @@ class Broadcaster:
 
         return self.live_ohlc.get_ohlc_bars()
 
-    def _merge_overlays(self, entries: list[dict], state: dict) -> list[dict]:
+    def _merge_overlays(self, entries: list[dict], state: dict | None) -> list[dict]:
         """Attach Brandon defensive-overlay hedge data (the debit spread /
         butterfly placed against a threatened IC side) to each entry, the
         same enrichment strategies.py:_ic_snapshot already does for the
@@ -139,11 +139,15 @@ class Broadcaster:
 
         Cheap no-op when there's nothing to attach (no sidecar file yet, or a
         non-Brandon live variant) — returns entries unchanged rather than
-        copying every dict on every 1s poll tick for no reason.
+        copying every dict on every 1s poll tick for no reason. ``state`` can
+        be None (e.g. hydra_state.json doesn't exist yet) — get_snapshot()
+        passes state_reader.read_latest() straight through unguarded, so this
+        must not assume a dict (2026-08-17: a missing-state-file test caught
+        this crashing the whole snapshot with AttributeError).
         """
         from dashboard.backend.routers.variants import _overlay_valuation_spx
 
-        spx = _overlay_valuation_spx(self._live_db_path, state)
+        spx = _overlay_valuation_spx(self._live_db_path, state or {})
         overlays_by_entry = read_overlays_by_entry(str(self._hedge_sidecar_path), spx)
         if not overlays_by_entry:
             return entries
