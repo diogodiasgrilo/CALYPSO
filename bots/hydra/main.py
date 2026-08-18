@@ -584,12 +584,14 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                             # FIX #48: Don't send empty daily summary on pre-market startup
                             # If settlement is "complete" because there's nothing to settle AND
                             # we're before market open with no trading activity, skip the summary
+                            # 2026-08-18: delegated to a strategy method (was inlined here) so a
+                            # calendar variant can override it — its daily_state.entries always
+                            # holds any CARRIED multi-day position, so the naive len(entries) > 0
+                            # check below is trivially true for as long as one is held, even on a
+                            # day nothing new happened (see CalendarStrategyBase._had_trading_
+                            # activity_today's docstring for the 2026-08-18 incident this fixed).
                             market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-                            had_trading_activity = (
-                                strategy.daily_state.entries_completed > 0 or
-                                strategy.daily_state.total_realized_pnl != 0 or
-                                len(strategy.daily_state.entries) > 0
-                            )
+                            had_trading_activity = strategy._had_trading_activity_today()
                             is_after_market_close = now_et.hour >= 16  # 4 PM or later
 
                             # PHANTOM-SUMMARY GUARD (06-03 incident): if the bot

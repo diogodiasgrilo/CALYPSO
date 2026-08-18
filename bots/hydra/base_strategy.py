@@ -5860,6 +5860,25 @@ class MEICStrategy(abc.ABC):
     # ACCOUNT & DASHBOARD LOGGING (matching Iron Fly interface)
     # =========================================================================
 
+    def _had_trading_activity_today(self) -> bool:
+        """True if there's real evidence trading activity happened TODAY —
+        used by main.py to decide whether an EOD daily summary should be
+        sent (as opposed to a pure pre-market/no-activity heartbeat). Base
+        0DTE definition: any entry attempted/completed, or nonzero realized
+        P&L. `len(daily_state.entries) > 0` catches a FAILED entry that
+        never incremented entries_completed but is still in the list.
+
+        A calendar variant (CalendarStrategyBase) overrides this — its
+        daily_state.entries always contains any CARRIED multi-day position
+        (re-attached on every reset), so this base condition is trivially
+        true for as long as a calendar is held, even on a day nothing new
+        happened at all."""
+        return (
+            self.daily_state.entries_completed > 0
+            or self.daily_state.total_realized_pnl != 0
+            or len(self.daily_state.entries) > 0
+        )
+
     def log_daily_summary(self):
         """
         Log and send daily summary after settlement is confirmed.

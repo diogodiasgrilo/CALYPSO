@@ -94,6 +94,22 @@ class CalendarStrategyBase(HydraStrategy):
         """
         carried = [e for e in self.daily_state.entries if self._dc_entry_is_open(e)]
         super()._reset_for_new_day()  # dry-run: account flat -> no STATE-004 halt
+        # BUG (found 2026-08-18): the base reset above ends with its own
+        # _save_state_to_disk() call, made while daily_state.entries is still
+        # EMPTY (the carry re-append below hasn't run yet) — which, via this
+        # class's _save_state_to_disk() override, also writes dc_open_trades
+        # .json EMPTY. That's a harmless same-day blip IF a later heartbeat's
+        # save re-persists the (correctly repopulated in-memory) carried
+        # entries first — but if the process restarts in the window before
+        # that happens, _dc_load_sidecar() on boot reads the empty file and
+        # the position is reconstructed as nothing: permanently dropped from
+        # tracking, no further monitoring, ever. Confirmed exactly this
+        # sequence on 2026-08-17->18: dc_open_trades.json's mtime lands on
+        # the same reset that logged [CAL-CARRY] for it. re_save_needed
+        # below forces a second save AFTER the entries are correct again, so
+        # the on-disk sidecar is never left empty while a position is truly
+        # still open.
+        re_save_needed = bool(carried)
         if carried:
             # Re-attach only entries NOT already present. The base reset normally
             # rebuilds daily_state (entries=[]) so we re-add all carried; but if it
@@ -142,6 +158,40 @@ class CalendarStrategyBase(HydraStrategy):
                 len(breach),
             )
             breach.clear()
+
+        if re_save_needed:
+            # Re-persist now that daily_state.entries actually contains the
+            # carried position again — see the comment above super()._reset_
+            # for_new_day() for why the base reset's own save can't be
+            # trusted to have captured it.
+            self._save_state_to_disk()
+
+    def _had_trading_activity_today(self) -> bool:
+        """BUG (found 2026-08-18, production incident on D): the base check's
+        `len(daily_state.entries) > 0` condition is always true for as long
+        as ANY multi-day position is held, since a carried entry re-attaches
+        to daily_state.entries on every reset (see _reset_for_new_day above)
+        — it can never distinguish "holding a position, nothing new today"
+        from "something actually happened today". Observed: at 00:00:36 ET
+        on 2026-08-18, main.py's had_trading_activity check (backed by this
+        method) read True purely because D's Aug-13 carried calendar was in
+        daily_state.entries, seconds after the midnight reset and before any
+        trading could possibly occur — triggering a phantom EOD daily-summary
+        send that booked the position's stale unrealized mark from the reset
+        moment into hydra_metrics.json as a "realized" result for a day that
+        hadn't started, corrupting D's cumulative track record.
+
+        Require genuinely-new evidence instead: a real close/settlement
+        booked today (total_realized_pnl != 0, unchanged from the base), or
+        at least one entry actually OPENED today (by entry_time's date) —
+        excludes carried-only entries from counting as "today's activity"."""
+        if self.daily_state.entries_completed > 0 or self.daily_state.total_realized_pnl != 0:
+            return True
+        today = get_us_market_time().date()
+        return any(
+            getattr(e, "entry_time", None) is not None and e.entry_time.date() == today
+            for e in self.daily_state.entries
+        )
 
     def _calculate_capital_deployed(self) -> float:
         """Capital at risk for a calendar variant = sum of OPEN calendars' net

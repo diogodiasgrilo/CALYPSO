@@ -36,6 +36,48 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Calendar (D/E) daily-reset sidecar race + phantom-activity EOD summary
+  (2026-08-18, THE GOLDEN LOOP). Investigated the previously-unresolved
+  "D's dc_open_trades.json came back empty" loose thread (proven not caused
+  by the 2026-08-17 pnl_history deploy, but never root-caused) and found two
+  distinct real bugs in calendar_strategy_base.py, both applying to D and E:
+  BUG A (write-ordering race): CalendarStrategyBase._reset_for_new_day()
+  re-attaches any carried multi-day position AFTER calling
+  super()._reset_for_new_day() — but the base reset ends with its own
+  _save_state_to_disk() call, made while daily_state.entries is still the
+  freshly-emptied list (the carry re-append hasn't run yet). Via this
+  class's _save_state_to_disk() override, that also writes dc_open_trades
+  .json EMPTY. Harmless if a later same-day save re-persists the (correctly
+  repopulated in-memory) state first; but a restart landing in that window
+  reads the empty sidecar on boot and permanently drops the position from
+  tracking, no further monitoring ever. Confirmed this exact sequence
+  produced the observed 2026-08-17->18 empty file (its mtime lands on the
+  reset that also logged the [CAL-CARRY] carry-forward for it). FIX: track
+  re_save_needed = bool(carried) and call _save_state_to_disk() again at
+  the end of _reset_for_new_day(), once daily_state.entries is correct.
+  BUG B (phantom EOD summary): main.py's had_trading_activity gate included
+  `len(daily_state.entries) > 0`, which is always true for as long as ANY
+  multi-day position is carried (re-attached every reset) — it can never
+  distinguish "holding a position, nothing new today" from real activity.
+  Observed: at 00:00:36 ET on 2026-08-18, 14 seconds after the midnight
+  reset, this falsely read True purely because D's carried Aug-13 calendar
+  was in daily_state.entries — triggering log_daily_summary() to book the
+  position's stale reset-moment unrealized mark (-$323.75) into
+  hydra_metrics.json as a fabricated "realized" result for a day that had
+  not started trading, corrupting D's cumulative track record for that
+  date (needs a separate manual data reconciliation on the VM; not
+  self-healing since the position was never actually settled). FIX:
+  extracted the check into MEICStrategy._had_trading_activity_today()
+  (base_strategy.py, byte-identical default logic — A/B/C unaffected) and
+  overrode it in CalendarStrategyBase to require either nonzero realized
+  P&L/entries_completed, or at least one entry whose entry_time falls on
+  TODAY — a carried-only entry no longer counts. main.py now calls
+  strategy._had_trading_activity_today() instead of re-inlining the check.
+  14 new tests (tests/test_calendar_carry_and_activity_gate_2026_08_18.py),
+  including a real end-to-end test that writes/reads the actual sidecar
+  file. Negative-controlled: 13 of 14 correctly fail with both fixes
+  reverted (the 14th is a no-carry no-op check, correctly unaffected).
+  Full suite: 2294 passed (was 2280), 15 skipped.
 - Fix #84's final-pnl_history-point moved to log_daily_summary() (2026-08-17).
   B's dashboard "today" card showed +$78.40 for the whole evening after the
   true settled total was -$76.60 — exactly the -$155.00 combined loss on two
