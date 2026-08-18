@@ -36,6 +36,37 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Fix #84's final-pnl_history-point moved to log_daily_summary() (2026-08-17).
+  B's dashboard "today" card showed +$78.40 for the whole evening after the
+  true settled total was -$76.60 — exactly the -$155.00 combined loss on two
+  Brandon defensive-overlay hedges (entries #3/#4) that settled a few seconds
+  AFTER the point had already been written. ROOT CAUSE: Fix #84 wrote the
+  "final" _pnl_history point inside check_after_hours_settlement() (strategy.
+  py), which main.py calls BEFORE log_daily_summary() — but for a Brandon
+  variant, log_daily_summary() is what settles the hedges (_brandon_settle_
+  hedges folds their P&L into total_realized_pnl before calling super()), so
+  the point captured a pre-hedge-settlement snapshot nothing ever corrected.
+  The real Telegram/email alert and DB daily_summaries row were NEVER wrong —
+  both are built later, inside log_daily_summary()'s own get_daily_summary()
+  call, after hedge settlement. Only the dashboard's in-memory pnl_history
+  curve had this staleness bug.
+  FIX: removed both Fix #84 call sites from check_after_hours_settlement()
+  (strategy.py, ~line 13043 area); added the final-point write to base_
+  strategy.py's log_daily_summary() (MEICStrategy — every concrete strategy
+  reaches this via super()) instead, positioned right after net_pnl/
+  commission are computed and using that SAME net_pnl the alert/Sheets/DB row
+  already report. Since a subclass's own settlement work always runs BEFORE
+  its super().log_daily_summary() call reaches this method's body, the point
+  can no longer be written ahead of any subclass-specific settlement step —
+  not just Brandon's, whatever future ones get added too. Same-minute points
+  now overwrite instead of appending a duplicate (matches the regular
+  heartbeat-driven pnl_history updater's existing convention).
+  Applies to all five variants (A/B/C/D/E all reach the shared base method);
+  in practice only B/C's Brandon hedges can trigger the staleness this fixes.
+  6 new tests (tests/test_pnl_history_settlement_ordering_2026_08_17.py),
+  negative-controlled (5 of 6 correctly fail with the fix reverted — the 6th
+  covers a zero-expired-credit path that was already a no-op pre-fix). Full
+  suite: 2275 passed (was 2269), 15 skipped.
 - GEX accel-zone peak persistence gate (2026-08-12, THE GOLDEN LOOP). Ships
   INERT — accel_peak_persistence_enabled defaults False in both AdjusterConfig
   and the strategy config-read; config_variant_b.json/config_variant_c.json

@@ -5906,6 +5906,35 @@ class MEICStrategy(abc.ABC):
         net_pnl = summary.get("net_pnl", summary["total_pnl"])
         commission = summary.get("total_commission", 0)
 
+        # Fix #84 (moved here 2026-08-17): final pnl_history point for the
+        # dashboard's intraday P&L curve. This used to be written inside
+        # check_after_hours_settlement() (bots/hydra/strategy.py), which
+        # main.py calls BEFORE this method — but for a Brandon variant (B/C),
+        # the defensive-overlay hedges settle inside THIS call (the subclass
+        # override folds their P&L into total_realized_pnl before reaching
+        # this line via super()), so a point written earlier could capture a
+        # pre-hedge-settlement snapshot with nothing left to correct it for
+        # the rest of the evening (2026-08-17: B showed +$78.40 all evening;
+        # true settled total was -$76.60 — exactly the two hedges' -$155.00
+        # combined loss). Writing it HERE — using the same net_pnl this
+        # method's own alert/Sheets/DB row report below — means it can't go
+        # stale the same way, for every strategy (not just Brandon ones),
+        # since every concrete strategy in this codebase reaches this method.
+        # getattr-defensive: _pnl_history/_save_state_to_disk are HydraStrategy
+        # additions, not part of this (MEICStrategy) base class's own contract.
+        pnl_history = getattr(self, "_pnl_history", None)
+        if pnl_history is not None:
+            now = get_us_market_time()
+            time_key = now.strftime("%H:%M")
+            if pnl_history and pnl_history[-1].get("time") == time_key:
+                pnl_history[-1]["pnl"] = round(net_pnl, 2)  # same-minute: overwrite, don't duplicate
+            else:
+                pnl_history.append({"time": time_key, "pnl": round(net_pnl, 2)})
+            logger.info(f"Final P&L history point: ${net_pnl:.2f} at {time_key}")
+            save_state = getattr(self, "_save_state_to_disk", None)
+            if callable(save_state):
+                save_state()
+
         # Send alert (Telegram/Email)
         self._send_daily_summary()
 

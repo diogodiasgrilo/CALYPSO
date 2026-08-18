@@ -13072,12 +13072,18 @@ class HydraStrategy(MEICStrategy):
                     f"FIX #77: Processed ${expired_credit:.2f} expired credits "
                     f"from surviving sides (no tracked conids)."
                 )
-                # Fix #84: final P&L history point after settlement
-                final_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
-                now = get_us_market_time()
-                time_key = now.strftime("%H:%M")
-                self._pnl_history.append({"time": time_key, "pnl": round(final_net_pnl, 2)})
-                logger.info(f"Fix #84: Final P&L history point: ${final_net_pnl:.2f} at {time_key}")
+                # Fix #84's final-pnl_history-point write used to live here, but
+                # main.py calls log_daily_summary() right after this method
+                # returns True — and for a Brandon variant (B/C), that call
+                # settles the defensive-overlay hedges BEFORE folding their P&L
+                # into total_realized_pnl. Reading total_realized_pnl at THIS
+                # point could grab a pre-hedge-settlement snapshot that never
+                # gets corrected (2026-08-17: dashboard showed +$78.40 all
+                # evening after the true settled total was -$76.60 — exactly
+                # the two hedges' -$155.00). Moved to base_strategy.py's
+                # log_daily_summary(), which runs after ALL settlement work
+                # (subclass-specific included) using the same net_pnl the
+                # real alert/DB row report — see the comment there.
                 self._save_state_to_disk()
             logger.info(
                 f"POS-004: No tracked conids — settlement reconciliation complete."
@@ -13169,13 +13175,10 @@ class HydraStrategy(MEICStrategy):
             logger.info(f"POS-004: All {self.BOT_NAME} positions confirmed settled - reconciliation complete")
             self._settlement_reconciliation_complete = True
 
-            # Fix #84: Add final P&L history point after settlement so dashboard
-            # shows post-settlement P&L (not stale pre-settlement snapshot)
-            final_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
-            now = get_us_market_time()
-            time_key = now.strftime("%H:%M")
-            self._pnl_history.append({"time": time_key, "pnl": round(final_net_pnl, 2)})
-            logger.info(f"Fix #84: Final P&L history point: ${final_net_pnl:.2f} at {time_key}")
+            # Fix #84's final-pnl_history-point write used to live here — see
+            # the comment at the sibling call site above (~line 13070) for why
+            # it moved to base_strategy.py's log_daily_summary(). Still save
+            # the settlement-flag/leg-clearing changes made above.
             self._save_state_to_disk()
 
             # Log safety event
