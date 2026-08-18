@@ -174,7 +174,9 @@
         "max_shift_pts": 25.0,
         "shift_buffer_pts": 5.0,
         "breach_exit_advisory": true,
-        "_comment_advisory": "2026-06-10: demote GEX-breach to advisory (logs would-close, does NOT act). Research: 70-86% false. credit+buffer (L-C2) is the acting primary."
+        "_comment_advisory": "2026-06-10: demote GEX-breach to advisory (logs would-close, does NOT act). Research: 70-86% false. credit+buffer (L-C2) is the acting primary.",
+        "accel_peak_persistence_enabled": true,
+        "_comment_persistence": "2026-08-12: require 2 independent GEX reads to agree before an accel-zone SKIP fires (Aug 10-12 3-day zero-entry streak fix). C-first observation trial before considering B. See bots/hydra/__init__.py version history."
       },
       "defensive_overlay": {
         "enabled": true,
@@ -193,6 +195,10 @@
       "enabled": false,
       "shadow": true,
       "pct_of_width": 0.25
+    },
+    "eod_flatten": {
+      "_comment_skip_otm_pts": "2026-08-18: skip_otm_pts lowered 20 -> 10 after a 19-event MKT-047 historical audit (all variants, back to the mechanism's 2026-06-17 birth) found a 0/19 win rate flattening vs just holding to expiry (net cost ~$805 in the recoverable window) and a real-money 0-for-2 on 2026-08-17 (B lost $175 flattening two puts that both settled OTM). A 15/10/5pt sensitivity re-check on the same 19 events found 10pt recovers ~52% of the historical gap while still protecting the one 2026-08-17 trade that came within 0.36pt of the strike at settlement (E4) -- 15pt changes nothing on that trade, 5pt would have let it ride. See bots/hydra/__init__.py version history.",
+      "skip_otm_pts": 10.0
     }
   },
   "trend_filter": {

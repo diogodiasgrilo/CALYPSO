@@ -13,12 +13,16 @@ loss. Two fixes, both exercised here:
 """
 
 import datetime
+import json
 from datetime import time as dtime
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from bots.hydra.strategy import HydraStrategy
 import bots.hydra.strategy as strat_mod
 import bots.hydra.base_strategy as base_mod
+
+_REPO_ROOT = Path(__file__).resolve().parents[1]
 
 
 def _et(h, m):
@@ -431,3 +435,92 @@ class TestEodFlattenPerSideSkip:
         assert e.put_side_expired is False   # put rides to worthless expiry / settlement
         assert e.call_side_expired is True   # call side flattened
         assert e.is_complete is False        # not complete until the put settles
+
+
+# ──────────── skip_otm_pts config wiring (2026-08-18: 20 -> 10) ────────────
+class TestEodFlattenSkipOtmPtsConfigWiring:
+    """A 19-event historical audit (2026-08-18) found MKT-047's 20pt OTM-skip
+    cushion never once beat just holding to expiry, and cost real money on
+    2026-08-17 (B lost $175 flattening two puts that both settled OTM). A
+    15/10/5pt sensitivity re-check picked 10pt as the one that still protects
+    the closest real call (E4, 0.36pt from the strike at settlement) while
+    recovering ~52% of the historical cost. Deployed as a config change (no
+    code change — skip_otm_pts was already fully config-driven), so what
+    actually needs testing here is the WIRING: that config.json's
+    strategy.eod_flatten.skip_otm_pts JSON path is spelled correctly and
+    parses to a float, using the identical extraction expression
+    bots/hydra/strategy.py's __init__ uses (strategy_config.get("eod_flatten",
+    {}) or {}).get("skip_otm_pts", 20.0) — a wrong key name or nesting level
+    would silently fall back to the old 20.0 default with no error anywhere.
+    The threshold LOGIC itself (_eod_flatten_can_skip / _eod_flatten_can_skip_
+    side) is unchanged and already covered generically by every test above."""
+
+    def _extract_skip_otm_pts(self, config: dict) -> float:
+        """Byte-for-byte the same expression as strategy.py's __init__
+        (~line 636-657) — not a re-derivation, the literal production logic."""
+        strategy_config = config.get("strategy", {})
+        _eod = strategy_config.get("eod_flatten", {}) or {}
+        return float(_eod.get("skip_otm_pts", 20.0))
+
+    def _load(self, filename: str) -> dict:
+        path = _REPO_ROOT / "bots" / "hydra" / "config" / filename
+        with open(path) as f:
+            return json.load(f)
+
+    def test_variant_b_config_sets_10pt(self):
+        cfg = self._load("config_variant_b.json")
+        assert self._extract_skip_otm_pts(cfg) == 10.0
+
+    def test_variant_c_config_sets_10pt(self):
+        cfg = self._load("config_variant_c.json")
+        assert self._extract_skip_otm_pts(cfg) == 10.0
+
+    def test_variant_b_config_is_a_real_float_not_a_string(self):
+        # A JSON "10.0" (string) would pass a naive equality check against the
+        # int 10 in some contexts but break arithmetic in _eod_flatten_can_skip
+        # (otm < cushion) the moment it's compared against a real float OTM
+        # distance — confirm it's the correct JSON type at the source.
+        cfg = self._load("config_variant_b.json")
+        raw = cfg["strategy"]["eod_flatten"]["skip_otm_pts"]
+        assert isinstance(raw, (int, float)) and not isinstance(raw, bool)
+
+    def test_missing_key_still_falls_back_to_20_default(self):
+        # Regression guard for the extraction expression itself: an eod_flatten
+        # block present but WITHOUT skip_otm_pts (or the block absent entirely)
+        # must still resolve to the pre-2026-08-18 default, not crash or
+        # silently produce 0/None. Confirms this change didn't accidentally
+        # remove the safe fallback for any variant that never sets the key
+        # (e.g. D/E's configs, which don't have this block at all).
+        assert self._extract_skip_otm_pts({"strategy": {"eod_flatten": {}}}) == 20.0
+        assert self._extract_skip_otm_pts({"strategy": {}}) == 20.0
+        assert self._extract_skip_otm_pts({}) == 20.0
+
+    def test_wired_value_actually_drives_the_real_skip_gate(self):
+        # End-to-end: take the REAL parsed config value (not a hand-typed 10.0)
+        # and feed it through the actual _eod_flatten_can_skip_side gate, to
+        # prove the deployed number changes real behavior at the boundary it's
+        # supposed to change: a short that was previously (20pt) flattened at
+        # 15pt OTM now correctly rides free at the new 10pt cushion.
+        cfg = self._load("config_variant_b.json")
+        cushion = self._extract_skip_otm_pts(cfg)
+        assert cushion == 10.0
+
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.eod_flatten_skip_otm_pts = cushion
+        # OTM for a short PUT means spot ABOVE the strike (spot - strike).
+        s.current_price = 7515.0  # short put 7500 -> 15pt OTM
+        e = base_mod.IronCondorEntry(entry_number=1)
+        e.contracts = 7
+        e.short_put_strike = 7500.0
+        e.short_put_uic = 111
+        e.is_complete = False
+        e.call_side_skipped = True  # put-only
+
+        # At the OLD 20pt cushion this would have been flattened (15 < 20).
+        assert s._eod_flatten_can_skip_side(e, "put") is True  # rides free at 10pt (15 >= 10)
+
+        # And confirm the boundary genuinely moved: a short still within the
+        # NEW 10pt cushion is still correctly flattened, not accidentally
+        # let through by the config change.
+        s.current_price = 7507.0  # 7pt OTM — inside the new cushion
+        assert s._eod_flatten_can_skip_side(e, "put") is False
