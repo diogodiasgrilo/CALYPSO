@@ -248,7 +248,7 @@
   "alerts": {
     "enabled": true,
     "phone_number": "+1XXXXXXXXXX",
-    "email": "your@email.com"
+    "email": "diogodiasgrilo@gmail.com"
   },
   "logging": {
     "log_level": "INFO",
