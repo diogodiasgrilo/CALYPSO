@@ -36,6 +36,70 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Strategy-process shutdown-hang investigation + client-hygiene hardening
+  (2026-08-19, THE GOLDEN LOOP, 2 review rounds). Root-caused the recurring
+  "SIGTERM logs 'Shutdown complete' but the process doesn't actually exit
+  for 44-82+s, needing a forced SIGKILL" symptom first flagged 2026-08-03
+  (broker-side fixed then; strategy-process side left open). Workflow-driven
+  investigation (code audit + live VM evidence + grpcio-internals research)
+  found: the lingering grpc_global_tim/event_engine/lifeguard child threads
+  seen at SIGKILL time are grpc-core PROCESS-GLOBAL singletons, lazily
+  spawned by the first channel any client library constructs (Secret
+  Manager, used by every variant at startup; Pub/Sub, constructed even on
+  alert-DISABLED D/E per AlertService's L-C2 comment) — confirmed via
+  grpcio 1.80.0's own compiled source strings that these can only be torn
+  down by grpc's internal shutdown sequence at real interpreter exit, not
+  by closing an individual channel. The "abandoned Pub/Sub publish future"
+  theory was checked against real logs and does NOT fully explain it alone
+  (D hit the identical hang with zero Pub/Sub calls that day, alerts
+  disabled). Shipped as honest, real client-hygiene hardening — NOT a
+  proven elimination of the underlying grpc-core teardown latency:
+  AlertService.close() (new) releases the Pub/Sub publisher's channel
+  promptly on a bounded background thread (CLOSE_TIMEOUT_S=5s, matching
+  shared/logger_service.py's _sheets_call_with_timeout convention), called
+  from bots/hydra/main.py's shutdown sequence via two new testable helpers
+  (close_alert_service_safely, log_shutdown_diagnostics — the latter logs
+  live Python thread names + /proc/self/status's native thread count right
+  before "Shutdown complete", filling the exact evidence gap that made
+  this investigation need a full forensic pass instead of a log read).
+  shared/secret_manager.py's get_secret()/update_secret() now release
+  their per-call SecretManagerServiceClient the same way. Round-1
+  adversarial review (3 reviewers) found 6 real issues, ALL fixed: (1) an
+  initial future.cancel() "fix" was a hard no-op for Pub/Sub futures
+  (verified against the installed library source) — removed rather than
+  left in place implying a mitigation that doesn't exist; (2)
+  AlertService.close()'s close call initially had no timeout, breaking
+  this codebase's own bounded-blocking-call convention — fixed; (3) an
+  unsynchronized self._publisher read-then-use (TOCTOU) — narrowed via a
+  local snapshot; (4) HIGH — the initial secret_manager fix used the
+  client as a context manager, and a close-time exception AFTER a
+  successful RPC propagated past the pending return, reporting a real
+  secret fetch/update as a failure (reproduced empirically) — fixed by
+  moving the close into an explicit `finally` that can never override an
+  already-decided RPC outcome; (5) matching test-coverage gap — closed;
+  (6) the new helpers were only wired into run_bot()'s main-loop finally:
+  block, not its ~6 earlier startup-failure early-return paths — fixed,
+  all now call both helpers (passing None for `strategy` where it isn't
+  in scope yet). Round-2 review re-verified all 6 fixes independently
+  (fresh code reads + empirical repro, not just re-reading round-1's
+  claims) and found ONE more real issue via a fresh sweep:
+  _close_secret_manager_client's own threading.Thread()/.start() calls
+  were unguarded, so a failure to even spawn the close thread (e.g. OS
+  thread exhaustion) reproduced the identical success-masked-as-failure
+  bug through a different trigger — fixed by wrapping the spawn itself.
+  25 new tests (tests/test_shutdown_hang_grpc_cleanup_2026_08_18.py),
+  negative-controlled throughout both rounds (each specific fix reverted
+  in isolation, confirmed the matching test goes red, restored, confirmed
+  green) — caught 2 real bugs in the tests THEMSELVES along the way (a
+  simulated-hang duration shorter than the bound being tested, silently
+  passing either way; the process-wide `time` module patch from an
+  existing autouse fixture silently neutering a time.sleep()-based hang
+  simulation) before they could ship as false-confidence coverage. Full
+  suite: see the run immediately after this entry for the final count.
+  Deploy note: NOT yet deployed as of this entry — 2026-08-19 is a live
+  trading day with variant B (the live paper seat) holding real open
+  positions; deploy deliberately deferred to a safe window (B flat or
+  market closed), never a mid-session restart with positions open.
 - Calendar (D/E) daily-reset sidecar race + phantom-activity EOD summary
   (2026-08-18, THE GOLDEN LOOP). Investigated the previously-unresolved
   "D's dc_open_trades.json came back empty" loose thread (proven not caused

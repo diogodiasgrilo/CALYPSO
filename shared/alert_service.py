@@ -246,6 +246,11 @@ class AlertService:
     """
 
     PUBSUB_TOPIC = "calypso-alerts"
+    # Bound for close()'s background transport-close thread — a class
+    # attribute (not a bare literal) so tests can monkeypatch it to a tiny
+    # value instead of needing to wait out the real 5s to prove the bound
+    # actually applies. See close()'s docstring.
+    CLOSE_TIMEOUT_S = 5.0
 
     def __init__(self, config: Dict[str, Any], bot_name: str):
         """
@@ -353,6 +358,81 @@ class AlertService:
             )
         except Exception as e:
             logger.error(f"Failed to initialize Pub/Sub publisher: {describe_exception(e)}")
+
+    def close(self) -> None:
+        """Best-effort teardown of the Pub/Sub publisher's gRPC channel.
+
+        Part of the 2026-08-18 shutdown-hang investigation: strategy
+        processes were observed taking 44-82+ seconds (sometimes past the
+        100s systemd TimeoutStopSec, needing a forced SIGKILL) to actually
+        exit after logging a complete graceful-shutdown sequence, with
+        lingering child threads named grpc_global_tim/event_engine/
+        lifeguard — grpc-core's process-global timer/poller/watchdog
+        threads, lazily spawned by the first channel any client library
+        constructs (Secret Manager at startup, this publisher — built even
+        when alerts are config-disabled, see the L-C2 comment in
+        _initialize). Those three threads are process-wide singletons only
+        torn down by grpc's own internal shutdown sequence at real
+        interpreter exit, NOT per-channel — closing this one publisher
+        cannot eliminate them. What it DOES do, correctly: releases this
+        channel's own connection/subchannel state promptly instead of
+        leaving it to Channel.__del__, which deliberately does not close
+        the channel (upstream grpc/grpc#12531) — real, achievable cleanup,
+        called once from main.py's shutdown sequence right before the
+        final "Shutdown complete" log line. Safe to call multiple times or
+        when the publisher was never constructed.
+
+        Round-1 adversarial review (2026-08-18) caught that the first
+        version of this method called transport.close() with NO timeout —
+        breaking this codebase's own established convention for every
+        other potentially-hanging client-library call (Sheets/Secret
+        Manager 10s, ib_oauth 30s — see CLAUDE.md's "Bot frozen" section)
+        and running unconditionally on the exact shutdown path this
+        investigation exists to unblock. If transport.close() itself ever
+        stalled, it would block BEFORE log_shutdown_diagnostics even runs.
+        Fixed to match shared/logger_service.py's _sheets_call_with_timeout
+        pattern: run the close on a daemon thread, bound the wait, give up
+        (but let the thread keep running in the background) past the
+        timeout rather than block shutdown on it.
+
+        Snapshots self._publisher into a local BEFORE clearing the
+        instance attribute, so a concurrent send_alert() that already read
+        the (still-valid-at-the-time) publisher reference keeps using its
+        own snapshot rather than crashing on a None — narrows, though
+        doesn't fully eliminate, the unsynchronized-access window a
+        reviewer flagged (low severity, not reachable today: this is
+        called exactly once, single-threaded, at the very end of
+        run_bot()'s shutdown sequence — see main.py). Full locking wasn't
+        added: it would need to wrap every send_alert() publish call too,
+        and this class's only other lock (_reinit_lock) is deliberately
+        non-blocking to avoid pileup on a possibly-hung reinit — reusing
+        it here for a blocking acquire would change its behavior for a
+        currently-unreachable race, which is a bigger, riskier change than
+        this fix warrants."""
+        publisher = self._publisher
+        self._publisher = None
+        self._initialized = False
+        if publisher is None:
+            return
+
+        result: list = [None]
+
+        def _do_close():
+            try:
+                publisher.transport.close()
+            except Exception as e:  # noqa: BLE001 — never fatal, see docstring
+                result[0] = e
+
+        thread = threading.Thread(target=_do_close, daemon=True)
+        thread.start()
+        thread.join(timeout=self.CLOSE_TIMEOUT_S)
+        if thread.is_alive():
+            logger.warning(
+                f"AlertService.close(): publisher transport close timed out "
+                f"after {self.CLOSE_TIMEOUT_S}s (non-fatal)"
+            )
+        elif result[0] is not None:
+            logger.debug(f"AlertService.close(): publisher transport close failed (non-fatal): {result[0]}")
 
     def send_alert(
         self,
@@ -566,7 +646,15 @@ class AlertService:
         # (not on GCP) this is harmless and fast: _write_dead_letter just
         # writes locally, and the bypass's own credential fetch short-
         # circuits immediately via the same not-on-GCP check.
-        if not self._initialized or not self._publisher:
+        # Snapshot into a local now, rather than re-reading self._publisher
+        # inside the retry loop below — narrows (though per close()'s own
+        # docstring, doesn't fully eliminate) the unsynchronized window a
+        # 2026-08-18 adversarial review flagged: a concurrent close() could
+        # otherwise flip self._publisher to None mid-loop, turning a
+        # would-have-succeeded publish into a crash-then-caught AttributeError
+        # instead of just using the reference this call already committed to.
+        publisher = self._publisher
+        if not self._initialized or not publisher:
             logger.info(f"Alert logged (Pub/Sub not available): {json.dumps(payload)}")
             self._write_dead_letter(payload, priority, "Pub/Sub not initialized/available")
             if priority in (AlertPriority.CRITICAL, AlertPriority.HIGH):
@@ -612,7 +700,7 @@ class AlertService:
         for attempt in range(1, max_attempts + 1):
             try:
                 data = json.dumps(payload).encode("utf-8")
-                future = self._publisher.publish(self._topic_path, data)
+                future = publisher.publish(self._topic_path, data)
                 message_id = future.result(timeout=5)  # Wait up to 5 seconds per attempt
 
                 logger.debug(f"Alert published to Pub/Sub with message ID: {message_id}")
@@ -620,6 +708,20 @@ class AlertService:
 
             except Exception as e:
                 last_error = e
+                # 2026-08-18 shutdown-hang investigation: a future.result()
+                # timeout here originally also called future.cancel(), on
+                # the theory that an abandoned publish RPC stays "in
+                # flight" and contributes to the process's slow/hung exit.
+                # Round-1 adversarial review caught that this doesn't hold:
+                # google.cloud.pubsub_v1.publisher.futures.Future.cancel()
+                # is hard-overridden to always `return False` and do
+                # nothing — verified against the actual installed library
+                # source, confirmed to be a no-op in every case, not just
+                # the already-completed one the removed comment hedged
+                # about. Removed rather than left in place inert — a
+                # future reader trusting that comment would wrongly rule
+                # out "abandoned publish future" as already handled. See
+                # AlertService.close() for what IS achievable here.
                 if attempt < max_attempts:
                     logger.warning(
                         f"Pub/Sub publish attempt {attempt}/{max_attempts} failed "

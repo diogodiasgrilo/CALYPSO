@@ -41,6 +41,7 @@ import signal
 import argparse
 import logging
 import subprocess
+import threading
 from datetime import datetime
 
 # Ensure project root is in path for imports when running as script
@@ -107,6 +108,58 @@ def signal_handler(signum, frame):
     except Exception as diag_exc:  # noqa: BLE001 — diagnostics must never block shutdown
         logger.warning("SIGTERM-DIAG: snapshot failed (non-fatal): %s", diag_exc)
     shutdown_requested = True
+
+
+def close_alert_service_safely(strategy, trade_logger) -> None:
+    """Best-effort AlertService.close() call from the shutdown sequence.
+
+    Part of the 2026-08-18 shutdown-hang investigation (see
+    AlertService.close()'s own docstring for the full writeup) — releases
+    the Pub/Sub publisher's gRPC channel promptly instead of leaving it to
+    GC. Never raises: a failure here must not prevent the rest of shutdown
+    (in particular the "Shutdown complete" log line main.py's own
+    idempotency/restart handling depends on) from completing."""
+    if strategy is None:
+        return
+    try:
+        strategy.alert_service.close()
+    except Exception as e:  # noqa: BLE001 — must never block shutdown
+        trade_logger.log_event(f"alert_service.close() failed (non-fatal): {e}")
+
+
+def log_shutdown_diagnostics(trade_logger) -> None:
+    """SHUTDOWN-DIAG: log what's still alive right before the final
+    "Shutdown complete" line.
+
+    The original SIGTERM-DIAG (signal_handler, above) captures a snapshot
+    at signal-RECEIPT time — nothing about live threads. That gap is what
+    made the 2026-08-18 shutdown-hang investigation (strategy processes
+    occasionally taking 44-82+ seconds, sometimes past the 100s systemd
+    TimeoutStopSec, to actually exit after this point) require a full
+    forensic pass instead of reading a log line. threading.enumerate()
+    cannot see grpc-core's native C threads (confirmed during that
+    investigation — they're spawned via grpc_core::Thread/pthread_create,
+    entirely outside Python's thread registry), so this also reads
+    /proc/self/status's native thread count on Linux as a coarse
+    cross-check. Best-effort only; never raises."""
+    try:
+        py_threads = [t.name for t in threading.enumerate()]
+        native_thread_count = None
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("Threads:"):
+                        native_thread_count = line.split()[1]
+                        break
+        except OSError:
+            pass  # non-Linux or /proc unavailable — best-effort only
+        trade_logger.log_event(
+            f"SHUTDOWN-DIAG: {len(py_threads)} Python thread(s) alive {py_threads}; "
+            f"native OS threads (includes non-Python, e.g. grpc-core): "
+            f"{native_thread_count or 'unknown'}"
+        )
+    except Exception as e:  # noqa: BLE001 — diagnostics must never block shutdown
+        trade_logger.log_event(f"SHUTDOWN-DIAG logging failed (non-fatal): {e}")
 
 
 def interruptible_sleep(seconds: int, check_interval: int = 1) -> bool:
@@ -284,6 +337,14 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
         broker = _build_broker()
     except Exception as e:
         trade_logger.log_error(f"Failed to build broker client: {e}")
+        # 2026-08-18 shutdown-hang investigation, round-1 review: this early
+        # exit bypasses run_bot()'s main finally: block entirely, so without
+        # this call any AlertService/Secret-Manager grpc state from code run
+        # before this point would get zero cleanup or diagnostics. No
+        # `strategy` exists yet at this point in the function — pass None
+        # explicitly (close_alert_service_safely no-ops on it).
+        close_alert_service_safely(None, trade_logger)
+        log_shutdown_diagnostics(trade_logger)
         trade_logger.shutdown()
         return
 
@@ -305,6 +366,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
         except BrokerError as e:
             if not _is_broker_mode or _connect_attempts >= _CONNECT_MAX_ATTEMPTS:
                 trade_logger.log_error(f"Failed to connect to IBKR broker: {e}")
+                # See the matching comment at the broker-build except above.
+                close_alert_service_safely(None, trade_logger)
+                log_shutdown_diagnostics(trade_logger)
                 trade_logger.shutdown()
                 return
             _connect_attempts += 1
@@ -313,10 +377,14 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 f"+ retrying (attempt {_connect_attempts}/{_CONNECT_MAX_ATTEMPTS}); not exiting."
             )
             if not interruptible_sleep(15):
+                close_alert_service_safely(None, trade_logger)
+                log_shutdown_diagnostics(trade_logger)
                 trade_logger.shutdown()
                 return
         except (IBAuthError, IBConnectionError, IBClientError) as e:
             trade_logger.log_error(f"Failed to connect to IBKR: {e}")
+            close_alert_service_safely(None, trade_logger)
+            log_shutdown_diagnostics(trade_logger)
             trade_logger.shutdown()
             return
 
@@ -347,6 +415,15 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     except Exception as e:
         trade_logger.log_error(f"Failed to initialize strategy: {e}")
         logger.exception("Strategy initialization failed")
+        # strategy is still None here (build_strategy's assignment never
+        # completed) — passed anyway for clarity; the real value of this
+        # call on THIS path is log_shutdown_diagnostics, since a raise deep
+        # inside build_strategy's __init__ (e.g. AlertService's
+        # PublisherClient construction succeeding, then a later __init__
+        # line raising) can leave grpc-core threads alive with no reference
+        # anywhere to close — see the 2026-08-18 shutdown-hang investigation.
+        close_alert_service_safely(strategy, trade_logger)
+        log_shutdown_diagnostics(trade_logger)
         trade_logger.shutdown()
         return
 
@@ -410,6 +487,12 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                     )
                 except Exception:
                     pass
+                # strategy is fully constructed and live here (its
+                # alert_service was just used above) — this early exit
+                # bypasses run_bot()'s main finally: block, so without this
+                # call its Pub/Sub channel would get zero cleanup.
+                close_alert_service_safely(strategy, trade_logger)
+                log_shutdown_diagnostics(trade_logger)
                 trade_logger.shutdown()
                 return
             else:
@@ -1117,6 +1200,23 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 trade_logger.log_event("Strategy was not initialized - no final status available")
         except Exception as e:
             trade_logger.log_error(f"Error during shutdown status reporting: {e}")
+
+        # 2026-08-18 shutdown-hang investigation: strategy processes were
+        # observed taking 44-82+ seconds (occasionally past the 100s
+        # systemd TimeoutStopSec, needing a forced SIGKILL) to actually
+        # exit after this point, with lingering child threads named
+        # grpc_global_tim/event_engine/lifeguard — grpc-core's
+        # process-global background threads, spawned by the Secret Manager
+        # + Pub/Sub clients every variant constructs at startup (Pub/Sub is
+        # constructed even when alerts are config-disabled, so this affects
+        # ALL of A/B/C/D/E, not just alert-enabled variants). Those threads
+        # can only be torn down by grpc's own internal shutdown sequence at
+        # real interpreter exit, not by application code — see
+        # close_alert_service_safely / AlertService.close() for what IS
+        # achievable, and log_shutdown_diagnostics for the evidence this
+        # investigation found was missing.
+        close_alert_service_safely(strategy, trade_logger)
+        log_shutdown_diagnostics(trade_logger)
 
         trade_logger.log_event("Shutdown complete.")
         trade_logger.shutdown()

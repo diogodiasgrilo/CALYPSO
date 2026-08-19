@@ -17,9 +17,70 @@ When running locally:
 import os
 import json
 import logging
+import threading
 from typing import Optional, Dict, Any
 
 logger = logging.getLogger(__name__)
+
+# Bound for _close_secret_manager_client's background thread — a module
+# constant (not a bare literal) so tests can monkeypatch it to a tiny value
+# instead of needing to wait out the real 5s to prove the bound applies.
+SECRET_MANAGER_CLOSE_TIMEOUT_S = 5.0
+
+
+def _close_secret_manager_client(client) -> None:
+    """Best-effort, bounded teardown of a SecretManagerServiceClient's gRPC
+    channel — never raises, never blocks the caller past 5s.
+
+    2026-08-18 shutdown-hang investigation: get_secret()/update_secret()
+    originally used the client as a context manager (`with ... as client:`),
+    which DOES release the channel promptly (real, worthwhile cleanup —
+    Channel.__del__ deliberately doesn't close it, grpc/grpc#12531) but has
+    two problems a round-1 adversarial review caught: (1) if __exit__ itself
+    raised — even AFTER a successful RPC — that exception propagated past
+    the pending `return`, and the caller's own `except Exception` converted
+    an already-successful fetch/update into a reported failure (reproduced
+    empirically); (2) __exit__'s transport.close() has no timeout, breaking
+    this codebase's own convention for exactly this class of call.
+
+    Fixed by NOT using the client as a context manager: callers construct it
+    directly, do the RPC in their own try/except (unchanged, still correctly
+    reports RPC-level failures), and call this helper from a `finally` —
+    close failures are swallowed here and can never mask an already-decided
+    RPC outcome. Mirrors shared/alert_service.py's AlertService.close().
+
+    Round-2 review caught that this docstring's "never raises" guarantee
+    was FALSE as first written: only client.transport.close() itself (run
+    inside _do_close) was try/excepted — threading.Thread(...) / .start()
+    were not, so under OS-level thread exhaustion (a real, if rare,
+    condition — and one this same investigation's own findings make more
+    plausible: a prior close() that genuinely hung leaves its daemon
+    thread running indefinitely) a failure to even SPAWN the close thread
+    would propagate out of this function, out of the caller's `finally`,
+    and reproduce the exact "successful RPC reported as a failure" bug
+    this whole fix exists to close — just via a different trigger.
+    Reproduced empirically (round-2 review) by forcing threading.Thread()
+    to raise. Fixed by wrapping the spawn itself too."""
+    result: list = [None]
+
+    def _do_close():
+        try:
+            client.transport.close()
+        except Exception as e:  # noqa: BLE001 — never fatal, see docstring
+            result[0] = e
+
+    try:
+        thread = threading.Thread(target=_do_close, daemon=True)
+        thread.start()
+    except Exception as e:  # noqa: BLE001 — spawning the thread must never mask a decided RPC outcome
+        logger.debug(f"SecretManagerServiceClient close thread failed to start (non-fatal): {e}")
+        return
+
+    thread.join(timeout=SECRET_MANAGER_CLOSE_TIMEOUT_S)
+    if thread.is_alive():
+        logger.debug(f"SecretManagerServiceClient close timed out after {SECRET_MANAGER_CLOSE_TIMEOUT_S}s (non-fatal)")
+    elif result[0] is not None:
+        logger.debug(f"SecretManagerServiceClient close failed (non-fatal): {result[0]}")
 
 # Secret names in GCP Secret Manager
 SECRET_NAMES = {
@@ -119,14 +180,22 @@ def get_secret(secret_name: str, version: str = "latest") -> Optional[str]:
             logger.error("Could not determine GCP project ID")
             return None
 
+        # NOT context-managed — see _close_secret_manager_client's docstring
+        # for why (a bare `with` let a close-time failure mask an
+        # already-successful fetch). This function constructs a fresh
+        # client per call, so releasing the channel here still matters (a
+        # real, unbounded leak otherwise — config_loader calls this ~3-4x
+        # at every strategy startup) — just done via an explicit finally
+        # instead, so close failures can never change this RPC's outcome.
         client = secretmanager.SecretManagerServiceClient()
-        name = f"projects/{project_id}/secrets/{secret_name}/versions/{version}"
-
-        response = client.access_secret_version(request={"name": name}, timeout=10)
-        secret_value = response.payload.data.decode("UTF-8")
-
-        logger.info(f"Successfully fetched secret: {secret_name}")
-        return secret_value
+        try:
+            name = f"projects/{project_id}/secrets/{secret_name}/versions/{version}"
+            response = client.access_secret_version(request={"name": name}, timeout=10)
+            secret_value = response.payload.data.decode("UTF-8")
+            logger.info(f"Successfully fetched secret: {secret_name}")
+            return secret_value
+        finally:
+            _close_secret_manager_client(client)
 
     except ImportError:
         logger.error("google-cloud-secret-manager not installed. Run: pip install google-cloud-secret-manager")
@@ -256,49 +325,54 @@ def update_secret(secret_name: str, secret_value: str) -> bool:
             logger.error("Could not determine GCP project ID")
             return False
 
+        # NOT context-managed — see _close_secret_manager_client's docstring
+        # (matching get_secret() above) for why.
         client = secretmanager.SecretManagerServiceClient()
-        parent = f"projects/{project_id}/secrets/{secret_name}"
-
-        # Get the current latest version number BEFORE adding new one
-        # so we can destroy it after the new version is confirmed
-        previous_version = None
         try:
-            latest = client.access_secret_version(
-                request={"name": f"{parent}/versions/latest"},
-                timeout=10
-            )
-            # Extract version number from name: "projects/.../secrets/.../versions/8261"
-            previous_version = latest.name
-        except Exception:
-            pass  # First version or access error — skip cleanup
+            parent = f"projects/{project_id}/secrets/{secret_name}"
 
-        # Add new version with updated value
-        response = client.add_secret_version(
-            request={
-                "parent": parent,
-                "payload": {"data": secret_value.encode("UTF-8")}
-            },
-            timeout=10
-        )
-
-        logger.info(f"Secret {secret_name} updated successfully: {response.name}")
-
-        # Destroy the previous version to avoid billing accumulation.
-        # Secret Manager charges $0.06/version/month for active versions.
-        # Token Keeper creates ~103 versions/day — without cleanup this
-        # costs ~$500/month (Fix: 2026-04-09, was costing $120 in 9 days).
-        if previous_version and previous_version != response.name:
+            # Get the current latest version number BEFORE adding new one
+            # so we can destroy it after the new version is confirmed
+            previous_version = None
             try:
-                client.destroy_secret_version(
-                    request={"name": previous_version},
+                latest = client.access_secret_version(
+                    request={"name": f"{parent}/versions/latest"},
                     timeout=10
                 )
-                logger.debug(f"Destroyed previous version: {previous_version}")
-            except Exception as e:
-                # Non-fatal: new version is already active, old one just costs money
-                logger.warning(f"Failed to destroy previous version {previous_version}: {e}")
+                # Extract version number from name: "projects/.../secrets/.../versions/8261"
+                previous_version = latest.name
+            except Exception:
+                pass  # First version or access error — skip cleanup
 
-        return True
+            # Add new version with updated value
+            response = client.add_secret_version(
+                request={
+                    "parent": parent,
+                    "payload": {"data": secret_value.encode("UTF-8")}
+                },
+                timeout=10
+            )
+
+            logger.info(f"Secret {secret_name} updated successfully: {response.name}")
+
+            # Destroy the previous version to avoid billing accumulation.
+            # Secret Manager charges $0.06/version/month for active versions.
+            # Token Keeper creates ~103 versions/day — without cleanup this
+            # costs ~$500/month (Fix: 2026-04-09, was costing $120 in 9 days).
+            if previous_version and previous_version != response.name:
+                try:
+                    client.destroy_secret_version(
+                        request={"name": previous_version},
+                        timeout=10
+                    )
+                    logger.debug(f"Destroyed previous version: {previous_version}")
+                except Exception as e:
+                    # Non-fatal: new version is already active, old one just costs money
+                    logger.warning(f"Failed to destroy previous version {previous_version}: {e}")
+
+            return True
+        finally:
+            _close_secret_manager_client(client)
 
     except ImportError:
         logger.error("google-cloud-secret-manager not installed")
