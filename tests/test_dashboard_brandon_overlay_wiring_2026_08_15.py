@@ -264,6 +264,31 @@ class TestBroadcasterGetSnapshot:
         assert by_num[5]["overlays"], "the live/primary snapshot must carry the real overlay"
         assert by_num[5]["overlays"][0]["structure"] == "butterfly"
 
+    def test_snapshot_state_entries_carry_overlays(self, broadcaster):
+        """2026-08-19 fix: the frontend's applySnapshot() only ever reads
+        snapshot["state"] (hydraStore.ts) — it never reads snapshot["today_entries"]
+        (confirmed dead field via repo-wide grep, zero references anywhere in
+        dashboard/frontend/src). The test above only proved today_entries
+        carries overlays; it never proved the field the frontend actually
+        consumes does. Without this second merge, every WS connect/reconnect
+        wipes any overlays a prior state_update had merged into hydraState —
+        invisible during market hours because state_update self-heals it
+        within ~1s (hydra_state.json changes almost continuously), but
+        permanent after market close once the state file stops changing for
+        the day, since nothing broadcasts a corrective state_update anymore."""
+        import asyncio
+
+        snapshot = asyncio.run(broadcaster.get_snapshot())
+        state_entries = snapshot["state"]["entries"]
+        by_num = {e["entry_number"]: e for e in state_entries}
+        assert 5 in by_num
+        assert by_num[5]["overlays"], (
+            "snapshot['state']['entries'] (what applySnapshot() actually reads "
+            "into hydraState) must carry the real overlay, not just today_entries"
+        )
+        assert by_num[5]["overlays"][0]["structure"] == "butterfly"
+        assert by_num[1]["overlays"] == []
+
 
 class TestBroadcasterPollStateMergesOverlays:
     """_poll_state() broadcasts raw hydra_state.json content on every change —

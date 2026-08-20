@@ -87,8 +87,22 @@ function computeEntryPnl(e: HydraEntry) {
   const callClosed = earlyClosed && (e.call_side_stopped || e.call_side_expired);
   const putClosed = earlyClosed && (e.put_side_stopped || e.put_side_expired);
   // Realized for an early-closed side: credit kept minus the cost to close.
-  const callRealized = e.call_spread_credit - (e.actual_call_stop_debit ?? 0);
-  const putRealized = e.put_spread_credit - (e.actual_put_stop_debit ?? 0);
+  // 2026-08-19 (review finding): `actual_*_stop_debit` defaults to 0.0 both
+  // when a close was genuinely free AND when the real fill price simply
+  // wasn't captured (IBKR has no deferred-correction retry for this path,
+  // unlike the old Saxo-era fill-lookup) — the two cases are indistinguishable
+  // from this field alone. Assuming "0 debit = free close" in that second case
+  // silently shows a phantom profit on a side that may have closed at a real
+  // loss. Mirror icEntryView.tsx's resolveSide() guard (`debit != null &&
+  // debit > 0`): only credit the realized amount when a real debit was
+  // actually confirmed; otherwise contribute $0 rather than assert a number
+  // that can't be backed up. This can UNDER-state a genuine win (self-evident
+  // as an odd $0 on an otherwise-favorable close) but can never OVER-state
+  // one — the safer direction for a dollar figure a trader relies on.
+  const callDebitConfirmed = (e.actual_call_stop_debit ?? 0) > 0;
+  const putDebitConfirmed = (e.actual_put_stop_debit ?? 0) > 0;
+  const callRealized = callDebitConfirmed ? e.call_spread_credit - e.actual_call_stop_debit! : 0;
+  const putRealized = putDebitConfirmed ? e.put_spread_credit - e.actual_put_stop_debit! : 0;
 
   // Max profit = credit from sides that can still expire worthless
   let maxProfit = 0;
@@ -270,12 +284,15 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
     : entry.trend_signal ?? "";
 
   // Show the P&L line for any entry with a meaningful realized/live P&L — active,
-  // stopped, AND the Brandon early-closes (take_profit / breach). Omitting
-  // take_profit here was the regression that left a TP card showing only its
-  // credit ($665) with no P&L.
+  // stopped, AND the Brandon early-closes (take_profit / breach / flattened).
+  // Omitting take_profit here was the regression that left a TP card showing
+  // only its credit ($665) with no P&L; "flattened" (EOD safety-flatten,
+  // MKT-047) had the identical bug — computeEntryPnl() already handles it
+  // correctly via the earlyClosed branch above, this line was just never
+  // updated when the "flattened" status was introduced (2026-08-19 fix).
   const showLiveData =
     status === "active" || status === "stopped_single" || status === "stopped" ||
-    status === "take_profit" || status === "breach";
+    status === "take_profit" || status === "breach" || status === "flattened";
 
   // Determine border color
   const borderColor =
@@ -291,7 +308,14 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
               ? colors.warning
               : status === "expired"
                 ? colors.profit
-                : colors.textDim;
+                : status === "flattened"
+                  // Unlike take_profit (always favorable) or stopped (always a
+                  // loss), a managed EOD flatten can land either way — key the
+                  // border off the actual computed result instead of a fixed
+                  // color (2026-08-19, alongside the showLiveData fix that
+                  // first made this status's real P&L visible at all).
+                  ? (currentPnl >= 0 ? colors.profit : colors.loss)
+                  : colors.textDim;
 
   // Determine which sides are still active (for cushion display on stopped entries)
   const callStillActive = !entry.call_side_stopped && !entry.call_side_skipped && !entry.call_side_expired;

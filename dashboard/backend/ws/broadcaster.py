@@ -190,6 +190,19 @@ class Broadcaster:
 
         entries = self._merge_overlays(entries, state)
 
+        # 2026-08-19 fix: the merge above only ever reached the separate
+        # "today_entries" field below, which the frontend's applySnapshot()
+        # never reads (it only consumes "state"). That left hydraState.entries
+        # overlay-less on every WS connect/reconnect -- invisible during market
+        # hours because the next state_update (which DOES merge correctly, see
+        # _poll_state) self-heals it within ~1s, but permanent after market
+        # close once hydra_state.json stops changing for the day. Mirror
+        # _poll_state's exact merge onto state["entries"] itself so a fresh
+        # snapshot carries overlays the same way a live state_update does.
+        if isinstance(state, dict) and isinstance(state.get("entries"), list):
+            state = dict(state)
+            state["entries"] = self._merge_overlays(state["entries"], state)
+
         ohlc = await self._get_merged_ohlc()
         market = get_current_status()
         agents = self.agent_reader.get_all_agent_status()
