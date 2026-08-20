@@ -36,6 +36,47 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Brandon defensive-overlay hedge tightening + PII fix-forward (2026-08-19,
+  THE GOLDEN LOOP, 2 review rounds). Prompted by a live-day review of B/C's
+  overlay hedge history: an event replay found the hedge (debit-spread pre-
+  12:30 ET / butterfly after) was arming well before real danger on B/C's
+  narrow 5-10pt spreads, and never once defended a side that was actually
+  breached. Two changes, both scoped to the defensive_overlay layer only —
+  the credit+buffer stop-loss and the independent GEX-fallback stop
+  promotion are untouched:
+  (1) brandon/strategy.py:_brandon_check_overlay() — OverlayConfig's
+  require_gex_confirmation was `(profile is not None)`, an unreviewed
+  default from the original 2026-05-05 commit that let a hedge fire on
+  distance alone whenever the Polygon GEX profile was simply present,
+  without an actual accel-zone confirming real danger. Changed to always
+  `True`. Does not weaken Polygon-outage protection — that path already
+  runs through the separately-tested _brandon_alert_gex_fallback stop
+  promotion, independent of this overlay.
+  (2) config_variant_b.json / config_variant_c.json — trigger_distance_pts
+  25 -> 15pt. See each file's _comment_trigger_distance_pts for the full
+  rationale and confidence caveat (LOW-MEDIUM; small event sample).
+  Added BRANDON-OVERLAY-WATCH instrumentation (60s-throttled per side) that
+  logs distance-at-tick + gex_confirmed whenever price is within 2x the
+  trigger distance, so a future replay has real recorded data instead of
+  inferred bounds. Round-1 review found 4 real issues, all fixed: missing
+  put-side test coverage for the GEX-confirmation fix; no config-wiring
+  test proving the JSON value actually reaches the strategy; the new WATCH
+  log had no throttle (would spam every tick near a threatened strike);
+  gex_confirmed could read misleadingly. Round-2 re-verified all fixes
+  independently and found none further. 13 new tests across
+  tests/test_brandon_strategy_integration.py, negative-controlled
+  throughout (each fix reverted in isolation, confirmed red, restored,
+  confirmed green) — 100/100 passing in that file, full suite 2331
+  passed/15 skipped. Bundled in the same commit: a PII fix-forward —
+  bots/hydra/config/config_variant_{b,c}.json's alerts.email had been
+  overwritten from the "your@email.com" placeholder to a real address by
+  an autonomous on-VM commit (HOMER's git auto-commit, a known gotcha —
+  see the operator memory) that reached origin; restored the placeholder
+  going forward per an explicit operator decision (fix-forward only, not a
+  history rewrite — this is a private repo and an email address, not a
+  credential). Deploy note: NOT yet deployed as of this entry — bundled
+  with the shutdown-hang hardening below, both deferred to the same safe
+  window (B flat or market closed).
 - Strategy-process shutdown-hang investigation + client-hygiene hardening
   (2026-08-19, THE GOLDEN LOOP, 2 review rounds). Root-caused the recurring
   "SIGTERM logs 'Shutdown complete' but the process doesn't actually exit

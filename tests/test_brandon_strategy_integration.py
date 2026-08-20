@@ -10,9 +10,11 @@ methods are tested in their existing suite. We only verify that the overrides
 correctly route to Brandon modules vs. parent.
 """
 
+import json
 import os
 import sys
 from datetime import datetime, timezone
+from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -64,6 +66,7 @@ def _make_instance(**brandon_attrs):
         _brandon_prior_gex_profile=None,
         _brandon_breach_states={},
         _brandon_overlay_placed=set(),
+        _brandon_overlay_watch_logged_at={},
         _brandon_hydra_shadow_fired=set(),
         _brandon_hedge_legs={},
         _brandon_hedge_settlements=[],
@@ -1676,6 +1679,395 @@ class TestOverlayHedgeTracking:
         inst._brandon_hedge_settlements = []
         assert inst._brandon_hedge_legs == {}
         assert inst._brandon_hedge_settlements == []
+
+
+class TestOverlayGexConfirmationAlwaysRequired:
+    """2026-08-19: _brandon_check_overlay used to pass
+    require_gex_confirmation=(profile is not None) to evaluate_overlay --
+    so when the GEX/Polygon profile is fully unavailable (a total outage,
+    not just sparse/degraded data), the hedge fired on proximity distance
+    ALONE, with zero confirming signal. Fixed to always require
+    confirmation; when profile is None, evaluate_overlay's own
+    `if profile is None: return None` (already-tested module behavior)
+    means no hedge is proposed at all -- the position stays protected via
+    the independent credit+buffer stop (L-C1 GEX fallback), not this hedge.
+    """
+
+    def _entry(self, entry_number=1):
+        e = MagicMock()
+        e.entry_number = entry_number
+        e.contracts = 1
+        e.short_call_strike = 6840
+        e.long_call_strike = 6915
+        e.short_put_strike = 6760
+        e.long_put_strike = 6685
+        e.call_side_stopped = False
+        e.put_side_stopped = False
+        e.call_side_expired = False
+        e.put_side_expired = False
+        e.call_side_skipped = False
+        e.put_side_skipped = False
+        e.call_side_pivot_closed = False
+        e.put_side_pivot_closed = False
+        return e
+
+    def test_no_hedge_when_profile_is_none_even_within_trigger_distance(self):
+        # Price is well within the (default 25pt) trigger distance of the
+        # threatened call strike (6840), which under the OLD code would
+        # have fired on distance alone since profile=None used to set
+        # require_gex_confirmation=False.
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_overlay_enabled=True,
+            brandon_overlay_butterfly_cutoff_hour=23,
+            brandon_overlay_butterfly_cutoff_minute=59,
+            current_price=6820,  # 20pt from short call 6840
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: None  # total Polygon outage
+        e = self._entry()
+        inst._brandon_check_overlay(e)
+
+        assert inst._brandon_hedge_legs.get(1, []) == [], (
+            "hedge fired on distance alone during a total Polygon outage -- "
+            "the GEX-confirmation-always-required fix regressed"
+        )
+
+    def test_hedge_still_fires_when_profile_present_and_confirmed(self):
+        # Regression companion: confirms the fix didn't also break the
+        # legitimate case (profile present, accel zone confirms).
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_overlay_enabled=True,
+            brandon_overlay_butterfly_cutoff_hour=23,
+            brandon_overlay_butterfly_cutoff_minute=59,
+            current_price=6820,
+        )
+        from datetime import date
+        from bots.hydra.brandon.gex_provider import build_profile
+        profile = build_profile(
+            [
+                {"details": {"strike_price": 6830, "contract_type": "call"}, "open_interest": 80000, "greeks": {"gamma": 0.001}},
+                {"details": {"strike_price": 6840, "contract_type": "call"}, "open_interest": 80000, "greeks": {"gamma": 0.001}},
+                {"details": {"strike_price": 6850, "contract_type": "call"}, "open_interest": 80000, "greeks": {"gamma": 0.001}},
+            ],
+            spot=6820, expiry=date(2026, 5, 5), time_to_expiry=1 / 365.0,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: profile
+        inst._brandon_estimate_t_years_to_close = lambda: 1.0 / 365.0
+        e = self._entry()
+        inst._brandon_check_overlay(e)
+
+        assert len(inst._brandon_hedge_legs.get(1, [])) == 2  # debit spread, still fires correctly
+
+    def test_no_hedge_when_profile_present_but_no_accel_zone_confirms(self):
+        # Profile IS available (not the None case) but has no accel cluster
+        # on the threatened side -- must still correctly withhold the hedge,
+        # exactly as before this fix (this path was already gated, confirms
+        # the fix didn't accidentally loosen it).
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_overlay_enabled=True,
+            brandon_overlay_butterfly_cutoff_hour=23,
+            brandon_overlay_butterfly_cutoff_minute=59,
+            current_price=6820,
+        )
+        from datetime import date
+        from bots.hydra.brandon.gex_provider import build_profile
+        profile = build_profile([], spot=6820, expiry=date(2026, 5, 5), time_to_expiry=1 / 365.0)
+        inst._brandon_get_gex_profile = lambda d, **_kw: profile
+        e = self._entry()
+        inst._brandon_check_overlay(e)
+
+        assert inst._brandon_hedge_legs.get(1, []) == []
+
+    def test_no_hedge_on_put_side_when_profile_is_none(self):
+        # Round-1 review finding: the other 3 tests in this class only ever
+        # drive the CALL side into the require_gex_confirmation branch --
+        # current_price=6820 puts the put side (short 6760) 60pt away, past
+        # the 25pt distance gate, so it never reaches the confirmation
+        # check at all. cfg.require_gex_confirmation is a single value
+        # shared by both sides (built once, before the per-side loop), so
+        # the call-side proof does cover the put side in practice -- but
+        # assert it directly rather than only by code-symmetry inference.
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_overlay_enabled=True,
+            brandon_overlay_butterfly_cutoff_hour=23,
+            brandon_overlay_butterfly_cutoff_minute=59,
+            current_price=6775,  # 15pt from short put 6760, within the 25pt trigger
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: None  # total Polygon outage
+        e = self._entry()
+        inst._brandon_check_overlay(e)
+
+        assert inst._brandon_hedge_legs.get(1, []) == [], (
+            "put-side hedge fired on distance alone during a total Polygon outage"
+        )
+
+
+class TestOverlayTriggerDistanceConfigWiring:
+    """A 9-event replay (2026-08-19) found trigger_distance_pts=25 arms the
+    hedge well before real danger on B/C's 5-10pt-wide spreads (0/9 events
+    defended a side that was ever actually breached). Retuned to 15. Deployed
+    as a config change (no logic change -- trigger_distance_pts was already
+    fully config-driven), so what needs testing here is the WIRING: that
+    config_variant_{b,c}.json's strategy.brandon.defensive_overlay.
+    trigger_distance_pts JSON path is spelled correctly and parses to the
+    expected value, using the identical extraction expression bots/hydra/
+    brandon/strategy.py's __init__ uses -- a wrong key name or nesting level
+    would silently fall back to the old 25.0 default with no error anywhere.
+    Mirrors tests/test_eod_flatten_safety.py::TestEodFlattenSkipOtmPtsConfigWiring,
+    the analogous wiring test for the sibling skip_otm_pts retune one day
+    earlier -- a round-1 review finding noted no such test existed yet for
+    this parameter, unlike that established precedent."""
+
+    def _extract_trigger_distance_pts(self, config: dict) -> float:
+        """Byte-for-byte the same expression as strategy.py's __init__
+        (~line 275-277) -- not a re-derivation, the literal production logic."""
+        bcfg = (config.get("strategy", {}) or {}).get("brandon", {}) or {}
+        ov = bcfg.get("defensive_overlay") or {}
+        return float(ov.get("trigger_distance_pts", 25.0))
+
+    def _load(self, filename: str) -> dict:
+        path = Path(__file__).resolve().parents[1] / "bots" / "hydra" / "config" / filename
+        with open(path) as f:
+            return json.load(f)
+
+    def test_variant_b_config_sets_15pt(self):
+        cfg = self._load("config_variant_b.json")
+        assert self._extract_trigger_distance_pts(cfg) == 15.0
+
+    def test_variant_c_config_sets_15pt(self):
+        cfg = self._load("config_variant_c.json")
+        assert self._extract_trigger_distance_pts(cfg) == 15.0
+
+
+class TestOverlayWatchLoggingAccuracy:
+    """Round-1 review finding: BRANDON-OVERLAY-WATCH's gex_confirmed field
+    originally logged `profile is not None` -- true whenever ANY profile
+    exists, even one with zero accel clusters on the threatened side, which
+    is a materially weaker signal than evaluate_overlay's own confirmation
+    gate (_has_accel_zone_on_side). A future retune replaying this log would
+    have over-counted "confirmed" approaches. Fixed to compute the same
+    check evaluate_overlay itself uses."""
+
+    def _entry(self, entry_number=1):
+        e = MagicMock()
+        e.entry_number = entry_number
+        e.contracts = 1
+        e.short_call_strike = 6840
+        e.long_call_strike = 6915
+        e.short_put_strike = 6760
+        e.long_put_strike = 6685
+        e.call_side_stopped = False
+        e.put_side_stopped = False
+        e.call_side_expired = False
+        e.put_side_expired = False
+        e.call_side_skipped = False
+        e.put_side_skipped = False
+        e.call_side_pivot_closed = False
+        e.put_side_pivot_closed = False
+        return e
+
+    def test_gex_confirmed_false_when_profile_present_but_no_accel_zone(self, caplog):
+        # The exact gap round-1 review found: profile is not None (would
+        # have logged gex_confirmed=True under the old code) but has no
+        # accel cluster on the threatened side, so the REAL gate
+        # (evaluate_overlay) would decline to hedge. The log must say False.
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_overlay_enabled=True,
+            brandon_overlay_trigger_distance_pts=25.0,
+            current_price=6820,  # 20pt from short call 6840, within watch zone
+        )
+        from datetime import date
+        from bots.hydra.brandon.gex_provider import build_profile
+        profile = build_profile([], spot=6820, expiry=date(2026, 5, 5), time_to_expiry=1 / 365.0)
+        inst._brandon_get_gex_profile = lambda d, **_kw: profile
+        e = self._entry()
+        with caplog.at_level("INFO"):
+            inst._brandon_check_overlay(e)
+
+        watch_lines = [r.getMessage() for r in caplog.records if "BRANDON-OVERLAY-WATCH" in r.getMessage() and " call:" in r.getMessage()]
+        assert any("gex_confirmed=False" in line for line in watch_lines), watch_lines
+        assert not any("gex_confirmed=True" in line for line in watch_lines), watch_lines
+
+    def test_gex_confirmed_true_when_accel_zone_present(self, caplog):
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_overlay_enabled=True,
+            brandon_overlay_trigger_distance_pts=25.0,
+            current_price=6820,
+        )
+        from datetime import date
+        from bots.hydra.brandon.gex_provider import build_profile
+        profile = build_profile(
+            [
+                {"details": {"strike_price": 6830, "contract_type": "call"}, "open_interest": 80000, "greeks": {"gamma": 0.001}},
+                {"details": {"strike_price": 6840, "contract_type": "call"}, "open_interest": 80000, "greeks": {"gamma": 0.001}},
+                {"details": {"strike_price": 6850, "contract_type": "call"}, "open_interest": 80000, "greeks": {"gamma": 0.001}},
+            ],
+            spot=6820, expiry=date(2026, 5, 5), time_to_expiry=1 / 365.0,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: profile
+        inst._brandon_estimate_t_years_to_close = lambda: 1.0 / 365.0
+        e = self._entry()
+        # Force a placement-free tick: use a distance just OUTSIDE the
+        # trigger but inside the watch zone, so WATCH logs without also
+        # firing the real hedge (which would consume the key and could
+        # otherwise complicate reading back the log for this assertion).
+        e.short_call_strike = 6840
+        inst.current_price = 6815  # 25pt away -- right at the trigger boundary
+        with caplog.at_level("INFO"):
+            inst._brandon_check_overlay(e)
+
+        watch_lines = [r.getMessage() for r in caplog.records if "BRANDON-OVERLAY-WATCH" in r.getMessage() and " call:" in r.getMessage()]
+        assert any("gex_confirmed=True" in line for line in watch_lines), watch_lines
+
+
+class TestOverlayWatchLoggingThrottle:
+    """Round-1 review finding: the WATCH log had no throttle, so a side
+    chopping sideways inside the watch band for an extended period could
+    log on every ~2-5s monitoring tick -- hundreds of near-duplicate lines
+    in a single range-bound session. Throttled to once per 60s per
+    (entry, side)."""
+
+    def _entry(self, entry_number=1):
+        e = MagicMock()
+        e.entry_number = entry_number
+        e.contracts = 1
+        e.short_call_strike = 6840
+        e.long_call_strike = 6915
+        e.short_put_strike = 6760
+        e.long_put_strike = 6685
+        e.call_side_stopped = False
+        e.put_side_stopped = False
+        e.call_side_expired = False
+        e.put_side_expired = False
+        e.call_side_skipped = False
+        e.put_side_skipped = False
+        e.call_side_pivot_closed = False
+        e.put_side_pivot_closed = False
+        return e
+
+    def test_second_tick_within_60s_does_not_log_again(self, caplog):
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_overlay_enabled=True,
+            brandon_overlay_trigger_distance_pts=25.0,
+            current_price=6810,  # 30pt from short call -- watch zone, not trigger
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: None
+        e = self._entry()
+        with caplog.at_level("INFO"):
+            inst._brandon_check_overlay(e)
+            first_count = len([
+                r for r in caplog.records
+                if "BRANDON-OVERLAY-WATCH" in r.getMessage() and " call:" in r.getMessage()
+            ])
+            inst._brandon_check_overlay(e)  # immediate second tick, same call
+            second_count = len([
+                r for r in caplog.records
+                if "BRANDON-OVERLAY-WATCH" in r.getMessage() and " call:" in r.getMessage()
+            ])
+
+        assert first_count == 1
+        assert second_count == 1, "throttle did not suppress a second tick within 60s"
+
+    def test_logs_again_after_throttle_window_elapses(self, caplog, monkeypatch):
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_overlay_enabled=True,
+            brandon_overlay_trigger_distance_pts=25.0,
+            current_price=6810,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: None
+        e = self._entry()
+        fake_now = [1000.0]
+        monkeypatch.setattr(
+            "bots.hydra.brandon.strategy.time.monotonic",
+            lambda: fake_now[0],
+        )
+        with caplog.at_level("INFO"):
+            inst._brandon_check_overlay(e)
+            fake_now[0] += 61.0  # past the 60s throttle window
+            inst._brandon_check_overlay(e)
+
+        watch_lines = [
+            r for r in caplog.records
+            if "BRANDON-OVERLAY-WATCH" in r.getMessage() and " call:" in r.getMessage()
+        ]
+        assert len(watch_lines) == 2, "expected a fresh log line once the throttle window elapsed"
+
+
+class TestOverlayWatchLogging:
+    """2026-08-19: distance-at-tick instrumentation (BRANDON-OVERLAY-WATCH),
+    added so a future trigger_distance_pts retune has a real intraday
+    distance trail instead of having to infer bounds from unrelated
+    signals (e.g. whether MKT-047 later force-closed the side)."""
+
+    def _entry(self, entry_number=1):
+        e = MagicMock()
+        e.entry_number = entry_number
+        e.contracts = 1
+        e.short_call_strike = 6840
+        e.long_call_strike = 6915
+        e.short_put_strike = 6760
+        e.long_put_strike = 6685
+        e.call_side_stopped = False
+        e.put_side_stopped = False
+        e.call_side_expired = False
+        e.put_side_expired = False
+        e.call_side_skipped = False
+        e.put_side_skipped = False
+        e.call_side_pivot_closed = False
+        e.put_side_pivot_closed = False
+        return e
+
+    def test_logs_within_watch_zone(self, caplog):
+        # 30pt from short call 6840 (current_price 6810), watch zone is
+        # 2x trigger_distance_pts (25 -> 50pt), so this is well inside it
+        # but outside the trigger itself -- must log without placing a hedge.
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_overlay_enabled=True,
+            brandon_overlay_trigger_distance_pts=25.0,
+            current_price=6810,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: None
+        e = self._entry()
+        with caplog.at_level("INFO"):
+            inst._brandon_check_overlay(e)
+
+        watch_lines = [r.getMessage() for r in caplog.records if "BRANDON-OVERLAY-WATCH" in r.getMessage()]
+        assert any("call" in line and "30.00pt" in line for line in watch_lines)
+        assert inst._brandon_hedge_legs.get(1, []) == []  # 30pt is outside the 25pt trigger itself
+
+    def test_does_not_log_outside_watch_zone(self, caplog):
+        # Wide strikes (unlike the default 6840/6760 entry, where call+put
+        # distances necessarily sum to the 80pt strike range -- making it
+        # impossible for BOTH sides to independently exceed a 50pt watch
+        # zone at once) so spot can sit >50pt from both sides simultaneously.
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_overlay_enabled=True,
+            brandon_overlay_trigger_distance_pts=25.0,
+            current_price=6800,
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: None
+        e = self._entry()
+        e.short_call_strike = 7000  # 200pt away
+        e.short_put_strike = 6600   # 200pt away
+        with caplog.at_level("INFO"):
+            inst._brandon_check_overlay(e)
+
+        watch_lines = [r.getMessage() for r in caplog.records if "BRANDON-OVERLAY-WATCH" in r.getMessage()]
+        assert watch_lines == []
+
+    def test_does_not_log_for_already_placed_side(self, caplog):
+        inst = _make_instance(
+            brandon_gex_enabled=True, brandon_overlay_enabled=True,
+            brandon_overlay_trigger_distance_pts=25.0,
+            current_price=6810,
+            _brandon_overlay_placed={(1, "call")},
+        )
+        inst._brandon_get_gex_profile = lambda d, **_kw: None
+        e = self._entry()
+        with caplog.at_level("INFO"):
+            inst._brandon_check_overlay(e)
+
+        watch_lines = [r.getMessage() for r in caplog.records if "BRANDON-OVERLAY-WATCH" in r.getMessage() and "call" in r.getMessage()]
+        assert watch_lines == []
 
 
 class TestDryRunStateRecovery:

@@ -180,7 +180,8 @@
       },
       "defensive_overlay": {
         "enabled": true,
-        "trigger_distance_pts": 25.0,
+        "_comment_trigger_distance_pts": "2026-08-19: tightened 25 -> 15 after a 9-event replay found 25pt arms the hedge well before real danger on a 5-10pt-wide B/C spread (0/9 events defended a side that was ever actually breached; the 3 realized-loss events all fired 11:02-11:16 ET on threats that evaporated). 15pt sits near a ~2.5-3x multiple of the narrow-spread width (matching this codebase's own OTM-multiplier convention) while staying above the just-tightened 10pt MKT-047 flatten cushion. Confidence is LOW-MEDIUM -- the 9-event sample reduces to ~5-6 independent moments (B/C fired on several identical underlying ticks in parallel) and the 3 known real stop-loss-breach days have zero recoverable hedge data, so this is a monitored/instrumented change, not a settled number. Distance-at-tick logging added alongside this change so a future replay has real data instead of inferred bounds. See bots/hydra/__init__.py version history.",
+        "trigger_distance_pts": 15.0,
         "butterfly_width_pts": 10,
         "butterfly_cutoff_hour": 12,
         "butterfly_cutoff_minute": 30,
@@ -244,7 +245,7 @@
   "alerts": {
     "enabled": false,
     "phone_number": "+1XXXXXXXXXX",
-    "email": "diogodiasgrilo@gmail.com"
+    "email": "your@email.com"
   },
   "logging": {
     "log_level": "INFO",

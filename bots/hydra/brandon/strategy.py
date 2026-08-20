@@ -55,6 +55,7 @@ from __future__ import annotations
 
 import logging
 import os
+import time
 from dataclasses import replace
 from datetime import datetime, timezone  # AUD2-L9: removed unused `timedelta`
 from typing import Optional
@@ -131,6 +132,13 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_prior_gex_profile: Optional[GEXProfile] = None
         self._brandon_breach_states: dict[tuple[int, str], gex_breach_exit.BreachState] = {}
         self._brandon_overlay_placed: set[tuple[int, str]] = set()
+        # Throttle for BRANDON-OVERLAY-WATCH (2026-08-19): monotonic
+        # timestamp of the last watch-zone log per (entry_number, side), so
+        # a side chopping sideways inside the watch band for an extended
+        # period doesn't log on every ~2-5s monitoring tick (round-1 review
+        # finding — unthrottled, this could produce hundreds of near-
+        # duplicate INFO lines during a single range-bound session).
+        self._brandon_overlay_watch_logged_at: dict[tuple[int, str], float] = {}
         self._brandon_hydra_shadow_fired: set[tuple[int, str]] = set()
         # %-of-width stop SHADOW: (entry_number, side) already logged a would-fire
         # today (one head-to-head datapoint per side per day; see
@@ -1664,7 +1672,23 @@ class BrandonHydraStrategy(HydraStrategy):
                 self.brandon_overlay_butterfly_cutoff_minute,
             ),
             butterfly_width_pts=self.brandon_overlay_butterfly_width,
-            require_gex_confirmation=(profile is not None),
+            # 2026-08-19: was `(profile is not None)` — coupled GEX
+            # confirmation to whatever the cache happened to hold, so a
+            # total Polygon outage (profile=None) let the hedge fire on
+            # distance alone with zero confirming signal. Unreviewed since
+            # the original 2026-05-05 feature commit (no rationale in the
+            # commit message or version history, unlike the codebase's
+            # other degraded-Polygon guards, which are all documented
+            # incidents). Always require confirmation now: when Polygon is
+            # down, evaluate_overlay's own `if profile is None: return
+            # None` (already-tested module behavior) means the hedge simply
+            # won't arm — the position stays protected regardless, since
+            # the credit+buffer stop is promoted to LIVE-acting via
+            # _brandon_alert_gex_fallback whenever GEX/Polygon is down,
+            # independent of this overlay. This only removes an *extra*,
+            # unconfirmed hedge layer bought on no information; it removes
+            # no real protection.
+            require_gex_confirmation=True,
             contracts=int(getattr(entry, "contracts", 1) or 1),
         )
         now_et = self._brandon_now_et()
@@ -1679,6 +1703,49 @@ class BrandonHydraStrategy(HydraStrategy):
             key = (entry.entry_number, side)
             if key in self._brandon_overlay_placed:
                 continue
+
+            # 2026-08-19: distance-at-tick instrumentation. The 15pt-vs-25pt
+            # trigger_distance_pts retune was reasoned from indirect bounds
+            # (inferring the intraday path only from whether MKT-047 later
+            # force-closed the side) because the overlay previously only
+            # ever logged the single tick it actually fired on. Log the
+            # approach trail itself now — INFO, gated to a "watch zone"
+            # (2x trigger_distance_pts) so this doesn't spam every tick for
+            # sides nowhere near being hedged — so a future retune has a
+            # real distance-over-time trail instead of inferred bounds.
+            #
+            # Round-1 review caught two bugs in the first version of this
+            # block: (1) gex_confirmed was logged as `profile is not None`
+            # — true whenever ANY profile exists, even an empty one with no
+            # accel zones on this side, which is a materially weaker signal
+            # than evaluate_overlay's own confirmation gate and would have
+            # skewed a future retune toward over-counting "confirmed"
+            # approaches. Fixed to compute the SAME check evaluate_overlay
+            # itself uses (_has_accel_zone_on_side, module-private but
+            # called directly here so the logged value can never drift from
+            # the real gate). (2) no throttle — at the ~2-5s monitoring
+            # cadence, a side chopping inside the watch band for an hour
+            # could produce hundreds of near-duplicate lines. Throttled to
+            # once per 60s per (entry, side).
+            watch_distance = short - spot if side == "call" else spot - short
+            if 0 < watch_distance <= 2 * cfg.trigger_distance_pts:
+                now_monotonic = time.monotonic()
+                last_logged = self._brandon_overlay_watch_logged_at.get(key, 0.0)
+                if now_monotonic - last_logged >= 60.0:
+                    self._brandon_overlay_watch_logged_at[key] = now_monotonic
+                    gex_confirmed = bool(
+                        profile is not None
+                        and defensive_overlay._has_accel_zone_on_side(
+                            side, spot, profile, min_strength_pct=0.05,
+                        )
+                    )
+                    logger.info(
+                        "BRANDON-OVERLAY-WATCH E#%s %s: %.2fpt from short %.1f "
+                        "(trigger=%.1fpt, gex_confirmed=%s)",
+                        entry.entry_number, side, watch_distance, short,
+                        cfg.trigger_distance_pts, gex_confirmed,
+                    )
+
             proposal = defensive_overlay.evaluate_overlay(
                 threatened_side=side,
                 spot_now=spot,
@@ -2642,6 +2709,7 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_prior_gex_profile = None
         self._brandon_breach_states.clear()
         self._brandon_overlay_placed.clear()
+        self._brandon_overlay_watch_logged_at.clear()
         self._brandon_hydra_shadow_fired.clear()
         self._brandon_pctwidth_shadow_fired.clear()
         self._brandon_pctwidth_breach_at.clear()
