@@ -3889,7 +3889,7 @@ class HydraStrategy(MEICStrategy):
         triggered = "TRIGGERED → put-only" if is_up else "not triggered"
         logger.info(
             f"Upday-035: SPX {change_pct * 100:+.2f}% from open "
-            f"({current:.1f} vs {spx_ref:.1f}), threshold +{self.upday_threshold_pct * 100:.1f}% — {triggered}"
+            f"({current:.1f} vs {spx_ref:.1f}), threshold +{self.upday_threshold_pct * 100:.2f}% — {triggered}"
         )
         return is_up
 
@@ -5667,13 +5667,28 @@ class HydraStrategy(MEICStrategy):
         )
 
     def _record_stop_to_db(self, entry, side: str, stop_level: float,
-                           actual_close_cost: float | None, exit_reason: str = "stop_loss"):
+                           actual_close_cost: float | None, exit_reason: str = "stop_loss",
+                           effective_trigger_level: float | None = None):
         """Record stop loss data to SQLite with execution quality metrics.
 
         exit_reason (v11) discriminates a real stop-loss from a Brandon
         take-profit / GEX-breach early-close — all of which route through here.
         Defaults to 'stop_loss' so the two HYDRA-stop call sites need no change.
+
+        2026-08-20 (round-1 adversarial review of the trigger_level-decay fix):
+        ``stop_level`` and the DB's ``trigger_level`` column used to be the same
+        number by definition, but ``stop_level`` ALSO feeds the ``net_pnl``
+        fallback below (used only when ``actual_close_cost`` is unknown) — and
+        that fallback must stay consistent with ``daily_state.total_realized_pnl``,
+        which ``super()._execute_stop_loss()`` computes from the STATIC entry-time
+        stop level, never the MKT-042-decayed one. Decoupled: ``stop_level``
+        keeps its original static meaning for the ``net_pnl`` fallback;
+        ``effective_trigger_level`` (optional, defaults to ``stop_level`` when a
+        caller has no better number — e.g. one-sided/A2 paths unaffected by this
+        finding) is what actually gets recorded as ``trigger_level``.
         """
+        if effective_trigger_level is None:
+            effective_trigger_level = stop_level
         if not self._data_recorder:
             return
         try:
@@ -5733,7 +5748,7 @@ class HydraStrategy(MEICStrategy):
                 "side": side,
                 "stop_time": now.strftime('%H:%M:%S'),
                 "spx_at_stop": self.current_price,
-                "trigger_level": stop_level,
+                "trigger_level": effective_trigger_level,
                 "actual_debit": actual_close_cost,
                 "net_pnl": net_pnl,
                 "exit_reason": exit_reason,
@@ -7480,13 +7495,38 @@ class HydraStrategy(MEICStrategy):
         # When short_only_stop is disabled, use base MEIC logic (closes both legs)
         if not self.short_only_stop:
             result = super()._execute_stop_loss(entry, side)
-            # Record stop to SQLite
+            # Record stop to SQLite. 2026-08-20 (execution audit finding): the
+            # trigger_level column used to read entry.call_side_stop/
+            # put_side_stop directly — the STATIC base level set once at entry
+            # time — while the live trigger check a few lines below (and at
+            # MKT-036 confirmation time) fires against
+            # _get_effective_stop_level()'s dynamically MKT-042-decayed value,
+            # which is never written back to the entry attribute. On a stop
+            # that fires inside the ~4h decay window (most 0DTE stops),
+            # trade_stops.trigger_level silently recorded the wrong number —
+            # any analysis reading "how close was the stop to firing" (buffer
+            # calibration, slot_edge, HERMES) was off by the decay multiplier.
+            #
+            # stop_level here STAYS the static value — round-1 adversarial
+            # review found _record_stop_to_db's own net_pnl fallback (fires
+            # when the close fill wasn't captured) also keys off this same
+            # parameter, and that fallback must stay consistent with
+            # daily_state.total_realized_pnl (booked inside
+            # super()._execute_stop_loss() above using its own separate,
+            # still-static local). The decayed value is passed SEPARATELY as
+            # effective_trigger_level, which only feeds the trigger_level
+            # column — booked P&L (real fill/debit-driven) and this DB
+            # fallback are both untouched by the decay fix.
             stop_level = entry.call_side_stop if side == "call" else entry.put_side_stop
+            effective_trigger_level = self._get_effective_stop_level(entry, side)
             actual_debit = entry.actual_call_stop_debit if side == "call" else entry.actual_put_stop_debit
             # 0.0 here = the stop's close fill was never captured (unknown); a real
             # stop buys back an ITM short (cost > 0), never worthless — so map 0.0 to
             # None to keep the trigger-level placeholder (do NOT book +credit).
-            self._record_stop_to_db(entry, side, stop_level, actual_debit or None)
+            self._record_stop_to_db(
+                entry, side, stop_level, actual_debit or None,
+                effective_trigger_level=effective_trigger_level,
+            )
             return result
 
         logger.warning(
@@ -7708,7 +7748,19 @@ class HydraStrategy(MEICStrategy):
         # 0.0 = short buy-back fill not captured (unknown); a real MKT-025 short-only
         # stop always buys back an expensive ITM short, so 0.0 is never a worthless
         # close — map to None to retain the placeholder rather than book +credit.
-        self._record_stop_to_db(entry, side, stop_level, actual_close_cost or None)
+        # 2026-08-20 (round-2 review: the original trigger_level-decay fix only
+        # covered the `not short_only_stop` branch above — this MKT-025 branch
+        # was left recording the static level too, an incomplete-scope gap,
+        # currently dormant since short_only_stop=false on every tracked
+        # config today). stop_level itself STAYS untouched here — it directly
+        # feeds net_loss/the real booked P&L a few lines up (line 7710), unlike
+        # the other branch where the real booking is fully internal to
+        # super()._execute_stop_loss(). Only trigger_level's DB column changes.
+        effective_trigger_level = self._get_effective_stop_level(entry, side)
+        self._record_stop_to_db(
+            entry, side, stop_level, actual_close_cost or None,
+            effective_trigger_level=effective_trigger_level,
+        )
 
         # MKT-033: Immediately try to sell the long leg if profitable
         if self.long_salvage_enabled and not self.dry_run:

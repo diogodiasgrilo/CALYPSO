@@ -15,6 +15,7 @@ import os
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -1622,14 +1623,19 @@ class TestOverlayHedgeTracking:
             entries=[SimpleNamespace(entry_number=1, realized_pnl=0.0, overlay_pnl_booked=False)],
             total_realized_pnl=0.0,
         )
-        # Pre-seed two legs of a call debit spread on entry 1
+        # Pre-seed two legs of a call debit spread on entry 1 — SAME placed_at,
+        # matching production (_brandon_place_overlay computes placed_at ONCE
+        # per call and shares it across every leg of that one hedge; a stray
+        # per-leg datetime.now() here would look like two separate hedges
+        # under the 2026-08-20 placed_at-grouping fix).
+        one_placement = datetime.now(timezone.utc)
         inst._brandon_hedge_legs[1] = [
             HedgeLeg(1, "long", "call", 6850, 1, fill_price=8.0,
                      position_id="DRY_OVERLAY_1_call_0", structure="debit_spread",
-                     threatened_side="call", placed_at=datetime.now(timezone.utc)),
+                     threatened_side="call", placed_at=one_placement),
             HedgeLeg(1, "short", "call", 6860, 1, fill_price=3.0,
                      position_id="DRY_OVERLAY_1_call_1", structure="debit_spread",
-                     threatened_side="call", placed_at=datetime.now(timezone.utc)),
+                     threatened_side="call", placed_at=one_placement),
         ]
         inst._brandon_send_telegram = MagicMock()
         settlements = inst._brandon_settle_hedges(spx_settle=6900)
@@ -1679,6 +1685,198 @@ class TestOverlayHedgeTracking:
         inst._brandon_hedge_settlements = []
         assert inst._brandon_hedge_legs == {}
         assert inst._brandon_hedge_settlements == []
+
+
+class TestDoubleHedgeOnSameEntrySettledSeparately:
+    """2026-08-20 (execution audit finding, variant B entry #5 on 2026-08-19):
+    an entry can receive TWO independent hedge placements hours apart on
+    different sides (e.g. a call debit spread mid-morning, a separate put
+    butterfly in the afternoon). _brandon_hedge_legs keyed only on
+    entry_number used to flatten both placements into one list and settle
+    them as a SINGLE HedgeSettlement — the combined dollar total was correct
+    (settle_hedge sums every leg) but structure/threatened_side were taken
+    from legs[0] alone, silently mislabeling the settlement and dropping the
+    second hedge's identity entirely (production: 4 real placements, only 3
+    BRANDON-OVERLAY-SETTLED lines). Fixed by grouping legs by placed_at
+    (shared exactly within one _brandon_place_overlay() call) before settling."""
+
+    def _ds(self, entries):
+        return SimpleNamespace(entries=entries, total_realized_pnl=0.0)
+
+    def test_two_placements_produce_two_settlements_correctly_labeled(self):
+        from bots.hydra.brandon.hedge_position import HedgeLeg
+
+        inst = _make_instance()
+        entry = SimpleNamespace(entry_number=5, realized_pnl=0.0, overlay_pnl_booked=False)
+        inst.daily_state = self._ds([entry])
+
+        morning = datetime(2026, 8, 19, 16, 8, 0, tzinfo=timezone.utc)
+        afternoon = datetime(2026, 8, 19, 16, 50, 54, tzinfo=timezone.utc)
+        inst._brandon_hedge_legs[5] = [
+            # Call debit spread, placed morning.
+            HedgeLeg(5, "long", "call", 7765, 1, fill_price=8.0,
+                     position_id="DRY_OVERLAY_5_call_0", structure="debit_spread",
+                     threatened_side="call", placed_at=morning),
+            HedgeLeg(5, "short", "call", 7770, 1, fill_price=3.0,
+                     position_id="DRY_OVERLAY_5_call_1", structure="debit_spread",
+                     threatened_side="call", placed_at=morning),
+            # Put butterfly, placed separately in the afternoon.
+            HedgeLeg(5, "long", "put", 7540, 1, fill_price=6.0,
+                     position_id="DRY_OVERLAY_5_put_0", structure="butterfly",
+                     threatened_side="put", placed_at=afternoon),
+            HedgeLeg(5, "short", "put", 7550, 2, fill_price=3.0,
+                     position_id="DRY_OVERLAY_5_put_1", structure="butterfly",
+                     threatened_side="put", placed_at=afternoon),
+            HedgeLeg(5, "long", "put", 7560, 1, fill_price=1.0,
+                     position_id="DRY_OVERLAY_5_put_2", structure="butterfly",
+                     threatened_side="put", placed_at=afternoon),
+        ]
+        inst._brandon_send_telegram = MagicMock()
+
+        settlements = inst._brandon_settle_hedges(spx_settle=7550)
+
+        assert len(settlements) == 2, "must settle as TWO independent hedges, not one merged record"
+        by_structure = {s.structure: s for s in settlements}
+        assert set(by_structure) == {"debit_spread", "butterfly"}
+        assert by_structure["debit_spread"].threatened_side == "call"
+        assert by_structure["butterfly"].threatened_side == "put"
+        # Each settlement only sums ITS OWN legs (2 for the spread, 3 for the
+        # butterfly) — not all 5 legs collapsed into one.
+        assert len(by_structure["debit_spread"].legs) == 2
+        assert len(by_structure["butterfly"].legs) == 3
+        # Combined P&L across both settlements matches the old (correct)
+        # aggregate-sum behavior.
+        expected_total = sum(s.total_pnl for s in settlements)
+        assert entry.realized_pnl == pytest.approx(expected_total)
+        # One BRANDON-OVERLAY-SETTLED-equivalent Telegram per hedge (2) + one
+        # day-total summary = 3, not 2 (1 merged hedge + day total).
+        assert inst._brandon_send_telegram.call_count == 3
+
+    def test_guard_set_once_after_both_placements_settle(self):
+        from bots.hydra.brandon.hedge_position import HedgeLeg
+
+        inst = _make_instance()
+        entry = SimpleNamespace(entry_number=5, realized_pnl=0.0, overlay_pnl_booked=False)
+        inst.daily_state = self._ds([entry])
+        morning = datetime(2026, 8, 19, 16, 8, 0, tzinfo=timezone.utc)
+        afternoon = datetime(2026, 8, 19, 16, 50, 54, tzinfo=timezone.utc)
+        inst._brandon_hedge_legs[5] = [
+            HedgeLeg(5, "long", "call", 7765, 1, 8.0, "p0", "debit_spread", "call", morning),
+            HedgeLeg(5, "short", "call", 7770, 1, 3.0, "p1", "debit_spread", "call", morning),
+            HedgeLeg(5, "long", "put", 7540, 1, 6.0, "p2", "butterfly", "put", afternoon),
+        ]
+        inst._brandon_send_telegram = MagicMock()
+
+        inst._brandon_settle_hedges(spx_settle=7550)
+
+        assert entry.overlay_pnl_booked is True
+        assert 5 in inst._brandon_overlay_booked
+        # Re-running the same day must be a true no-op — no re-price, no
+        # re-booking, no duplicate telegrams (matches test_settle_is_idempotent_within_day).
+        call_count = inst._brandon_send_telegram.call_count
+        inst._brandon_settle_hedges(spx_settle=9999)  # wildly different SPX
+        assert inst._brandon_send_telegram.call_count == call_count
+
+    def test_telegram_failure_after_booking_does_not_cause_restart_double_book(self):
+        """2026-08-20 round-1 adversarial review finding (HIGH, empirically
+        reproduced by the reviewer): an earlier version of this refactor set
+        the entry-level guard only AFTER the full per-group loop (including
+        logging/Telegram) finished, while each group booked its P&L
+        mid-loop. A raise between group 1's booking and the final guard-set
+        left a booked-but-unguarded entry that a same-day restart re-ran
+        from scratch, double-counting group 1. This test proves the fix:
+        booking + guard-set now happen BEFORE any logging/Telegram, in a
+        tight block with no I/O, so a Telegram failure on ANY group cannot
+        leave the entry booked-but-unguarded."""
+        from bots.hydra.brandon import hedge_position
+        from bots.hydra.brandon.hedge_position import HedgeLeg
+
+        inst = _make_instance()
+        entry = SimpleNamespace(entry_number=5, realized_pnl=0.0, overlay_pnl_booked=False)
+        inst.daily_state = self._ds([entry])
+        morning = datetime(2026, 8, 19, 16, 8, 0, tzinfo=timezone.utc)
+        afternoon = datetime(2026, 8, 19, 16, 50, 54, tzinfo=timezone.utc)
+        inst._brandon_hedge_legs[5] = [
+            HedgeLeg(5, "long", "call", 7765, 1, 8.0, "p0", "debit_spread", "call", morning),
+            HedgeLeg(5, "short", "call", 7770, 1, 3.0, "p1", "debit_spread", "call", morning),
+            HedgeLeg(5, "long", "put", 7540, 1, 6.0, "p2", "butterfly", "put", afternoon),
+        ]
+        # Telegram raises on every call — simulates the exact failure class
+        # the reviewer used (something in the logging/Telegram phase).
+        inst._brandon_send_telegram = MagicMock(side_effect=RuntimeError("network blip"))
+
+        with pytest.raises(RuntimeError):
+            inst._brandon_settle_hedges(spx_settle=7550)
+
+        # Booking + guard must ALREADY be fully consistent even though the
+        # method raised before returning — this is the whole point of doing
+        # book+guard in a phase with zero I/O, before any Telegram send.
+        expected_total = sum(
+            hedge_position.settle_hedge(
+                [l for l in inst._brandon_hedge_legs[5] if l.placed_at == pa], 7550
+            ).total_pnl
+            for pa in {morning, afternoon}
+        )
+        assert entry.realized_pnl == pytest.approx(expected_total)
+        assert entry.overlay_pnl_booked is True
+        assert 5 in inst._brandon_overlay_booked
+
+        # Simulate a restart: fresh settlements cache, guard persisted.
+        inst._brandon_hedge_settlements = []
+        inst._brandon_send_telegram = MagicMock()  # network recovered
+        settlements = inst._brandon_settle_hedges(spx_settle=9999)  # even a different SPX
+        assert settlements == []  # guard skips the entry entirely — no re-booking
+        assert entry.realized_pnl == pytest.approx(expected_total), (
+            "restart after a mid-settlement failure double-counted a hedge — "
+            "the exact bug this fix closes"
+        )
+
+    def test_settle_hedge_exception_books_nothing(self):
+        """The PURE COMPUTE phase must not book anything if settle_hedge
+        itself fails for any group — no partial booking from a half-computed
+        entry."""
+        from bots.hydra.brandon.hedge_position import HedgeLeg
+
+        inst = _make_instance()
+        entry = SimpleNamespace(entry_number=5, realized_pnl=0.0, overlay_pnl_booked=False)
+        inst.daily_state = self._ds([entry])
+        inst._brandon_hedge_legs[5] = [
+            HedgeLeg(5, "long", "call", 7765, 1, 8.0, "p0", "debit_spread", "call",
+                     datetime(2026, 8, 19, 16, 8, 0, tzinfo=timezone.utc)),
+        ]
+        inst._brandon_send_telegram = MagicMock()
+
+        with patch(
+            "bots.hydra.brandon.strategy.hedge_position.settle_hedge",
+            side_effect=RuntimeError("boom"),
+        ):
+            with pytest.raises(RuntimeError):
+                inst._brandon_settle_hedges(spx_settle=7550)
+
+        assert entry.realized_pnl == 0.0
+        assert entry.overlay_pnl_booked is False
+        assert 5 not in inst._brandon_overlay_booked
+
+    def test_single_placement_on_entry_still_settles_as_one(self):
+        """Regression guard: an entry with exactly one hedge placement (the
+        common case) must still produce exactly one settlement after the
+        placed_at-grouping refactor."""
+        from bots.hydra.brandon.hedge_position import HedgeLeg
+
+        inst = _make_instance()
+        entry = SimpleNamespace(entry_number=2, realized_pnl=0.0, overlay_pnl_booked=False)
+        inst.daily_state = self._ds([entry])
+        one_placement = datetime(2026, 8, 19, 15, 13, 39, tzinfo=timezone.utc)
+        inst._brandon_hedge_legs[2] = [
+            HedgeLeg(2, "long", "put", 7620, 1, 6.0, "p0", "debit_spread", "put", one_placement),
+            HedgeLeg(2, "short", "put", 7645, 1, 3.0, "p1", "debit_spread", "put", one_placement),
+        ]
+        inst._brandon_send_telegram = MagicMock()
+
+        settlements = inst._brandon_settle_hedges(spx_settle=7600)
+
+        assert len(settlements) == 1
+        assert len(settlements[0].legs) == 2
 
 
 class TestOverlayGexConfirmationAlwaysRequired:
@@ -2199,6 +2397,26 @@ class TestOverlayReconciliation:
         }
         expected = inst._expected_position_quantities()
         assert expected == {}  # conid=None → skipped entirely
+
+    def test_settled_hedge_excluded_from_expected(self):
+        """2026-08-20 (execution audit finding): once an entry's hedge is
+        settled (_brandon_overlay_booked), its legs must drop out of the
+        expected-position set — the real IBKR position no longer exists —
+        even though _brandon_hedge_legs itself is never cleared (the
+        dashboard sidecar needs it post-close). Without this, every same-day
+        restart after a settlement logged a permanent POS-003 'ambiguous'
+        warning indistinguishable from a genuinely stuck leg."""
+        inst = _make_instance()
+        inst.daily_state = MagicMock()
+        inst.daily_state.entries = []
+        inst._brandon_hedge_legs = {
+            1: [self._leg(side="long", qty=2, conid=123456, position_id="123456")],  # settled
+            2: [self._leg(side="short", qty=3, conid=999999, position_id="999999")],  # still open
+        }
+        inst._brandon_overlay_booked = {1}
+        expected = inst._expected_position_quantities()
+        assert 123456 not in expected
+        assert expected.get(999999) == -3
 
     def test_partial_overlay_alert_fires_critical(self):
         inst = _make_instance()

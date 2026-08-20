@@ -3097,7 +3097,22 @@ class MEICStrategy(abc.ABC):
             instrument_id=conid, side=close_side, quantity=int(filled_qty),
             order_type="MKT", coid=f"{external_ref}_{coid_suffix}",
         )
-        if not (flat and flat.get("filled")):
+        if flat and flat.get("filled"):
+            # 2026-08-20 (execution audit finding): mirror _unwind_partial_entry's
+            # round-trip commission booking — this accumulated partial is a real
+            # broker fill on the way in (never went through the success-path
+            # commission booking, since the entry never completed) and a real
+            # broker fill again on this flatten. Use the ACTUAL filled_qty, not
+            # entry.contracts — this leg was, by definition, only partially filled.
+            round_trip_commission = 2 * self.commission_per_leg * filled_qty
+            self.daily_state.total_commission += round_trip_commission
+            logger.warning(
+                f"  ORDER-010: booked ${round_trip_commission:.2f} round-trip "
+                f"commission for the flattened {filled_qty}-contract partial on "
+                f"{leg_description} — market-order slippage on this round trip "
+                f"is NOT separately tracked"
+            )
+        else:
             logger.critical(
                 f"  ORDER-010: FAILED to flatten the {filled_qty}-contract "
                 f"partial on {leg_description} — MANUAL INTERVENTION REQUIRED"
@@ -3861,6 +3876,26 @@ class MEICStrategy(abc.ABC):
                             self.registry.unregister(pos_id)
                         except Exception as reg_e:
                             logger.error(f"Registry error unregistering {pos_id}: {reg_e}")
+                        # 2026-08-20 (execution audit finding): this leg was a REAL
+                        # broker fill on the way in (the success-path commission
+                        # booking at ~line 6896 never ran, since the entry never
+                        # completed) and is a real broker fill again on the way
+                        # out via this close order — both incur commission that
+                        # was previously invisible in total_commission entirely,
+                        # understating the true cost of a failed entry attempt.
+                        # Book both legs of the round trip here, the only place
+                        # that knows this leg both opened and closed. Market-order
+                        # slippage on the round trip is a real but harder-to-
+                        # quantify residual cost NOT captured by this fix — see
+                        # the WARNING below.
+                        round_trip_commission = 2 * self.commission_per_leg * entry.contracts
+                        self.daily_state.total_commission += round_trip_commission
+                        logger.warning(
+                            f"  ORDER-010: booked ${round_trip_commission:.2f} round-trip "
+                            f"commission for the failed entry's {leg_name} leg "
+                            f"({entry.contracts}c open + close) — market-order slippage "
+                            f"on this round trip is NOT separately tracked"
+                        )
                         logger.info(f"Unwound {leg_name}: {pos_id} via order {result.get('OrderId')}")
                     else:
                         # Audit fix: a non-full / timed-out market close leaves the

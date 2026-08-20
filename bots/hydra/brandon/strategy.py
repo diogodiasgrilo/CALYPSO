@@ -2047,9 +2047,44 @@ class BrandonHydraStrategy(HydraStrategy):
         mismatch. Only legs with a real conid (live placement) are added;
         dry-run DRY_OVERLAY_* placeholders (conid=None) are skipped. The conid
         is kept in its native type to match `_actual_position_quantities`.
+
+        2026-08-20 (execution audit finding): SETTLED entries (in
+        `_brandon_overlay_booked`) are excluded — `self._brandon_hedge_legs`
+        is intentionally never cleared of settled legs (the dashboard's
+        `brandon_hedge_legs.json` sidecar reader needs them to keep showing
+        settled hedges after close), but a settled hedge's real IBKR position
+        no longer exists once expired/closed. Without this exclusion, every
+        SAME-DAY restart after a hedge settles kept counting it as still-
+        expected-open, so POS-003 logged a permanent "ambiguous, leaving for
+        manual review" warning on every restart — indistinguishable in the
+        log from a genuinely stuck leg.
+
+        Safety invariant this exclusion depends on (round-1 adversarial
+        review, 2026-08-20): `_brandon_overlay_booked` is only ever populated
+        by `_brandon_settle_hedges()`, itself only ever called from
+        `log_daily_summary()`. On the NORMAL path, `main.py` only calls
+        `log_daily_summary()` after `check_after_hours_settlement()` (POS-004)
+        returns True, and POS-004's "still open" check reuses THIS SAME
+        method — so by construction, an entry can't reach
+        `_brandon_overlay_booked` while its real IBKR hedge legs still show
+        an open quantity. DORMANT GAP: MKT-018's `_execute_early_close()`
+        (early_close_enabled — false on every variant today, see CLAUDE.md
+        "Early Close (MKT-018): DISABLED") is a SECOND call site that reaches
+        `log_daily_summary()` immediately, with no broker-confirmation wait,
+        and Brandon does not override it to flatten its own overlay legs
+        first. If `early_close_enabled` is ever re-enabled on B/C, an entry
+        closed via MKT-018 with a still-open hedge would get marked "booked"
+        (a Black-Scholes mark-to-model settlement) while the real overlay
+        position remains open on IBKR — invisible to POS-003/004 and to
+        `_get_current_position_size()`'s concentration cap for the rest of
+        that session. Fix before flipping that flag: either gate MKT-018 off
+        for entries with an unsettled hedge, or have Brandon's early-close
+        override flatten overlay legs first.
         """
         expected = super()._expected_position_quantities()
-        for legs in self._brandon_hedge_legs.values():
+        for entry_number, legs in self._brandon_hedge_legs.items():
+            if entry_number in self._brandon_overlay_booked:
+                continue
             for hl in legs:
                 conid = getattr(hl, "conid", None)
                 if conid is None:
@@ -2082,7 +2117,13 @@ class BrandonHydraStrategy(HydraStrategy):
         overlay's size is fixed by the placement loop, not by this cap).
         """
         total = super()._get_current_position_size()
-        for legs in (getattr(self, "_brandon_hedge_legs", {}) or {}).values():
+        booked = getattr(self, "_brandon_overlay_booked", set())
+        for entry_number, legs in (getattr(self, "_brandon_hedge_legs", {}) or {}).items():
+            if entry_number in booked:
+                # 2026-08-20: settled hedge — see _expected_position_quantities'
+                # docstring for why _brandon_hedge_legs keeps these legs around
+                # (dashboard sidecar) and why the concentration count must not.
+                continue
             for hl in legs:
                 if getattr(hl, "conid", None) is not None:
                     total += abs(int(hl.quantity))
@@ -2130,40 +2171,88 @@ class BrandonHydraStrategy(HydraStrategy):
             if (entry_number in self._brandon_overlay_booked
                     or (entry is not None and getattr(entry, "overlay_pnl_booked", False))):
                 continue
-            s = hedge_position.settle_hedge(legs, spx_settle)
-            if s is None:
-                continue
-            settlements.append(s)
-            # Fold the overlay's GROSS realized P&L into the day aggregate AND the
-            # specific entry (via _book_realized_pnl), ONCE. If the hedged entry is
-            # missing from daily_state, book to the aggregate only so the day total
-            # stays complete; the reconciliation guard then flags the rare miss.
-            if entry is not None:
-                self._book_realized_pnl(s.total_pnl, entry)
-                entry.overlay_pnl_booked = True
-                self._brandon_overlay_booked.add(entry_number)
-            else:  # entry is None — book aggregate-only, guarded so a re-run can't double
-                self._book_realized_pnl(s.total_pnl, None)
-                self._brandon_overlay_booked.add(entry_number)
-                logger.warning(
-                    "BRANDON-OVERLAY E#%s: no matching daily_state entry — booked "
-                    "$%.2f to the day aggregate only (per-entry attribution missed; "
-                    "guarded against restart double-book).",
-                    entry_number, s.total_pnl,
+
+            # 2026-08-20 (execution audit finding): an entry can receive
+            # MULTIPLE independent hedge placements hours apart — e.g. a call
+            # debit spread mid-morning, then a separate put butterfly in the
+            # afternoon after a fresh threat. _brandon_hedge_legs keys ONLY on
+            # entry_number, so all such legs used to land in one flat list and
+            # get settled as a SINGLE HedgeSettlement — settle_hedge() derives
+            # structure/threatened_side from legs[0] alone while summing P&L
+            # over every leg, so the combined dollar total was correct but the
+            # settlement silently mislabeled a 2-hedge day as one structure
+            # and the other hedge's identity vanished entirely (only 3
+            # BRANDON-OVERLAY-SETTLED lines for 4 real placements on
+            # 2026-08-19). Group by placed_at: every leg from one
+            # _brandon_place_overlay() call shares the exact same timestamp
+            # (set once per call), which reliably separates independent
+            # placements even when they share side+structure.
+            groups: dict = {}
+            for leg in legs:
+                groups.setdefault(leg.placed_at, []).append(leg)
+
+            # PURE COMPUTE phase (round-1 adversarial review, 2026-08-20): a
+            # first version of this refactor booked + guard-set INSIDE this
+            # per-group loop, interleaved with logging/Telegram sends — if
+            # anything raised between group 1's booking and the final guard
+            # flip (log_daily_summary()'s own try/except swallows it, then
+            # falls through to super().log_daily_summary(), which force-saves
+            # state regardless), a same-day restart re-ran this whole method
+            # from scratch, saw the entry NOT guarded yet, and re-booked
+            # group 1 on top of its own already-persisted total — a real,
+            # reproduced double-count. settle_hedge() is a pure function (no
+            # I/O, can't corrupt state), so compute every group's settlement
+            # FIRST with zero side effects before touching daily_state at all.
+            group_settlements = [
+                s for s in (
+                    hedge_position.settle_hedge(groups[placed_at], spx_settle)
+                    for placed_at in sorted(groups)
                 )
-            logger.warning(
-                "BRANDON-OVERLAY-SETTLED E#%s %s %s: SPX_close=%.2f, debit_paid=$%.2f, hedge_pnl=$%.2f",
-                s.entry_number, s.threatened_side, s.structure,
-                s.spx_settle, s.total_debit_paid, s.total_pnl,
-            )
-            self._brandon_send_telegram(
-                f"BRANDON-OVERLAY-SETTLED E#{s.entry_number} {s.threatened_side}: "
-                f"{s.structure} — SPX_close ${s.spx_settle:.2f}, "
-                f"debit paid ${s.total_debit_paid:.2f}, hedge P&L ${s.total_pnl:+.2f}",
-                title=f"Brandon overlay settlement E#{s.entry_number}",
-                priority_name="MEDIUM",
-                alert_type_name="POSITION_CLOSED",
-            )
+                if s is not None
+            ]
+            if not group_settlements:
+                continue
+
+            # ATOMIC BOOK + GUARD phase: pure arithmetic only (_book_realized_pnl
+            # is a `+=`), no logging/Telegram/I/O of any kind in this block, so
+            # nothing here can raise partway through and leave a booked amount
+            # without its guard — restoring the same atomicity the old single-
+            # settlement-per-entry code had, extended correctly to N groups.
+            for s in group_settlements:
+                if entry is not None:
+                    self._book_realized_pnl(s.total_pnl, entry)
+                else:
+                    self._book_realized_pnl(s.total_pnl, None)
+            if entry is not None:
+                entry.overlay_pnl_booked = True
+            self._brandon_overlay_booked.add(entry_number)
+            settlements.extend(group_settlements)
+
+            # LOGGING / TELEGRAM phase, AFTER booking+guard are already
+            # consistent — if a send raises here, the financial state is
+            # already correct and a restart will skip this entry (guard is
+            # set), not re-book it.
+            for s in group_settlements:
+                if entry is None:
+                    logger.warning(
+                        "BRANDON-OVERLAY E#%s: no matching daily_state entry — booked "
+                        "$%.2f to the day aggregate only (per-entry attribution missed; "
+                        "guarded against restart double-book).",
+                        entry_number, s.total_pnl,
+                    )
+                logger.warning(
+                    "BRANDON-OVERLAY-SETTLED E#%s %s %s: SPX_close=%.2f, debit_paid=$%.2f, hedge_pnl=$%.2f",
+                    s.entry_number, s.threatened_side, s.structure,
+                    s.spx_settle, s.total_debit_paid, s.total_pnl,
+                )
+                self._brandon_send_telegram(
+                    f"BRANDON-OVERLAY-SETTLED E#{s.entry_number} {s.threatened_side}: "
+                    f"{s.structure} — SPX_close ${s.spx_settle:.2f}, "
+                    f"debit paid ${s.total_debit_paid:.2f}, hedge P&L ${s.total_pnl:+.2f}",
+                    title=f"Brandon overlay settlement E#{s.entry_number}",
+                    priority_name="MEDIUM",
+                    alert_type_name="POSITION_CLOSED",
+                )
         self._brandon_hedge_settlements = settlements
 
         # Aggregate summary if there were any hedges today

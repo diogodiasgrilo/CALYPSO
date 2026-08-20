@@ -211,6 +211,25 @@ class TestOverlayLegOrderAndCap:
         # 28 (IC) + 10 + 20 (real overlays) = 58; the conid=None dry leg is excluded
         assert s._get_current_position_size() == 58
 
+    def test_get_current_position_size_excludes_settled_hedge(self):
+        """2026-08-20 (execution audit finding): a SETTLED hedge's legs stay
+        in _brandon_hedge_legs forever within the day (the dashboard sidecar
+        needs them post-close), but its real IBKR position no longer exists
+        once expired/closed — the concentration cap must not count it as
+        still-open exposure on a same-day restart after settlement."""
+        from types import SimpleNamespace as NS
+
+        s = BrandonHydraStrategy.__new__(BrandonHydraStrategy)
+        s.contracts_per_entry = 7
+        s.daily_state = NS(entries=[])
+        s._brandon_hedge_legs = {
+            5: [NS(conid=7500, quantity=10, side="long"),
+                NS(conid=7510, quantity=20, side="short")],  # SETTLED — excluded
+            6: [NS(conid=8500, quantity=5, side="long")],    # still open — counted
+        }
+        s._brandon_overlay_booked = {5}
+        assert s._get_current_position_size() == 5
+
     def test_get_current_position_size_no_overlays_is_base(self):
         from types import SimpleNamespace as NS
         s = BrandonHydraStrategy.__new__(BrandonHydraStrategy)

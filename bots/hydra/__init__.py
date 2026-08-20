@@ -36,6 +36,89 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- Full-strategy execution audit follow-up fixes (2026-08-20, THE GOLDEN LOOP,
+  2 review rounds). Prompted by a comprehensive audit of every variant's full
+  2026-08-19 trading day plus independent re-verification of everything
+  deployed the night before. P&L itself was correct everywhere (every
+  variant's ledger reconciled exactly); these fixes close real tracking/
+  attribution/analytics gaps found in that audit, all on variant B (the live
+  seat) except A1:
+  (1) base_strategy.py — a failed entry's leg-in that gets safely unwound
+  (_unwind_partial_entry) or an ORDER-010 accumulated partial that gets
+  market-flattened (_flatten_accumulated_partial) now books the round-trip's
+  commission (2x commission_per_leg x quantity — open, never booked since the
+  entry never completed, + this close) into daily_state.total_commission.
+  Previously invisible entirely; the reported day cost understated the true
+  economic cost of a failed attempt. Real 2026-08-19 incident: variant B
+  entry #6's ~25-contract round trip.
+  (2) brandon/strategy.py — _brandon_settle_hedges() now groups
+  _brandon_hedge_legs by placed_at (shared exactly across every leg of one
+  _brandon_place_overlay() call) before settling, so an entry that receives
+  TWO independent hedge placements hours apart (e.g. a call debit spread
+  morning, a put butterfly afternoon) settles as two correctly-labeled
+  HedgeSettlements instead of one merged, mislabeled record (aggregate $ was
+  always right; structure/threatened_side attribution was not). Real
+  2026-08-19 incident: variant B entry #5 (4 real placements, only 3
+  BRANDON-OVERLAY-SETTLED lines). Round-1 adversarial review found and fixed
+  a genuine atomicity regression this refactor introduced (booking could
+  complete for one group while a later group's logging/Telegram raised
+  before the entry-level guard was set, risking a double-book on a same-day
+  restart) — restructured into a pure-compute phase (settle_hedge, no side
+  effects), then an atomic book+guard phase (pure arithmetic, zero I/O), then
+  logging/Telegram strictly after. Empirically reproduced and closed.
+  (3) brandon/strategy.py — _expected_position_quantities() and
+  _get_current_position_size() now exclude entries already in
+  _brandon_overlay_booked (settled). _brandon_hedge_legs is intentionally
+  NEVER cleared of settled legs (the dashboard's brandon_hedge_legs.json
+  sidecar reader needs them to keep showing settled hedges after close — see
+  the dashboard fix below), but a settled hedge's real IBKR position no
+  longer exists — without this exclusion, every same-day restart after a
+  hedge settled logged a permanent POS-003 "ambiguous, leaving for manual
+  review" warning indistinguishable from a genuinely stuck leg. Round-2
+  review confirmed this is safe on the normal path (an entry can't reach
+  _brandon_overlay_booked before POS-004's broker-confirmed-flat check
+  passes, since that check reuses this same method) and flagged one DORMANT
+  gap for the future: MKT-018 early-close (disabled on every variant today)
+  has no broker-confirmation wait and Brandon doesn't flatten hedge legs in
+  that path — documented in the code, not fixed (not reachable while
+  early_close_enabled stays false).
+  (4) strategy.py — _execute_stop_loss()'s non-short-only branch now records
+  the MKT-042-decayed _get_effective_stop_level() value (what the live
+  trigger check actually fires against) into trade_stops.trigger_level,
+  instead of the static entry-time base level — any stop firing inside the
+  ~4h decay window (most 0DTE stops) had this DB column off by the decay
+  multiplier, feeding wrong data into buffer-calibration/slot_edge/HERMES
+  analysis. Real 2026-08-19 incident: variant A entry #2 put (DB showed
+  $405, log showed the stop fired against an effective ~$530 trigger).
+  Round-1 review found the initial version leaked the decayed value into
+  _record_stop_to_db()'s net_pnl fallback too (used when actual_close_cost
+  is unknown), diverging from daily_state.total_realized_pnl (which stays
+  static, booked separately inside super()._execute_stop_loss()) — fixed by
+  adding a dedicated effective_trigger_level parameter that feeds ONLY the
+  trigger_level column; the original stop_level parameter keeps its exact
+  prior meaning and net_pnl-fallback behavior. Round-2 review found the same
+  gap, still unclosed, in the MKT-025 short_only_stop branch (currently
+  dormant — false on every tracked config) — closed for completeness.
+  (5) CLAUDE.md — corrected two stale claims found during the audit: the
+  documented B/C stop formula (credit+buffer) is no longer what actually
+  fires on B, which has run the A2 %-of-width override since the 2026-07-24
+  swap; and skip-worktree does NOT block a git pull's fast-forward from
+  overwriting config_variant_*.json content (only suppresses git status/
+  diff/add from flagging local edits) — empirically confirmed the same
+  night when a routine pull silently (and harmlessly, this time) applied a
+  tracked value to the VM's live B/C configs.
+  Also same night: 2 real dashboard display bugs fixed and deployed (see the
+  entry below this one) plus verification that the 2026-08-19 shutdown-hang
+  fix genuinely works (3-6s clean restarts vs the prior 58-84s, once
+  properly exercised by a restart that actually loaded the fixed code).
+  15+ new/updated tests across tests/test_failed_entry_commission_tracking_
+  2026_08_20.py, tests/test_brandon_strategy_integration.py, tests/
+  test_brandon_overlay_live_sizing_2026_07_21.py, tests/
+  test_stop_db_decay_recording_2026_08_20.py, and a fixture fix in tests/
+  test_preflight_audit_fixes.py — every negative control independently
+  re-verified by BOTH review rounds, not just the author. Full suite: 2353
+  passed, 15 skipped. Deploy note: NOT yet deployed as of this entry — B is
+  live and trading; deferred to the same night's safe window (B flat).
 - Brandon defensive-overlay hedge tightening + PII fix-forward (2026-08-19,
   THE GOLDEN LOOP, 2 review rounds). Prompted by a live-day review of B/C's
   overlay hedge history: an event replay found the hedge (debit-spread pre-

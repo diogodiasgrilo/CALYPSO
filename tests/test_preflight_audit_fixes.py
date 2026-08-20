@@ -27,7 +27,7 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from bots.hydra.base_strategy import PROGRESSIVE_RETRY_SEQUENCE
+from bots.hydra.base_strategy import PROGRESSIVE_RETRY_SEQUENCE, MEICDailyState
 from bots.hydra.order_types import BuySell
 from bots.hydra.strategy import HydraStrategy
 from shared.ib_client import _SNAPSHOT_METADATA_KEYS, _snapshot_has_data
@@ -135,6 +135,12 @@ def _make_strategy():
     s.broker = MagicMock()
     s.dry_run = False
     s.contracts_per_entry = 10
+    # 2026-08-20: real __init__ always sets these (base_strategy.py:1197 for
+    # commission_per_leg, MEICDailyState() for daily_state) before any entry
+    # code can run — _flatten_accumulated_partial's round-trip commission
+    # booking (execution audit fix) now reads both.
+    s.commission_per_leg = 1.15
+    s.daily_state = MEICDailyState()
     s._orphaned_orders = []
     s._max_absolute_slippage = 10.0
     s._monitor_fill_slippage = MagicMock()
