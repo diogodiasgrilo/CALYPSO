@@ -36,6 +36,74 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- MKT-047 EOD-flatten continuous re-check + dry-run cost correction
+  (2026-08-20, THE GOLDEN LOOP, 2 review rounds). Prompted by the same-day
+  full-strategy execution audit, which surfaced two real production
+  incidents:
+  (1) strategy.py — new _eod_flatten_dry_run_correct(entry, side_name) fixes
+  a dry-run zero-cost booking bug on A/C: in dry-run, _close_position_with_
+  retry (SAFETY-DRY-04) never produces a simulated fill price for an early
+  close, so the side's FULL credit was booked as if it closed for free.
+  Mirrors Brandon's existing TP/breach correction pattern (fall back to the
+  pre-close spread-value mark). Real incident: variant A's day flipped from
+  a reported +$24.85 to a true ~-$40/-$55; C overstated by ~$490 (+$619.50
+  reported vs ~+$129.50 true). Wired into both the primary
+  _execute_eod_flatten sweep and the new re-check below.
+  (2) strategy.py — new _check_eod_flatten_recheck() closes a real near-miss
+  on B (live paper money): the primary MKT-047 sweep decides once, at 15:50
+  ET, whether each side is safe to ride to free expiry — two short puts
+  measured 11pt OTM at that single check and were left riding, but SPX
+  drifted and the cushion shrank to 0.84pt (near-ATM) at 15:57:30 before
+  recovering to 1.4pt by close. No loss resulted, but nothing re-evaluated
+  the decision as price kept moving. The new function re-watches every side
+  left riding on every tick (reusing the existing ~2-12s monitoring cadence)
+  from the moment the primary sweep fires until close, closing a side that
+  drifts back within the cushion and applying the dry-run cost correction
+  above.
+  Round-1 review (3 reviewers) found 2 HIGH + 3 MEDIUM/LOW issues before
+  this could ship: a 90s failed-close cooldown that only cleared on eventual
+  success, not on recovery — a side that failed, went briefly safe, then
+  drifted back at-risk within the same 90s window stayed silently
+  unprotected; the per-entry retry loop had no wall-clock bound across
+  multiple entries in one tick, letting several stuck legs compound serially
+  and starve every other entry's safety check for up to the full ~10min
+  window; a hardcoded now.hour>=16 market-closed bound that ignored
+  early-close (1:00pm ET) days; a new _eod_side_is_live_short helper missing
+  the pivot_closed exclusion already present in the pre-existing
+  _eod_flatten_can_skip_side gate; and a trade_stops DB write-ordering gap
+  (inherited from Brandon's pre-existing correction pattern, does not affect
+  real P&L, documented not fixed). Fixed: clear the cooldown the instant a
+  side is observed OTM-safe again, not only on a later successful close; a
+  60s per-tick wall-clock budget (time.monotonic) so a stuck leg can only
+  block one tick, not compound across entries within it; mins_to_close now
+  computed via shared.market_hours.get_market_close_time(now), matching the
+  existing pattern in _place_marketable_close; pivot_closed added to
+  _eod_side_is_live_short.
+  Round-2 review (3 reviewers + independent verification of every finding)
+  confirmed all 4 round-1 remediations hold, but surfaced one new real HIGH
+  finding via a dedicated interaction-focused pass: the two HIGH fixes above
+  compound ACROSS ticks, not just within one — a persistently
+  oscillating/failing early entry, repeatedly re-armed by the clear-on-safe
+  fix, can dominate the 60s budget on many consecutive ticks (fixed
+  iteration order restarts from the front every tick), starving a later,
+  unrelated entry of its own recheck coverage for a meaningful fraction of
+  the ~10min window — reopening HIGH#2's own anti-starvation intent. Fixed
+  with a round-robin iteration order (_eod_recheck_next_start_idx): each
+  tick starts where the previous tick left off, so an entry that blows the
+  budget gets pushed to the back of the queue instead of perpetually
+  occupying the front. Two other round-2 claims (an alert-spam risk from the
+  clear-on-safe retry cadence; an intermittent full-suite test flake) were
+  independently adversarially verified and refuted — the alert path already
+  goes through AlertService's existing content-dedup gate, and the flake
+  claim could not be reproduced (0/3 full-suite runs, 0/1 targeted prefix
+  run, 10/10 isolated runs) and had no plausible mechanism given the test's
+  full determinism/isolation.
+  30 new/updated tests in tests/test_eod_flatten_recheck_and_dryrun_fix_
+  2026_08_20.py — every fix (both original + all 5 remediations)
+  independently negative-controlled (reverted, confirmed RED, restored,
+  confirmed GREEN). Full suite: 2383 passed, 15 skipped. Deploy note: NOT
+  yet deployed as of this entry — B is live and trading; deferred to the
+  next confirmed-flat window.
 - Full-strategy execution audit follow-up fixes (2026-08-20, THE GOLDEN LOOP,
   2 review rounds). Prompted by a comprehensive audit of every variant's full
   2026-08-19 trading day plus independent re-verification of everything

@@ -52,7 +52,7 @@ from shared.ib_client import (
 )
 from shared.alert_service import AlertService, AlertType, AlertPriority, describe_exception
 from shared import strategy_taxonomy
-from shared.market_hours import get_us_market_time, is_early_close_day
+from shared.market_hours import get_us_market_time, is_early_close_day, get_market_close_time
 from shared.technical_indicators import get_current_ema, calculate_atr
 from shared.event_calendar import is_fomc_t_plus_one
 
@@ -656,6 +656,21 @@ class HydraStrategy(MEICStrategy):
         # Full analysis: docs/HYDRA_HOLD_IF_SAFE_ANALYSIS.md + the final-10-min study.
         self.eod_flatten_skip_otm_pts = float(_eod.get("skip_otm_pts", 20.0))
         self._eod_flatten_done = False  # one-shot latch; reset each new ET day
+        # MKT-047-RECHECK: (entry_number, side) -> last-failed-close time.
+        # In-memory only (not persisted to hydra_state.json) — a same-day
+        # restart during the ~10min EOD tail window resets any cooldown in
+        # progress. Low risk: the per-tick wall-clock budget in
+        # _check_eod_flatten_recheck already bounds how much a REPEATED
+        # failure can compound within a single process lifetime, and a
+        # freshly-restarted process re-attempts a failed close immediately
+        # rather than silently waiting out a cooldown, which is the safer
+        # direction for a safety-net check to fail in.
+        self._eod_recheck_failed_at = {}
+        # MKT-047-RECHECK: round-robin index into active_entries for
+        # _check_eod_flatten_recheck's per-tick iteration order — prevents a
+        # perpetually-stuck early entry from starving later entries of
+        # recheck coverage across many ticks (round-2 review finding).
+        self._eod_recheck_next_start_idx = 0
         logger.info(
             f"  EOD safety flatten (MKT-047): "
             f"{'ENABLED' if self.eod_flatten_enabled else 'DISABLED'} "
@@ -2559,6 +2574,19 @@ class HydraStrategy(MEICStrategy):
             if flatten_result:
                 return flatten_result
 
+        # MKT-047 continuous re-check (2026-08-20): after the primary sweep
+        # above has fired once, keep watching every side it left riding —
+        # see _check_eod_flatten_recheck's docstring for the real near-miss
+        # that motivated this. Runs on the same per-tick cadence as
+        # everything else in this method; a no-op return (None) on every
+        # tick where nothing has drifted into danger.
+        if (self.eod_flatten_enabled
+                and self._eod_flatten_done
+                and len(self.daily_state.active_entries) > 0):
+            recheck_result = self._check_eod_flatten_recheck()
+            if recheck_result:
+                return recheck_result
+
         return result
 
     def _check_early_close(self) -> Optional[str]:
@@ -3004,6 +3032,256 @@ class HydraStrategy(MEICStrategy):
         otm = (strike - spot) if side_name == "call" else (spot - strike)
         return otm >= cushion
 
+    # Space between retries of a re-check close that transacted 0 legs —
+    # mirrors brandon/strategy.py's _BRANDON_FAILED_CLOSE_COOLDOWN_S exactly
+    # (same rationale: don't hammer the broker + re-alert every tick on a
+    # doomed close; the side stays alive and monitored either way).
+    _EOD_RECHECK_FAILED_COOLDOWN_S = 90.0
+
+    def _eod_recheck_failed_store(self) -> dict:
+        """(entry_number, side) -> last-failed-close timestamp. Lazily
+        created so a bare __new__-constructed test instance is safe."""
+        store = getattr(self, "_eod_recheck_failed_at", None)
+        if store is None:
+            store = {}
+            self._eod_recheck_failed_at = store
+        return store
+
+    def _eod_recheck_in_cooldown(self, entry, side: str) -> bool:
+        last = self._eod_recheck_failed_store().get((entry.entry_number, side))
+        if last is None:
+            return False
+        try:
+            elapsed = (get_us_market_time() - last).total_seconds()
+        except Exception:
+            return False
+        return elapsed < self._EOD_RECHECK_FAILED_COOLDOWN_S
+
+    def _eod_recheck_mark_failed(self, entry, side: str) -> None:
+        self._eod_recheck_failed_store()[(entry.entry_number, side)] = get_us_market_time()
+
+    def _eod_recheck_clear_failed(self, entry, side: str) -> None:
+        self._eod_recheck_failed_store().pop((entry.entry_number, side), None)
+
+    @staticmethod
+    def _eod_side_is_live_short(entry, side_name: str) -> bool:
+        """True iff ``side_name`` is a genuine alive short _close_entry_early
+        would actually attempt to close — mirrors its own internal gate
+        EXACTLY (strategy.py sides_to_close, not skip_sides-dependent).
+
+        Needed because `_eod_flatten_can_skip_side` returning False is
+        overloaded: it means EITHER "genuinely at risk" OR "not an alive
+        short at all" (already stopped/expired/skipped/pivot-closed, or —
+        critically for a put-only/call-only entry — a side that was simply
+        NEVER PLACED). The primary flatten doesn't need to tell these apart
+        (closing a not-alive side is already a safe no-op inside
+        `_close_entry_early`), but the re-check's failure/cooldown tracking
+        does — without this, a put-only entry's never-placed call side gets
+        misdiagnosed as a "close FAILED" every tick forever.
+        """
+        return bool(
+            not getattr(entry, f"{side_name}_side_stopped", False)
+            and not getattr(entry, f"{side_name}_side_expired", False)
+            and not getattr(entry, f"{side_name}_side_skipped", False)
+            and not getattr(entry, f"{side_name}_side_pivot_closed", False)
+            and (getattr(entry, f"short_{side_name}_uic", None)
+                 or getattr(entry, f"short_{side_name}_position_id", None))
+        )
+
+    def _check_eod_flatten_recheck(self) -> Optional[str]:
+        """MKT-047 continuous safety net (2026-08-20 execution audit finding).
+
+        The primary flatten (_check_eod_flatten / _execute_eod_flatten) makes
+        its OTM-skip decision ONCE, at the 15:50 ET cutoff — a single point-in-
+        time snapshot. Real 2026-08-20 near-miss on variant B (live paper
+        money): two short puts measured 11pt OTM at that single check and were
+        left to ride to free expiry, but SPX kept drifting in the final
+        minutes and the cushion shrank to 0.84pt (essentially at-the-money) at
+        15:57:30 ET before recovering to 1.4pt by the 16:00 close. No loss
+        resulted, but a decision made once, 10 minutes before close, never
+        got re-evaluated as price kept moving in that window.
+
+        This re-checks every side that was left riding, on EVERY tick from
+        the moment the primary flatten fires until market close — reusing the
+        bot's existing monitoring cadence (already runs every ~2-12s during
+        market hours depending on mode/variant; see get_recommended_check_
+        interval) rather than a new timer. Deliberately NOT a restructure of
+        the primary flatten itself (which stays exactly as before, one-shot,
+        fully covered by its existing tests) — this is a narrowly-scoped
+        second layer with its own cooldown/logging, calling the SAME
+        `_eod_flatten_can_skip_side` gate and the SAME `_close_entry_early`
+        close path, both of which are already correctly idempotent at side
+        granularity (a side that's closed/expired/skipped is permanently
+        excluded from `_close_entry_early`'s `sides_to_close`), so repeated
+        calls cannot double-close a side. Silent on every tick where nothing
+        changes — only logs/alerts/saves state when a side actually closes or
+        a close attempt fails.
+        """
+        if not getattr(self, "requires_protective_wings", True):
+            return None  # multi-day calendar — never applies
+        if not self.eod_flatten_enabled or not self._eod_flatten_done:
+            return None  # only runs AFTER the primary sweep has fired once
+        if not self.daily_state.active_entries:
+            return None
+        now = get_us_market_time()
+        try:
+            close_t = get_market_close_time(now)
+            mins_to_close = ((close_t.hour * 60 + close_t.minute)
+                              - (now.hour * 60 + now.minute))
+        except Exception:
+            # Conservative fallback: assume a normal 16:00 ET close rather
+            # than silently disabling the re-check on an unexpected error.
+            mins_to_close = (16 * 60) - (now.hour * 60 + now.minute)
+        if mins_to_close <= 0:
+            return None  # market closed — the primary/settlement path takes over
+
+        # Bound how much wall-clock time a single tick can spend blocked in
+        # retrying `_close_entry_early` across MULTIPLE entries. A single
+        # stuck leg can still take up to ~2.7min (pre-existing risk, shared
+        # with the primary sweep) — this budget only prevents that cost from
+        # COMPOUNDING serially across several entries within one tick, which
+        # would otherwise starve every OTHER entry's safety checks for the
+        # remainder of the ~10min re-check window. Any entry not reached this
+        # tick is picked up on the next one.
+        _RECHECK_TICK_BUDGET_S = 60.0
+        tick_budget_start = time.monotonic()
+
+        # Round-2 review finding: iterating active_entries in the SAME fixed
+        # order every tick means a single entry that blows the budget on
+        # EVERY tick (e.g. a stuck leg whose price keeps oscillating across
+        # the cushion boundary, repeatedly re-arming via the cooldown-clear-
+        # on-safe logic above) can perpetually sit first in line and starve
+        # every LATER entry of its own recheck coverage for a large fraction
+        # of the ~10min window — exactly the failure mode this budget exists
+        # to prevent, reopened across ticks instead of within one. Rotating
+        # the start point to just past wherever the PREVIOUS tick left off
+        # means a persistently-stuck entry gets pushed to the back of the
+        # queue next tick instead of perpetually blocking the front of it.
+        entries_this_tick = list(self.daily_state.active_entries)
+        n_entries = len(entries_this_tick)
+        start_idx = (getattr(self, "_eod_recheck_next_start_idx", 0) % n_entries) if n_entries else 0
+        ordered_entries = entries_this_tick[start_idx:] + entries_this_tick[:start_idx]
+
+        legs_closed = legs_failed = 0
+        reached = 0
+        for entry in ordered_entries:
+            if time.monotonic() - tick_budget_start >= _RECHECK_TICK_BUDGET_S:
+                logger.warning(
+                    "MKT-047-RECHECK: tick time budget (%.0fs) exhausted — "
+                    "deferring remaining entries to the next tick",
+                    _RECHECK_TICK_BUDGET_S,
+                )
+                break
+            reached += 1
+            # A side that failed to close and is now OTM-safe again no longer
+            # needs its cooldown — clearing it here (rather than only on a
+            # future successful close) means a side that drifts back at-risk
+            # WITHIN the 90s window is re-attempted immediately instead of
+            # staying silently unprotected until the cooldown expires.
+            can_skip = {s: self._eod_flatten_can_skip_side(entry, s) for s in ("call", "put")}
+            for s, safe in can_skip.items():
+                if safe:
+                    self._eod_recheck_clear_failed(entry, s)
+            skip_sides = {
+                s for s in ("call", "put")
+                if can_skip[s] or self._eod_recheck_in_cooldown(entry, s)
+            }
+            # Only a genuinely alive short is a real target — a put-only
+            # entry's call side (say) is never live, so it must never be
+            # mistaken for an attempted-and-failed close below.
+            live_sides = {s for s in ("call", "put") if self._eod_side_is_live_short(entry, s)}
+            targeted_sides = {s for s in ("call", "put") if s not in skip_sides} & live_sides
+            if not targeted_sides:
+                continue
+
+            call_expired_before = entry.call_side_expired
+            put_expired_before = entry.put_side_expired
+            c, f, d = self._close_entry_early(entry, skip_sides=skip_sides)
+            if not (c or f):
+                continue  # nothing actually happened this tick — stay silent
+
+            legs_closed += c
+            legs_failed += f
+            if d:
+                self._spawn_async_early_close_fill_correction(d)
+            if not getattr(entry, "close_reason", ""):
+                entry.close_reason = "EOD_FLATTEN"
+
+            for side_name, was_expired in (
+                ("call", call_expired_before), ("put", put_expired_before)
+            ):
+                if side_name not in targeted_sides:
+                    continue
+                if getattr(entry, f"{side_name}_side_expired", False):
+                    if not was_expired:
+                        self._eod_flatten_dry_run_correct(entry, side_name)
+                        self._eod_recheck_clear_failed(entry, side_name)
+                        logger.warning(
+                            "MKT-047-RECHECK: E#%s %s side drifted back within "
+                            "%.0fpt cushion after the primary flatten — late "
+                            "force-closed at %s ET",
+                            entry.entry_number, side_name,
+                            self.eod_flatten_skip_otm_pts, now.strftime("%H:%M:%S"),
+                        )
+                else:
+                    self._eod_recheck_mark_failed(entry, side_name)
+                    logger.error(
+                        "MKT-047-RECHECK: E#%s %s side close FAILED — will retry "
+                        "in %.0fs (side remains live-monitored)",
+                        entry.entry_number, side_name,
+                        self._EOD_RECHECK_FAILED_COOLDOWN_S,
+                    )
+
+        # Persist the rotation point regardless of whether anything closed
+        # this tick — this is what gives a later entry its fair turn at the
+        # FRONT of the next tick's order once an earlier entry has occupied
+        # a full tick's budget. Unchanged (== start_idx) when every entry
+        # was reached this tick.
+        if n_entries:
+            self._eod_recheck_next_start_idx = (start_idx + reached) % n_entries
+
+        if not (legs_closed or legs_failed):
+            return None
+
+        # Unregister fully-closed sides (mirror the primary flatten's Phase 3).
+        for entry in self.daily_state.entries:
+            for side, legs in (("call", ["short_call", "long_call"]),
+                               ("put", ["short_put", "long_put"])):
+                if (getattr(entry, f"{side}_side_expired", False)
+                        or getattr(entry, f"{side}_side_stopped", False)
+                        or getattr(entry, f"{side}_side_skipped", False)):
+                    for leg in legs:
+                        pid = getattr(entry, f"{leg}_position_id", None)
+                        if pid:
+                            try:
+                                self.registry.unregister(pid)
+                            except Exception:
+                                pass
+                            setattr(entry, f"{leg}_position_id", None)
+                            setattr(entry, f"{leg}_uic", 0)
+
+        self._save_state_to_disk()
+        try:
+            self.alert_service.send_alert(
+                alert_type=AlertType.POSITION_CLOSED,
+                title="MKT-047-RECHECK: late EOD flatten",
+                message=(
+                    f"Late force-close at {now.strftime('%I:%M:%S %p ET')} — "
+                    f"{legs_closed} leg(s) closed, {legs_failed} failed. A side "
+                    f"left riding at the 15:50 check drifted back within the "
+                    f"{self.eod_flatten_skip_otm_pts:.0f}pt cushion."
+                ),
+                priority=AlertPriority.HIGH if legs_failed else AlertPriority.MEDIUM,
+                contracts=self.contracts_per_entry,
+            )
+        except Exception as e:
+            logger.error(f"MKT-047-RECHECK: Alert failed: {e}")
+
+        return (
+            f"MKT-047-RECHECK: late flatten at {now.strftime('%I:%M:%S %p ET')} "
+            f"| {legs_closed} legs closed, {legs_failed} failed"
+        )
+
     def _execute_eod_flatten(self, *, cutoff_label: str, is_fomc: bool) -> str:
         """MKT-047: force-close ALL open legs as a pre-expiry SAFETY flatten,
         reusing the MKT-018 leg-closer (which books real fill-based P&L, honors
@@ -3055,10 +3333,17 @@ class HydraStrategy(MEICStrategy):
                     entry.entry_number, "+".join(sorted(skip_sides)),
                     self.eod_flatten_skip_otm_pts,
                 )
+            call_expired_before = entry.call_side_expired
+            put_expired_before = entry.put_side_expired
             c, f, d = self._close_entry_early(entry, skip_sides=skip_sides)
             legs_closed += c
             legs_failed += f
             deferred_legs.extend(d)
+            # 2026-08-20: dry-run cost correction — see _eod_flatten_dry_run_correct.
+            if entry.call_side_expired and not call_expired_before:
+                self._eod_flatten_dry_run_correct(entry, "call")
+            if entry.put_side_expired and not put_expired_before:
+                self._eod_flatten_dry_run_correct(entry, "put")
             if c or f:
                 entries_closed += 1
                 # Dashboard (2026-06-25): tag the EOD-flatten close so the UI
@@ -3165,6 +3450,54 @@ class HydraStrategy(MEICStrategy):
                 f"  Entry #{entry.entry_number} {side_name} side early-closed: "
                 f"credit=${credit:.2f} (fill prices deferred)"
             )
+
+    def _eod_flatten_dry_run_correct(self, entry, side_name: str) -> None:
+        """2026-08-20 (execution audit finding, variants A/C): in DRY-RUN,
+        ``_close_position_with_retry`` (SAFETY-DRY-04) never produces a
+        simulated fill price for an early close, so ``side_close_cost`` stays
+        0 and ``_book_early_close_side_pnl`` books the FULL credit as if the
+        side closed for free — silently overstating dry-run P&L by the real
+        cost that would have been paid to buy back the short. Real incident:
+        variant A's day flipped from a reported +$24.85 to a true ~-$40/-$55;
+        variant C overstated by ~$490 (+$619.50 reported vs ~+$129.50 true).
+        Brandon's own TP/GEX-breach handlers already correct for this exact
+        gap (brandon/strategy.py's TP handler, ~1174-1199) by falling back to
+        the pre-close spread-value MARK; MKT-047's EOD-flatten never got the
+        same correction since it shares ``_close_entry_early`` ->
+        ``_book_early_close_side_pnl`` with MKT-018 but has no per-caller
+        override. Mirrors that exact pattern.
+
+        Call ONLY once per side, immediately after confirming THIS call just
+        transitioned that side from open to closed (compare ``*_side_expired``
+        before/after ``_close_entry_early`` — see call sites) — calling it on
+        an already-corrected side would double-subtract the estimated cost.
+        No-ops outside dry-run, and no-ops if a real fill cost is already
+        known (``actual_*_stop_debit`` already set) or no live mark exists.
+
+        KNOWN GAP (inherited from Brandon's pre-existing TP/breach correction
+        pattern, not introduced here, out of scope for this fix): the
+        per-event ``trade_stops`` SQLite row for this close is written by
+        ``_record_stop_to_db`` BEFORE this correction runs, so that row keeps
+        the pre-correction (free-close) numbers permanently — there is no
+        UPDATE path. Day-total P&L and real dry-run bookkeeping above
+        (``total_realized_pnl`` via ``_book_realized_pnl``) ARE correct; only
+        the individual event record in the DB is stale, which can mislead a
+        per-event dashboard/agent narrative for this one row.
+        """
+        if not self.dry_run:
+            return
+        if getattr(entry, f"actual_{side_name}_stop_debit", 0):
+            return  # a real fill cost is already known — nothing to correct
+        close_cost = float(getattr(entry, f"{side_name}_spread_value", 0) or 0)
+        if close_cost <= 0:
+            return  # no usable mark — leave the credit-only booking as-is
+        setattr(entry, f"actual_{side_name}_stop_debit", close_cost)
+        self._book_realized_pnl(-close_cost, entry)
+        logger.info(
+            "  MKT-047: dry-run cost correction for Entry #%s %s side — "
+            "subtracted mark-estimated close cost $%.2f (was booked as free)",
+            entry.entry_number, side_name, close_cost,
+        )
 
     def _close_entry_early(self, entry, skip_sides=None) -> Tuple[int, int, list]:
         """
@@ -12386,6 +12719,8 @@ class HydraStrategy(MEICStrategy):
         self._api_results_window.clear()
         self._early_close_triggered = False  # MKT-018: Reset early close
         self._eod_flatten_done = False  # MKT-047: Reset EOD safety-flatten latch
+        self._eod_recheck_failed_at = {}  # MKT-047-RECHECK: reset failed-close cooldowns
+        self._eod_recheck_next_start_idx = 0  # MKT-047-RECHECK: reset round-robin pointer
         self._roc_gate_triggered = False  # MKT-021: Reset ROC gate
         self._vix_gate_resolved = False  # MKT-034: Reset VIX gate
         self._vix_gate_start_slot = 0
