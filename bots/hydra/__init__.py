@@ -36,6 +36,77 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-08-21 full-day audit LOW/INFO follow-ups (THE GOLDEN LOOP, 1 review
+  round + 1 investigation). Same-day full-strategy execution audit for
+  2026-08-21 (itself CLEAN — confirmed the prior night's MKT-047 deploy held
+  up correctly in every scenario the day produced) surfaced 3 minor items;
+  closed all 3:
+  (1) base_strategy.py / strategy.py — the stop-loss "Stop loss executed"
+  summary log line printed the static/undecayed buffer level (e.g. $317.50)
+  instead of the actual MKT-042-decayed trigger that caused the breach (e.g.
+  $405.76, already shown correctly one line above in the STOP-DETAIL/
+  MKT-046 output) — display-only, DB/state/P&L math were already correct
+  (a 2026-08-20 fix already recorded the decayed value into
+  trade_stops.trigger_level, but only for that DB column, not this line).
+  Fixed with a new `display_trigger_level` parameter on the shared
+  MEICStrategy._execute_stop_loss (base_strategy.py) that changes ONLY the
+  final returned string; HydraStrategy's override now computes
+  `effective_trigger_level` BEFORE calling super() (verified safe —
+  _get_effective_stop_level depends only on entry state + the wall clock,
+  nothing super() mutates) and reuses the same value for both the existing
+  DB write and the new display parameter. The sibling MKT-025 short-only-
+  stop branch (currently dormant — short_only_stop=false on every tracked
+  config) had the identical bug in its own separately-implemented return
+  string; fixed for completeness, reusing its own already-computed
+  effective_trigger_level. Review confirmed this has ZERO observable effect
+  on B tonight — B runs narrow_spread_stop.enabled=true (A2 %-of-width
+  mode), under which _get_effective_stop_level short-circuits to the same
+  static value stop_level already equals, so the fix's visible effect is
+  confined to A and C's shadow logs. Also flagged (documented, not fixed):
+  the Telegram/email alert body and the (globally-disabled) Sheets log still
+  source the static level for the same event — pre-existing, unaffected by
+  this diff, a candidate for a future full-accuracy pass.
+  (2) base_strategy.py — `_estimate_entry_credit_ib` returned unrounded
+  floats, so an economically-exact credit (e.g. mid 0.15 - mid 0.10 =
+  $0.05/share = $5.00 total) could land as a float artifact like
+  4.999999999999993 and miss a credit-gate `>=` threshold it should clear by
+  noise alone. Real incident: variant C's Entry #1 put credit missed the
+  MKT-029 fallback-acceptance branch this way (made no difference that day —
+  the call side was independently vetoed). Fixed by rounding both
+  estimated_call_credit/estimated_put_credit to the cent at the point of
+  computation, mirroring the pre-existing rounding already applied a few
+  lines below for the MKT-048 fillable-credit stash. Review brute-forced
+  ~14,400 realistic penny/nickel-tick bid/ask combinations and confirmed the
+  true noise-free credit is always an exact $0.50 multiple given IBKR's
+  option-tick quantization — round-half-to-even ties are not a reachable
+  risk here; round() only ever cleans up ~1e-13 IEEE-754 noise. Review also
+  found (documented, not fixed) the identical unrounded-credit pattern in
+  MKT-020/MKT-022's progressive OTM-tightening scans — currently dead code
+  on B and C (both set brandon_disable_progressive_tightening=true), only
+  reachable on A (dry-run-shadow, no real orders); worth the same fix if
+  tightening is ever re-enabled on a live variant. A MEDIUM-severity version
+  of this same finding was raised then adversarially REFUTED for
+  overclaiming "live, reachable... real paper money" risk — correctly
+  downgraded once B/C's config gating was traced.
+  (3) D's "unexplained near-nightly restart pattern" (flagged as an audit
+  LOW item, not a confirmed bug) — investigated and fully explained by
+  benign causes, no code/config fix needed. Every one of 7 restarts in a
+  2-week lookback traces to a `sudo systemctl restart...` audit line from
+  the operator account within 1-2 minutes prior (routine post-deploy
+  restarts and debug sessions) — no autonomous crash-loop, no timer, no
+  cron, no OOM kill anywhere in the window. The one ungraceful SIGKILL
+  (2026-08-18, all 5 units simultaneously, not D-specific) is the same
+  fleet-wide grpc-core client-teardown shutdown-hang first flagged
+  2026-08-03 and already root-caused + mitigated the very next morning in
+  commit 3bce8940 — likely the incident that motivated that fix. Zero
+  SIGKILLs have recurred on any hydra unit since.
+  10 new tests in tests/test_audit_minor_fixes_2026_08_21.py, both code
+  fixes negative-controlled (reverted, confirmed RED, restored, confirmed
+  GREEN). 1 review round (2 reviewers + verify pass on every finding): both
+  fixes PASS, 5 findings confirmed (all INFO/LOW, no defects — reassuring
+  observations + this version-history reminder + documented adjacent gaps),
+  1 MEDIUM finding adversarially refuted (see above). Full suite: 2393
+  passed, 15 skipped.
 - MKT-047 EOD-flatten continuous re-check + dry-run cost correction
   (2026-08-20, THE GOLDEN LOOP, 2 review rounds). Prompted by the same-day
   full-strategy execution audit, which surfaced two real production

@@ -7827,7 +7827,23 @@ class HydraStrategy(MEICStrategy):
 
         # When short_only_stop is disabled, use base MEIC logic (closes both legs)
         if not self.short_only_stop:
-            result = super()._execute_stop_loss(entry, side)
+            # stop_level / effective_trigger_level depend only on the entry's
+            # own stored state (static side_stop, entry_time, contracts,
+            # strikes) and the current clock — none of it is mutated by
+            # super()._execute_stop_loss(), so computing both BEFORE the call
+            # is safe and lets the same effective_trigger_level feed both the
+            # DB write below AND the base class's final summary log line
+            # (2026-08-21 execution audit finding: that line printed the
+            # static/undecayed level — e.g. $317.50 — instead of the actual
+            # MKT-042-decayed trigger that caused the breach, e.g. $405.76,
+            # already shown correctly one line above in the STOP-DETAIL/
+            # MKT-046 output. Display-only; DB/state/P&L math were already
+            # correct — see the trigger_level comment below, unchanged).
+            stop_level = entry.call_side_stop if side == "call" else entry.put_side_stop
+            effective_trigger_level = self._get_effective_stop_level(entry, side)
+            result = super()._execute_stop_loss(
+                entry, side, display_trigger_level=effective_trigger_level,
+            )
             # Record stop to SQLite. 2026-08-20 (execution audit finding): the
             # trigger_level column used to read entry.call_side_stop/
             # put_side_stop directly — the STATIC base level set once at entry
@@ -7850,8 +7866,6 @@ class HydraStrategy(MEICStrategy):
             # effective_trigger_level, which only feeds the trigger_level
             # column — booked P&L (real fill/debit-driven) and this DB
             # fallback are both untouched by the decay fix.
-            stop_level = entry.call_side_stop if side == "call" else entry.put_side_stop
-            effective_trigger_level = self._get_effective_stop_level(entry, side)
             actual_debit = entry.actual_call_stop_debit if side == "call" else entry.actual_put_stop_debit
             # 0.0 here = the stop's close fill was never captured (unknown); a real
             # stop buys back an ITM short (cost > 0), never worthless — so map 0.0 to
@@ -8101,7 +8115,7 @@ class HydraStrategy(MEICStrategy):
 
         return (
             f"MKT-025 Stop loss: Entry #{entry.entry_number} {side} "
-            f"SHORT closed at ${stop_level:.2f} (long expires at settlement)"
+            f"SHORT closed at ${effective_trigger_level:.2f} (long expires at settlement)"
         )
 
     # =========================================================================

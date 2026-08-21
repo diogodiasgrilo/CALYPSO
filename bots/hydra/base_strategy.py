@@ -2244,7 +2244,24 @@ class MEICStrategy(abc.ABC):
                         "unreliable, treating call side as non-viable"
                     )
                 else:
-                    estimated_call_credit = (_mid(sc) - _mid(lc)) * 100
+                    # Penny-rounded — mirrors the _fillable_*_ps rounding a few
+                    # lines below (MKT-048). Without it, an economically-exact
+                    # credit (e.g. mid 0.15 - mid 0.10 = $0.05/share) can land
+                    # as a float artifact like 4.999999999999993 (total $) and
+                    # miss a credit-gate threshold it should clear by noise
+                    # alone (2026-08-21 execution audit finding, variant C).
+                    #
+                    # KNOWN GAP (adversarial review, 2026-08-21, not fixed here):
+                    # strategy.py's MKT-020/MKT-022 progressive OTM-tightening
+                    # scans (_apply_progressive_call_tightening /
+                    # _apply_progressive_put_tightening) compute the identical
+                    # unrounded (short_mid - long_mid) * 100 pattern against
+                    # the same kind of exact >= threshold. Currently dead code
+                    # on B and C (both set brandon_disable_progressive_
+                    # tightening=true) — only reachable on A, which is
+                    # dry-run-shadow (no real orders). Worth the same round()
+                    # fix if tightening is ever re-enabled on a live variant.
+                    estimated_call_credit = round((_mid(sc) - _mid(lc)) * 100, 2)
 
             estimated_put_credit = 0.0
             if need_put:
@@ -2263,7 +2280,9 @@ class MEICStrategy(abc.ABC):
                         "unreliable, treating put side as non-viable"
                     )
                 else:
-                    estimated_put_credit = (_mid(sp) - _mid(lp)) * 100
+                    # Penny-rounded — see the matching comment on
+                    # estimated_call_credit above.
+                    estimated_put_credit = round((_mid(sp) - _mid(lp)) * 100, 2)
 
             # MKT-048: per-share fillable credit = short_bid − long_MID. The
             # placement net-credit floor (_sell_credit_floor_price) fills the
@@ -3946,13 +3965,25 @@ class MEICStrategy(abc.ABC):
         strategy.py:_record_entry_realized_pnl."""
         return 0.0
 
-    def _execute_stop_loss(self, entry: IronCondorEntry, side: str) -> str:
+    def _execute_stop_loss(
+        self, entry: IronCondorEntry, side: str,
+        display_trigger_level: Optional[float] = None,
+    ) -> str:
         """
         Execute a stop loss for one side of an IC.
 
         Args:
             entry: IronCondorEntry with stop triggered
             side: "call" or "put"
+            display_trigger_level: optional override for the trigger level
+                shown in the final "Stop loss executed" summary line ONLY —
+                does not affect net_loss math, DB writes, or anything else
+                in this method (those all keep using the static local
+                ``stop_level`` computed below, unchanged). Lets a subclass
+                with a dynamic/decayed trigger concept (e.g. HYDRA's MKT-042
+                buffer decay) show the real level that fired instead of the
+                static entry-time base level. Defaults to ``stop_level``
+                when omitted, preserving prior behavior exactly.
 
         Returns:
             str describing action taken
@@ -4291,7 +4322,8 @@ class MEICStrategy(abc.ABC):
         time.sleep(0.1)  # Small delay to allow batching
         self._flush_batched_alerts()
 
-        return f"Stop loss executed: Entry #{entry.entry_number} {side} side (${stop_level:.2f})"
+        log_trigger_level = stop_level if display_trigger_level is None else display_trigger_level
+        return f"Stop loss executed: Entry #{entry.entry_number} {side} side (${log_trigger_level:.2f})"
 
     def _close_position_with_retry(
         self, position_id: str, leg_name: str, uic: int = None, entry_number: int = None,
