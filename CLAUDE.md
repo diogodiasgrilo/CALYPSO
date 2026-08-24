@@ -1099,6 +1099,7 @@ For the full 86-fix history including all Saxo-era bugs and resolutions, see `bo
 | P7 audit findings (49 issues, all closed) | [docs/migration/P7_AUDIT_FINDINGS.md](docs/migration/P7_AUDIT_FINDINGS.md) | Round 1 register + Round 2/3 verifications |
 | Credentials setup | [deploy/IBKR_CREDENTIALS_SETUP.md](deploy/IBKR_CREDENTIALS_SETUP.md) | One-time setup + pre-start checklist |
 | HYDRA strategy spec | [docs/HYDRA_STRATEGY_SPECIFICATION.md](docs/HYDRA_STRATEGY_SPECIFICATION.md) | Full spec: decision flows, MKT rules, stop math |
+| Deciding WHICH strategy to build next | [docs/STRATEGY_CANDIDATES.md](docs/STRATEGY_CANDIDATES.md) | Scored backlog (ease/differentiation/uncorrelatedness/credibility/overhead) of candidate strategies not yet implemented; supersedes `docs/THETA_PROFITS_STRATEGY_ANALYSIS.md` |
 | Adding a NEW strategy (playbook + audit) | [docs/NEW_STRATEGY_PLAYBOOK.md](docs/NEW_STRATEGY_PLAYBOOK.md) | Step-by-step (Steps 0–10) distilled from Strategy D; coexistence checklist; go-live gate; audit log |
 | Strategy grouping + new-calendar design | [docs/STRATEGY_GROUPING_REDESIGN.md](docs/STRATEGY_GROUPING_REDESIGN.md) | Why the taxonomy/groups exist; comparability rules; D/E calendar design |
 | Living next-steps tracker | [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) | What's done / in-flight / next across this work |

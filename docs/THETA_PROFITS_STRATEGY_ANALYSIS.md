@@ -1,5 +1,7 @@
 # Theta Profits Strategy Analysis
 
+> **⚠️ Superseded for prioritization — see [`docs/STRATEGY_CANDIDATES.md`](STRATEGY_CANDIDATES.md).** This doc was written against the Saxo-era architecture (`SaxoClient`, Iron Fly/Delta Neutral/Rolling Put Diagonal — all deleted on this branch) before MEIC or Double Calendar were actually built (both are now HYDRA/Strategy D respectively), and its code-reuse percentages were largely asserted rather than verified. Kept here for its original source links and historical context only; every candidate worth re-evaluating was independently re-scored against the current IBKR/HYDRA codebase in the newer doc.
+
 **Last Updated:** 2026-01-27
 **Purpose:** Comprehensive analysis of 20 Theta Profits trading strategies for potential bot implementation
 **Excludes:** Delta Neutral, Iron Fly 0DTE, Rolling Put Diagonal (already implemented)
