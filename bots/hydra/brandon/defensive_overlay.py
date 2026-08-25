@@ -67,6 +67,33 @@ class OverlayConfig:
         False, distance alone triggers.
     contracts: how many contracts in the hedge. Default 1 — matches HYDRA's
         contracts_per_entry.
+    gex_confirm_min_strength_pct: minimum |GEX| (as fraction of total |GEX|)
+        for a negative cluster to count as a confirming accel zone. Default
+        0.05 preserves the original (2026-05-05) behavior for any caller
+        that doesn't explicitly override it; the real B/C call site
+        (bots/hydra/brandon/strategy.py:_brandon_check_overlay) threads its
+        own value — see that call site for the 2026-08-25 fix rationale
+        (this was hardcoded and inconsistent with gex_strike_adjuster's
+        accel_min_pct, which defaults to 0.10 for the identical concept).
+    gex_confirm_peak_locality_pts: when set, an accel-zone cluster only
+        confirms if its |GEX| peak is within this many points of
+        `reference_strike` (the threatened short). None (default) preserves
+        the original no-locality-gate behavior — ANY qualifying cluster
+        confirms regardless of how far its peak sits, which the 2026-08-25
+        audit identified as the likely reason the hedge's GEX confirmation
+        was close to a rubber stamp (SpotGamma's sign convention can
+        collapse an entire wing into one giant cluster; see
+        gex_strike_adjuster.AdjusterConfig's docstring for the same issue
+        and fix, applied there first).
+    gex_confirm_peak_persistence_enabled / gex_confirm_peak_persistence_tolerance_pts:
+        when enabled, a confirming cluster must also appear at roughly the
+        same peak in `prior_profile` (a second, independent GEX read) —
+        mirrors gex_strike_adjuster.AdjusterConfig's identical mechanism
+        (see its docstring). Off by default.
+    decel_min_pct: minimum |GEX| fraction for a positive cluster to count as
+        a decel wall worth pinning the afternoon butterfly on. Default 0.05
+        preserves the original hardcoded value for any caller that doesn't
+        override it.
     """
 
     trigger_distance_pts: float = 25.0
@@ -74,6 +101,11 @@ class OverlayConfig:
     butterfly_width_pts: int = 10
     require_gex_confirmation: bool = True
     contracts: int = 1
+    gex_confirm_min_strength_pct: float = 0.05
+    gex_confirm_peak_locality_pts: Optional[float] = None
+    gex_confirm_peak_persistence_enabled: bool = False
+    gex_confirm_peak_persistence_tolerance_pts: float = 10.0
+    decel_min_pct: float = 0.05
 
 
 SPX_INCREMENT = 5.0
@@ -88,11 +120,60 @@ def _has_accel_zone_on_side(
     spot: float,
     profile: GEXProfile,
     min_strength_pct: float,
+    reference_strike: Optional[float] = None,
+    peak_locality_pts: Optional[float] = None,
+    peak_persistence_enabled: bool = False,
+    peak_persistence_tolerance_pts: float = 10.0,
+    prior_profile: Optional[GEXProfile] = None,
+    force_unconfirmed: bool = False,
 ) -> bool:
+    """True if a confirming accel (negative-GEX) cluster exists on this side.
+
+    reference_strike / peak_locality_pts: when both are given, a cluster
+    only confirms if its |GEX| peak is within peak_locality_pts of
+    reference_strike (the threatened short strike) — mirrors
+    gex_strike_adjuster.adjust_call_strike/adjust_put_strike's identical
+    locality gate (see AdjusterConfig's docstring for why this matters).
+    Omitting either preserves the original, pre-2026-08-25 behavior: any
+    qualifying cluster on the correct side of spot confirms.
+
+    peak_persistence_enabled / prior_profile / force_unconfirmed: when
+    persistence is enabled, an in-locality cluster only confirms if
+    prior_profile ALSO shows a matching cluster at roughly the same peak —
+    directly mirrors adjust_call_strike/adjust_put_strike's persistence gate
+    (same parameter semantics, including force_unconfirmed for "the only
+    prior available IS this exact read" — see that function's docstring).
+    """
     zones = profile.negative_clusters(min_strength_pct=min_strength_pct)
     if threatened_side == "call":
-        return any(c.strike_low > spot for c in zones)
-    return any(c.strike_high < spot for c in zones)
+        candidates = [c for c in zones if c.strike_low > spot]
+    else:
+        candidates = [c for c in zones if c.strike_high < spot]
+
+    if peak_locality_pts is None or reference_strike is None:
+        return bool(candidates)
+
+    for c in candidates:
+        if abs(reference_strike - c.peak_strike) > peak_locality_pts:
+            continue
+        if peak_persistence_enabled and (force_unconfirmed or prior_profile is not None):
+            if force_unconfirmed:
+                confirmed = False
+            else:
+                prior_zones = prior_profile.negative_clusters(min_strength_pct=min_strength_pct)
+                prior_c = next(
+                    (pc for pc in prior_zones if pc.strike_low <= c.peak_strike <= pc.strike_high),
+                    None,
+                )
+                confirmed = (
+                    prior_c is not None
+                    and prior_profile.expiry == profile.expiry
+                    and abs(prior_c.peak_strike - c.peak_strike) <= peak_persistence_tolerance_pts
+                )
+            if not confirmed:
+                continue
+        return True
+    return False
 
 
 def _nearest_decel_wall_for_pin(
@@ -118,6 +199,8 @@ def evaluate_overlay(
     now_et: datetime,
     config: OverlayConfig = OverlayConfig(),
     profile: Optional[GEXProfile] = None,
+    prior_profile: Optional[GEXProfile] = None,
+    force_unconfirmed: bool = False,
 ) -> Optional[OverlayProposal]:
     """Return an OverlayProposal if a hedge should be placed, else None.
 
@@ -126,6 +209,9 @@ def evaluate_overlay(
     short_strike, long_strike: the existing credit spread on the threatened
         side (e.g., for a call IC: short=6840, long=6850).
     now_et: ET datetime — drives the debit/butterfly pivot.
+    prior_profile / force_unconfirmed: only consulted when
+        config.gex_confirm_peak_persistence_enabled is True — see
+        _has_accel_zone_on_side's docstring.
     """
     if threatened_side not in ("call", "put"):
         return None
@@ -144,7 +230,16 @@ def evaluate_overlay(
     if config.require_gex_confirmation:
         if profile is None:
             return None
-        if not _has_accel_zone_on_side(threatened_side, spot_now, profile, min_strength_pct=0.05):
+        if not _has_accel_zone_on_side(
+            threatened_side, spot_now, profile,
+            min_strength_pct=config.gex_confirm_min_strength_pct,
+            reference_strike=short_strike,
+            peak_locality_pts=config.gex_confirm_peak_locality_pts,
+            peak_persistence_enabled=config.gex_confirm_peak_persistence_enabled,
+            peak_persistence_tolerance_pts=config.gex_confirm_peak_persistence_tolerance_pts,
+            prior_profile=prior_profile,
+            force_unconfirmed=force_unconfirmed,
+        ):
             return None
 
     spread_width = abs(long_strike - short_strike)
@@ -160,7 +255,7 @@ def evaluate_overlay(
             distance=distance,
         )
 
-    pin = _choose_butterfly_pin(threatened_side, spot_now, profile)
+    pin = _choose_butterfly_pin(threatened_side, spot_now, profile, min_strength_pct=config.decel_min_pct)
     return _propose_butterfly(
         threatened_side=threatened_side,
         pin_strike=pin,
@@ -205,10 +300,11 @@ def _propose_debit_spread(
 
 
 def _choose_butterfly_pin(
-    threatened_side: str, spot_now: float, profile: Optional[GEXProfile]
+    threatened_side: str, spot_now: float, profile: Optional[GEXProfile],
+    min_strength_pct: float = 0.05,
 ) -> float:
     if profile is not None:
-        wall = _nearest_decel_wall_for_pin(threatened_side, spot_now, profile, min_strength_pct=0.05)
+        wall = _nearest_decel_wall_for_pin(threatened_side, spot_now, profile, min_strength_pct=min_strength_pct)
         if wall is not None:
             mid = (wall.strike_low + wall.strike_high) / 2.0
             return _snap(mid)

@@ -53,6 +53,17 @@ def _make_instance(**brandon_attrs):
         brandon_overlay_butterfly_width=10,
         brandon_overlay_butterfly_cutoff_hour=12,
         brandon_overlay_butterfly_cutoff_minute=30,
+        # 0.0 = no confirmation delay / no severity band / legacy (flat 0.05,
+        # no locality, no persistence) GEX gate — preserves the pre-2026-08-25
+        # immediate-fire behavior as the test default; individual tests for
+        # the new mechanisms override these explicitly.
+        brandon_overlay_confirm_seconds=0.0,
+        brandon_overlay_severity_bypass_distance_pts=0.0,
+        brandon_overlay_use_adjuster_gex_gate=False,
+        _brandon_overlay_trigger_first_seen_at={},
+        _brandon_overlay_current_gex_profile=None,
+        _brandon_overlay_prior_gex_profile=None,
+        _brandon_hedge_recorder=None,
         brandon_narrow_spread_enabled=False,
         brandon_narrow_breakpoint_vix=22.0,
         brandon_narrow_width_low=5,

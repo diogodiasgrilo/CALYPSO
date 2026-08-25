@@ -13,8 +13,10 @@ from bots.hydra.brandon.defensive_overlay import (
     OverlayLeg,
     OverlayStructure,
     evaluate_overlay,
+    _choose_butterfly_pin,
+    _has_accel_zone_on_side,
 )
-from bots.hydra.brandon.gex_provider import build_profile
+from bots.hydra.brandon.gex_provider import GEXCluster, build_profile
 
 
 def _contract(strike, ctype, oi, gamma=0.001):
@@ -334,3 +336,174 @@ class TestTimeBoundary:
             profile=_profile_with_call_accel(),
         )
         assert p.structure == OverlayStructure.BUTTERFLY
+
+
+class _FakeProfile:
+    """Minimal duck-typed GEXProfile stand-in for _has_accel_zone_on_side unit
+    tests — lets a test hand-pick exact cluster shapes (peak distance, drift
+    between reads) instead of reverse-engineering build_profile's real
+    clustering algorithm to land a peak at a specific distance."""
+
+    def __init__(self, negative=(), positive=(), expiry=date(2026, 5, 4)):
+        self._negative = negative
+        self._positive = positive
+        self.expiry = expiry
+        self.fetched_at = datetime(2026, 5, 4, 10, 0, tzinfo=timezone.utc)
+
+    def negative_clusters(self, min_strength_pct=0.05):
+        return self._negative
+
+    def positive_clusters(self, min_strength_pct=0.05):
+        return self._positive
+
+
+class TestAccelZoneLocalityGate:
+    """2026-08-25: _has_accel_zone_on_side gained an optional peak-locality
+    gate, mirroring gex_strike_adjuster's identical mechanism — the audit
+    found the hedge's original check had no such gate at all, so a single
+    wide same-sign cluster could trivially "confirm" any threatened short on
+    that side regardless of how far the actual GEX peak sat."""
+
+    def test_no_locality_gate_confirms_regardless_of_peak_distance(self):
+        # Back-compat: omitting reference_strike/peak_locality_pts preserves
+        # the original (pre-fix) behavior.
+        cluster = GEXCluster(strike_low=6840, strike_high=7200, total_gex=-1e9, peak_strike=7150)
+        profile = _FakeProfile(negative=(cluster,))
+        assert _has_accel_zone_on_side("call", 6800, profile, min_strength_pct=0.05) is True
+
+    def test_locality_gate_rejects_a_cluster_whose_peak_is_far_from_the_short(self):
+        cluster = GEXCluster(strike_low=6840, strike_high=7200, total_gex=-1e9, peak_strike=7150)
+        profile = _FakeProfile(negative=(cluster,))
+        confirmed = _has_accel_zone_on_side(
+            "call", 6800, profile, min_strength_pct=0.05,
+            reference_strike=6845, peak_locality_pts=25.0,
+        )
+        assert confirmed is False  # peak 7150 is 305pt from the 6845 short
+
+    def test_locality_gate_confirms_when_peak_is_within_range(self):
+        cluster = GEXCluster(strike_low=6840, strike_high=6900, total_gex=-1e9, peak_strike=6850)
+        profile = _FakeProfile(negative=(cluster,))
+        confirmed = _has_accel_zone_on_side(
+            "call", 6800, profile, min_strength_pct=0.05,
+            reference_strike=6845, peak_locality_pts=25.0,
+        )
+        assert confirmed is True  # peak 6850 is 5pt from the 6845 short
+
+    def test_put_side_locality_gate(self):
+        cluster = GEXCluster(strike_low=6600, strike_high=6660, total_gex=-1e9, peak_strike=6650)
+        profile = _FakeProfile(negative=(cluster,))
+        far = _has_accel_zone_on_side(
+            "put", 6800, profile, min_strength_pct=0.05,
+            reference_strike=6790, peak_locality_pts=25.0,
+        )
+        assert far is False  # peak 6650 is 140pt from the 6790 short
+        near = _has_accel_zone_on_side(
+            "put", 6800, profile, min_strength_pct=0.05,
+            reference_strike=6655, peak_locality_pts=25.0,
+        )
+        assert near is True  # peak 6650 is 5pt from the 6655 short
+
+
+class TestAccelZonePersistenceGate:
+    """Mirrors gex_strike_adjuster's accel_peak_persistence_enabled semantics
+    exactly (same parameter names/behavior) — see AdjusterConfig's docstring
+    for the full rationale."""
+
+    @staticmethod
+    def _cluster(peak):
+        return GEXCluster(strike_low=peak - 20, strike_high=peak + 20, total_gex=-1e9, peak_strike=peak)
+
+    def test_no_prior_and_not_force_unconfirmed_is_the_legacy_trust_path(self):
+        profile = _FakeProfile(negative=(self._cluster(6845),))
+        confirmed = _has_accel_zone_on_side(
+            "call", 6800, profile, min_strength_pct=0.05,
+            reference_strike=6845, peak_locality_pts=25.0,
+            peak_persistence_enabled=True, prior_profile=None, force_unconfirmed=False,
+        )
+        assert confirmed is True
+
+    def test_prior_drifted_beyond_tolerance_does_not_confirm(self):
+        profile = _FakeProfile(negative=(self._cluster(6845),), expiry=date(2026, 5, 4))
+        prior_profile = _FakeProfile(negative=(self._cluster(6900),), expiry=date(2026, 5, 4))
+        confirmed = _has_accel_zone_on_side(
+            "call", 6800, profile, min_strength_pct=0.05,
+            reference_strike=6845, peak_locality_pts=25.0,
+            peak_persistence_enabled=True, prior_profile=prior_profile,
+            peak_persistence_tolerance_pts=10.0,
+        )
+        assert confirmed is False  # 55pt drift >> 10pt tolerance
+
+    def test_prior_agrees_within_tolerance_confirms(self):
+        profile = _FakeProfile(negative=(self._cluster(6845),), expiry=date(2026, 5, 4))
+        prior_profile = _FakeProfile(negative=(self._cluster(6848),), expiry=date(2026, 5, 4))
+        confirmed = _has_accel_zone_on_side(
+            "call", 6800, profile, min_strength_pct=0.05,
+            reference_strike=6845, peak_locality_pts=25.0,
+            peak_persistence_enabled=True, prior_profile=prior_profile,
+            peak_persistence_tolerance_pts=10.0,
+        )
+        assert confirmed is True  # 3pt drift <= 10pt tolerance
+
+    def test_prior_with_different_expiry_does_not_confirm(self):
+        profile = _FakeProfile(negative=(self._cluster(6845),), expiry=date(2026, 5, 4))
+        prior_profile = _FakeProfile(negative=(self._cluster(6845),), expiry=date(2026, 5, 5))
+        confirmed = _has_accel_zone_on_side(
+            "call", 6800, profile, min_strength_pct=0.05,
+            reference_strike=6845, peak_locality_pts=25.0,
+            peak_persistence_enabled=True, prior_profile=prior_profile,
+        )
+        assert confirmed is False
+
+    def test_force_unconfirmed_overrides_even_a_perfectly_matching_prior(self):
+        profile = _FakeProfile(negative=(self._cluster(6845),), expiry=date(2026, 5, 4))
+        prior_profile = _FakeProfile(negative=(self._cluster(6845),), expiry=date(2026, 5, 4))
+        confirmed = _has_accel_zone_on_side(
+            "call", 6800, profile, min_strength_pct=0.05,
+            reference_strike=6845, peak_locality_pts=25.0,
+            peak_persistence_enabled=True, prior_profile=prior_profile,
+            force_unconfirmed=True,
+        )
+        assert confirmed is False
+
+    def test_persistence_disabled_ignores_prior_entirely(self):
+        profile = _FakeProfile(negative=(self._cluster(6845),), expiry=date(2026, 5, 4))
+        prior_profile = _FakeProfile(negative=(self._cluster(6900),), expiry=date(2026, 5, 4))
+        confirmed = _has_accel_zone_on_side(
+            "call", 6800, profile, min_strength_pct=0.05,
+            reference_strike=6845, peak_locality_pts=25.0,
+            peak_persistence_enabled=False, prior_profile=prior_profile,
+        )
+        assert confirmed is True  # persistence off — locality alone confirms
+
+
+class TestDecelMinPctWiring:
+    """2026-08-25: the OTHER hardcoded 0.05 (butterfly pin selection) is now
+    wired to a min_strength_pct parameter instead of a bare literal, so it
+    can no longer silently drift from OverlayConfig.decel_min_pct."""
+
+    def _weak_wall_profile(self):
+        contracts = [
+            _contract(6840, "call", 50000),
+            _contract(6850, "call", 50000),
+            _contract(6870, "put", 2000),
+            _contract(6875, "put", 2000),
+            _contract(6880, "put", 2000),
+        ]
+        return build_profile(contracts, spot=6820, expiry=date(2026, 5, 4), time_to_expiry=1 / 365.0)
+
+    def test_default_threshold_picks_up_the_wall(self):
+        prof = self._weak_wall_profile()
+        assert _choose_butterfly_pin("call", 6820, prof, min_strength_pct=0.05) == 6875
+
+    def test_stricter_threshold_rejects_the_wall_and_falls_back_to_spot(self):
+        prof = self._weak_wall_profile()
+        assert _choose_butterfly_pin("call", 6820, prof, min_strength_pct=0.9) == 6820
+
+    def test_evaluate_overlay_threads_decel_min_pct_from_config(self):
+        prof = self._weak_wall_profile()
+        p = evaluate_overlay(
+            threatened_side="call", spot_now=6820, short_strike=6840, long_strike=6850,
+            now_et=AFTERNOON, profile=prof, config=OverlayConfig(decel_min_pct=0.9),
+        )
+        assert p is not None
+        assert p.pin_strike == 6820  # the weak wall no longer qualifies under the stricter config

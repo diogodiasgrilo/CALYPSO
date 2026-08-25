@@ -104,6 +104,9 @@ class _HedgeStub:
     def _brandon_save_hedge_state(self):
         pass  # persistence is exercised in the load/save round-trip tests
 
+    def _brandon_record_hedge_settlement(self, settlement):
+        pass  # durable recording is exercised in test_brandon_hedge_recorder_2026_08_25.py
+
 
 def _hedge_legs_for_entry(n):
     """A long-call debit spread hedge for entry n."""

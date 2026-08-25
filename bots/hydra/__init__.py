@@ -36,6 +36,125 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-08-25 Brandon defensive-overlay hedge fixes (THE GOLDEN LOOP: plan,
+  adversarial audit-before with 3 independent reviewers, implementation,
+  tests-with-code, adversarial audit-after). Prompted by the 2026-08-24
+  full-strategy audit (hedge cost real money on both B and C defending a
+  threat that evaporated) plus a 2026-08-19 9-event historical replay
+  (0-of-9 hedge firings ever defended a side that was actually breached).
+  Four changes, all in bots/hydra/brandon/{strategy.py,defensive_overlay.py}
+  + a new bots/hydra/brandon/hedge_recorder.py — B and C run the identical
+  file, so items 2-3 below are config-gated (see the staging note) rather
+  than code-gated:
+  (1) C's dry-run hedge-leg pricing switched from a flat-18%-IV
+  Black-Scholes model (+ a compensating flat ±$0.25/leg spread-crossing
+  hack, itself now removed) to REAL broker quotes at the mid — the same
+  convention every other simulated leg in this codebase already uses
+  (base_strategy._estimate_entry_credit_ib's `_mid(conid)` pattern). The
+  audit found the old model diverged from B's real fill by 4.4x on an
+  identical structure. hedge_position.estimate_fill_price is now a
+  fallback ONLY for a leg whose live quote is genuinely unavailable
+  (logged, so the rare fallback path is visible). Ships active on both B
+  and C immediately — naturally isolated to the dry-run branch, zero
+  effect on B's live orders.
+  (2) A confirmation delay before the hedge actually places
+  (defensive_overlay.confirm_seconds, new self._brandon_overlay_trigger_
+  first_seen_at pending-timer dict) — the hedge previously fired on the
+  very first qualifying monitoring tick with no persistence check, unlike
+  every other trigger-sensitive path in this codebase. Mirrors
+  _brandon_check_pctwidth_shadow_stop's confirm-then-fire pattern
+  (strategy.py ~line 1560) — NOT MKT-046, which an earlier design draft
+  reached for and adversarial review caught as the wrong precedent: the
+  critical detail is that self._brandon_overlay_placed is added to ONLY
+  inside the elapsed>=confirm_seconds branch, never before — adding it
+  on the first qualifying tick (as the original draft would have done)
+  would let the existing dedup check permanently block re-evaluation of
+  that (entry, side), so the pending timer could never reach its
+  threshold and the hedge would silently never fire again. A severity
+  bypass (defensive_overlay.severity_bypass_distance_pts, new logic, no
+  in-file precedent — mirrors the INTENT of MKT-046's L-M6 "≥2x stop
+  fires immediately" rule) skips the delay entirely when the threat is
+  already inside a tighter distance band, so a genuinely fast real
+  breach doesn't wait it out.
+  (3) The hedge's own GEX-confirmation gate (defensive_overlay._has_
+  accel_zone_on_side) gained the SAME peak-locality gate
+  (accel_peak_locality_pts) and 2-independent-reads persistence gate
+  (accel_peak_persistence_enabled/_tolerance_pts) the strike adjuster
+  already has (gex_strike_adjuster.AdjusterConfig) — reusing that
+  already-tested logic, not reimplementing it. The adversarial audit
+  found the hedge's original check had NO locality gate at all (just a
+  flat 0.05 min-strength threshold, vs. the adjuster's 0.10 for the
+  identical concept) — meaning a single wide same-sign GEX cluster could
+  rubber-stamp confirmation for any threatened short on that side
+  regardless of how far the actual peak sat, plausibly the real reason
+  behind the 0-of-9 replay result (bumping the threshold alone would
+  have treated a symptom, not the cause). The overlay's OWN persistence-
+  gate rotation (_brandon_overlay_rotate_prior_gex_profile, a NEW
+  dedicated `_brandon_overlay_prior_gex_profile` pointer) is deliberately
+  separate from the strike adjuster's `_brandon_prior_gex_profile`: that
+  pointer only rotates once per entry decision, so reusing it for the
+  hedge (which checks on every monitoring tick, all day) would compare a
+  live threat against a potentially hours-stale entry-time read and fail
+  persistence confirmation almost always between entries — a correctness
+  bug caught during implementation, not a shared-state optimization.
+  Also fixed a second, unrelated hardcoded 0.05 (defensive_overlay.
+  _choose_butterfly_pin's decel-wall pin selection) to read
+  self.brandon_decel_min_pct instead of a bare literal — ships on both
+  immediately (values coincide today; this only removes a future silent-
+  drift risk).
+  STAGING (2 and 3): both change the SAME shared pre-fork code path
+  (evaluate_overlay / _brandon_check_overlay's OverlayConfig
+  construction) that B and C call identically before any dry-run/live
+  split — B's config keeps confirm_seconds=0 / use_adjuster_gex_gate=
+  false (the exact behavior-preserving defaults), C's config turns both
+  on for a dry-run trial. This distinction matters because brandon_
+  accel_min_pct / accel_peak_locality_pts / accel_peak_persistence_
+  enabled are ALREADY live-tuned, non-default values on both B and C (0.1
+  / persistence ON) for the strike adjuster — simply reusing them for the
+  hedge unconditionally, as an earlier design draft assumed was a
+  "no-op" (same reasoning error the original plan made before audit),
+  would actually have been an immediate live behavior change on B, not
+  inert. Mirrors the project's own established pattern of proving a new
+  mechanism on C before ever touching B's live decisions (the narrow-
+  spread %-of-width stop's ~2-week A2-SHADOW trial).
+  (4) Durable hedge-history tracking — bots/hydra/brandon/hedge_
+  recorder.py (BrandonHedgeRecorder), a new isolated per-variant DB
+  (data/variant_<id>/brandon_hedges.db) modeled directly on dc_
+  recorder.py's pattern for Strategy D/E, NOT an extension of the shared
+  backtesting.db (which would add two Brandon-only tables to A/D/E's
+  databases too, for no benefit, and cuts against the documented
+  "Brandon-hedge precedent" for per-variant isolation this file's own
+  history already established for D). Two tables (hedge_placements — one
+  row per leg, hedge_settlements — one row per settled hedge), written
+  fire-and-forget from _brandon_place_overlay (both dry-run and live
+  branches) and the BRANDON-OVERLAY-SETTLED site — a recording failure
+  never affects trading logic, same convention as every other recorder
+  in this codebase. Before this, hedge history lived only in the daily-
+  wiped brandon_hedge_legs.json sidecar and the log file.
+  AUDIT-AFTER FINDING (same day, caught by adversarial review of the
+  implemented diff, before any deploy): item 3's persistence-gate
+  rotation (_brandon_overlay_rotate_prior_gex_profile) originally
+  advanced a SINGLE pointer on first touch of a new fetched_at — but
+  _brandon_check_overlay runs every ~2-5s monitoring tick, for every
+  active entry (up to 7 concurrent slots on B), while a GEX profile only
+  refetches every ~180s. Only the very first call after a fresh fetch
+  got a real "prior != current" comparison; every later call that tick
+  and every tick until the NEXT refresh saw prior==current and got
+  force_unconfirmed=True — starving persistence confirmation almost
+  permanently once enabled, which would have defeated the entire point
+  of C's staged trial (use_adjuster_gex_gate=True +
+  accel_peak_persistence_enabled=True) had it shipped. Fixed to a true
+  2-slot ring buffer (_brandon_overlay_current_gex_profile /
+  _brandon_overlay_prior_gex_profile) that only advances on a genuinely
+  NEW fetch, so the prior stays valid for the full lifetime of the
+  current profile across every entry and every tick. Regression tests
+  added (tests/test_brandon_overlay_confirmation_2026_08_25.py,
+  TestOverlayGexProfileRotation +
+  TestPersistenceGateSurvivesMultipleEvaluationsOnSameProfile) and
+  verified via negative control (temporarily reverted to the buggy
+  rotation — 3 of 4 new tests failed as expected, including the direct
+  end-to-end reproduction; restored the fix, all pass). Full suite:
+  2484 passed, 0 failed after the fix.
 - 2026-08-21 full-day audit LOW/INFO follow-ups (THE GOLDEN LOOP, 1 review
   round + 1 investigation). Same-day full-strategy execution audit for
   2026-08-21 (itself CLEAN — confirmed the prior night's MKT-047 deploy held

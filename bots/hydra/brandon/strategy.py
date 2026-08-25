@@ -30,7 +30,17 @@ Feature matrix (both B and C):
                                  (12:30 ET onward) when SPX threatens a short
                                  strike + GEX confirms an accel zone. Hedge
                                  legs placed via _place_option_order in live
-                                 mode; synthetic DRY_* fills in dry-run
+                                 mode; real-quote-mid fills in dry-run (BS
+                                 model kept as a no-quote fallback only).
+                                 NOT identical arming behavior on B vs C as
+                                 of 2026-08-25: the confirm-delay/severity-
+                                 bypass timer and the GEX-gate's locality/
+                                 persistence check are config-gated
+                                 (defensive_overlay.confirm_seconds /
+                                 use_adjuster_gex_gate) — OFF on B (today's
+                                 pre-existing immediate-fire, flat-0.05
+                                 behavior), ON for C's staged trial. See
+                                 bots/hydra/__init__.py version history.
     gex_cache           3-min    background refresh every 3 min (cut from
                                  15 min on 2026-05-13; Polygon Starter is
                                  unlimited). force_refresh at entry time
@@ -139,6 +149,42 @@ class BrandonHydraStrategy(HydraStrategy):
         # finding — unthrottled, this could produce hundreds of near-
         # duplicate INFO lines during a single range-bound session).
         self._brandon_overlay_watch_logged_at: dict[tuple[int, str], float] = {}
+        # 2026-08-25: pending-confirmation timestamp per (entry_number, side)
+        # for the hedge-arm confirmation delay — the ET time evaluate_overlay
+        # FIRST returned a qualifying proposal for this key, or absent if no
+        # confirmation is currently pending. Mirrors
+        # _brandon_pctwidth_breach_at's pending-timer pattern. Cleared on
+        # recovery (evaluate_overlay returns None again) and on placement.
+        # Cleared in _reset_for_new_day.
+        self._brandon_overlay_trigger_first_seen_at: dict[tuple[int, str], datetime] = {}
+        # The overlay's OWN "previous independent GEX read" 2-slot pointer
+        # pair for its accel-zone persistence gate (see
+        # _brandon_overlay_rotate_prior_gex_profile). Deliberately separate
+        # from _brandon_prior_gex_profile: that pointer only rotates when the
+        # strike adjuster runs (once per entry decision), so reusing it here
+        # would compare the hedge's live threat against a potentially
+        # hours-stale entry-time read — failing persistence confirmation
+        # almost always between entries, not smoothing noise.
+        #
+        # 2026-08-25 audit-after fix: the first version of this rotation
+        # advanced the pointer on every call where `profile.fetched_at`
+        # differed from the pointer's OWN fetched_at — but
+        # _brandon_check_overlay runs every ~2-5s monitoring tick, for EVERY
+        # active entry (up to 7 concurrent slots on B), while a GEX profile
+        # is only actually refetched every ~180s (_GEX_REFRESH_SECONDS). That
+        # meant only the very FIRST call after a fresh fetch got a real
+        # "prior != current" comparison; every other call that tick (later
+        # entries) and every tick for the next ~180s saw prior==current and
+        # got force_unconfirmed=True — starving persistence confirmation
+        # almost permanently once enabled, defeating the entire point of the
+        # mechanism. A true 2-slot ring buffer fixes this: `_current` only
+        # advances when a genuinely NEW profile arrives (comparing against
+        # the CURRENT slot, not the prior slot), and `_prior` — the actual
+        # independent second opinion — stays fixed and reusable for the full
+        # lifetime of the current profile, across every entry and every tick,
+        # until the NEXT real fetch rotates it again.
+        self._brandon_overlay_current_gex_profile: Optional[GEXProfile] = None
+        self._brandon_overlay_prior_gex_profile: Optional[GEXProfile] = None
         self._brandon_hydra_shadow_fired: set[tuple[int, str]] = set()
         # %-of-width stop SHADOW: (entry_number, side) already logged a would-fire
         # today (one head-to-head datapoint per side per day; see
@@ -180,6 +226,10 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_overlay_booked: set[int] = set()
         self._brandon_hedge_state_path = self._brandon_resolve_hedge_state_path()
         self._brandon_load_hedge_state()
+        # Durable hedge-history DB (2026-08-25) — separate from the sidecar
+        # JSON above, which is wiped daily. Safe pre-super() for the same
+        # reason as the sidecar path (DATA_DIR is a module constant).
+        self._brandon_hedge_recorder = self._brandon_open_hedge_recorder()
 
         super().__init__(
             broker,
@@ -278,16 +328,37 @@ class BrandonHydraStrategy(HydraStrategy):
         self.brandon_overlay_butterfly_width = int(ov.get("butterfly_width_pts", 10))
         self.brandon_overlay_butterfly_cutoff_hour = int(ov.get("butterfly_cutoff_hour", 12))
         self.brandon_overlay_butterfly_cutoff_minute = int(ov.get("butterfly_cutoff_minute", 30))
-        # Realistic dry-run ENTRY fill (2026-07-21). estimate_fill_price returns a
-        # Black-Scholes MID with NO bid/ask spread, so the modeled overlay debit is
-        # too cheap and the overlay P&L is inflated (the settlement side is already
-        # realistic — SPXW is PM-settled at the close, cash-settled, held to expiry).
-        # Cross the spread on entry: buy long legs toward the ask (+spread), sell
-        # short legs toward the bid (−spread), by this per-leg half-spread ($/share).
-        # Only the DRY-RUN path uses it; live fills come from the broker already
-        # spread-crossed. 0.0 restores the old mid pricing. Tune against real 0DTE
-        # SPX spreads (mirrors Strategy-D's dry_run_fill_model calibration).
-        self.brandon_overlay_fill_spread = float(ov.get("dry_run_fill_spread_per_leg", 0.25))
+        # 2026-08-25 fixes (2026-08-24 audit): dry-run pricing switched from a
+        # Black-Scholes model + this flat crossing to real broker quotes (see
+        # _brandon_place_overlay) — brandon_overlay_fill_spread / dry_run_fill_
+        # spread_per_leg is retired, not read here anymore.
+        #
+        # Confirmation delay before the hedge arms (mirrors MKT-046 / the
+        # _brandon_check_pctwidth_shadow_stop pattern): 0 = no delay, fires on
+        # the first qualifying tick exactly like today (the safe, current-
+        # behavior-preserving default — set this way on B until C's staged
+        # trial supports promoting it).
+        self.brandon_overlay_confirm_seconds = float(ov.get("confirm_seconds", 0.0))
+        # Severity bypass: skip the confirmation delay entirely when the
+        # threatened distance is already inside this tighter band (mirrors
+        # MKT-046's L-M6 "≥2x stop fires immediately" — waiting shouldn't let
+        # a genuinely fast, severe threat balloon). 0 = disabled (distance is
+        # always > 0 when evaluate_overlay returns a proposal, so a 0.0
+        # threshold never triggers).
+        self.brandon_overlay_severity_bypass_distance_pts = float(
+            ov.get("severity_bypass_distance_pts", 0.0)
+        )
+        # Master switch for reusing the GEX strike-adjuster's own (already
+        # config-driven, already-tuned) accel_min_pct / accel_peak_locality_pts
+        # / accel_peak_persistence_enabled for the hedge's OWN GEX-confirmation
+        # gate too, instead of the original hardcoded 0.05-with-no-locality-
+        # gate check. False (default) preserves today's exact hedge-arming
+        # behavior — required because brandon_accel_min_pct/accel_peak_* are
+        # ALREADY live-tuned, non-default values on both B and C (0.1 /
+        # persistence ON), so simply reusing them here would be a live
+        # behavior change on B, not a no-op, if it weren't gated separately
+        # from confirm_seconds.
+        self.brandon_overlay_use_adjuster_gex_gate = bool(ov.get("use_adjuster_gex_gate", False))
 
         ns = bcfg.get("narrow_spread") or {}
         self.brandon_narrow_spread_enabled = bool(ns.get("enabled", False))
@@ -1660,11 +1731,55 @@ class BrandonHydraStrategy(HydraStrategy):
     # Defensive overlay (LIVE) — debit / butterfly hedge placement
     # ------------------------------------------------------------------
 
+    def _brandon_overlay_rotate_prior_gex_profile(self, profile: Optional[GEXProfile]):
+        """The overlay's OWN persistence-gate rotation — a true 2-slot ring
+        buffer (_brandon_overlay_current_gex_profile /
+        _brandon_overlay_prior_gex_profile), NOT a single-pointer "rotate on
+        first touch" like _brandon_apply_strike_adjuster's — see the 2026-08-25
+        audit-after fix note on _brandon_overlay_prior_gex_profile's __init__
+        docstring for why a single pointer breaks at this call cadence
+        (every monitoring tick, for every active entry, vs. the adjuster's
+        once-per-entry-decision cadence).
+
+        `_current` only advances when `profile` is a genuinely NEW,
+        independent fetch (its fetched_at differs from `_current`'s, NOT from
+        `_prior`'s) — at which point the OLD `_current` becomes the new
+        `_prior`. `_prior` therefore stays fixed and reusable as a real
+        independent second opinion for the full ~180s lifetime of the current
+        profile, across every entry and every tick, until the next real fetch
+        rotates it again. Because `_prior` and `_current`/`profile` can never
+        be the same read once `_prior` is non-None (by construction of this
+        rotation), the "only prior available IS this exact read" case
+        force_unconfirmed exists for in the strike adjuster cannot occur here
+        — always returns False.
+
+        Returns (prior_profile_to_use, force_unconfirmed=False).
+        """
+        current = self._brandon_overlay_current_gex_profile
+        if profile is not None and profile.fetched_at != getattr(current, "fetched_at", None):
+            self._brandon_overlay_prior_gex_profile = current
+            self._brandon_overlay_current_gex_profile = profile
+        return self._brandon_overlay_prior_gex_profile, False
+
     def _brandon_check_overlay(self, entry) -> None:
         spot = float(self.current_price or 0.0)
         if spot <= 0:
             return
         profile = self._brandon_get_gex_profile(self._brandon_today_date())
+        overlay_prior_profile, overlay_force_unconfirmed = (
+            self._brandon_overlay_rotate_prior_gex_profile(profile)
+        )
+        if self.brandon_overlay_use_adjuster_gex_gate:
+            gex_confirm_min_strength_pct = self.brandon_accel_min_pct
+            gex_confirm_peak_locality_pts = self.brandon_accel_peak_locality_pts
+            gex_confirm_peak_persistence_enabled = self.brandon_accel_peak_persistence_enabled
+        else:
+            # Preserve the original (pre-2026-08-25) hedge-only behavior:
+            # flat 0.05 threshold, no locality gate, no persistence gate —
+            # regardless of the strike adjuster's own (already-tuned) values.
+            gex_confirm_min_strength_pct = 0.05
+            gex_confirm_peak_locality_pts = None
+            gex_confirm_peak_persistence_enabled = False
         cfg = defensive_overlay.OverlayConfig(
             trigger_distance_pts=self.brandon_overlay_trigger_distance_pts,
             butterfly_cutoff=__import__("datetime").time(
@@ -1672,6 +1787,11 @@ class BrandonHydraStrategy(HydraStrategy):
                 self.brandon_overlay_butterfly_cutoff_minute,
             ),
             butterfly_width_pts=self.brandon_overlay_butterfly_width,
+            gex_confirm_min_strength_pct=gex_confirm_min_strength_pct,
+            gex_confirm_peak_locality_pts=gex_confirm_peak_locality_pts,
+            gex_confirm_peak_persistence_enabled=gex_confirm_peak_persistence_enabled,
+            gex_confirm_peak_persistence_tolerance_pts=self.brandon_accel_peak_persistence_tolerance_pts,
+            decel_min_pct=self.brandon_decel_min_pct,
             # 2026-08-19: was `(profile is not None)` — coupled GEX
             # confirmation to whatever the cache happened to hold, so a
             # total Polygon outage (profile=None) let the hedge fire on
@@ -1733,10 +1853,21 @@ class BrandonHydraStrategy(HydraStrategy):
                 last_logged = self._brandon_overlay_watch_logged_at.get(key, 0.0)
                 if now_monotonic - last_logged >= 60.0:
                     self._brandon_overlay_watch_logged_at[key] = now_monotonic
+                    # Mirrors the SAME check evaluate_overlay itself uses below
+                    # (module-private but called directly here so the logged
+                    # value can never drift from the real gate) — now including
+                    # the locality/persistence gate, not just the threshold.
                     gex_confirmed = bool(
                         profile is not None
                         and defensive_overlay._has_accel_zone_on_side(
-                            side, spot, profile, min_strength_pct=0.05,
+                            side, spot, profile,
+                            min_strength_pct=gex_confirm_min_strength_pct,
+                            reference_strike=short,
+                            peak_locality_pts=gex_confirm_peak_locality_pts,
+                            peak_persistence_enabled=gex_confirm_peak_persistence_enabled,
+                            peak_persistence_tolerance_pts=self.brandon_accel_peak_persistence_tolerance_pts,
+                            prior_profile=overlay_prior_profile,
+                            force_unconfirmed=overlay_force_unconfirmed,
                         )
                     )
                     logger.info(
@@ -1754,14 +1885,99 @@ class BrandonHydraStrategy(HydraStrategy):
                 now_et=now_et,
                 config=cfg,
                 profile=profile,
+                prior_profile=overlay_prior_profile,
+                force_unconfirmed=overlay_force_unconfirmed,
             )
             if proposal is None:
+                # No qualifying threat this tick — clear any pending
+                # confirmation timer. Safe to reset unconditionally (not just
+                # on a "distance genuinely recovered" case) because, when
+                # persistence is enabled, the underlying GEX signal itself is
+                # now smoothed at the source (see
+                # _brandon_overlay_rotate_prior_gex_profile) — so a bare
+                # evaluate_overlay()->None here is no longer expected to be a
+                # single noisy flicker on a persistently dangerous side.
+                self._brandon_overlay_trigger_first_seen_at.pop(key, None)
                 continue
 
-            self._brandon_overlay_placed.add(key)
-            self._brandon_place_overlay(entry, proposal)
+            confirm_seconds = self.brandon_overlay_confirm_seconds
+            severity_bypass_pts = self.brandon_overlay_severity_bypass_distance_pts
 
-    def _brandon_place_overlay(self, entry, proposal) -> None:
+            if confirm_seconds <= 0:
+                # No confirmation window configured — fire immediately,
+                # exactly as before this change (today's B behavior).
+                self._brandon_overlay_placed.add(key)
+                self._brandon_place_overlay(
+                    entry, proposal, gex_confirmed=True,
+                    trigger_distance_pts=watch_distance,
+                    confirm_seconds=confirm_seconds, severity_bypassed=False,
+                )
+                continue
+
+            if severity_bypass_pts > 0 and 0 < watch_distance <= severity_bypass_pts:
+                # L-M6-style severity bypass (mirrors MKT-046): a threat
+                # already this close is a real fast move, not a spike worth
+                # waiting out — waiting would just let it get worse.
+                logger.warning(
+                    "BRANDON-OVERLAY-SEVERITY-BYPASS E#%s %s: %.2fpt from short "
+                    "(<= %.1fpt severity band) — placing immediately, skipping "
+                    "the %.0fs confirmation window.",
+                    entry.entry_number, side, watch_distance, severity_bypass_pts,
+                    confirm_seconds,
+                )
+                self._brandon_overlay_trigger_first_seen_at.pop(key, None)
+                self._brandon_overlay_placed.add(key)
+                self._brandon_place_overlay(
+                    entry, proposal, gex_confirmed=True,
+                    trigger_distance_pts=watch_distance,
+                    confirm_seconds=confirm_seconds, severity_bypassed=True,
+                )
+                continue
+
+            first_seen = self._brandon_overlay_trigger_first_seen_at.get(key)
+            if first_seen is None:
+                self._brandon_overlay_trigger_first_seen_at[key] = now_et
+                logger.info(
+                    "BRANDON-OVERLAY-ARM-PENDING E#%s %s: %s — confirming "
+                    "%.0fs before placing...",
+                    entry.entry_number, side, proposal.reason, confirm_seconds,
+                )
+                continue
+
+            elapsed = (now_et - first_seen).total_seconds()
+            if elapsed < confirm_seconds:
+                continue
+
+            # Confirmed: the placed-set is added to ONLY here, inside the
+            # elapsed >= confirm_seconds branch — never before. Adding it any
+            # earlier would let the dedup check at the top of this loop
+            # ("if key in self._brandon_overlay_placed: continue")
+            # permanently block re-evaluation of this (entry, side) on every
+            # later tick, so the pending timer could never reach its
+            # threshold and the hedge would silently never fire again for
+            # this side (caught in adversarial review of this change's
+            # initial design — mirrors _brandon_check_pctwidth_shadow_stop's
+            # identical placed-only-on-confirm pattern).
+            self._brandon_overlay_trigger_first_seen_at.pop(key, None)
+            logger.warning(
+                "BRANDON-OVERLAY-CONFIRMED E#%s %s: confirmed after %.0fs "
+                "(>= %.0fs) — placing.",
+                entry.entry_number, side, elapsed, confirm_seconds,
+            )
+            self._brandon_overlay_placed.add(key)
+            self._brandon_place_overlay(
+                entry, proposal, gex_confirmed=True,
+                trigger_distance_pts=watch_distance,
+                confirm_seconds=confirm_seconds, severity_bypassed=False,
+            )
+
+    def _brandon_place_overlay(
+        self, entry, proposal, *,
+        gex_confirmed: Optional[bool] = None,
+        trigger_distance_pts: Optional[float] = None,
+        confirm_seconds: Optional[float] = None,
+        severity_bypassed: bool = False,
+    ) -> None:
         """Place the overlay hedge legs.
 
         In dry-run mode each leg is materialised as a HedgeLeg with a
@@ -1799,25 +2015,50 @@ class BrandonHydraStrategy(HydraStrategy):
         t_years = self._brandon_estimate_t_years_to_close()
         placed_at = self._brandon_now_et()
 
-        # DRY-RUN: synthetic legs with a Black-Scholes-estimated fill (unchanged).
+        # DRY-RUN (rewritten 2026-08-25): price each leg off REAL broker
+        # quotes (mid), the same convention every other simulated leg in this
+        # codebase already uses (base_strategy._estimate_entry_credit_ib's
+        # `_mid(conid)` calls) — not a modeled Black-Scholes price. The
+        # 2026-08-24 audit found the prior BS-mid ± flat-$0.25-crossing model
+        # diverged from B's real fill by 4.4x on an identical structure; B's
+        # real fills mostly land near mid anyway (PROGRESSIVE_RETRY_SEQUENCE
+        # starts at limit-at-mid before escalating), so mid is also the more
+        # comparable choice for C-vs-B analysis, not just the more "correct"
+        # one. hedge_position.estimate_fill_price is kept as a fallback ONLY
+        # for a leg whose live quote is genuinely unavailable.
         if self.dry_run:
             hedge_legs: list[HedgeLeg] = []
-            _half_spread = float(getattr(self, "brandon_overlay_fill_spread", 0.0))
+            expiry = self._get_todays_expiry() if hasattr(self, "_get_todays_expiry") else None
+            conid_by_leg: dict = {}
+            quotes: dict = {}
+            if expiry:
+                for i, leg in enumerate(proposal.legs):
+                    put_call = "Call" if leg.contract_type == "call" else "Put"
+                    conid = self._get_option_uic(leg.strike, put_call, expiry)
+                    if conid:
+                        conid_by_leg[i] = conid
+                unique_conids = list({c for c in conid_by_leg.values()})
+                if unique_conids:
+                    quotes = self._read_option_quotes_batch(unique_conids)
             for i, leg in enumerate(proposal.legs):
-                fill_price = hedge_position.estimate_fill_price(
-                    contract_type=leg.contract_type,
-                    strike=leg.strike,
-                    spot=spot,
-                    t_years=t_years,
-                )
-                # Cross the spread so the modeled debit reflects a real marketable
-                # fill, not the BS mid: buy (long) toward the ask, sell (short)
-                # toward the bid. Deflates the inflated overlay P&L (2026-07-21).
-                if _half_spread:
-                    fill_price = max(
-                        0.0,
-                        fill_price + _half_spread if leg.side == "long"
-                        else fill_price - _half_spread,
+                conid = conid_by_leg.get(i)
+                quote = quotes.get(conid) if conid else None
+                mid = self._quote_mid(quote) if quote else 0.0
+                if mid > 0:
+                    fill_price = mid
+                else:
+                    logger.warning(
+                        "BRANDON-OVERLAY-DRYRUN-FALLBACK E#%s %s %s %.0f: no "
+                        "live quote available — using the Black-Scholes model "
+                        "estimate instead of a real fill for this leg.",
+                        entry.entry_number, proposal.threatened_side,
+                        leg.contract_type, leg.strike,
+                    )
+                    fill_price = hedge_position.estimate_fill_price(
+                        contract_type=leg.contract_type,
+                        strike=leg.strike,
+                        spot=spot,
+                        t_years=t_years,
                     )
                 position_id = f"DRY_OVERLAY_{entry.entry_number}_{proposal.threatened_side}_{i}"
                 hedge_legs.append(HedgeLeg(
@@ -1831,9 +2072,15 @@ class BrandonHydraStrategy(HydraStrategy):
                     structure=proposal.structure.value,
                     threatened_side=proposal.threatened_side,
                     placed_at=placed_at,
+                    conid=conid,
                 ))
             self._brandon_hedge_legs.setdefault(entry.entry_number, []).extend(hedge_legs)
             self._brandon_save_hedge_state()
+            self._brandon_record_hedge_placement(
+                entry, proposal, hedge_legs,
+                gex_confirmed=gex_confirmed, trigger_distance_pts=trigger_distance_pts,
+                confirm_seconds=confirm_seconds, severity_bypassed=severity_bypassed,
+            )
             return
 
         # LIVE wiring (L-H6). Previously this pre-built synthetic-id legs +
@@ -1982,6 +2229,11 @@ class BrandonHydraStrategy(HydraStrategy):
         if filled_legs:
             self._brandon_hedge_legs.setdefault(entry.entry_number, []).extend(filled_legs)
             self._brandon_save_hedge_state()
+            self._brandon_record_hedge_placement(
+                entry, proposal, filled_legs,
+                gex_confirmed=gex_confirmed, trigger_distance_pts=trigger_distance_pts,
+                confirm_seconds=confirm_seconds, severity_bypassed=severity_bypassed,
+            )
 
     def _brandon_unwind_overlay_legs(self, filled_legs, expiry) -> None:
         """Flatten every filled overlay leg (opposite MARKET) so a partially-
@@ -2245,6 +2497,7 @@ class BrandonHydraStrategy(HydraStrategy):
                     s.entry_number, s.threatened_side, s.structure,
                     s.spx_settle, s.total_debit_paid, s.total_pnl,
                 )
+                self._brandon_record_hedge_settlement(s)
                 self._brandon_send_telegram(
                     f"BRANDON-OVERLAY-SETTLED E#{s.entry_number} {s.threatened_side}: "
                     f"{s.structure} — SPX_close ${s.spx_settle:.2f}, "
@@ -2548,6 +2801,67 @@ class BrandonHydraStrategy(HydraStrategy):
         except Exception:
             return "/opt/calypso/data/brandon_hedge_legs.json"
 
+    def _brandon_open_hedge_recorder(self):
+        """Open (or fail soft to None) the durable hedge-history DB. Mirrors
+        dc_recorder.py's isolation pattern for Strategy D/E — its own
+        physically-separate file under DATA_DIR, NOT the shared
+        backtesting.db (which would add two Brandon-only tables to every
+        other variant's DB for no benefit — see hedge_recorder.py's module
+        docstring)."""
+        try:
+            from bots.hydra.strategy import DATA_DIR
+            from .hedge_recorder import BrandonHedgeRecorder
+            db_path = os.path.join(DATA_DIR, "brandon_hedges.db")
+            return BrandonHedgeRecorder(db_path)
+        except Exception as exc:
+            logger.warning("BRANDON: hedge recorder init failed (non-critical): %s", exc)
+            return None
+
+    def _brandon_record_hedge_placement(
+        self, entry, proposal, legs,
+        *, gex_confirmed=None, trigger_distance_pts=None,
+        confirm_seconds=None, severity_bypassed=False,
+    ) -> None:
+        """Fire-and-forget durable record of a hedge placement. Never raises
+        into the trading loop — a recording failure must never affect
+        trading logic (mirrors dc_recorder.py's own fire-and-forget writes)."""
+        recorder = getattr(self, "_brandon_hedge_recorder", None)
+        if recorder is None or not legs:
+            return
+        try:
+            recorder.record_hedge_placement(
+                date=self._brandon_today_date().isoformat(),
+                entry_number=entry.entry_number,
+                threatened_side=proposal.threatened_side,
+                structure=proposal.structure.value,
+                legs=legs,
+                gex_confirmed=gex_confirmed,
+                trigger_distance_at_arm_pts=trigger_distance_pts,
+                confirm_seconds=confirm_seconds,
+                severity_bypassed=severity_bypassed,
+            )
+        except Exception as exc:
+            logger.debug("BRANDON: hedge placement recording failed (non-critical): %s", exc)
+
+    def _brandon_record_hedge_settlement(self, settlement) -> None:
+        """Fire-and-forget durable record of a settled hedge outcome."""
+        recorder = getattr(self, "_brandon_hedge_recorder", None)
+        if recorder is None:
+            return
+        try:
+            recorder.record_hedge_settlement(
+                date=self._brandon_today_date().isoformat(),
+                entry_number=settlement.entry_number,
+                threatened_side=settlement.threatened_side,
+                structure=settlement.structure,
+                spx_close=settlement.spx_settle,
+                debit_paid=settlement.total_debit_paid,
+                hedge_pnl=settlement.total_pnl,
+                settled_at=self._brandon_now_et().isoformat(),
+            )
+        except Exception as exc:
+            logger.debug("BRANDON: hedge settlement recording failed (non-critical): %s", exc)
+
     def _brandon_load_hedge_state(self) -> None:
         """Restore hedge_legs from sidecar on startup. No-op if file absent
         or stale (different date)."""
@@ -2799,6 +3113,9 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_breach_states.clear()
         self._brandon_overlay_placed.clear()
         self._brandon_overlay_watch_logged_at.clear()
+        self._brandon_overlay_trigger_first_seen_at.clear()
+        self._brandon_overlay_current_gex_profile = None
+        self._brandon_overlay_prior_gex_profile = None
         self._brandon_hydra_shadow_fired.clear()
         self._brandon_pctwidth_shadow_fired.clear()
         self._brandon_pctwidth_breach_at.clear()
