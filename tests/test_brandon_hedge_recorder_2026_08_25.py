@@ -218,3 +218,37 @@ class TestStrategyWrapperMethods:
             spx_settle=6800.0, total_debit_paid=1.0, total_pnl=0.0,
         )
         s._brandon_record_hedge_settlement(settlement)  # must not raise
+
+
+class TestOpenHedgeRecorderCreatesDataDir:
+    """2026-08-25 convergence-audit fix: _brandon_open_hedge_recorder must
+    create DATA_DIR before opening the DB, mirroring the identical
+    os.makedirs call HydraStrategy.__init__ already does for the shared
+    DataRecorder — without it, a genuinely fresh variant install (data/
+    variant_<id>/ not yet created) would hit sqlite3.connect()'s
+    "unable to open database file" error, which BrandonHedgeRecorder
+    catches and turns into a PERMANENT self._conn = None for the process
+    lifetime (no retry until the next restart)."""
+
+    def test_creates_missing_data_dir_and_opens_successfully(self, tmp_path, monkeypatch):
+        fresh_dir = tmp_path / "variant_b_fresh_install"
+        assert not fresh_dir.exists()
+        monkeypatch.setattr("bots.hydra.strategy.DATA_DIR", str(fresh_dir))
+
+        s = BrandonHydraStrategy.__new__(BrandonHydraStrategy)
+        recorder = s._brandon_open_hedge_recorder()
+
+        assert fresh_dir.exists()
+        assert recorder is not None
+        assert recorder._conn is not None
+        assert (fresh_dir / "brandon_hedges.db").exists()
+
+    def test_negative_control_fails_without_makedirs(self, tmp_path, monkeypatch):
+        # Proves the test above actually exercises the fix: reproduce the
+        # pre-fix behavior directly (no makedirs) and confirm it degrades to
+        # a permanently-None connection, exactly the bug this fix closes.
+        from bots.hydra.brandon.hedge_recorder import BrandonHedgeRecorder
+        fresh_dir = tmp_path / "variant_b_fresh_install_no_makedirs"
+        assert not fresh_dir.exists()
+        recorder = BrandonHedgeRecorder(str(fresh_dir / "brandon_hedges.db"))
+        assert recorder._conn is None  # exactly the silent-failure this fix prevents

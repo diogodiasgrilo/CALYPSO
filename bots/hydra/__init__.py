@@ -48,15 +48,20 @@ Version History:
   morning debit spread has a clean, consistently-losing real-dollar record
   with zero offsetting wins anywhere in the data — Aug 19 (-$765 combined,
   flipping a would-be +$154 IC-only day into -$611) and Aug 24 (-$525,
-  reconciling exactly to the same-day audit's number). The afternoon
-  butterfly's one clearly-attributable large outcome (Jul 21, dry-run —
-  B wasn't live yet) was a genuine win: SPX closed within ~2.6pts of the
-  butterfly's pin strike, the exact scenario the structure exists to
-  exploit, not a pricing artifact. A second, smaller butterfly-or-debit-
-  spread win was also found (Aug 14, ~$2,296) but its structure type
-  couldn't be confirmed from available data. The one butterfly event
-  independently confirmed since (Aug 19, previously an unresolved loose
-  thread — see below) settled for a trivial -$28.
+  reconciling exactly to the number an earlier same-day chat-only
+  investigation found). The afternoon butterfly's one clearly-attributable
+  large outcome (Jul 21, dry-run — B wasn't live yet) was a genuine win:
+  SPX closed within ~2.6pts of the butterfly's pin strike, the exact
+  scenario the structure exists to exploit, not a pricing artifact. A
+  second, smaller butterfly-or-debit-spread win was also found (Aug 14,
+  ~$2,296) but its structure type couldn't be confirmed from available
+  data. The one butterfly event independently confirmed since (Aug 19,
+  previously an unresolved loose thread — see below) settled for a trivial
+  -$28. Full sourcing for every number above (log lines, SQL queries, exact
+  methodology) — not just an unlocatable "audit" reference — is written up
+  in docs/postmortems/2026-08-25_brandon_hedge_pnl_reconstruction.md, added
+  specifically because a convergence audit (see below) correctly flagged
+  that these figures had no durable, checkable source.
   Fix: `bots/hydra/brandon/defensive_overlay.py`'s `OverlayConfig` gained
   independent `debit_spread_enabled`/`butterfly_enabled` switches (both
   default True — unchanged legacy behavior for any config that doesn't set
@@ -95,6 +100,50 @@ Version History:
   size was trivial regardless: SPX closed 157pts from the butterfly's pin,
   so the ~$28 entire structure cost simply expired worthless and was never
   captured in that day's total.
+  CONVERGENCE-AUDIT PASS (same day, after deploy — a fresh, 3-agent
+  re-review of BOTH of today's Brandon changes combined, explicitly told
+  not to trust either change's own earlier audit verdicts, run specifically
+  because "audit once, fix once" is not the same as "converged"). Found and
+  fixed two real, pre-existing bugs plus the documentation gap addressed
+  above:
+  (1) `_brandon_open_hedge_recorder` never created `DATA_DIR` before
+  opening the SQLite file, unlike every other per-variant DB opener in this
+  codebase (`HydraStrategy.__init__`'s `DataRecorder` setup,
+  `_brandon_save_hedge_state`). On a genuinely fresh variant install,
+  `sqlite3.connect()` would raise, `BrandonHedgeRecorder.__init__` would
+  catch it and permanently set `self._conn = None` for the process
+  lifetime — hedge recording silently and permanently disabled until the
+  next restart. Low practical risk today (B/C's `data/variant_{b,c}/` dirs
+  have existed since February) but a real, demonstrable inconsistency.
+  Fixed with the identical `os.makedirs(DATA_DIR, exist_ok=True)` call the
+  other openers already use.
+  (2) MORE SERIOUS, PRE-EXISTING (not introduced by either of today's
+  changes, but found while auditing them): `_brandon_load_hedge_state`
+  restored `self._brandon_hedge_legs` from the sidecar JSON on a same-day
+  restart, but never reconstructed `self._brandon_overlay_placed` — the
+  anti-double-fire guard `_brandon_check_overlay` checks before considering
+  a new hedge. So after ANY same-day restart (including the ones used to
+  deploy today's own changes), a side that already had a real, live,
+  already-placed hedge would look "never placed" — if that side was still
+  within `trigger_distance_pts` and GEX still confirmed, the bot could have
+  placed a SECOND, duplicate hedge on top of a real, already-open position.
+  Today's own restarts were safe only because B/C were confirmed flat (0
+  active entries) at restart time — the gap itself was live and unrelated
+  to that luck. Fixed: `_brandon_load_hedge_state` now also adds
+  `(leg.entry_number, leg.threatened_side)` to `_brandon_overlay_placed`
+  for every restored leg. Provably one-directional-safe: a restored key can
+  only ever suppress a redundant placement, never suppress one that should
+  legitimately fire.
+  Both fixes verified with real negative-control test runs (reverted each
+  fix, confirmed the new tests fail; restored, confirmed they pass) —
+  tests/test_brandon_hedge_recorder_2026_08_25.py::TestOpenHedgeRecorderCreatesDataDir,
+  tests/test_brandon_hedge_state_restart_dedup_2026_08_25.py. Full suite
+  green after both fixes. The interaction-sweep and live-safety re-audit
+  legs of this same convergence pass found no further issues in the
+  already-deployed confirm_seconds/use_adjuster_gex_gate/debit_spread_enabled
+  logic itself — B's live decision path was independently re-traced end to
+  end and confirmed byte-identical to pre-8/25 behavior except for the one
+  intended change (debit spread never proposed).
 - 2026-08-25 Brandon defensive-overlay hedge fixes (THE GOLDEN LOOP: plan,
   adversarial audit-before with 3 independent reviewers, implementation,
   tests-with-code, adversarial audit-after). Prompted by the 2026-08-24

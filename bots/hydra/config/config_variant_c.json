@@ -190,7 +190,7 @@
         "confirm_seconds": 10.0,
         "severity_bypass_distance_pts": 5.0,
         "use_adjuster_gex_gate": true,
-        "_comment_debit_spread_disabled": "2026-08-25: disabled in lockstep with B (same evidence, same rationale) -- see config_variant_b.json's _comment_debit_spread_disabled for the full P&L reconstruction. The afternoon butterfly stays enabled and continues to run inside this file's separate confirm_seconds/use_adjuster_gex_gate staged trial above. See bots/hydra/__init__.py version history.",
+        "_comment_debit_spread_disabled": "2026-08-25: disabled in lockstep with B (same evidence, same rationale). Full sourcing: docs/postmortems/2026-08-25_brandon_hedge_pnl_reconstruction.md. The afternoon butterfly stays enabled and continues to run inside this file's separate confirm_seconds/use_adjuster_gex_gate staged trial above. See also bots/hydra/__init__.py version history.",
         "debit_spread_enabled": false
       },
       "hydra_stop_shadow": {

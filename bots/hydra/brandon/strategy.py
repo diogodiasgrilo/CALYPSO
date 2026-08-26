@@ -2844,6 +2844,18 @@ class BrandonHydraStrategy(HydraStrategy):
         try:
             from bots.hydra.strategy import DATA_DIR
             from .hedge_recorder import BrandonHedgeRecorder
+            # 2026-08-25 convergence-audit fix: mirrors the identical
+            # os.makedirs call in HydraStrategy.__init__'s DataRecorder setup
+            # (bots/hydra/strategy.py) — without it, sqlite3.connect() raises
+            # on a fresh variant install (data/variant_<id>/ not yet created),
+            # and since that exception is caught below and permanently sets
+            # self._conn = None for the process lifetime, hedge recording
+            # would silently and permanently disable itself until the next
+            # restart. Low practical risk today (B/C's data dirs have existed
+            # since February) but a real, demonstrable gap vs. the
+            # established pattern this codebase already uses everywhere else
+            # a per-variant DB is opened.
+            os.makedirs(DATA_DIR, exist_ok=True)
             db_path = os.path.join(DATA_DIR, "brandon_hedges.db")
             return BrandonHedgeRecorder(db_path)
         except Exception as exc:
@@ -2942,6 +2954,23 @@ class BrandonHydraStrategy(HydraStrategy):
             if restored:
                 self._brandon_hedge_legs[ent] = restored
                 loaded += len(restored)
+                # 2026-08-25 convergence-audit fix (pre-existing gap, not
+                # introduced by today's other changes): reconstruct the
+                # anti-double-fire guard too, not just the leg list. Without
+                # this, a same-day restart forgets which (entry, side)
+                # already has a hedge placed — _brandon_overlay_placed stays
+                # empty after restart even though _brandon_hedge_legs
+                # (restored above) correctly shows an existing hedge — so if
+                # that side is still within trigger distance and GEX still
+                # confirms, _brandon_check_overlay would treat it as
+                # never-placed and could place a SECOND, duplicate hedge on
+                # top of a real, already-open position. Safe in both
+                # directions: a restored key can only ever suppress a
+                # redundant placement, never suppress one that should
+                # legitimately fire (nothing here can create a false
+                # "already placed" for a side that doesn't actually have one).
+                for leg in restored:
+                    self._brandon_overlay_placed.add((leg.entry_number, leg.threatened_side))
         if loaded:
             logger.info("BRANDON: restored %d hedge legs across %d entries from %s",
                         loaded, len(self._brandon_hedge_legs), path)
