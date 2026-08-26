@@ -60,6 +60,8 @@ def _make_instance(**brandon_attrs):
         brandon_overlay_confirm_seconds=0.0,
         brandon_overlay_severity_bypass_distance_pts=0.0,
         brandon_overlay_use_adjuster_gex_gate=False,
+        brandon_overlay_debit_spread_enabled=True,
+        brandon_overlay_butterfly_enabled=True,
         _brandon_overlay_trigger_first_seen_at={},
         _brandon_overlay_current_gex_profile=None,
         _brandon_overlay_prior_gex_profile=None,

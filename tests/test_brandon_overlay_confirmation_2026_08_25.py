@@ -378,3 +378,64 @@ class TestPersistenceGateSurvivesMultipleEvaluationsOnSameProfile:
         # "touched" — this is exactly where the bug forced non-confirmation.
         inst._brandon_check_overlay(_entry(3))
         assert (3, "call") in inst._brandon_overlay_placed
+
+
+class TestIndependentStructureTogglesEndToEnd:
+    """End-to-end (via the real _brandon_check_overlay) coverage of the
+    debit_spread_enabled/butterfly_enabled config wiring — complements the
+    pure evaluate_overlay-level tests in test_brandon_defensive_overlay.py
+    by proving the strategy actually threads its config-read attributes
+    into OverlayConfig correctly."""
+
+    def test_debit_spread_disabled_on_b_style_config_places_nothing_in_the_morning(self):
+        inst = _make_overlay_instance(
+            brandon_overlay_debit_spread_enabled=False,
+            brandon_overlay_butterfly_cutoff_hour=23,  # keep it in the morning window
+            brandon_overlay_butterfly_cutoff_minute=59,
+        )
+        e = _entry()
+        inst._brandon_check_overlay(e)
+
+        assert (1, "call") not in inst._brandon_overlay_placed
+        assert inst._brandon_hedge_legs.get(1, []) == []
+
+    def test_butterfly_disabled_places_nothing_in_the_afternoon(self):
+        inst = _make_overlay_instance(
+            brandon_overlay_butterfly_enabled=False,
+            brandon_overlay_butterfly_cutoff_hour=0,  # force afternoon window
+            brandon_overlay_butterfly_cutoff_minute=0,
+        )
+        e = _entry()
+        inst._brandon_check_overlay(e)
+
+        assert (1, "call") not in inst._brandon_overlay_placed
+        assert inst._brandon_hedge_legs.get(1, []) == []
+
+    def test_default_config_unaffected_still_places_the_morning_debit_spread(self):
+        inst = _make_overlay_instance(
+            brandon_overlay_butterfly_cutoff_hour=23,
+            brandon_overlay_butterfly_cutoff_minute=59,
+        )
+        e = _entry()
+        inst._brandon_check_overlay(e)
+        assert (1, "call") in inst._brandon_overlay_placed
+
+    def test_watch_log_reports_disabled_structure_instead_of_a_misleading_gex_confirmed(self, caplog):
+        # Audit-after finding: computing gex_confirmed on a window whose
+        # structure is disabled logged a misleading "gex_confirmed=True" for
+        # a hedge that could never fire regardless of GEX. The watch line
+        # must say the structure is disabled instead.
+        inst = _make_overlay_instance(
+            brandon_overlay_debit_spread_enabled=False,
+            brandon_overlay_butterfly_cutoff_hour=23,
+            brandon_overlay_butterfly_cutoff_minute=59,
+            current_price=6822,  # 18pt from the 6840 short — inside the 2x=50pt watch band
+        )
+        e = _entry()
+        with caplog.at_level("INFO"):
+            inst._brandon_check_overlay(e)
+
+        watch_lines = [r.message for r in caplog.records if "BRANDON-OVERLAY-WATCH" in r.message]
+        assert len(watch_lines) == 1
+        assert "debit_spread DISABLED for this window" in watch_lines[0]
+        assert "gex_confirmed" not in watch_lines[0]

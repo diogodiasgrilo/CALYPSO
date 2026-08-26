@@ -94,6 +94,21 @@ class OverlayConfig:
         a decel wall worth pinning the afternoon butterfly on. Default 0.05
         preserves the original hardcoded value for any caller that doesn't
         override it.
+    debit_spread_enabled / butterfly_enabled (2026-08-25): independent
+        on/off switches for the two structures. Before this, "enabled" was
+        all-or-nothing — both structures always lived or died together, even
+        though they're different bets on different timescales with (per a
+        first-pass P&L reconstruction) very different track records: the
+        morning debit spread has a clean, consistently-losing real-dollar
+        history with no offsetting wins found; the afternoon butterfly's
+        one clearly-attributable large outcome was a genuine win (SPX
+        closed within ~2.6pts of its pin). Both default True (unchanged
+        legacy behavior for any caller that doesn't override). When the
+        applicable window's structure is disabled, evaluate_overlay returns
+        None for that window rather than falling back to the other
+        structure — the two are deliberately not interchangeable (the
+        source interview ties debit spreads specifically to "earlier in the
+        session" and butterflies to "later in the day", not either-or).
     """
 
     trigger_distance_pts: float = 25.0
@@ -106,6 +121,8 @@ class OverlayConfig:
     gex_confirm_peak_persistence_enabled: bool = False
     gex_confirm_peak_persistence_tolerance_pts: float = 10.0
     decel_min_pct: float = 0.05
+    debit_spread_enabled: bool = True
+    butterfly_enabled: bool = True
 
 
 SPX_INCREMENT = 5.0
@@ -246,6 +263,8 @@ def evaluate_overlay(
     is_morning = now_et.time() < config.butterfly_cutoff
 
     if is_morning or spread_width <= 0:
+        if not config.debit_spread_enabled:
+            return None
         return _propose_debit_spread(
             threatened_side=threatened_side,
             short_strike=short_strike,
@@ -255,6 +274,8 @@ def evaluate_overlay(
             distance=distance,
         )
 
+    if not config.butterfly_enabled:
+        return None
     pin = _choose_butterfly_pin(threatened_side, spot_now, profile, min_strength_pct=config.decel_min_pct)
     return _propose_butterfly(
         threatened_side=threatened_side,

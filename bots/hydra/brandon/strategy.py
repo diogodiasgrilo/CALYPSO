@@ -359,6 +359,14 @@ class BrandonHydraStrategy(HydraStrategy):
         # behavior change on B, not a no-op, if it weren't gated separately
         # from confirm_seconds.
         self.brandon_overlay_use_adjuster_gex_gate = bool(ov.get("use_adjuster_gex_gate", False))
+        # 2026-08-25: independent on/off switches for the morning debit
+        # spread vs. the afternoon butterfly — see OverlayConfig's
+        # debit_spread_enabled/butterfly_enabled docstring for the
+        # P&L-reconstruction rationale (the two structures have very
+        # different observed track records and are not interchangeable).
+        # Both default True (unchanged legacy behavior).
+        self.brandon_overlay_debit_spread_enabled = bool(ov.get("debit_spread_enabled", True))
+        self.brandon_overlay_butterfly_enabled = bool(ov.get("butterfly_enabled", True))
 
         ns = bcfg.get("narrow_spread") or {}
         self.brandon_narrow_spread_enabled = bool(ns.get("enabled", False))
@@ -1792,6 +1800,8 @@ class BrandonHydraStrategy(HydraStrategy):
             gex_confirm_peak_persistence_enabled=gex_confirm_peak_persistence_enabled,
             gex_confirm_peak_persistence_tolerance_pts=self.brandon_accel_peak_persistence_tolerance_pts,
             decel_min_pct=self.brandon_decel_min_pct,
+            debit_spread_enabled=self.brandon_overlay_debit_spread_enabled,
+            butterfly_enabled=self.brandon_overlay_butterfly_enabled,
             # 2026-08-19: was `(profile is not None)` — coupled GEX
             # confirmation to whatever the cache happened to hold, so a
             # total Polygon outage (profile=None) let the hedge fire on
@@ -1853,29 +1863,52 @@ class BrandonHydraStrategy(HydraStrategy):
                 last_logged = self._brandon_overlay_watch_logged_at.get(key, 0.0)
                 if now_monotonic - last_logged >= 60.0:
                     self._brandon_overlay_watch_logged_at[key] = now_monotonic
-                    # Mirrors the SAME check evaluate_overlay itself uses below
-                    # (module-private but called directly here so the logged
-                    # value can never drift from the real gate) — now including
-                    # the locality/persistence gate, not just the threshold.
-                    gex_confirmed = bool(
-                        profile is not None
-                        and defensive_overlay._has_accel_zone_on_side(
-                            side, spot, profile,
-                            min_strength_pct=gex_confirm_min_strength_pct,
-                            reference_strike=short,
-                            peak_locality_pts=gex_confirm_peak_locality_pts,
-                            peak_persistence_enabled=gex_confirm_peak_persistence_enabled,
-                            peak_persistence_tolerance_pts=self.brandon_accel_peak_persistence_tolerance_pts,
-                            prior_profile=overlay_prior_profile,
-                            force_unconfirmed=overlay_force_unconfirmed,
+                    # 2026-08-25: check which structure applies to THIS window
+                    # first (audit-after finding) — with debit_spread_enabled/
+                    # butterfly_enabled, a disabled structure means the hedge
+                    # can never fire here regardless of GEX. Computing
+                    # gex_confirmed anyway (as the original version of this
+                    # block did) logged a misleading "gex_confirmed=True" on a
+                    # window that will never hedge, which reads to an operator
+                    # like an unexplained miss rather than an intentional,
+                    # config-driven no-op.
+                    is_morning_watch = now_et.time() < cfg.butterfly_cutoff
+                    structure_enabled = (
+                        cfg.debit_spread_enabled if is_morning_watch else cfg.butterfly_enabled
+                    )
+                    if not structure_enabled:
+                        logger.info(
+                            "BRANDON-OVERLAY-WATCH E#%s %s: %.2fpt from short %.1f "
+                            "(trigger=%.1fpt, %s DISABLED for this window — will not "
+                            "hedge regardless of GEX)",
+                            entry.entry_number, side, watch_distance, short,
+                            cfg.trigger_distance_pts,
+                            "debit_spread" if is_morning_watch else "butterfly",
                         )
-                    )
-                    logger.info(
-                        "BRANDON-OVERLAY-WATCH E#%s %s: %.2fpt from short %.1f "
-                        "(trigger=%.1fpt, gex_confirmed=%s)",
-                        entry.entry_number, side, watch_distance, short,
-                        cfg.trigger_distance_pts, gex_confirmed,
-                    )
+                    else:
+                        # Mirrors the SAME check evaluate_overlay itself uses below
+                        # (module-private but called directly here so the logged
+                        # value can never drift from the real gate) — now including
+                        # the locality/persistence gate, not just the threshold.
+                        gex_confirmed = bool(
+                            profile is not None
+                            and defensive_overlay._has_accel_zone_on_side(
+                                side, spot, profile,
+                                min_strength_pct=gex_confirm_min_strength_pct,
+                                reference_strike=short,
+                                peak_locality_pts=gex_confirm_peak_locality_pts,
+                                peak_persistence_enabled=gex_confirm_peak_persistence_enabled,
+                                peak_persistence_tolerance_pts=self.brandon_accel_peak_persistence_tolerance_pts,
+                                prior_profile=overlay_prior_profile,
+                                force_unconfirmed=overlay_force_unconfirmed,
+                            )
+                        )
+                        logger.info(
+                            "BRANDON-OVERLAY-WATCH E#%s %s: %.2fpt from short %.1f "
+                            "(trigger=%.1fpt, gex_confirmed=%s)",
+                            entry.entry_number, side, watch_distance, short,
+                            cfg.trigger_distance_pts, gex_confirmed,
+                        )
 
             proposal = defensive_overlay.evaluate_overlay(
                 threatened_side=side,

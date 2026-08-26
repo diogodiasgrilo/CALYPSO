@@ -507,3 +507,83 @@ class TestDecelMinPctWiring:
         )
         assert p is not None
         assert p.pin_strike == 6820  # the weak wall no longer qualifies under the stricter config
+
+
+class TestIndependentStructureToggles:
+    """2026-08-25: debit_spread_enabled / butterfly_enabled let the morning
+    and afternoon structures be switched independently — a first-pass P&L
+    reconstruction found the morning debit spread has a clean, consistently
+    losing real-dollar history with no offsetting wins, while the afternoon
+    butterfly's one clearly-attributable large outcome was a genuine win.
+    Disabling one must not silently fall back to proposing the other."""
+
+    def test_debit_spread_disabled_returns_none_in_the_morning_window(self):
+        p = evaluate_overlay(
+            threatened_side="call", spot_now=6820, short_strike=6840, long_strike=6850,
+            now_et=MORNING, profile=_profile_with_call_accel(),
+            config=OverlayConfig(debit_spread_enabled=False),
+        )
+        assert p is None
+
+    def test_debit_spread_disabled_does_not_fall_back_to_butterfly(self):
+        # Even though a butterfly COULD be proposed for this exact setup at
+        # a later time of day, disabling the morning structure must not
+        # silently substitute the other one at the wrong time of day.
+        p = evaluate_overlay(
+            threatened_side="call", spot_now=6820, short_strike=6840, long_strike=6850,
+            now_et=MORNING, profile=_profile_with_call_accel(),
+            config=OverlayConfig(debit_spread_enabled=False, butterfly_enabled=True),
+        )
+        assert p is None
+
+    def test_debit_spread_enabled_by_default_unaffected(self):
+        p = evaluate_overlay(
+            threatened_side="call", spot_now=6820, short_strike=6840, long_strike=6850,
+            now_et=MORNING, profile=_profile_with_call_accel(),
+        )
+        assert p is not None
+        assert p.structure == OverlayStructure.DEBIT_SPREAD
+
+    def test_butterfly_disabled_returns_none_in_the_afternoon_window(self):
+        p = evaluate_overlay(
+            threatened_side="call", spot_now=6820, short_strike=6840, long_strike=6850,
+            now_et=AFTERNOON, profile=_profile_with_call_accel(),
+            config=OverlayConfig(butterfly_enabled=False),
+        )
+        assert p is None
+
+    def test_butterfly_disabled_does_not_fall_back_to_debit_spread(self):
+        p = evaluate_overlay(
+            threatened_side="call", spot_now=6820, short_strike=6840, long_strike=6850,
+            now_et=AFTERNOON, profile=_profile_with_call_accel(),
+            config=OverlayConfig(butterfly_enabled=False, debit_spread_enabled=True),
+        )
+        assert p is None
+
+    def test_butterfly_enabled_by_default_unaffected(self):
+        p = evaluate_overlay(
+            threatened_side="call", spot_now=6820, short_strike=6840, long_strike=6850,
+            now_et=AFTERNOON, profile=_profile_with_call_accel(),
+        )
+        assert p is not None
+        assert p.structure == OverlayStructure.BUTTERFLY
+
+    def test_debit_spread_disabled_still_returns_none_on_the_degenerate_width_fallback(self):
+        # spread_width<=0 also routes to debit_spread regardless of time of
+        # day (the "degenerate credit spread" fallback) — must respect the
+        # same disable switch, not bypass it via this alternate path.
+        p = evaluate_overlay(
+            threatened_side="call", spot_now=6820, short_strike=6840, long_strike=6840,  # width=0
+            now_et=AFTERNOON, profile=_profile_with_call_accel(),
+            config=OverlayConfig(debit_spread_enabled=False),
+        )
+        assert p is None
+
+    def test_both_disabled_returns_none_regardless_of_time(self):
+        cfg = OverlayConfig(debit_spread_enabled=False, butterfly_enabled=False)
+        for when in (MORNING, AFTERNOON):
+            p = evaluate_overlay(
+                threatened_side="call", spot_now=6820, short_strike=6840, long_strike=6850,
+                now_et=when, profile=_profile_with_call_accel(), config=cfg,
+            )
+            assert p is None

@@ -189,7 +189,9 @@
         "_comment_confirm_staging": "2026-08-25: C-first staged trial (dry-run, no real orders) of both new hedge-arming mechanisms before considering a B promotion -- (1) a 10s confirmation delay before the hedge actually places (mirrors _brandon_check_pctwidth_shadow_stop's confirm-then-fire pattern), with a 5pt severity-bypass band so a genuinely fast, severe threat still hedges immediately; (2) use_adjuster_gex_gate=true reuses the strike adjuster's own already-tuned accel_min_pct/accel_peak_locality_pts/accel_peak_persistence_enabled (see the gex block above) for the hedge's own GEX-confirmation check instead of the original hardcoded flat 0.05-with-no-locality-gate check -- the audit found that missing locality gate is the likely reason the hedge's GEX confirmation was close to a rubber stamp. Watch BRANDON-OVERLAY-ARM-PENDING/CONFIRMED/SEVERITY-BYPASS and the gex_confirmed field in BRANDON-OVERLAY-WATCH lines. See bots/hydra/__init__.py version history.",
         "confirm_seconds": 10.0,
         "severity_bypass_distance_pts": 5.0,
-        "use_adjuster_gex_gate": true
+        "use_adjuster_gex_gate": true,
+        "_comment_debit_spread_disabled": "2026-08-25: disabled in lockstep with B (same evidence, same rationale) -- see config_variant_b.json's _comment_debit_spread_disabled for the full P&L reconstruction. The afternoon butterfly stays enabled and continues to run inside this file's separate confirm_seconds/use_adjuster_gex_gate staged trial above. See bots/hydra/__init__.py version history.",
+        "debit_spread_enabled": false
       },
       "hydra_stop_shadow": {
         "_comment": "When true, computes HYDRA's existing credit+buffer stop every tick in parallel without acting. First fire per side per day is Telegrammed for head-to-head comparison against Brandon's GEX breach (which IS the live stop in B/C).",

@@ -36,6 +36,65 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-08-25 (second same-day change) Brandon defensive-overlay: disable
+  the morning debit-spread hedge on B and C, keep the afternoon butterfly
+  (THE GOLDEN LOOP: plan, 2-agent adversarial audit-before via the earlier
+  same-day design discussion, implementation, tests-with-code incl. a
+  verified negative-control run, 2-agent adversarial audit-after). Follows
+  directly from a P&L reconstruction done after the hedge fixes above
+  landed: querying every B entry where realized_pnl > total_credit
+  (mathematically only possible with an external/hedge contribution, since
+  a plain IC can never earn more than 100% of its own credit) found the
+  morning debit spread has a clean, consistently-losing real-dollar record
+  with zero offsetting wins anywhere in the data — Aug 19 (-$765 combined,
+  flipping a would-be +$154 IC-only day into -$611) and Aug 24 (-$525,
+  reconciling exactly to the same-day audit's number). The afternoon
+  butterfly's one clearly-attributable large outcome (Jul 21, dry-run —
+  B wasn't live yet) was a genuine win: SPX closed within ~2.6pts of the
+  butterfly's pin strike, the exact scenario the structure exists to
+  exploit, not a pricing artifact. A second, smaller butterfly-or-debit-
+  spread win was also found (Aug 14, ~$2,296) but its structure type
+  couldn't be confirmed from available data. The one butterfly event
+  independently confirmed since (Aug 19, previously an unresolved loose
+  thread — see below) settled for a trivial -$28.
+  Fix: `bots/hydra/brandon/defensive_overlay.py`'s `OverlayConfig` gained
+  independent `debit_spread_enabled`/`butterfly_enabled` switches (both
+  default True — unchanged legacy behavior for any config that doesn't set
+  them), threaded through `evaluate_overlay`: when the applicable window's
+  structure is disabled, it returns None rather than falling back to
+  propose the OTHER structure at the wrong time of day — the two are not
+  interchangeable (the source interview ties debit spreads to "earlier in
+  the session" and butterflies to "later in the day"). `strategy.py` reads
+  the two new config keys and threads them into the sole `OverlayConfig(...)`
+  construction site in `_brandon_check_overlay`. Both config_variant_b.json
+  and config_variant_c.json set `debit_spread_enabled: false`,
+  `butterfly_enabled` left at its default (unchanged) — this is a REAL,
+  intentional live-behavior change on B, not gated/staged like the
+  confirmation-delay/GEX-gate work above, since it's a straightforward
+  disable of a mechanism with a fully evidenced losing record, not new,
+  unproven logic.
+  KNOWN TRADE-OFF (surfaced by audit-after, not a bug): from an entry's
+  open until butterfly_cutoff (12:30 ET default), a threatened position now
+  has NO overlay hedge of either kind — previously the debit spread was
+  always live in that window. The credit+buffer stop remains the backstop
+  throughout regardless; this trade-off follows directly from the decision
+  to cut the morning structure, not from an implementation gap.
+  Also fixed (same audit-after pass): the BRANDON-OVERLAY-WATCH log
+  computed and logged `gex_confirmed=True/False` even on a window whose
+  structure is disabled — misleading, since the hedge can never fire there
+  regardless of GEX. Now logs "<structure> DISABLED for this window" instead
+  when applicable, skipping the (now-pointless) GEX-confirmation computation.
+  RESOLVED LOOSE THREAD: while investigating the butterflies' historical
+  record, tracked down a previously-unexplained gap — B's 2026-08-19 E#5 put
+  butterfly (fully filled, 3 legs, no partial/unwind) never produced a
+  BRANDON-OVERLAY-SETTLED log line, and its cost never reached B's official
+  P&L. Root cause: the exact bug already described in this file's
+  2026-08-20 entry (multiple same-entry hedges collapsing into one
+  settlement, with one hedge's separate identity silently vanishing from
+  the log) — already fixed the next day, not a live issue. Real financial
+  size was trivial regardless: SPX closed 157pts from the butterfly's pin,
+  so the ~$28 entire structure cost simply expired worthless and was never
+  captured in that day's total.
 - 2026-08-25 Brandon defensive-overlay hedge fixes (THE GOLDEN LOOP: plan,
   adversarial audit-before with 3 independent reviewers, implementation,
   tests-with-code, adversarial audit-after). Prompted by the 2026-08-24
