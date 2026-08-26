@@ -1,0 +1,101 @@
+{
+  "_comment_variant": "HYDRA Variant F — Ghauri 0DTE Mean Reversion Credit Spreads. Fades price touching the day's VIX-implied expected-move boundary with a ONE-SIDED (never both) 0DTE SPX put or call credit vertical — never holds overnight, so STATE-004 never applies. dry-run-LOCKED (GhauriMeanReversionStrategy refuses non-dry_run construction) — going live is a deliberate later operator decision, not a config flip. See bots/hydra/ghauri_strategy.py's module docstring + the approved build plan for the full design (7 fully self-contained method overrides, zero edits to shared strategy.py/base_strategy.py). NOTE: this checked-in file is a sample/template, not deploy-authoritative — the VM's live copy is edited directly there (see CLAUDE.md Config Files) and may diverge from this value.",
+  "bot_name": "HYDRA",
+  "dry_run": true,
+  "_comment_credentials": "IBKR OAuth credentials are loaded from systemd $CREDENTIALS_DIRECTORY on the VM, or env vars in dev. Not in this file.",
+  "strategy": {
+    "name": "ghauri",
+    "_comment_commission": "IBKR all-in SPX cost ~$1.15/leg/contract — see config_variant_c.json's comment for the full breakdown.",
+    "commission_per_leg": 1.15,
+    "underlying_symbol": "SPX",
+    "trading_class": "SPXW",
+    "exchange": "CBOE",
+    "target_dte": 0,
+    "contracts_per_entry": 1,
+    "_comment_entry_times": "Not read for scheduling by this strategy — GhauriMeanReversionStrategy fully overrides _parse_entry_times/_should_attempt_entry/_skip_missed_entries/_is_entry_time and never consults this list for control flow. Left here only so a human skimming this file isn't confused by its absence; the real trigger config is the ghauri block below.",
+    "entry_times": [],
+    "_comment_ghauri": "The strategy's own knobs. target_delta_pct/delta_band drive shared/delta_strike_selector.py's walk; width_pt is the long-leg offset from the selected short strike; pct_of_credit + trail_* drive ghauri_strategy.py's self-contained stop/take-profit/trail logic (see its module docstring for the corrected stop-formula rationale). trail_lock_pct=0.0 means the trail locks in breakeven once armed (the most conservative reading of the source strategy's ambiguous 'breakeven or +10%' language) — raise toward 0.10 to lock a small guaranteed profit instead, once real dry-run data suggests which reading fits better.",
+    "ghauri": {
+      "target_delta_pct": 0.15,
+      "delta_band": [0.05, 0.35],
+      "delta_max_reads": 6,
+      "width_pt": 10.0,
+      "strike_search_pts": 150.0,
+      "profit_target_pct": 0.50,
+      "pct_of_credit": 1.00,
+      "trail_arm_pct": 0.25,
+      "trail_lock_pct": 0.0,
+      "entry_cutoff_time": "13:00",
+      "preferred_window_min": 60
+    },
+    "_comment_decay_off": "Explicitly null (not omitted) — a present-but-null key still returns None from strategy_cfg.get(...), so this overrides HydraStrategy's own config-read default and forces _get_effective_stop_level's MKT-042 decay branch off entirely. Required: this strategy's trail-to-breakeven tightens the stop mid-life, and decay would re-widen it back out (the same 'L-C2c trap' A2/narrow_spread_stop was built to avoid) if left on.",
+    "buffer_decay_start_mult": null,
+    "buffer_decay_hours": null,
+    "_comment_narrow_spread_stop_off": "Not used by this strategy (it never calls _calculate_stop_levels_hydra) — left disabled for clarity/self-documentation, not because anything reads it.",
+    "narrow_spread_stop": {
+      "enabled": false
+    },
+    "_comment_max_vix_entry": "Ghauri's own entry logic has no VIX cutoff (matches CLAUDE.md's framing for A: neither Sandvand nor this strategy's own rules gate entry on a VIX ceiling) — set to the same effective-disable sentinel A/B/C use.",
+    "max_vix_entry": 999,
+    "_comment_safety_caps": "Conservative sizing at 1c while this variant is dry-run-locked and under initial observation — matches variant A's ORDER-006 defaults, not B/C's narrow-spread sizing (this isn't a narrow-spread strategy).",
+    "max_contracts_per_order": 10,
+    "max_contracts_per_underlying": 60,
+    "min_buying_power_per_ic": 2000,
+    "max_pnl_per_ic": 1000,
+    "min_pnl_per_ic": -3000,
+    "fomc_t1_skip_enabled": false,
+    "fomc_t1_callonly_enabled": false,
+    "fomc_announcement_skip": false,
+    "_comment_fomc": "CORRECTED (found by adversarial post-implementation review — the original comment here was wrong): fomc_t1_skip_enabled and fomc_t1_callonly_enabled genuinely have no effect on this variant, since both live inside HydraStrategy._initiate_entry, which GhauriMeanReversionStrategy overrides completely and never calls into. fomc_announcement_skip is DIFFERENT — it's read by the base MEICStrategy.run_strategy_check (base_strategy.py, the main-loop entry point Ghauri does NOT override) and, if true on an FOMC announcement day, sets state=DAILY_COMPLETE and skips the ENTIRE day before this class's own logic ever runs. Deliberately set false here (trade normally on announcement day, matching D/E's own convention) — this is a real, live, config-controlled choice, not an inert leftover. Flipping it to true would genuinely skip Ghauri on FOMC days.",
+    "cushion_nearstop_pct": null,
+    "cushion_recovery_pct": null,
+    "calm_entry_lookback_min": null,
+    "calm_entry_threshold_pts": null,
+    "calm_entry_max_delay_min": null,
+    "whipsaw_range_skip_mult": null,
+    "_comment_calm_and_whipsaw": "Also inert for the same reason as the FOMC comment above (both live inside the overridden _initiate_entry) — set to their disabling null values anyway for clarity, since a calm-entry/anti-whipsaw filter is philosophically opposed to this strategy's entire premise of entering right at a large-move boundary.",
+    "early_close_enabled": false,
+    "hold_check_enabled": false,
+    "min_entries_before_roc_gate": 999
+  },
+  "trend_filter": {
+    "enabled": false
+  },
+  "smart_entry": {
+    "enabled": false
+  },
+  "vix_time_shift": {
+    "enabled": false
+  },
+  "long_salvage": {
+    "short_only_stop": false,
+    "enabled": false,
+    "min_profit": 10.0
+  },
+  "filters": {
+    "fomc_blackout": false
+  },
+  "external_price_feed": {
+    "enabled": true
+  },
+  "google_sheets": {
+    "enabled": false,
+    "credentials_file": "config/google_credentials.json",
+    "spreadsheet_name": "Calypso_HYDRA_Variant_F",
+    "worksheet_name": "Trades",
+    "strategy_type": "ghauri"
+  },
+  "alerts": {
+    "enabled": false,
+    "phone_number": "+1XXXXXXXXXX",
+    "email": "your@email.com"
+  },
+  "logging": {
+    "log_level": "INFO",
+    "log_dir": "logs/hydra_variant_f",
+    "google_sheets_enabled": false,
+    "spreadsheet_name": "Calypso_HYDRA_Variant_F",
+    "strategy_type": "ghauri"
+  },
+  "api_pacing_multiplier": 2.0
+}

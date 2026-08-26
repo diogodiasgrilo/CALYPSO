@@ -153,6 +153,28 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         status="dry_run_locked",
         bot_name_base="SPYDC",
     ),
+    "f": StrategyMeta(
+        id="f",
+        display_name="Ghauri Mean Reversion",
+        short_name="GHAURI-F",
+        strategy_class="ghauri",
+        # structure_family="iron_condor" (not a new taxonomy value) matches B/C's
+        # own one-sided put_only/call_only fallback convention — this variant's
+        # entries are a strict 2-of-4-leg subset of the same shape, so it inherits
+        # ic_state routing + History/Analytics capability with no new branches.
+        # NOTE (deliberate judgment call, not a default): joining ic_0dte pools
+        # this strategy's aggregate P&L/win-rate with A/B/C's, even though its
+        # one-sided entries are the PRIMARY structure here (not a degraded
+        # fallback of a failed full-IC attempt like B/C's occasional one-sided
+        # entries are) — see the memory onesided_entry_negative_expectancy. Any
+        # UI/copy comparing F to A/B/C should carry that caveat.
+        group_id="ic_0dte",
+        structure_family="iron_condor",
+        pnl_shape="credit",
+        dte_class="0DTE",
+        status="dry_run_locked",
+        bot_name_base="HYDRA",
+    ),
 }
 
 

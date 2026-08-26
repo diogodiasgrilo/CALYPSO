@@ -88,7 +88,7 @@ class TestResolveClass:
 
     def test_available_lists_registered(self):
         assert available_strategies() == [
-            "brandon", "double_calendar", "hydra", "spy_double_calendar", "strangle"
+            "brandon", "double_calendar", "ghauri", "hydra", "spy_double_calendar", "strangle"
         ]
 
 

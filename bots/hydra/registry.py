@@ -42,6 +42,13 @@ _REGISTRY: Dict[str, str] = {
     # construction); a real-order run requires the coexistence MUST-FIXes + (E) SPY
     # assignment handling.
     "spy_double_calendar": "bots.hydra.spy_double_calendar_strategy:SpyDoubleCalendarStrategy",
+    # Variant F — Ghauri 0DTE Mean Reversion Credit Spreads: fades price
+    # touching the day's VIX-implied expected-move boundary with a one-sided
+    # put or call credit vertical. Selected via strategy.name = "ghauri";
+    # dry-run-LOCKED (see the class docstring) — no coexistence guards needed
+    # since it never holds overnight (unlike D/E), but go-live is still a
+    # deliberate later gate, not a config flip.
+    "ghauri": "bots.hydra.ghauri_strategy:GhauriMeanReversionStrategy",
 }
 
 # Default when neither brandon.enabled nor strategy.name is set — preserves the

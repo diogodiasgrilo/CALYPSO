@@ -161,14 +161,14 @@ class TestMeta:
         # ic_0dte = credit, calendar_multiday = debit; members derived from taxonomy.
         by_id = {g["id"]: g for g in body["groups"]}
         assert by_id["ic_0dte"]["pnl_shape"] == "credit"
-        assert by_id["ic_0dte"]["member_ids"] == ["a", "b", "c"]
+        assert by_id["ic_0dte"]["member_ids"] == ["a", "b", "c", "f"]  # F (Ghauri) joined ic_0dte
         assert by_id["calendar_multiday"]["pnl_shape"] == "debit"
         assert by_id["calendar_multiday"]["member_ids"] == ["d", "e"]
         # baseline is the first member, not hardcoded "a".
         assert by_id["calendar_multiday"]["baseline_id"] == "d"
 
         strat_ids = {s["id"] for s in body["strategies"]}
-        assert {"a", "b", "c", "d", "e"} <= strat_ids
+        assert {"a", "b", "c", "d", "e", "f"} <= strat_ids
         e = next(s for s in body["strategies"] if s["id"] == "e")
         assert e["data_kind"] == "dc_calendar"
         assert e["family"] == "double_calendar"

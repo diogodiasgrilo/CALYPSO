@@ -281,6 +281,11 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
     : entry.override_reason === "upday-035" ? "Upday-035"
     : entry.override_reason === "downday-035" ? "Downday-035"
     : entry.override_reason === "base-downday" ? "Base-Downday"
+    // Variant F (Ghauri) — without these, an EM-touch entry falls through to
+    // entry.trend_signal (HYDRA's inherited EMA label), which is meaningless
+    // for a touch-triggered strategy that doesn't use the trend filter.
+    : entry.override_reason === "EM_UPPER_TOUCH" ? "EM Upper Touch"
+    : entry.override_reason === "EM_LOWER_TOUCH" ? "EM Lower Touch"
     : entry.trend_signal ?? "";
 
   // Show the P&L line for any entry with a meaningful realized/live P&L — active,
@@ -344,7 +349,13 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
               {trendLabel}
             </span>
           )}
-          {isConditional && (entry.put_only || entry.call_only) && (
+          {/* Was gated on isConditional (E6/E7 conditional-slot cards only), which
+              meant this never rendered for a variant where EVERY entry is
+              one-sided by design (Variant F / Ghauri) rather than an occasional
+              conditional fallback. B/C's own one-sided entries are suppressed
+              entirely (require-both-sides) so this gate change has no effect
+              on their cards. */}
+          {(entry.put_only || entry.call_only) && (
             <span
               className="text-[9px] px-1 py-0.5 rounded"
               style={{

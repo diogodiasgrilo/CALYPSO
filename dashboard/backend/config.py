@@ -127,6 +127,21 @@ class Settings(BaseSettings):
     variant_e_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_e.json")
     variant_e_label: str = "E (SPY Double Calendar · multi-day · dry-run scaffold)"
 
+    # ── Variant F — Ghauri 0DTE Mean Reversion Credit Spreads (dry-run-locked) ─
+    # A 0DTE credit-vertical strategy (structure_family="iron_condor" in the
+    # taxonomy, matching B/C's own one-sided-entry convention), NOT a calendar —
+    # unlike D/E it's served correctly by the existing ic_state reader with zero
+    # new dashboard code. Still intentionally NOT in _VARIANT_IDS
+    # (routers/variants.py) — that list is deliberately closed (D/E are excluded
+    # the same way); F is fully served by the taxonomy-driven /api/strategies
+    # router via this settings block alone.
+    variant_f_state_file: Path = Path("/opt/calypso/data/variant_f/hydra_state.json")
+    variant_f_metrics_file: Path = Path("/opt/calypso/data/variant_f/hydra_metrics.json")
+    variant_f_backtesting_db: Path = Path("/opt/calypso/data/variant_f/backtesting.db")
+    variant_f_log_file: Path = Path("/opt/calypso/logs/hydra_variant_f/bot.log")
+    variant_f_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_f.json")
+    variant_f_label: str = "F (Ghauri Mean Reversion · 0DTE · dry-run-locked)"
+
     # ── Cumulative track-record BASELINE (rebase the cumulative to a date) ────
     # 2026-06-04: every cumulative figure (the single P&L card + the Comparison
     # lifetime totals + the running-cumulative curves) is summed from each
@@ -169,6 +184,7 @@ class Settings(BaseSettings):
     # E has zero completed trades, but worth calibrating before grading its edge.
     variant_d_baseline_date: str = "2026-07-11"
     variant_e_baseline_date: str = "2026-07-07"
+    variant_f_baseline_date: str = ""  # empty = full history; F has no trading history yet
 
     # Agent intel directories
     agent_intel_dir: Path = Path("/opt/calypso/intel")
