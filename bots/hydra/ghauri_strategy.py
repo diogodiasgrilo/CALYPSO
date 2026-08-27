@@ -225,7 +225,29 @@ class GhauriMeanReversionStrategy(HydraStrategy):
         inert: _should_attempt_entry/_skip_missed_entries/_is_entry_time are
         all overridden below to never read entry_times/_next_entry_index for
         control flow, so its length/value has no other effect.
+
+        Also replicates the base implementation's MKT-034 vix-gate attribute
+        initialization (found missing by a live construction smoke test,
+        2026-08-27 — every existing test in this file bypasses the real
+        HydraStrategy.__init__ via __new__ or a monkeypatched stub, so this
+        gap was never exercised). HydraStrategy.__init__ itself — not just
+        the methods this class overrides — reads self.vix_gate_enabled
+        unconditionally right after calling _parse_entry_times(), and several
+        other inherited-unchanged methods (logging/formatting branches) read
+        it too. Since this override never calls super(), it must set these
+        side-effect attributes itself or every one of those reads raises
+        AttributeError. Ghauri's own entry logic has no VIX cutoff, so the
+        gate is always off; still read from config like the base does rather
+        than hardcoding, since config_variant_f.json already carries an
+        explicit vix_time_shift.enabled=false.
         """
+        vts = self.config.get("vix_time_shift", {})
+        self.vix_gate_enabled = vts.get("enabled", False)
+        self.vix_medium_threshold = vts.get("medium_vix_threshold", 20.0)
+        self.vix_high_threshold = vts.get("high_vix_threshold", 23.0)
+        self._vix_gate_resolved = False
+        self._vix_gate_start_slot = 0
+
         self.entry_times = [dt_time(9, 30)]
         self._base_entry_count = 1
 

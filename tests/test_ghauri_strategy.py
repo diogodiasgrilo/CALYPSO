@@ -34,6 +34,7 @@ def _inst(**overrides):
     the established pattern in tests/test_double_calendar_strategy.py."""
     inst = GhauriMeanReversionStrategy.__new__(GhauriMeanReversionStrategy)
     inst.dry_run = True  # this variant is dry-run-LOCKED; matches every real instance
+    inst.config = {}  # real instances always have this by the time any override runs
     inst.contracts_per_entry = 1
     inst.ghauri_target_delta_pct = 0.15
     inst.ghauri_delta_band = (0.05, 0.35)
@@ -162,6 +163,45 @@ class TestContract:
         assert isinstance(e, HydraIronCondorEntry)
         assert e.peak_profit_pct == 0.0
         assert e.trail_armed is False
+
+
+class TestRealConstructionSmoke:
+    """Constructs through the REAL HydraStrategy.__init__ (no monkeypatch
+    stub, no __new__ bypass) — every other test in this file uses one of
+    those two shortcuts, which is exactly why a real bug shipped undetected:
+    HydraStrategy.__init__ itself reads self.vix_gate_enabled right after
+    calling self._parse_entry_times() (polymorphically dispatched to this
+    class's own override), and Ghauri's override never set it — a 100%
+    reproducible crash on every real construction, caught only by a live
+    systemd start attempt on 2026-08-27, not by any of this file's 26+
+    existing tests. Fixed in _parse_entry_times (now replicates the base's
+    vix-gate attribute initialization). These two tests are the regression
+    coverage for that whole bug class, not just the one attribute."""
+
+    def test_real_construction_with_minimal_config_does_not_raise(self):
+        # {"strategy": {}} is the minimum CONFIG-001 accepts (a bare {} fails
+        # its own "Missing required config section: strategy" check, which
+        # is correct validation behavior, not the bug under test here).
+        broker = MagicMock()
+        s = GhauriMeanReversionStrategy(broker, {"strategy": {}}, MagicMock(), dry_run=True)
+        assert isinstance(s, GhauriMeanReversionStrategy)
+        assert s.vix_gate_enabled is False
+
+    def test_real_construction_with_shipped_variant_f_config_does_not_raise(self):
+        """Reproduces the exact conditions of the live crash: the actual
+        checked-in config_variant_f.json, not a synthetic {}."""
+        import json
+        config_path = (
+            Path(__file__).resolve().parents[1]
+            / "bots" / "hydra" / "config" / "config_variant_f.json"
+        )
+        with open(config_path) as f:
+            config = json.load(f)
+        broker = MagicMock()
+        s = GhauriMeanReversionStrategy(broker, config, MagicMock(), dry_run=True)
+        assert isinstance(s, GhauriMeanReversionStrategy)
+        assert s.vix_gate_enabled is False  # config_variant_f.json sets vix_time_shift.enabled=false
+        assert s.dry_run is True
 
 
 class TestParseEntryTimes:

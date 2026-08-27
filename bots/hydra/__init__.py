@@ -36,6 +36,23 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-08-27 Variant F (Ghauri) real-construction crash fix, found during
+  first VM deploy attempt: GhauriMeanReversionStrategy's _parse_entry_times
+  override never set self.vix_gate_enabled/_vix_gate_resolved/_vix_gate_start_slot/
+  vix_medium_threshold/vix_high_threshold — attributes HydraStrategy.__init__
+  itself (not just the 7 methods this class overrides) reads unconditionally
+  right after calling _parse_entry_times(). 100% reproducible crash on every
+  real construction; every one of the 26 pre-existing Ghauri tests either
+  monkeypatched HydraStrategy.__init__ into a no-op or bypassed __init__
+  entirely via __new__, so the gap was invisible to the test suite and only
+  surfaced when hydra_variant_f.service was actually started on the VM
+  (crash-looped via Restart=always before being caught and stopped). Fixed
+  by having _parse_entry_times replicate the base's vix-gate attribute
+  initialization (config-driven, always False for this variant). Added 2
+  real-construction regression tests (empty-minimal config + the actual
+  shipped config_variant_f.json) that never bypass __init__ — the
+  category of test coverage that was missing, not just the one attribute.
+  Full suite 2514 passed. Service then verified starting cleanly on the VM.
 - 2026-08-25 (second same-day change) Brandon defensive-overlay: disable
   the morning debit-spread hedge on B and C, keep the afternoon butterfly
   (THE GOLDEN LOOP: plan, 2-agent adversarial audit-before via the earlier
