@@ -204,6 +204,56 @@ class TestAuthDb:
     def test_admin_reset_password_unknown_user_returns_false(self, db_path):
         assert not auth_db.admin_reset_password(db_path, "nobody", "hash")
 
+    def test_admin_unlock_clears_the_lockout(self, db_path):
+        uid = auth_db.create_user(db_path, "diogo", "h")
+        for _ in range(5):
+            auth_db.record_login_failure(db_path, uid, lockout_threshold=5, lockout_seconds=900)
+        user = auth_db.get_user_by_id(db_path, uid)
+        assert auth_db.is_locked(user)
+
+        ok = auth_db.admin_unlock(db_path, "diogo")
+        assert ok
+        user = auth_db.get_user_by_id(db_path, uid)
+        assert user["failed_login_count"] == 0
+        assert user["locked_until"] is None
+        assert not auth_db.is_locked(user)
+
+    def test_admin_unlock_does_not_revoke_sessions(self, db_path):
+        # Deliberately narrower than admin_reset_password/set_active(False)/
+        # reset_totp — those revoke sessions because they respond to a
+        # lost/compromised credential; a lockout doesn't imply that.
+        uid = auth_db.create_user(db_path, "diogo", "h")
+        auth_db.create_session(db_path, "sesshash", uid, time.time() + 3600)
+        for _ in range(5):
+            auth_db.record_login_failure(db_path, uid, lockout_threshold=5, lockout_seconds=900)
+
+        auth_db.admin_unlock(db_path, "diogo")
+        assert auth_db.get_session_with_user(db_path, "sesshash") is not None
+
+    def test_admin_unlock_does_not_touch_password_or_2fa(self, db_path):
+        uid = auth_db.create_user(db_path, "diogo", auth_crypto.hash_password("x" * 20))
+        auth_db.set_totp_secret(db_path, uid, "SECRET123")
+        auth_db.enable_totp(db_path, uid, "[]")
+        for _ in range(5):
+            auth_db.record_login_failure(db_path, uid, lockout_threshold=5, lockout_seconds=900)
+
+        auth_db.admin_unlock(db_path, "diogo")
+        user = auth_db.get_user_by_id(db_path, uid)
+        assert auth_crypto.verify_password("x" * 20, user["password_hash"])
+        assert user["totp_enabled"] == 1
+        assert user["totp_secret"] == "SECRET123"
+
+    def test_admin_unlock_unknown_user_returns_false(self, db_path):
+        assert not auth_db.admin_unlock(db_path, "nobody")
+
+    def test_admin_unlock_on_a_never_locked_user_is_a_safe_noop(self, db_path):
+        uid = auth_db.create_user(db_path, "diogo", "h")
+        ok = auth_db.admin_unlock(db_path, "diogo")
+        assert ok  # user exists, so this still reports success
+        user = auth_db.get_user_by_id(db_path, uid)
+        assert user["failed_login_count"] == 0
+        assert user["locked_until"] is None
+
 
 class TestLockout:
     def test_locks_after_threshold(self, db_path):

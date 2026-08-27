@@ -13,10 +13,18 @@ Usage (from /opt/calypso, with the venv active):
     .venv/bin/python -m scripts.manage_dashboard_users enable <username>
     .venv/bin/python -m scripts.manage_dashboard_users reset-password <username>
     .venv/bin/python -m scripts.manage_dashboard_users reset-2fa <username>
+    .venv/bin/python -m scripts.manage_dashboard_users unlock <username>
 
 `add` prints a strong random temp password ONCE — relay it to the person
 out-of-band (text/call/in person), never through the dashboard itself. They
 are forced to change it and enroll in TOTP 2FA on first login.
+
+`unlock` clears a failed-login lockout immediately instead of making them
+wait out the timer (default 15 min) — it does NOT touch their password or
+2FA, only the lockout counter. Note: there's a SEPARATE, per-IP rate limit
+(HTTP 429, ~5 min window) that this can't reach since it's in-memory on the
+live dashboard process — if `unlock` doesn't fix it, that's likely IP-based
+and just needs the ~5 min window to pass on its own.
 """
 import argparse
 import sys
@@ -109,6 +117,15 @@ def cmd_reset_2fa(args):
     return 0
 
 
+def cmd_unlock(args):
+    db_path = settings.dashboard_auth_db
+    if not auth_db.admin_unlock(db_path, args.username):
+        print(f"Error: no such user '{args.username}'.", file=sys.stderr)
+        return 1
+    print(f"Cleared the failed-login lockout for '{args.username}'. Password and 2FA are unchanged.")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -137,6 +154,12 @@ def main():
     p_reset = sub.add_parser("reset-2fa", help="Clear 2FA enrollment (lost-phone recovery)")
     p_reset.add_argument("username")
     p_reset.set_defaults(func=cmd_reset_2fa)
+
+    p_unlock = sub.add_parser(
+        "unlock", help="Clear a failed-login lockout immediately (password/2FA unchanged)"
+    )
+    p_unlock.add_argument("username")
+    p_unlock.set_defaults(func=cmd_unlock)
 
     args = parser.parse_args()
     sys.exit(args.func(args))

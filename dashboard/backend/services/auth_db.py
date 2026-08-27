@@ -283,6 +283,40 @@ def is_locked(user: dict) -> bool:
     return bool(locked_until and locked_until > time.time())
 
 
+def admin_unlock(db_path: Path, username: str) -> bool:
+    """Operator-forced clear of the lockout counter (2026-08-27).
+
+    The lockout is time-based (login_lockout_minutes, default 15) and
+    self-clears on its own, and any successful login also clears it via
+    record_login_success — but a locked-out user can't log in to trigger
+    that, so this exists for the "don't make them wait" case. Deliberately
+    narrower than admin_reset_password/set_active(False)/reset_totp: those
+    all revoke existing sessions because they respond to a lost/compromised
+    credential; a lockout is just accumulated failed attempts and doesn't
+    imply an existing valid session (elsewhere) is any less trustworthy, so
+    this does NOT touch the sessions table.
+
+    Only clears the PER-ACCOUNT lockout (this table's failed_login_count /
+    locked_until). There is a SEPARATE, per-IP rate limiter
+    (dashboard/backend/routers/auth.py's _rate_limit/_rate_buckets, HTTP
+    429) that this cannot reach — it's in-memory state on the live running
+    dashboard process, not this offline script's SQLite file. If a block
+    turns out to be IP-based rather than account-based, this call still
+    succeeds but won't actually unblock them; that side clears itself
+    within its own window (currently 5 min) with no operator action needed.
+    """
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE users SET failed_login_count = 0, locked_until = NULL WHERE username = ?",
+            (username,),
+        )
+        conn.commit()
+        return bool(cur.rowcount)
+    finally:
+        conn.close()
+
+
 # ── Sessions ───────────────────────────────────────────────────────────
 
 def create_session(db_path: Path, token_hash: str, user_id: int, expires_at: float) -> None:
