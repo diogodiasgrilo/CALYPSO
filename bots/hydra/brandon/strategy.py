@@ -1825,6 +1825,14 @@ class BrandonHydraStrategy(HydraStrategy):
 
         for side in ("call", "put"):
             if not self._brandon_side_alive(entry, side):
+                # 2026-08-27 (minor, audit-flagged state-hygiene fix): a side
+                # that dies (stop/expire/skip/pivot-close) while a
+                # confirmation timer is pending would otherwise leave that
+                # stale entry sitting in _brandon_overlay_trigger_first_seen_at
+                # until the next day's reset instead of clearing immediately
+                # — harmless (a dead side is never re-evaluated regardless),
+                # but pop it now for cleanliness.
+                self._brandon_overlay_trigger_first_seen_at.pop((entry.entry_number, side), None)
                 continue
             short = entry.short_call_strike if side == "call" else entry.short_put_strike
             longs = entry.long_call_strike if side == "call" else entry.long_put_strike
@@ -1872,7 +1880,20 @@ class BrandonHydraStrategy(HydraStrategy):
                     # window that will never hedge, which reads to an operator
                     # like an unexplained miss rather than an intentional,
                     # config-driven no-op.
-                    is_morning_watch = now_et.time() < cfg.butterfly_cutoff
+                    # 2026-08-27 (minor, audit-flagged fix): mirror
+                    # evaluate_overlay's REAL routing condition exactly
+                    # (defensive_overlay.py's `if is_morning or spread_width
+                    # <= 0:`), not just the time-of-day half of it. Without
+                    # the width check, a degenerate entry (long_strike ==
+                    # short_strike — a data anomaly, not a normal IC) hedged
+                    # in the afternoon actually routes through the
+                    # debit_spread branch via that fallback, but this watch
+                    # log would have attributed it to butterfly_enabled —
+                    # pointing an operator at the wrong toggle if they went
+                    # looking. Fails safe either way (no hedge fires from a
+                    # disabled structure), this only affects which switch the
+                    # log message blames.
+                    is_morning_watch = now_et.time() < cfg.butterfly_cutoff or abs(longs - short) <= 0
                     structure_enabled = (
                         cfg.debit_spread_enabled if is_morning_watch else cfg.butterfly_enabled
                     )

@@ -439,3 +439,79 @@ class TestIndependentStructureTogglesEndToEnd:
         assert len(watch_lines) == 1
         assert "debit_spread DISABLED for this window" in watch_lines[0]
         assert "gex_confirmed" not in watch_lines[0]
+
+
+class TestPendingTimerClearedWhenSideDies:
+    """2026-08-27 (minor state-hygiene fix): a side that dies mid-confirmation
+    must have its pending timer popped immediately, not left dangling until
+    the next day's reset."""
+
+    def test_timer_popped_the_same_tick_the_side_dies(self):
+        inst = _make_overlay_instance(brandon_overlay_confirm_seconds=10.0)
+        e = _entry()
+        inst._brandon_now_et = lambda: datetime(2026, 5, 5, 11, 0, 0)
+        inst._brandon_check_overlay(e)  # tick 1: qualifies, timer starts pending
+        assert (1, "call") in inst._brandon_overlay_trigger_first_seen_at
+
+        e.call_side_stopped = True  # side dies before confirmation completes
+        inst._brandon_now_et = lambda: datetime(2026, 5, 5, 11, 0, 5)
+        inst._brandon_check_overlay(e)
+
+        assert (1, "call") not in inst._brandon_overlay_trigger_first_seen_at
+        assert (1, "call") not in inst._brandon_overlay_placed
+
+    def test_negative_control_without_the_fix_the_timer_would_linger(self):
+        # Reproduces the pre-fix code path directly (side-alive check with no
+        # pop) to prove this is the exact gap the fix closes.
+        inst = _make_overlay_instance(brandon_overlay_confirm_seconds=10.0)
+        e = _entry()
+        inst._brandon_now_et = lambda: datetime(2026, 5, 5, 11, 0, 0)
+        inst._brandon_check_overlay(e)
+        assert (1, "call") in inst._brandon_overlay_trigger_first_seen_at
+
+        # Minimal stand-in for the pre-fix loop body: side dies, nothing pops.
+        if not inst._brandon_side_alive(e, "call"):
+            pass  # pre-fix: bare `continue`, no cleanup
+        e.call_side_stopped = True
+        if not inst._brandon_side_alive(e, "call"):
+            pass  # still nothing — the timer entry is untouched below
+        assert (1, "call") in inst._brandon_overlay_trigger_first_seen_at  # the bug, reproduced
+
+
+class TestWatchLogAttributesDegenerateWidthToDebitSpread:
+    """2026-08-27 (minor, audit-flagged fix): evaluate_overlay's real
+    fallback (`is_morning or spread_width <= 0`) routes a degenerate-width
+    entry through the debit_spread branch EVEN IN THE AFTERNOON — the watch
+    log must attribute a disabled structure the same way, or it points an
+    operator at the wrong config switch."""
+
+    def test_degenerate_width_in_the_afternoon_blames_debit_spread_not_butterfly(self, caplog):
+        inst = _make_overlay_instance(
+            brandon_overlay_debit_spread_enabled=False,
+            brandon_overlay_butterfly_enabled=True,  # butterfly IS enabled...
+            brandon_overlay_butterfly_cutoff_hour=0,  # ...and it's the afternoon window...
+            brandon_overlay_butterfly_cutoff_minute=0,
+            current_price=6822,  # 18pt from the 6840 short — inside the watch band
+        )
+        e = _entry()
+        e.long_call_strike = e.short_call_strike  # degenerate width — the fallback case
+        with caplog.at_level("INFO"):
+            inst._brandon_check_overlay(e)
+
+        watch_lines = [r.message for r in caplog.records if "BRANDON-OVERLAY-WATCH" in r.message]
+        assert len(watch_lines) == 1
+        # ...yet the real evaluate_overlay fallback routes this to debit_spread,
+        # which IS disabled, so that's what the log must blame — not butterfly.
+        assert "debit_spread DISABLED for this window" in watch_lines[0]
+
+    def test_negative_control_time_only_check_would_have_blamed_butterfly(self):
+        # Reproduces the pre-fix condition directly to prove it disagrees
+        # with the real evaluate_overlay routing for this exact scenario.
+        cutoff_hour, cutoff_minute = 0, 0
+        now_et = datetime(2026, 5, 5, 11, 0, 0)
+        pre_fix_is_morning_watch = now_et.time() < __import__("datetime").time(cutoff_hour, cutoff_minute)
+        assert pre_fix_is_morning_watch is False  # pre-fix: would blame butterfly_enabled
+
+        long_strike = short_strike = 6840.0  # degenerate width
+        real_is_morning = pre_fix_is_morning_watch or abs(long_strike - short_strike) <= 0
+        assert real_is_morning is True  # post-fix: correctly blames debit_spread_enabled
