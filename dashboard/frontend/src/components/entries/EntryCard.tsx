@@ -441,18 +441,24 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
       {/* Strikes — show whenever EITHER side was placed (a put-only / call-only
           entry has the other short at 0; the old `short_call_strike > 0` gate
           hid the strikes entirely for put-only entries). Label the un-placed
-          side "skipped" instead of "0/0". */}
+          side "skipped" instead of "0/0". A strangle (Variant G) has no long
+          wing at all — long_*_strike is always 0, not "skipped" — so show just
+          the naked short strike instead of a misleading "short/0". */}
       {(entry.short_call_strike > 0 || entry.short_put_strike > 0) && (
         <div className="mt-2 text-[10px] text-text-dim flex justify-between">
           <span>
             C:{entry.call_side_skipped || !(entry.short_call_strike > 0)
               ? 'skipped'
-              : `${entry.short_call_strike}/${entry.long_call_strike}`}
+              : entry.long_call_strike > 0
+              ? `${entry.short_call_strike}/${entry.long_call_strike}`
+              : `${entry.short_call_strike} (naked)`}
           </span>
           <span>
             P:{entry.put_side_skipped || !(entry.short_put_strike > 0)
               ? 'skipped'
-              : `${entry.short_put_strike}/${entry.long_put_strike}`}
+              : entry.long_put_strike > 0
+              ? `${entry.short_put_strike}/${entry.long_put_strike}`
+              : `${entry.short_put_strike} (naked)`}
           </span>
         </div>
       )}

@@ -51,6 +51,7 @@ def test_a_group_has_exactly_one_pnl_shape():
 def test_known_membership_today():
     assert tax.members("ic_0dte") == ["a", "b", "c", "f"]  # F (Ghauri) joined ic_0dte
     assert tax.members("calendar_multiday") == ["d", "e"]  # E (SPY double calendar) joined D
+    assert tax.members("undefined_risk_0dte") == ["g"]  # Strangle, solo group (see its GroupMeta)
 
 
 # ---------------------------------------------------------------------------
@@ -63,6 +64,7 @@ def test_comparable_with_is_same_group_only():
     assert sorted(tax.comparable_with("f")) == ["a", "b", "c"]  # F (Ghauri) joined ic_0dte
     assert tax.comparable_with("d") == ["e"]  # D and E share the calendar group
     assert tax.comparable_with("e") == ["d"]
+    assert tax.comparable_with("g") == []  # solo group, and not comparable=True (nothing to compare yet)
 
 
 def test_comparable_never_crosses_pnl_shape():

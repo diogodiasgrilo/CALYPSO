@@ -62,10 +62,11 @@ bots/
     calendar_chain.py         # calendar chain/expiry-pair helpers (D/E)
     double_calendar_strategy.py     # D "DC Time Machine" (registry double_calendar, multi-day SPX net-debit; subclasses CalendarStrategyBase)
     spy_double_calendar_strategy.py # E "SPY Double Calendar" (registry spy_double_calendar, class SpyDoubleCalendarStrategy, BOT_NAME SPYDC, multi-day SPY net-debit)
-    strangle_strategy.py      # StrangleStrategy (registry strangle — dry-run-locked, not yet wired to a variant)
+    ghauri_strategy.py        # F "Ghauri Mean Reversion" (registry ghauri, class GhauriMeanReversionStrategy — fully self-contained, does NOT reuse HYDRA's scheduled-entry machinery; dry-run-locked)
+    strangle_strategy.py      # G "Strangle" (registry strangle, class StrangleStrategy — undefined-risk naked 0DTE strangle, requires_protective_wings=False; dry-run-locked)
     dc_recorder.py            # calendar DataRecorder → isolated dc_calendar.db (separate from the shared backtesting.db)
     dc_status.py              # calendar status renderer (reads dc_open_trades.json sidecar + dc_outcomes)
-    config/                   # config.json + config_variant_{b,c,d,e}.json (config.json gitignored)
+    config/                   # config.json + config_variant_{b,c,d,e,f,g}.json (config.json gitignored)
   # On `main` only: iron_fly_0dte/, delta_neutral/, rolling_put_diagonal/, meic/
   # (kill-switched there). NOT on this branch. D/E are calendar SUBCLASSES inside
   # bots/hydra/ (CalendarStrategyBase), NOT restored sibling bots.
@@ -110,6 +111,8 @@ deploy/
   hydra_variant_c.service     # parallel dry-run instance (Brandon variant C — was live/PRIMARY before the 2026-07-24 swap)
   hydra_variant_d.service     # parallel dry-run-locked instance (D "DC Time Machine", SPX double calendar)
   hydra_variant_e.service     # parallel dry-run-locked instance (E "SPY Double Calendar")
+  hydra_variant_f.service     # parallel dry-run-locked instance (F "Ghauri Mean Reversion", 0DTE)
+  hydra_variant_g.service     # parallel dry-run-locked instance (G "Strangle", 0DTE undefined-risk)
   IBKR_CREDENTIALS_SETUP.md   # one-time-setup + pre-start verification runbook
   hermes/apollo/clio/homer/argus .service + .timer  # agent timers
   token_keeper.service.disabled-on-this-branch  # Saxo-only — DEAD on this branch
@@ -402,17 +405,19 @@ Six credentials, all per-environment (paper here):
 
 ## Variant Comparison (Dry-Run Head-to-Head, One Live Seat)
 
-Up to **5 parallel HYDRA processes** run concurrently, clustered into **2 comparability groups** by `shared/strategy_taxonomy.py` — `ic_0dte` (credit, members A/B/C) and `calendar_multiday` (debit, members D/E). Each variant has its own systemd unit and isolated `data/variant_<id>/*` paths via the `HYDRA_VARIANT_ID` env var. Exactly one `ic_0dte` variant holds the **live paper seat** (`dry_run=false`, `alerts.enabled=true`, `google_sheets.enabled=false` — Sheets logging is off repo-wide post-DB-migration, see the Agent Suite section) at a time — B since the 2026-07-24 swap, C before it; the rest run dry-run-shadow with alerts off so they don't pollute the canonical record. The two comparability groups are **never compared together** — a credit IC's P&L and a net-debit calendar's P&L are apples-to-oranges, so every comparison view / `/compare` command is group-scoped.
+Up to **7 parallel HYDRA processes** run concurrently, clustered into **3 comparability groups** by `shared/strategy_taxonomy.py` — `ic_0dte` (credit, members A/B/C/F), `calendar_multiday` (debit, members D/E), and `undefined_risk_0dte` (credit, naked/undefined-risk, member G — solo, `comparable=False`, no group-comparison renderer built yet). Each variant has its own systemd unit and isolated `data/variant_<id>/*` paths via the `HYDRA_VARIANT_ID` env var. Exactly one `ic_0dte` variant holds the **live paper seat** (`dry_run=false`, `alerts.enabled=true`, `google_sheets.enabled=false` — Sheets logging is off repo-wide post-DB-migration, see the Agent Suite section) at a time — B since the 2026-07-24 swap, C before it; the rest run dry-run-shadow/dry-run-locked with alerts off so they don't pollute the canonical record. Comparability groups are **never compared together** — a credit IC's P&L, a net-debit calendar's P&L, and an undefined-risk naked strangle's P&L are apples-to-oranges, so every comparison view / `/compare` command is group-scoped.
 
-**Current scheme (IBKR-standalone branch):** the table below is **group-scoped** (the `ic_0dte` group, then the `calendar_multiday` group):
+**Current scheme (IBKR-standalone branch):** the table below is **group-scoped** (`ic_0dte`, then `calendar_multiday`, then `undefined_risk_0dte`):
 
 | Variant | Group | Service | Strategy | Schedule | Contracts | Widths | Status |
 |---|---|---|---|---|---|---|---|
 | A | `ic_0dte` | `hydra.service` | HYDRA baseline (MKT-027 dynamic) | 10:45 / 11:15 (+ E6 14:00 conditional) | 1c | 75pt MKT-027 dynamic | dry_run_shadow (config `dry_run=true`; only B is live-paper) |
 | B | `ic_0dte` | `hydra_variant_b.service` | `BrandonHydraStrategy` (Trojan Horse stack LIVE) | 09:45 / 10:15 / 10:45 / 11:15 / 11:45 / 12:15 / 12:45 (7-slot grid; E6 **off** — require-both-sides) | 7c | 5pt below VIX 22, 10pt above (narrow) | **live (dashboard PRIMARY)** — since the 2026-07-24 B↔C live-seat swap (`docs/migration/RUNBOOKS.md` RB-9) |
 | C | `ic_0dte` | `hydra_variant_c.service` | `BrandonHydraStrategy` (Brandon-faithful baseline) | 10:15 / 10:45 / 11:15 (E6 **off** — require-both-sides) | 7c | Same narrow widths as B | dry_run_shadow — was live (dashboard PRIMARY) before the 2026-07-24 swap |
+| F | `ic_0dte` | `hydra_variant_f.service` | `GhauriMeanReversionStrategy` ("Ghauri Mean Reversion" — fades a touch of the day's VIX-implied expected-move boundary with a one-sided put/call credit vertical; fully self-contained, does NOT reuse HYDRA's scheduled-entry machinery) | event-triggered, not clock-scheduled (EM-boundary touch, cutoff 13:00 ET) | 1c | fixed 10pt width | dry_run_locked — deployed 2026-08-27, first live-market session starts the next trading day (started after that day's own 13:00 ET cutoff had already passed) |
 | D | `calendar_multiday` | `hydra_variant_d.service` | `DoubleCalendarStrategy` ("DC Time Machine", multi-day SPX net-debit) | multi-day (not 0DTE) | — | double calendar | dry_run_locked (NO-GO) |
 | E | `calendar_multiday` | `hydra_variant_e.service` | `SpyDoubleCalendarStrategy` ("SPY Double Calendar", multi-day SPY net-debit, from an OptionsKit video) | multi-day (not 0DTE) | — | double calendar | dry_run_locked |
+| G | `undefined_risk_0dte` | `hydra_variant_g.service` | `StrangleStrategy` (0DTE SPX short strangle — two naked shorts, `requires_protective_wings=False`, undefined risk sized by broker margin not a defined-risk floor; reuses HYDRA's scheduled-entry gating unchanged, only strike selection/placement/per-side stops are strangle-specific) | 10:15 / 10:45 / 11:15 (same base schedule as A) | 1c | ±8δ-anchored symmetric OTM, no wings | dry_run_locked — deployed 2026-08-27 |
 
 **Live-seat swap (2026-07-24):** the live paper seat moved from C → B (B: dry_run_shadow→live, 10c→7c, 4-slot→7-slot; C: live→dry_run_shadow, alerts/Sheets off). Dashboard canonical/WS/widget views, Telegram alert identity, and the agent suite (`services/agents_config.json`) all follow whichever variant is live via `dashboard/backend/services/variant_readers.live_seat_id()` / dynamic `is_live`/`is_primary` — no other surface should hardcode "C" as the live bot. Swap runbook: `docs/migration/RUNBOOKS.md` RB-9 (RB-8 is the historical A+C go-live, kept for reference only). To reverse: `scripts/flip_bc_rollback.sh`.
 

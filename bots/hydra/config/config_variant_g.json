@@ -1,0 +1,96 @@
+{
+  "_comment_variant": "HYDRA Variant G — 0DTE SPX Strangle (undefined-risk, dry-run-LOCKED). Two naked short legs (call + put), no protective wings — StrangleStrategy refuses non-dry_run construction. Reuses HydraStrategy's scheduled-entry gating (entry_times/VIX regime/smart entry) unchanged; only strike selection, entry placement, and per-side stop levels are strangle-specific overrides. See bots/hydra/strangle_strategy.py's module docstring for the full design. NOTE: this checked-in file is a sample/template, not deploy-authoritative — the VM's live copy is edited directly there (see CLAUDE.md Config Files) and may diverge from this value.",
+  "bot_name": "STRANGLE",
+  "dry_run": true,
+  "_comment_credentials": "IBKR OAuth credentials are loaded from systemd $CREDENTIALS_DIRECTORY on the VM, or env vars in dev. Not in this file.",
+  "strategy": {
+    "name": "strangle",
+    "_comment_commission": "IBKR all-in SPX cost ~$1.15/leg/contract — see config_variant_c.json's comment for the full breakdown.",
+    "commission_per_leg": 1.15,
+    "underlying_symbol": "SPX",
+    "trading_class": "SPXW",
+    "exchange": "CBOE",
+    "target_dte": 0,
+    "_comment_entry_times": "Strangle does NOT override _parse_entry_times/_should_attempt_entry — it reuses HydraStrategy's scheduled-entry gating verbatim (entry_times, VIX regime scaling, MKT-021 ROC gate, MKT-031 smart entry all still apply to WHEN it fires). Only WHAT happens when it fires (_initiate_entry) is strangle-specific. Same base schedule as variant A.",
+    "entry_times": [
+      "10:15",
+      "10:45",
+      "11:15"
+    ],
+    "entry_window_minutes": 5,
+    "_comment_delta": "Delta targeting for strike selection — _calculate_strikes uses target_delta directly (delta_adjustment = 8.0 / target_delta), same knob the IC family uses.",
+    "target_delta": 8,
+    "min_delta": 5,
+    "max_delta": 15,
+    "_comment_stop_buffer": "Strangle's own _calculate_stop_levels_hydra reads these same buffers, but applies each PER SIDE against that side's own credit (not the IC's total-credit-both-sides formula) — a strangle's two legs are independent naked positions.",
+    "call_stop_buffer": 0.75,
+    "put_stop_buffer": 1.75,
+    "_comment_margin": "S2: broker-margin sizing floor for an undefined-risk naked strangle (FAR larger than the defined-risk IC floor) — the gate errs high so it never opens a position the account can't margin. See strangle_strategy.py's _min_buying_power_per_unit docstring.",
+    "min_buying_power_per_strangle": 30000.0,
+    "_comment_safety_caps": "Conservative sizing at 1c while this variant is dry-run-locked and under initial observation — matches variant A/F's ORDER-006 defaults.",
+    "contracts_per_entry": 1,
+    "max_contracts_per_order": 10,
+    "max_contracts_per_underlying": 60,
+    "max_vix_entry": 999,
+    "_comment_whipsaw": "Anti-whipsaw filter — Strangle's own _strangle_pre_entry_gates calls the shared _check_whipsaw_filter helper, same as the IC family.",
+    "whipsaw_range_skip_mult": 1.75,
+    "_comment_fomc": "fomc_t1_skip_enabled is actively read by _strangle_pre_entry_gates (skip all entries the day after a FOMC announcement) — same policy as A.",
+    "fomc_t1_skip_enabled": true,
+    "fomc_t1_callonly_enabled": false,
+    "fomc_announcement_skip": false,
+    "min_entries_before_roc_gate": 999,
+    "vix_regime": {
+      "_comment": "Inherited unchanged via HydraStrategy._should_attempt_entry (Strangle doesn't override it) — the SAME vix_regime block A/B/C use, kept identical for a fresh variant's first observation window rather than inventing new breakpoints untested for this structure.",
+      "enabled": true,
+      "breakpoints": [18.0, 22.0, 28.0],
+      "max_entries": [2, 2, 2, 1],
+      "put_stop_buffer": [null, 2.50, 1.50, null],
+      "call_stop_buffer": [null, 1.50, 1.00, null],
+      "min_call_credit": [1.0, 0.5, 0.3, 0.3],
+      "min_put_credit": [1.25, 0.75, 0.5, 0.4],
+      "shadow_call_otm": [40.0, 50.0, 75.0, 75.0],
+      "shadow_put_otm": [50.0, 75.0, 110.0, 90.0]
+    }
+  },
+  "trend_filter": {
+    "enabled": false
+  },
+  "smart_entry": {
+    "enabled": false
+  },
+  "vix_time_shift": {
+    "enabled": false
+  },
+  "long_salvage": {
+    "_comment": "Strangle has no long legs to salvage (long_call_strike/long_put_strike are always 0.0) — short_only_stop stays false (close-both-legs default), same as every other variant. Not meaningfully exercised by this strategy either way.",
+    "short_only_stop": false,
+    "enabled": false,
+    "min_profit": 10.0
+  },
+  "filters": {
+    "fomc_blackout": false
+  },
+  "external_price_feed": {
+    "enabled": true
+  },
+  "google_sheets": {
+    "enabled": false,
+    "credentials_file": "config/google_credentials.json",
+    "spreadsheet_name": "Calypso_HYDRA_Variant_G",
+    "worksheet_name": "Trades",
+    "strategy_type": "strangle"
+  },
+  "alerts": {
+    "enabled": false,
+    "phone_number": "+1XXXXXXXXXX",
+    "email": "your@email.com"
+  },
+  "logging": {
+    "log_level": "INFO",
+    "log_dir": "logs/hydra_variant_g",
+    "google_sheets_enabled": false,
+    "spreadsheet_name": "Calypso_HYDRA_Variant_G",
+    "strategy_type": "strangle"
+  },
+  "api_pacing_multiplier": 2.0
+}

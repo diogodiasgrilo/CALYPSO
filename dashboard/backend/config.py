@@ -142,6 +142,23 @@ class Settings(BaseSettings):
     variant_f_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_f.json")
     variant_f_label: str = "F (Ghauri Mean Reversion · 0DTE · dry-run-locked)"
 
+    # ── Variant G — 0DTE SPX Strangle, undefined-risk (dry-run-locked) ────────
+    # structure_family="strangle" in the taxonomy (a genuinely new value, NOT a
+    # reuse of "iron_condor" like F — a strangle's legs are ALWAYS naked, no
+    # long wings, unlike F's true one-sided IC subset). data_kind still resolves
+    # to ic_state (same HydraIronCondorEntry shape as A/B/C/F), so it's served
+    # by the existing reader with zero new dashboard code — it just doesn't
+    # claim History/Analytics capabilities that assume real IC wings exist.
+    # group_id="undefined_risk_0dte" is a solo, non-comparable group (see its
+    # GroupMeta) — no group-comparison renderer exists for it yet, deliberately.
+    # Also intentionally NOT in _VARIANT_IDS (routers/variants.py), same as F.
+    variant_g_state_file: Path = Path("/opt/calypso/data/variant_g/hydra_state.json")
+    variant_g_metrics_file: Path = Path("/opt/calypso/data/variant_g/hydra_metrics.json")
+    variant_g_backtesting_db: Path = Path("/opt/calypso/data/variant_g/backtesting.db")
+    variant_g_log_file: Path = Path("/opt/calypso/logs/hydra_variant_g/bot.log")
+    variant_g_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_g.json")
+    variant_g_label: str = "G (0DTE Strangle · undefined-risk · dry-run-locked)"
+
     # ── Cumulative track-record BASELINE (rebase the cumulative to a date) ────
     # 2026-06-04: every cumulative figure (the single P&L card + the Comparison
     # lifetime totals + the running-cumulative curves) is summed from each
@@ -185,6 +202,7 @@ class Settings(BaseSettings):
     variant_d_baseline_date: str = "2026-07-11"
     variant_e_baseline_date: str = "2026-07-07"
     variant_f_baseline_date: str = ""  # empty = full history; F has no trading history yet
+    variant_g_baseline_date: str = ""  # empty = full history; G has no trading history yet
 
     # Agent intel directories
     agent_intel_dir: Path = Path("/opt/calypso/intel")

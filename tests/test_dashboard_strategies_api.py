@@ -156,7 +156,7 @@ class TestMeta:
         assert body["primary_id"] == "c"
 
         group_ids = {g["id"] for g in body["groups"]}
-        assert group_ids == {"ic_0dte", "calendar_multiday"}
+        assert group_ids == {"ic_0dte", "calendar_multiday", "undefined_risk_0dte"}
 
         # ic_0dte = credit, calendar_multiday = debit; members derived from taxonomy.
         by_id = {g["id"]: g for g in body["groups"]}
@@ -168,7 +168,7 @@ class TestMeta:
         assert by_id["calendar_multiday"]["baseline_id"] == "d"
 
         strat_ids = {s["id"] for s in body["strategies"]}
-        assert {"a", "b", "c", "d", "e", "f"} <= strat_ids
+        assert {"a", "b", "c", "d", "e", "f", "g"} <= strat_ids
         e = next(s for s in body["strategies"] if s["id"] == "e")
         assert e["data_kind"] == "dc_calendar"
         assert e["family"] == "double_calendar"
@@ -177,6 +177,19 @@ class TestMeta:
         # E hasn't run → available:false; capabilities expose calendar_cards, not history.
         assert e["available"] is False
         assert e["capabilities"]["calendar_cards"] is True
+
+        g = next(s for s in body["strategies"] if s["id"] == "g")
+        assert g["data_kind"] == "ic_state"  # reuses the existing reader — same entry shape as A/B/C/F
+        assert g["family"] == "strangle"
+        assert g["pnl_shape"] == "credit"
+        assert g["is_primary"] is False
+        # Solo, non-comparable group + not structure_family="iron_condor" → no
+        # comparison/history/analytics capability (deliberately not built yet).
+        assert g["capabilities"]["comparison"] is False
+        assert g["capabilities"]["history"] is False
+        assert g["capabilities"]["analytics"] is False
+        assert g["capabilities"]["calendar_cards"] is False
+        assert g["capabilities"]["main_dashboard"] is True
         assert e["capabilities"]["history"] is False
 
         c = next(s for s in body["strategies"] if s["id"] == "c")

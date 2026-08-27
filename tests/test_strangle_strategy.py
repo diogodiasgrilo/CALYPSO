@@ -54,6 +54,38 @@ class TestDryRunGate:
         assert isinstance(s, StrangleStrategy)
 
 
+class TestRealConstructionSmoke:
+    """Constructs through the REAL HydraStrategy.__init__ (no monkeypatch stub,
+    no __new__ bypass) — every other test in this file uses one of those two
+    shortcuts. This category of gap let a real bug (GhauriMeanReversionStrategy
+    crashing on every real construction — 2026-08-27, see bots/hydra/__init__.py
+    version history) ship completely undetected in a sibling variant; these are
+    the equivalent regression tests for Strangle so the same gap doesn't hide
+    here too, even though Strangle's own real construction is currently clean."""
+
+    def test_real_construction_with_minimal_config_does_not_raise(self):
+        broker = MagicMock()
+        s = StrangleStrategy(broker, {"strategy": {}}, MagicMock(), dry_run=True)
+        assert isinstance(s, StrangleStrategy)
+        assert s.dry_run is True
+
+    def test_real_construction_with_shipped_variant_g_config_does_not_raise(self):
+        """Reproduces the exact conditions of a real VM deploy: the actual
+        checked-in config_variant_g.json, not a synthetic minimal config."""
+        import json
+        config_path = (
+            Path(__file__).resolve().parents[1]
+            / "bots" / "hydra" / "config" / "config_variant_g.json"
+        )
+        with open(config_path) as f:
+            config = json.load(f)
+        broker = MagicMock()
+        s = StrangleStrategy(broker, config, MagicMock(), dry_run=True)
+        assert isinstance(s, StrangleStrategy)
+        assert s.dry_run is True
+        assert s.BOT_NAME == "STRANGLE"
+
+
 class TestContract:
     def test_is_undefined_risk(self):
         assert StrangleStrategy.requires_protective_wings is False

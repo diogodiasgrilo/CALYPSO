@@ -36,6 +36,34 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-08-27 (second same-day change) Variant G — wired StrangleStrategy
+  (already-built, already-tested code from earlier this week; was registered
+  in bots/hydra/registry.py but had no taxonomy entry, config, or systemd
+  unit, so it had never actually run) as a new dry-run-locked variant: added
+  a new solo, non-comparable GroupMeta ("undefined_risk_0dte" — a naked
+  strangle's undefined risk makes it structurally incomparable to ic_0dte's
+  defined-risk ICs, even though both are premium-selling/credit strategies;
+  deliberately NOT comparable=True and NO group-comparison renderer built,
+  since there's nothing to compare against with one member — flip both
+  together if/when a second undefined-risk strategy is added) + StrategyMeta
+  ("g", structure_family="strangle" — a genuinely NEW value, not a reuse of
+  "iron_condor" like F, since a strangle's legs are ALWAYS naked with no long
+  wing at all, unlike F's true one-sided IC subset; still routes through the
+  existing ic_state dashboard reader since entries use the same
+  HydraIronCondorEntry shape, just without History/Analytics capabilities
+  that assume real IC wings). Added config_variant_g.json + hydra_variant_g.service
+  (modeled on F's), a dashboard/backend/config.py settings block, and a small
+  EntryCard.tsx fix (a strangle's "short/0" strike display read as a broken
+  spread — now shows "short (naked)"). Applied the lesson from the SAME-DAY
+  Ghauri construction bug directly: ran a real-construction smoke test
+  (real config, mocked broker, no __init__ bypass) locally before touching
+  the VM — construction was clean on the first attempt (Strangle, unlike
+  Ghauri, reuses HydraStrategy's _parse_entry_times/_should_attempt_entry
+  unchanged, so it never had that category of gap) — and added the same
+  real-construction regression test class to test_strangle_strategy.py,
+  which had the identical monkeypatch/__new__-only test coverage gap Ghauri's
+  test file had, just never triggered. Full suite 2516 passed, frontend
+  typecheck clean. Deployed to the VM, verified running with zero errors.
 - 2026-08-27 Variant F (Ghauri) real-construction crash fix, found during
   first VM deploy attempt: GhauriMeanReversionStrategy's _parse_entry_times
   override never set self.vix_gate_enabled/_vix_gate_resolved/_vix_gate_start_slot/

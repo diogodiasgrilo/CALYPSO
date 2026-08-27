@@ -87,6 +87,21 @@ GROUPS: Dict[str, GroupMeta] = {
         pnl_shape="debit",
         comparable=True,
     ),
+    "undefined_risk_0dte": GroupMeta(
+        id="undefined_risk_0dte",
+        label="Undefined-Risk 0DTE",
+        pnl_shape="credit",  # sells premium upfront, same P&L direction as ic_0dte —
+        # NOT pooled with it because the risk profile (undefined, naked shorts vs
+        # ic_0dte's defined-risk wings) makes them structurally incomparable, not
+        # because the pnl_shape differs.
+        # comparable=False (not True like the other 2 groups): with exactly one
+        # member (Strangle) today there is nothing to compare it against yet, and
+        # no group-comparison renderer has been built for this group (deliberate —
+        # building a head-to-head UI with nothing to compare is premature). Flip
+        # this to True and build a renderer together, if/when a second
+        # undefined-risk strategy is ever added — see docs/NEW_STRATEGY_PLAYBOOK.md.
+        comparable=False,
+    ),
 }
 
 # Sentinel group for an unregistered letter (never comparable, no axis).
@@ -174,6 +189,31 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         dte_class="0DTE",
         status="dry_run_locked",
         bot_name_base="HYDRA",
+    ),
+    "g": StrategyMeta(
+        id="g",
+        display_name="Strangle (0DTE Naked)",
+        short_name="STRANGLE-G",
+        strategy_class="strangle",
+        group_id="undefined_risk_0dte",
+        # Genuinely NEW structure_family value (not a reuse of "iron_condor" like F) —
+        # a strangle's two legs are ALWAYS naked (long_call_strike/long_put_strike
+        # permanently 0.0 in strangle_strategy.py, never a real wing), unlike F's
+        # entries which are a true one-sided subset of a real 4-leg IC. Reusing
+        # "iron_condor" here would set is_ic=True in the dashboard backend
+        # (routers/strategies.py _capabilities), turning on History/Analytics —
+        # pages hard-bound to IC-shaped assumptions (spread width, wing distance)
+        # this variant's entries don't have. Any structure_family other than
+        # "double_calendar" still routes through the SAME already-working
+        # ic_state reader (data_kind), since a strangle entry uses the identical
+        # HydraIronCondorEntry fields as A/B/C/F — so it still renders correctly
+        # as a standalone snapshot via the strategy picker; it just doesn't claim
+        # IC-specific analytics capabilities it hasn't earned.
+        structure_family="strangle",
+        pnl_shape="credit",
+        dte_class="0DTE",
+        status="dry_run_locked",
+        bot_name_base="STRANGLE",  # matches StrangleStrategy.BOT_NAME (not "HYDRA")
     ),
 }
 
