@@ -78,6 +78,8 @@
     "calm_entry_max_delay_min": 5,
     "stop_confirmation_enabled": false,
     "stop_confirmation_seconds": 75,
+    "_comment_mkt046": "2026-08-28: same disable as B (see config_variant_b.json's comment + bots/hydra/__init__.py version history for the full study) -- C's own history independently showed the identical result (6/6 delayed stops worse, 0 better, $718.55 additional cost). C is dry-run-shadow, zero real-money risk either way.",
+    "mkt046_confirm_seconds": 0,
     "early_close_enabled": false,
     "early_close_roc_threshold": 0.03,
     "early_close_cost_per_position": 5.0,

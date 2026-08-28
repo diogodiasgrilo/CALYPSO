@@ -38,6 +38,8 @@
     "_comment_max_vix_entry": "Ghauri's own entry logic has no VIX cutoff (matches CLAUDE.md's framing for A: neither Sandvand nor this strategy's own rules gate entry on a VIX ceiling) — set to the same effective-disable sentinel A/B/C use.",
     "max_vix_entry": 999,
     "_comment_safety_caps": "Conservative sizing at 1c while this variant is dry-run-locked and under initial observation — matches variant A's ORDER-006 defaults, not B/C's narrow-spread sizing (this isn't a narrow-spread strategy).",
+    "_comment_mkt046": "2026-08-28: same disable as B/C (see config_variant_b.json's comment + bots/hydra/__init__.py version history) — MKT-046's 10s wait isn't part of Ghauri's own design and was never validated for it; disabling here matches the same reasoning (not from any strategy's original research) rather than F's own stop history, which is essentially nonexistent (dry-run-locked, first live day 2026-08-28). Zero real-money risk either way.",
+    "mkt046_confirm_seconds": 0,
     "max_contracts_per_order": 10,
     "max_contracts_per_underlying": 60,
     "min_buying_power_per_ic": 2000,

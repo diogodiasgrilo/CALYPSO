@@ -28,6 +28,8 @@
     "_comment_margin": "S2: broker-margin sizing floor for an undefined-risk naked strangle (FAR larger than the defined-risk IC floor) — the gate errs high so it never opens a position the account can't margin. See strangle_strategy.py's _min_buying_power_per_unit docstring.",
     "min_buying_power_per_strangle": 30000.0,
     "_comment_safety_caps": "Conservative sizing at 1c while this variant is dry-run-locked and under initial observation — matches variant A/F's ORDER-006 defaults.",
+    "_comment_mkt046": "2026-08-28: same disable as B/C/F (see config_variant_b.json's comment + bots/hydra/__init__.py version history) — MKT-046's 10s wait isn't part of any of these strategies' original research; disabling here matches that reasoning rather than G's own stop history, which is essentially nonexistent (dry-run-locked, first live day 2026-08-28, one real stop so far — see the 2026-08-28 audit). Zero real-money risk either way. Note: this is the confirmation TIMING only, unrelated to the separate close-cost-estimator bug fixed the same day.",
+    "mkt046_confirm_seconds": 0,
     "contracts_per_entry": 1,
     "max_contracts_per_order": 10,
     "max_contracts_per_underlying": 60,

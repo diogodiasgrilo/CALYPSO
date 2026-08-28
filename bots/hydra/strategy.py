@@ -9140,13 +9140,23 @@ class HydraStrategy(MEICStrategy):
         # at least this long before executing. Originally built to filter
         # momentary bid/ask spikes that inflate mid-price (documented cause of
         # 80% of false call stops at the time — see
-        # docs/HYDRA_STRATEGY_SPECIFICATION.md). Now configurable per variant
-        # via self.mkt046_confirm_seconds (default 10.0, set in __init__) —
-        # was a hardcoded constant here until a 2026-08-28 full-history study
-        # of B+C found zero cases where waiting ever avoided a stop that
-        # didn't happen anyway, and the wait made the eventual exit worse in
-        # 19 of 22 delayed stops (never better). B's config sets this to 0.0;
-        # every other variant keeps the original 10s pending its own review.
+        # docs/HYDRA_STRATEGY_SPECIFICATION.md, and NOT part of Tammy
+        # Chambless's or Sandvand's original MEIC research — a CALYPSO-only
+        # addition, v1.23.0). Now configurable per variant via
+        # self.mkt046_confirm_seconds (default 10.0, set in __init__) — was a
+        # hardcoded constant here until a 2026-08-28 full-history study of
+        # B+C found zero cases where waiting ever avoided a stop that didn't
+        # happen anyway, and the wait made the eventual exit worse in 19 of
+        # 22 delayed stops (never better). B, C, F, and G all set this to
+        # 0.0 as of 2026-08-28 (same day, second change) — extended past B
+        # once C's own independent data confirmed the same result and it was
+        # established the mechanism was never part of any of these
+        # strategies' original research in the first place; F/G have their
+        # own real-money risk at zero (dry-run-locked) so the extension
+        # didn't need each variant's own historical proof first. D/E (the
+        # calendar variants) have a SEPARATE, un-investigated "MKT-046
+        # analogue" of their own in calendar_strategy_base.py /
+        # double_calendar_strategy.py — deliberately not touched here.
 
         if spread_value >= stop_level:
             # A2 SETTLEMENT-HOLD: on a defined-risk spread already deep ITM in the

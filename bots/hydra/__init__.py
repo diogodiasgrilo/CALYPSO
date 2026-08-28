@@ -36,6 +36,31 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-08-28 (third same-day change) MKT-046 disable extended from B to C,
+  F, and G. Rationale: MKT-046's 10s confirmation wait is confirmed NOT
+  part of Tammy Chambless's or Sandvand's original MEIC research anywhere
+  in this codebase — it's a CALYPSO-only addition (v1.23.0) applied
+  uniformly across every HYDRA-family variant, not something tied to any
+  one variant's specific design. Given that, and given C's own history
+  (queried the same day) independently confirmed the identical result to
+  B's (6/6 delayed stops closed worse, 0 better, $718.55 additional cost),
+  disabling it was extended to every variant sharing the actual MKT-046
+  mechanism (A, C, F, G) rather than requiring each one's own multi-month
+  stop history first — reasonable since A/C/F/G carry zero real-money risk
+  either way (only B is live). Checked F (Ghauri) and G (Strangle) first
+  for any dependency on the confirmation window specifically: Ghauri's
+  trail-to-breakeven adjusts the STOP LEVEL over time, a separate
+  mechanism from the confirmation TIMING, no conflict; Strangle has no
+  MKT-046-specific code at all, pure inherited default. D and E
+  deliberately NOT touched — they have their own separate, entirely
+  different "MKT-046 analogue" in calendar_strategy_base.py /
+  double_calendar_strategy.py that has not been investigated and
+  shouldn't be assumed to behave the same way. No new code — this reuses
+  the exact mkt046_confirm_seconds config key + _check_stop_with_
+  confirmation logic already implemented and tested for B; only the 3
+  variant config samples changed, plus the code comment describing the
+  rollout scope. Full suite reconfirmed green (config-only change, no new
+  behavior to test beyond what the original 6 tests already cover).
 - 2026-08-28 (second same-day change) MKT-046 anti-spike confirmation
   disabled on B, following the same investigate-then-act pattern as the
   2026-08-27 morning-hedge disable. Prompted by a real live loss that day
