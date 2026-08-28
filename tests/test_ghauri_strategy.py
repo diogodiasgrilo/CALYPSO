@@ -204,6 +204,47 @@ class TestRealConstructionSmoke:
         assert s.dry_run is True
 
 
+class TestHeartbeatDoesNotClaimFullIC:
+    """2026-08-28 audit (cosmetic): every heartbeat line printed 'E1-E1: full
+    IC (<0.00% drop)' — HydraStrategy's shared base-entry-schedule label,
+    meaningless for a strategy whose entries are EM-boundary-touch triggered,
+    never clock-scheduled. Ghauri overrides _show_ic_schedule_in_heartbeat to
+    False so this line is omitted entirely rather than printing something
+    misleading; the flag defaults True (unchanged) for every other variant."""
+
+    def test_ghauri_omits_the_full_ic_schedule_line(self, monkeypatch):
+        from bots.hydra.base_strategy import MEICStrategy
+        monkeypatch.setattr(MEICStrategy, "get_detailed_position_status", lambda self: [])
+        inst = _inst()
+        inst.market_data = SimpleNamespace(spx_open=100.0, vix_open=15.0)
+        inst.current_price = 105.0
+        inst._current_trend = None
+        inst.vix_gate_enabled = False
+
+        lines = HydraStrategy.get_detailed_position_status(inst)
+
+        assert not any("full IC" in line or "Up-day" in line or "Down-day" in line for line in lines)
+
+    def test_default_hydra_strategy_still_shows_the_schedule_line(self, monkeypatch):
+        """Negative control: confirms the flag genuinely defaults True and the
+        line still renders for every OTHER variant (unchanged behavior)."""
+        from bots.hydra.base_strategy import MEICStrategy
+        monkeypatch.setattr(MEICStrategy, "get_detailed_position_status", lambda self: [])
+        inst = HydraStrategy.__new__(HydraStrategy)
+        inst.market_data = SimpleNamespace(spx_open=100.0, vix_open=15.0)
+        inst.current_price = 105.0
+        inst._current_trend = None
+        inst.vix_gate_enabled = False
+        inst.base_entry_downday_callonly_pct = None
+        inst._base_entry_count = 3
+        inst.upday_putonly_enabled = False
+        inst.downday_callonly_conditional_enabled = False
+
+        lines = HydraStrategy.get_detailed_position_status(inst)
+
+        assert any("full IC" in line for line in lines)
+
+
 class TestParseEntryTimes:
     def test_single_meaningful_placeholder_not_a_real_schedule(self):
         inst = _inst()

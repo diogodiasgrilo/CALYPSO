@@ -145,6 +145,11 @@ class GhauriMeanReversionStrategy(HydraStrategy):
     """Variant F — see module docstring for the full design rationale."""
 
     BOT_NAME = "HYDRA"
+    # 2026-08-28 audit (cosmetic): suppresses HydraStrategy's "E1-EN: full IC"
+    # heartbeat line — meaningless here, entries are EM-boundary-touch
+    # triggered, never clock-scheduled. See HydraStrategy's own docstring on
+    # this flag for the full rationale.
+    _show_ic_schedule_in_heartbeat = False
 
     def __init__(
         self,

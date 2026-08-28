@@ -301,6 +301,17 @@ class HydraStrategy(MEICStrategy):
     # This ensures HYDRA positions are isolated in the registry
     BOT_NAME = "HYDRA"
 
+    # 2026-08-28 audit (cosmetic): get_detailed_position_status()'s "Up-day/
+    # Down-day ... E1-EN: full IC" heartbeat line describes the base-entry
+    # schedule (entry_times, base_entry_downday_callonly_pct, E6/E7
+    # conditionals) — meaningless for a subclass whose entries aren't
+    # clock-scheduled at all (Ghauri fires on an EM-boundary touch, not a
+    # slot count). Overridden False there so the heartbeat doesn't print a
+    # misleading "full IC" label for a strategy that never places one.
+    # Strangle keeps this True — it genuinely reuses the scheduled-entry
+    # machinery unchanged, so the label is accurate for it.
+    _show_ic_schedule_in_heartbeat = True
+
     # Class-level defaults so these always exist even if a stop-level recompute
     # is triggered during the state-reload path BEFORE __init__ assigns them
     # (line ~777). Without this, the first state-save after a restart logged a
@@ -9544,7 +9555,7 @@ class HydraStrategy(MEICStrategy):
         # SPX vs open indicator (after trend line, before entries)
         # Shows base entry mode (E1-E{N}) and conditional entry eligibility (E6/E7)
         spx_ref = self.market_data.spx_open
-        if spx_ref and spx_ref > 0 and self.current_price > 0:
+        if self._show_ic_schedule_in_heartbeat and spx_ref and spx_ref > 0 and self.current_price > 0:
             change_pct = (self.current_price - spx_ref) / spx_ref * 100
             sign = "+" if change_pct >= 0 else ""
             base_count = self._base_entry_count
@@ -11756,7 +11767,7 @@ class HydraStrategy(MEICStrategy):
             )
 
             logger.info(
-                f"Entry #{entry.entry_number} {trend_tag} logged to Sheets: "
+                f"Entry #{entry.entry_number} {trend_tag} recorded: "
                 f"SPX={self.current_price:.2f}, Credit=${entry.total_credit:.2f}, "
                 f"Type={entry_type}, Strikes: {strike_str}"
             )

@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from bots.hydra.base_strategy import ConfigError
+from bots.hydra.base_strategy import ConfigError, MEICStrategy
 from bots.hydra.order_types import BuySell
 from bots.hydra.strangle_strategy import StrangleStrategy
 from bots.hydra.strategy import HydraIronCondorEntry, HydraStrategy
@@ -470,6 +470,81 @@ class TestStrangleStopFires:
         assert result == "STOPPED"
         s._execute_stop_loss.assert_called_once()
         assert s._execute_stop_loss.call_args[0][1] == "call"
+
+
+class TestNakedStopCloseCostUsesRealAsk:
+    """2026-08-28 audit finding: a naked strangle stop always fell to the
+    pessimistic spread-mid×1.10 fallback, even when a live real ask was
+    available on the SAME tick, because the "use real bid/ask" branch in
+    MEICStrategy._execute_stop_loss (base_strategy.py) required
+    long_{side}_bid is not None — and a naked side's long leg has no conid,
+    so _batch_update_entry_prices never populates its bid at all (always
+    None, structurally, not a transient data gap). On variant G's real
+    2026-08-28 stop this overstated the loss by ~14% ($88.25 booked vs.
+    ~$77.50 a real-ask-based estimate). Fixed by treating a long_{side}_strike
+    of 0 (no wing at all) as a legitimate "no long leg to subtract", not a
+    missing-quote case — while leaving the IC-family (a real wing exists,
+    strike > 0) requiring a real long_bid exactly as before."""
+
+    def _naked_entry(self, *, short_ask, short_price, credit):
+        e = HydraIronCondorEntry(entry_number=1)
+        e.contracts = 1
+        e.short_call_strike = 7795.0
+        e.long_call_strike = 0.0  # naked — no wing, by design
+        e.short_call_ask = short_ask
+        e.short_call_price = short_price
+        e.long_call_price = 0.0
+        # Deliberately NOT setting long_call_bid at all — matches production,
+        # where _batch_update_entry_prices never quotes a leg with no uic.
+        e.call_spread_credit = credit
+        e.call_side_stop = 132.50
+        e.put_side_stopped = False
+        return e
+
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s.dry_run = True
+        s.commission_per_leg = 1.15
+        s.daily_state = SimpleNamespace(
+            call_stops_triggered=0, put_stops_triggered=0, double_stops=0,
+            total_commission=0.0,
+        )
+        s._book_realized_pnl = MagicMock()
+        s._log_stop_loss = MagicMock()
+        s._queue_stop_alert = MagicMock()
+        s._save_state_to_disk = MagicMock()
+        s._flush_batched_alerts = MagicMock()
+        return s
+
+    def test_real_ask_used_when_side_is_structurally_naked(self):
+        s = self._strat()
+        e = self._naked_entry(short_ask=1.35, short_price=1.325, credit=57.50)
+
+        MEICStrategy._execute_stop_loss(s, e, "call")
+
+        # Real-ask close cost: (1.35 - 0) * 100 * 1 = $135.00 — NOT the
+        # mid×1.10 fallback ($1.325 * 1.10 * 100 = $145.75).
+        s._book_realized_pnl.assert_called_once()
+        net_loss_booked = -s._book_realized_pnl.call_args[0][0]
+        assert net_loss_booked == pytest.approx(135.00 - 57.50)  # = 77.50
+        assert e.actual_call_stop_debit == pytest.approx(135.00)
+
+    def test_a_real_wing_still_requires_a_real_bid_unchanged(self):
+        """Negative control: this fix must NOT change behavior for a side
+        that genuinely has a long wing (the IC family, A/B/C/F) — a missing
+        long_bid there is still treated as a transient data gap, exactly as
+        before this fix, and still falls to the mid×1.10 fallback."""
+        s = self._strat()
+        e = self._naked_entry(short_ask=1.35, short_price=1.325, credit=57.50)
+        e.long_call_strike = 7805.0  # a real wing exists now
+        # long_call_bid still never set -> genuinely no quote this tick.
+
+        MEICStrategy._execute_stop_loss(s, e, "call")
+
+        net_loss_booked = -s._book_realized_pnl.call_args[0][0]
+        # Unchanged fallback: 1.325 * 1.10 * 100 = 145.75
+        assert net_loss_booked == pytest.approx(145.75 - 57.50)
+        assert e.actual_call_stop_debit == pytest.approx(145.75)
 
 
 class TestNakedSettlement:

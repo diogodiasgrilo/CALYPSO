@@ -36,6 +36,51 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-08-28 First-live-day fleet audit (7-agent workflow covering A-G +
+  fleet infra, deep dive on B/F/G, adversarial verification on the two most
+  consequential findings) turned up 2 real bugs + 2 cosmetic issues, all
+  fixed same-day, THE GOLDEN LOOP (audit, implement, negative-control test
+  per fix, full-suite verify):
+  (1) [medium] calendar_strategy_base.py check_after_hours_settlement()
+  crashed 43x overnight (00:00-09:29 ET) on D with "CalendarEntry object has
+  no attribute call_only" — it fell through to HydraStrategy's 0DTE-shaped
+  settlement path (_process_expired_credits, which assumes
+  HydraIronCondorEntry) whenever a calendar variant had zero open positions,
+  new as of D's Aug-18 position settling overnight. Caught by main.py's
+  broad except (never crashed the bot) but polluted the log with a
+  misleading "positions still open" line. Fixed: never delegate to super()
+  here — _dc_settle_due (called just above) is already this class's own
+  complete settlement mechanism; there was nothing for the base path to
+  legitimately do.
+  (2) [high] base_strategy.py _execute_stop_loss's dry-run real-bid/ask
+  close-cost branch required `long_bid is not None` — a condition written
+  for the iron-condor family that a naked strangle (G, no long legs, ever)
+  can never satisfy, so every G stop silently fell to the pessimistic
+  spread-mid×1.10 fallback even with a live fresh ask sitting right there
+  the same tick. Overstated G's real 2026-08-28 stop loss by ~14% ($88.25
+  booked vs. ~$77.50 real-ask-based). The stop DECISION itself was verified
+  independently twice as genuinely correct (real SPX move, correct trigger
+  formula, correct MKT-046 confirmation) — only the booked dollar amount was
+  wrong. Fixed by recognizing long_{side}_strike == 0 as "structurally no
+  wing" (correctly zero, not a data gap) rather than requiring a long_bid
+  that can never exist; IC-family behavior (a real wing, missing bid this
+  tick) is unchanged — pinned by a negative-control test.
+  (3) [cosmetic] strategy.py's "logged to Sheets" entry log line was stale
+  (Sheets writes are disabled repo-wide) — reworded to not claim a specific
+  destination.
+  (4) [cosmetic] HydraStrategy's shared heartbeat printed "E1-EN: full IC"
+  for Ghauri (F), whose entries are EM-boundary-touch triggered, never
+  clock-scheduled — misleading, not a trading-logic issue. Added
+  _show_ic_schedule_in_heartbeat (default True, unchanged for every other
+  variant), overridden False on Ghauri to omit the line entirely.
+  Also fixed on the VM (not a code change): hydra_variant_e had
+  UnitFileState=disabled (wouldn't survive a reboot, inconsistent with every
+  other unit) — re-enabled without restarting the running process. And
+  corrected CLAUDE.md's stale "cap 110pt" MKT-027 doc line to the live VM's
+  actual 75pt (verified against a real 2026-08-28 A entry).
+  Full suite 2523 passed. D/E/F/G/A/C restarted same-day; B (live, open
+  positions + more scheduled entries) deferred to its own after-hours
+  window per the established restart-only-when-flat discipline.
 - 2026-08-27 (second same-day change) Variant G — wired StrangleStrategy
   (already-built, already-tested code from earlier this week; was registered
   in bots/hydra/registry.py but had no taxonomy entry, config, or systemd

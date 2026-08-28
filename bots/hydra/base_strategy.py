@@ -4063,7 +4063,22 @@ class MEICStrategy(abc.ABC):
             long_bid = getattr(entry, f"long_{side}_bid", None)
             short_price = getattr(entry, f"short_{side}_price", 0)
             long_price = getattr(entry, f"long_{side}_price", 0)
-            if short_ask and short_ask > 0 and long_bid is not None:
+            # 2026-08-28 audit: a NAKED side (no long leg at all — e.g. the
+            # strangle, requires_protective_wings=False) has long_{side}_strike
+            # permanently 0 and its long_{side}_bid is therefore never set by
+            # _batch_update_entry_prices (there's no conid to quote) — so
+            # `long_bid is not None` was always False and this branch could
+            # never fire, even with a live short_ask sitting right there this
+            # same tick. Every naked stop silently fell to the pessimistic
+            # mid×1.10 fallback below, overstating the loss. Distinguish
+            # "genuinely no long leg" (long_bid_safe correctly defaults to 0,
+            # same as a real long worth $0) from "long leg exists but its
+            # quote didn't populate this tick" (still requires long_bid is
+            # not None, unchanged) via the leg's STRIKE, not its quote —
+            # a strike of 0 is a structural "no wing", not a data gap.
+            long_strike = getattr(entry, f"long_{side}_strike", 0) or 0
+            is_naked_side = long_strike <= 0
+            if short_ask and short_ask > 0 and (long_bid is not None or is_naked_side):
                 # Real bid/ask available — use worst-case spread fill
                 long_bid_safe = long_bid if long_bid is not None else 0
                 actual_close_cost = (short_ask - long_bid_safe) * 100 * entry.contracts

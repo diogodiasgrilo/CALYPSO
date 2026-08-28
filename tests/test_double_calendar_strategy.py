@@ -778,3 +778,60 @@ class TestSettlement:
         inst.daily_state.entries.append(due)
         assert inst._dc_settle_due("2026-06-26") is False
         assert due.dc_phase == DCPhase.TRANSFORMED  # not settled
+
+
+class TestCheckAfterHoursSettlementNoOpenPositions:
+    """2026-08-28 overnight bug: the moment a calendar variant's only tracked
+    entry settles (daily_state.entries non-empty, open_md empty), every
+    off-hours heartbeat crashed with 'CalendarEntry object has no attribute
+    call_only'. check_after_hours_settlement() used to fall through to
+    super() (HydraStrategy's 0DTE-shaped version), which eventually reaches
+    _process_expired_credits() -- that method reads entry.call_only
+    unconditionally, an attribute only HydraIronCondorEntry defines, never
+    the plain IronCondorEntry a CalendarEntry subclasses. Fired ~every 15min
+    all night in production, caught by main.py's broad except so the bot
+    never crashed, but logged a misleading "positions still open" line when
+    nothing was open. Fixed by never delegating to super() here -- there is
+    nothing for the base 0DTE settlement path to legitimately do for a
+    calendar variant; _dc_settle_due (called just above) is already this
+    class's own complete settlement mechanism."""
+
+    def _inst(self):
+        inst = DoubleCalendarStrategy.__new__(DoubleCalendarStrategy)
+        from bots.hydra.base_strategy import MEICDailyState
+        inst.daily_state = MEICDailyState()
+        inst.contracts_per_entry = 1
+        inst.current_price = 5000.0
+        inst._save_state_to_disk = lambda: None
+        return inst
+
+    def test_only_entry_already_closed_does_not_raise_and_reports_settled(self):
+        inst = self._inst()
+        closed = _calendar_entry()
+        closed.dc_phase = DCPhase.CLOSED  # the state a settled position is left in
+        inst.daily_state.entries.append(closed)
+
+        result = inst.check_after_hours_settlement()  # must not raise
+
+        assert result is True
+
+    def test_empty_entries_list_also_reports_settled(self):
+        inst = self._inst()
+        assert inst.check_after_hours_settlement() is True
+
+    def test_negative_control_super_call_actually_crashes_on_a_closed_entry(self):
+        """Pins WHY the fix avoids super() at all: confirms the base
+        HydraStrategy settlement path genuinely cannot handle a CalendarEntry
+        (this is the exact exception production hit, not a hypothetical)."""
+        inst = self._inst()
+        closed = _calendar_entry()
+        closed.dc_phase = DCPhase.CLOSED
+        inst.daily_state.entries.append(closed)
+        inst._expected_position_quantities = lambda: {}
+        inst._settlement_reconciliation_complete = False
+        inst.broker = None
+        inst.dry_run = True
+        inst.requires_protective_wings = True
+
+        with pytest.raises(AttributeError, match="call_only"):
+            HydraStrategy.check_after_hours_settlement(inst)

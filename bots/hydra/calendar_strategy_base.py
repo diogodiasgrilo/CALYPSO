@@ -254,8 +254,23 @@ class CalendarStrategyBase(HydraStrategy):
         session and, until it does, returns False (keeping the daily-summary gate
         open). A calendar position held across days would jam that gate forever.
         Here: if the strategy is holding open multi-day positions, report
-        settled-for-today so the daily summary proceeds; otherwise defer to the
-        base 0DTE-style logic.
+        settled-for-today so the daily summary proceeds.
+
+        When there are NO open multi-day positions, settlement is simply done —
+        `_dc_settle_due` (called just above) is this class's own, complete
+        settlement mechanism for anything that needed it (the transformed-IC /
+        leftover-calendar PM-close case). There is deliberately no fallback to
+        `super().check_after_hours_settlement()` here (found missing, 2026-08-28
+        audit): the base HydraStrategy version eventually reaches
+        `_process_expired_credits()`, which iterates `self.daily_state.entries`
+        assuming HydraIronCondorEntry-shaped objects (`entry.call_only` etc.) —
+        attributes a `CalendarEntry` never has (it subclasses the plain
+        `IronCondorEntry`, not `HydraIronCondorEntry`). The instant a calendar
+        variant's only tracked entry settles (leaving `daily_state.entries`
+        non-empty but `open_md` empty), every off-hours heartbeat hit that
+        AttributeError — caught by main.py's broad try/except so it never took
+        the bot down, but it fired every ~15min all night and logged a
+        misleading "positions still open" line when nothing was open.
         """
         # Phase 5: settle any position whose SHORT expiry has arrived (the
         # transformed IC / leftover calendar settles at the SPXW PM close), then
@@ -264,13 +279,12 @@ class CalendarStrategyBase(HydraStrategy):
         self._dc_settle_due(today)
 
         open_md = [e for e in self.daily_state.entries if self._dc_entry_is_open(e)]
-        if not open_md:
-            return super().check_after_hours_settlement()
-        logger.info(
-            "[CAL-HOLD] %d multi-day position(s) held past the close — normal for a "
-            "calendar, not pending settlement; daily summary may proceed.",
-            len(open_md),
-        )
+        if open_md:
+            logger.info(
+                "[CAL-HOLD] %d multi-day position(s) held past the close — normal for a "
+                "calendar, not pending settlement; daily summary may proceed.",
+                len(open_md),
+            )
         return True
 
     def get_daily_summary(self) -> dict:

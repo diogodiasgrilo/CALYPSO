@@ -169,7 +169,7 @@ When the regime applies, `call_credit_floor` / `put_credit_floor` are overwritte
 ### Strike Selection
 
 - **Wider Starting OTM (MKT-024) — tuned 2026-04-30:** Calls **2.5×**, puts **2.75×** the VIX-adjusted OTM distance, hard-clamped to **180pt**. MKT-020/022 scan inward from there.
-- **VIX-Scaled Spread Width (MKT-027):** `round(VIX × 6.0 / 5) × 5`, floor 25pt, cap 110pt.
+- **VIX-Scaled Spread Width (MKT-027):** `round(VIX × 6.0 / 5) × 5`, floor 25pt, cap 75pt on the live VM (`max_spread_width` in the gitignored, VM-local `config.json` — verified against a real 2026-08-28 entry; `config.json.template`'s checked-in sample value of 110pt is a stale default, not what's actually deployed).
 - **Progressive OTM Tightening (MKT-020 Calls / MKT-022 Puts):** scans from MKT-024 starting distance inward in 5pt steps until credit ≥ active minimum (VIX-regime-dependent) with MKT-029 graduated fallback to `min_credit − $0.10`, or 25pt OTM floor. Each uses batch API (1 chain + 1 batch quote = 2 IBKR calls).
 - **Chain Strike Snapping (MKT-045):** After tightening + overlap checks, snaps all 4 strikes to the nearest actual IBKR chain strike (max 25pt tolerance).
 
