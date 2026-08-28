@@ -79,6 +79,8 @@
     "calm_entry_max_delay_min": 5,
     "stop_confirmation_enabled": false,
     "stop_confirmation_seconds": 75,
+    "_comment_mkt046": "2026-08-28: disabled the MKT-046 anti-spike breach-confirmation wait (was a hardcoded 10s, now configurable). A full-history study (16 delayed stops on B, 6 on C, 3 months) found ZERO cases where waiting avoided a stop that didn't happen anyway, and the wait made the eventual exit price WORSE in 19 of 22 delayed stops (never better) -- see bots/hydra/__init__.py version history. 0.0 means the breach must still be observed on 2 consecutive ticks (not a same-tick instant stop) before executing -- matches the confirmation code's own original documented intent of 'two consecutive heartbeat cycles'. The >=2x severity bypass (separate mechanism) is unaffected either way. A/C/F/G keep the default 10.0 pending their own review.",
+    "mkt046_confirm_seconds": 0,
     "early_close_enabled": false,
     "early_close_roc_threshold": 0.03,
     "early_close_cost_per_position": 5.0,

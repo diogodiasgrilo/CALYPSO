@@ -415,6 +415,18 @@ class HydraStrategy(MEICStrategy):
                 f"(>{self.settlement_hold_itm_pct:.0%} ITM within {self.settlement_hold_minutes:.0f}min of close)"
             )
 
+        # MKT-046: anti-spike breach-confirmation window (seconds), used by
+        # _check_stop_with_confirmation when MKT-036 (the 75s timer) is
+        # disabled — which it is on every variant. Was a hardcoded 10s
+        # constant; made configurable 2026-08-28 after a full-history study
+        # of B (16 delayed stops, 3 months) and C (6 delayed stops) found
+        # ZERO cases where the wait ever avoided a stop that didn't happen
+        # anyway, and 19 of 22 delayed stops closed at a WORSE price for
+        # having waited (never better) — see bots/hydra/__init__.py version
+        # history for the full study. Defaults to 10.0 (unchanged behavior)
+        # everywhere except where a variant's own config overrides it.
+        self.mkt046_confirm_seconds = float(strategy_cfg.get("mkt046_confirm_seconds", 10.0))
+
         # Price-based stop: trigger when SPX reaches within N points of the short strike.
         # When set, replaces the credit-based spread-value check for ALL entry types
         # (full IC, call-only, put-only). Set to None to use credit-based stop (default).
@@ -9125,11 +9137,16 @@ class HydraStrategy(MEICStrategy):
         stop_level = self._get_effective_stop_level(entry, side)
 
         # MKT-046 minimum confirmation time (seconds). Breach must persist for
-        # at least this long before executing. Filters momentary bid/ask spikes
-        # that inflate mid-price (confirmed cause of 80% of false call stops).
-        # 10s is conservative: longer than any observed spike, shorter than a
-        # real trend move toward the strike.
-        MKT046_MIN_CONFIRM_SECONDS = 10
+        # at least this long before executing. Originally built to filter
+        # momentary bid/ask spikes that inflate mid-price (documented cause of
+        # 80% of false call stops at the time — see
+        # docs/HYDRA_STRATEGY_SPECIFICATION.md). Now configurable per variant
+        # via self.mkt046_confirm_seconds (default 10.0, set in __init__) —
+        # was a hardcoded constant here until a 2026-08-28 full-history study
+        # of B+C found zero cases where waiting ever avoided a stop that
+        # didn't happen anyway, and the wait made the eventual exit worse in
+        # 19 of 22 delayed stops (never better). B's config sets this to 0.0;
+        # every other variant keeps the original 10s pending its own review.
 
         if spread_value >= stop_level:
             # A2 SETTLEMENT-HOLD: on a defined-risk spread already deep ITM in the
@@ -9166,7 +9183,7 @@ class HydraStrategy(MEICStrategy):
                 # First breach — start timer
                 setattr(entry, f'{side}_breach_time', now)
                 self._log_stop_detail(entry, side, spread_value, stop_level, "FIRST_BREACH")
-                confirm_secs = self.stop_confirmation_seconds if self.stop_confirmation_enabled else MKT046_MIN_CONFIRM_SECONDS
+                confirm_secs = self.stop_confirmation_seconds if self.stop_confirmation_enabled else self.mkt046_confirm_seconds
                 logger.info(
                     f"MKT-046: E#{entry.entry_number} {side} breached stop "
                     f"(SV=${spread_value:.0f} >= ${stop_level:.0f}), "
@@ -9174,7 +9191,7 @@ class HydraStrategy(MEICStrategy):
                 )
             else:
                 elapsed = (now - breach_time).total_seconds()
-                confirm_secs = self.stop_confirmation_seconds if self.stop_confirmation_enabled else MKT046_MIN_CONFIRM_SECONDS
+                confirm_secs = self.stop_confirmation_seconds if self.stop_confirmation_enabled else self.mkt046_confirm_seconds
                 if elapsed >= confirm_secs:
                     # Confirmed — breach persisted long enough
                     self._log_stop_detail(entry, side, spread_value, stop_level, "CONFIRMED")

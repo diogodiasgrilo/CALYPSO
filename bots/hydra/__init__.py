@@ -36,6 +36,51 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-08-28 (second same-day change) MKT-046 anti-spike confirmation
+  disabled on B, following the same investigate-then-act pattern as the
+  2026-08-27 morning-hedge disable. Prompted by a real live loss that day
+  (Entry #4 put, -$1,785) prompting a "did the confirmation delay help or
+  hurt, historically" study, mirroring the earlier hedge study's rigor.
+  Pulled B's FULL trade_stops history (104 stops, 2026-06-03 to today) +
+  tick-level spread_snapshots (back to 2026-05-07) directly from the DB —
+  not log-scraping, which only goes back 8 days. Found: of 16 stops where
+  the 10s confirmation delay was actually exercised, 13 closed at a WORSE
+  price for having waited, 0 closed better, 3 were flat — $3,075 total
+  price drift specifically attributable to the wait (separate from $4,165
+  of ordinary execution slippage that would exist regardless). Zero cases,
+  across the entire post-A2 period (2026-07-24 onward, 40 entries), where
+  a breach reached the stop trigger and the position was never actually
+  stopped that day. Cross-checked C (same MKT-046 mechanism): 6/6 delayed
+  stops also closed worse, $718.55 additional cost, 0 better — same result,
+  independent sample. Findings independently re-derived via a second, raw
+  SQL query (exact match) and stress-tested for confounders before acting:
+  confirmed the 2 blank-exit_reason 2026-06-11 rows are a genuine early-
+  period column-population gap (exit_reason wasn't recorded before
+  2026-06-24), not a different stop type contaminating the sample; checked
+  the settlement_hold (0.7x-width, last-20min) override couldn't have
+  masked any "avoided" cases (moot — zero were found either way); confirmed
+  MKT-046 already has an unrelated >=2x severity bypass (fires instantly,
+  no wait) that scopes this whole analysis to the 1-2x marginal-breach band
+  specifically, not all breaches. Real complication surfaced and disclosed
+  before acting: MKT-046's own documented origin (docs/HYDRA_STRATEGY_
+  SPECIFICATION.md) cites it as fixing a historical "80% of false call
+  stops" problem — the most likely reconciliation is that the separate
+  2026-06-10 L-C2b wide-quote clamp fix (base_strategy.py's
+  call_spread_value/put_spread_value) already fixed the underlying phantom-
+  value problem independently, making MKT-046's own 10s wait now largely
+  redundant on top of it — consistent with 100% of the post-clamp-era
+  sample showing no benefit. Implemented as a new per-variant config key
+  (strategy.mkt046_confirm_seconds, default 10.0 preserving every other
+  variant's exact current behavior unchanged) replacing a hardcoded
+  MKT046_MIN_CONFIRM_SECONDS=10 constant in
+  HydraStrategy._check_stop_with_confirmation; B's config sets it to 0
+  (still requires the breach on 2 consecutive ticks, not a same-tick
+  instant stop — matches the method's own docstring-described original
+  intent of "two consecutive heartbeat cycles"). 6 new tests (config-read
+  defaults/override, real 0s-vs-10s timing behavior through the actual
+  unmocked method, negative control confirming the severity-bypass and
+  breach-recovery paths are untouched) + negative-control run (reverted,
+  confirmed the timing test fails without the fix). Full suite 2529 passed.
 - 2026-08-28 First-live-day fleet audit (7-agent workflow covering A-G +
   fleet infra, deep dive on B/F/G, adversarial verification on the two most
   consequential findings) turned up 2 real bugs + 2 cosmetic issues, all
