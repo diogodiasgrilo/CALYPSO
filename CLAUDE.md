@@ -445,12 +445,16 @@ HYDRA → AlertService → Pub/Sub (~50ms) → Cloud Function → Telegram/Gmail
 
 Alerts are sent AFTER actions complete with actual results. The bot publishes to Pub/Sub non-blocking and continues. All timestamps in US Eastern Time (ET) — exchange timezone, DST handled.
 
-| Priority | Delivery | Examples |
-|----------|----------|----------|
-| CRITICAL | Telegram + Email | Circuit breaker, emergency exit, naked position, intervention required |
-| HIGH | Telegram + Email | Stop loss, max loss, position mismatch |
-| MEDIUM | Telegram + Email | Position opened/closed, profit target, settlement complete |
-| LOW | Telegram (only) | Bot started/stopped, daily summary, entry skipped, vigilant exit |
+**Telegram gets everything, at its normal priority — unaffected by anything below.** Email is narrowed to **CRITICAL only** (`shared/alert_service.py:_should_send_email`, changed 2026-08-28 — was HIGH+MEDIUM+several individually-listed exceptions before, and was generating 4-8+ emails/day from B alone into a personal inbox: every stop loss, every position close, every profit-target close, the daily summary). This is a pure priority check now — no per-type override list to keep in sync; to make a type email again, raise its entry in `DEFAULT_PRIORITIES` to CRITICAL.
+
+| Priority | Telegram | Email | Examples |
+|----------|----------|-------|----------|
+| CRITICAL | ✓ | ✓ | Circuit breaker, emergency exit, naked position, daily halt, ITM risk close, intervention required |
+| HIGH | ✓ | — | Stop loss, max loss, position mismatch |
+| MEDIUM | ✓ | — | Position opened/closed, profit target, settlement complete |
+| LOW | ✓ | — | Bot started/stopped, daily summary, entry skipped, vigilant exit |
+
+Only **B** currently has `alerts.enabled: true` (the live seat) — A/C/D/E/F/G all have alerts disabled, so B is the sole source of every alert today regardless of this table.
 
 AlertService auto-prefixes `[Nc]` on the title when `contracts > 1` (v1.24.0). 14 HYDRA call sites pass `contracts=entry.contracts` so the prefix appears on multi-contract events.
 

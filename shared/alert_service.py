@@ -869,36 +869,19 @@ class AlertService:
     # DELIVERY CHANNEL ROUTING
     # =========================================================================
 
-    # Alert types that ALWAYS get email regardless of priority
-    _EMAIL_ALWAYS = {
-        AlertType.DAILY_SUMMARY,       # End-of-day P&L record
-        AlertType.STOP_LOSS,           # Financial record
-        AlertType.EMERGENCY_EXIT,      # Financial record
-        AlertType.CIRCUIT_BREAKER,     # Needs paper trail
-        AlertType.CRITICAL_INTERVENTION,
-        AlertType.NAKED_POSITION,
-        AlertType.DAILY_HALT,
-        AlertType.ITM_RISK_CLOSE,
-        AlertType.SLIPPAGE_ALERT,      # Fill quality record
-        AlertType.DATA_QUALITY,        # Used by ARGUS health failures
-    }
-
-    # Alert types that are Telegram-only (no email needed)
-    _TELEGRAM_ONLY = {
-        AlertType.POSITION_OPENED,     # 6/day — routine, clutters inbox
-        AlertType.BOT_STARTED,         # Informational — glance and move on
-        AlertType.BOT_STOPPED,         # Informational — glance and move on
-        AlertType.CONNECTION_RESTORED, # Transient event
-        AlertType.VIGILANT_EXITED,     # Back to safe zone — transient
-        AlertType.MARKET_OPENING_SOON, # Countdown — transient
-        AlertType.MARKET_OPEN,         # Transient
-        AlertType.MARKET_CLOSED,       # Transient
-        AlertType.MARKET_HOLIDAY,      # Informational
-        AlertType.MARKET_EARLY_CLOSE,  # Informational
-        AlertType.POSITION_SNAPSHOT,   # 30-min dashboard — Telegram glance
-        AlertType.ENTRY_SKIPPED,       # Entry skipped — informational
-        AlertType.VARIANT_COMPARISON_DAILY,  # End-of-day A vs B — Telegram glance
-    }
+    # 2026-08-28: email narrowed to CRITICAL-only (operator request — B alone
+    # was generating 4-8+ emails/day: every stop loss, every position close,
+    # every profit-target close, the daily summary, plus rarer HIGH/MEDIUM
+    # events, all landing in a personal inbox). Replaces the old per-type
+    # _EMAIL_ALWAYS / _TELEGRAM_ONLY override lists (removed — this is now a
+    # pure priority check, so there's no separate list to keep in sync with
+    # DEFAULT_PRIORITIES). Telegram is UNCHANGED — every alert still goes
+    # there at its normal priority; this only narrows the second, noisier
+    # channel. CRITICAL today = CIRCUIT_BREAKER, CRITICAL_INTERVENTION,
+    # DAILY_HALT, NAKED_POSITION, EMERGENCY_EXIT, ITM_RISK_CLOSE — the
+    # genuine can't-miss-this set. To restore a type to email, raise its
+    # DEFAULT_PRIORITIES entry to CRITICAL rather than special-casing it here
+    # (keeps "what emails" answerable by reading one table, not two).
 
     # =========================================================================
     # ANTI-SPAM GATE TUNABLES (see _apply_alert_gate)
@@ -954,33 +937,17 @@ class AlertService:
         """
         Determine if an alert should also be sent via email.
 
-        Routing logic (order matters — fixed 2026-06-11):
-        1. _EMAIL_ALWAYS types email no matter what (financial/safety paper
-           trail — wins over every other rule).
-        2. _TELEGRAM_ONLY types NEVER email, even at CRITICAL/HIGH. This is
-           what lets a noisy-but-high-severity alert (e.g. a self-healing
-           "session lost, restarting" notice sent at LOW) be demoted to
-           Telegram. Previously the CRITICAL/HIGH bypass ran first, so the
-           Telegram-only set was unreachable for HIGH alerts.
-        3. CRITICAL/HIGH otherwise email (severity bypass).
-        4. MEDIUM emails; LOW is Telegram-only (matches DEFAULT_PRIORITIES'
-           stated intent — LOW = Telegram-only except the explicit
-           _EMAIL_ALWAYS members like DAILY_SUMMARY).
+        2026-08-28: email narrowed to CRITICAL-only — see the comment above
+        this class's old _EMAIL_ALWAYS/_TELEGRAM_ONLY definitions (removed)
+        for the full rationale. ``alert_type`` is intentionally unused now
+        (kept as a parameter for call-site compatibility and because a
+        future per-type carve-out, if ever wanted, belongs here) — every
+        routing decision is driven by ``priority`` alone, which already
+        reflects DEFAULT_PRIORITIES (or an explicit override the caller
+        passed). Telegram delivery is separate and unaffected by this method
+        — every alert still reaches Telegram at its normal priority.
         """
-        # 1. Financial/safety paper-trail types — always email.
-        if alert_type in self._EMAIL_ALWAYS:
-            return True
-
-        # 2. Explicit Telegram-only types — never email (beats severity bypass).
-        if alert_type in self._TELEGRAM_ONLY:
-            return False
-
-        # 3. Severity bypass for everything else.
-        if priority in (AlertPriority.CRITICAL, AlertPriority.HIGH):
-            return True
-
-        # 4. MEDIUM → email; LOW → Telegram-only.
-        return priority == AlertPriority.MEDIUM
+        return priority == AlertPriority.CRITICAL
 
     # =========================================================================
     # ANTI-SPAM GATE

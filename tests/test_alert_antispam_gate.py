@@ -13,9 +13,9 @@ through, so no loop can ever spam email again:
   Layer 3 — global email ceiling: over N emails / window, non-critical alerts
             downgrade to Telegram-only. _NEVER_SUPPRESS always emails.
 
-Plus the _should_send_email reorder so a _TELEGRAM_ONLY type can be demoted
-even at HIGH (previously the CRITICAL/HIGH bypass ran first and made the
-Telegram-only set unreachable for HIGH alerts).
+_should_send_email itself narrowed to CRITICAL-only on 2026-08-28 (operator
+request — see the tests below the anti-spam-gate ones) — a pure priority
+check now, no per-type override lists to keep in sync.
 """
 from __future__ import annotations
 
@@ -176,33 +176,54 @@ def test_never_suppress_exempt_from_bucket():
     assert sum(results) == 8  # no bucket cap for never-suppress
 
 
-# ─── _should_send_email reorder ───────────────────────────────────────────
+# ─── _should_send_email: CRITICAL-only (2026-08-28) ────────────────────────
+# Narrowed from the old per-type _EMAIL_ALWAYS/_TELEGRAM_ONLY override lists
+# (removed) to a pure priority check, at the operator's request — B alone
+# was generating 4-8+ emails/day (every stop loss, every position close,
+# every profit-target close, the daily summary) into a personal inbox.
+# Telegram is unaffected; every alert still reaches Telegram at its normal
+# priority regardless of what these tests check.
 
-def test_telegram_only_type_not_emailed_even_at_high():
-    """The reorder: a _TELEGRAM_ONLY type must be demotable even at HIGH.
-    Before the fix the CRITICAL/HIGH bypass returned email=True first."""
+def test_only_critical_priority_emails():
     svc = _svc()
-    assert svc._should_send_email(AlertType.POSITION_OPENED, AlertPriority.HIGH) is False
-    assert svc._should_send_email(AlertType.CONNECTION_RESTORED, AlertPriority.HIGH) is False
+    assert svc._should_send_email(AlertType.CIRCUIT_BREAKER, AlertPriority.CRITICAL) is True
+    assert svc._should_send_email(AlertType.NAKED_POSITION, AlertPriority.CRITICAL) is True
+    assert svc._should_send_email(AlertType.EMERGENCY_EXIT, AlertPriority.CRITICAL) is True
 
 
-def test_email_always_type_emails_even_at_low():
+def test_high_no_longer_emails_even_for_a_financial_event():
+    """Was _EMAIL_ALWAYS before 2026-08-28 (stop losses were a "financial
+    paper trail" exception) — now HIGH is Telegram-only like everything else
+    below CRITICAL, by explicit operator request."""
     svc = _svc()
-    assert svc._should_send_email(AlertType.DAILY_SUMMARY, AlertPriority.LOW) is True
-    assert svc._should_send_email(AlertType.STOP_LOSS, AlertPriority.LOW) is True
+    assert svc._should_send_email(AlertType.STOP_LOSS, AlertPriority.HIGH) is False
+    assert svc._should_send_email(AlertType.MAX_LOSS, AlertPriority.HIGH) is False
 
 
-def test_low_default_is_telegram_only():
-    """An un-classified LOW alert is Telegram-only (matches DEFAULT_PRIORITIES'
-    stated intent); MEDIUM still emails."""
+def test_daily_summary_no_longer_emails():
+    """Was the other _EMAIL_ALWAYS exception (LOW priority but always
+    emailed) — now Telegram-only, same as any other LOW alert."""
     svc = _svc()
-    assert svc._should_send_email(AlertType.PROFIT_TARGET, AlertPriority.LOW) is False
-    assert svc._should_send_email(AlertType.PROFIT_TARGET, AlertPriority.MEDIUM) is True
+    assert svc._should_send_email(AlertType.DAILY_SUMMARY, AlertPriority.LOW) is False
 
 
-def test_critical_unlisted_type_still_emails():
+def test_medium_no_longer_emails():
+    """Was the general MEDIUM->email rule before 2026-08-28 — position
+    closes, profit targets, etc. now stay Telegram-only too."""
+    svc = _svc()
+    assert svc._should_send_email(AlertType.PROFIT_TARGET, AlertPriority.MEDIUM) is False
+    assert svc._should_send_email(AlertType.POSITION_CLOSED, AlertPriority.MEDIUM) is False
+
+
+def test_routing_follows_the_passed_priority_not_the_alert_type():
+    """alert_type is intentionally NOT consulted — an alert_type whose
+    DEFAULT_PRIORITIES entry is non-CRITICAL still emails if the caller
+    passes an explicit CRITICAL override (matches send_alert's contract:
+    priority can be overridden per-call), and a normally-CRITICAL type
+    passed at a lower priority does not."""
     svc = _svc()
     assert svc._should_send_email(AlertType.MAX_LOSS, AlertPriority.CRITICAL) is True
+    assert svc._should_send_email(AlertType.CIRCUIT_BREAKER, AlertPriority.LOW) is False
 
 
 # ─── fingerprint ──────────────────────────────────────────────────────────

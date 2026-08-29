@@ -36,6 +36,23 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-08-28 (fourth same-day change) Alert email narrowed to CRITICAL-only
+  (shared/alert_service.py) — operator request after B alone (the only
+  variant with alerts.enabled=true) was generating 4-8+ emails/day into a
+  personal inbox: every stop loss, every position close, every profit-
+  target close, the daily summary. Replaced the old per-type
+  _EMAIL_ALWAYS/_TELEGRAM_ONLY override lists (in place since 2026-06-11)
+  with a pure priority check — email now fires only for CRITICAL (circuit
+  breaker, critical intervention, daily halt, naked position, emergency
+  exit, ITM risk close), everything else stays Telegram-only. Telegram
+  itself is completely unaffected — every alert still reaches it at its
+  normal priority; only the second, noisier channel was narrowed. 5 tests
+  rewritten to pin the new behavior (3 of the 4 old ones asserted the now-
+  removed exceptions and would have been actively wrong to keep); negative-
+  control run confirmed 4 of the 5 fail without the fix. Also updated
+  CLAUDE.md's Alert System table, which was already stale (never reflected
+  the 2026-06-11 override lists in the first place). Full suite 2530
+  passed.
 - 2026-08-28 (third same-day change) MKT-046 disable extended from B to C,
   F, and G. Rationale: MKT-046's 10s confirmation wait is confirmed NOT
   part of Tammy Chambless's or Sandvand's original MEIC research anywhere
