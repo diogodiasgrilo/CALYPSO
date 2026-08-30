@@ -36,6 +36,27 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-08-29 Two minor cosmetic/doc gaps found by the 2026-08-28 fleet audit,
+  fixed on operator approval:
+  1. G (bots/hydra/strangle_strategy.py) now overrides
+     `_show_ic_schedule_in_heartbeat = False`, mirroring F/Ghauri's identical
+     fix from the day before. Without it, G's heartbeat inherited HYDRA's
+     "E1-EN: full IC" schedule line, which reads `self._base_entry_count` —
+     an attribute G's `__init__` never sets (G reuses HYDRA's scheduled-entry
+     gating but is a 2-leg naked strangle, not a scheduled 4-leg IC), so the
+     line would have raised AttributeError the first time it executed live.
+     Log/cosmetic only, caught before it ever fired in production. 2 new
+     tests (tests/test_strangle_strategy.py::TestHeartbeatDoesNotClaimFullIC),
+     negative-control confirmed both fail with the exact AttributeError
+     without the fix.
+  2. shared/alert_service.py: 13 stale "Telegram + Email" references (module
+     docstring's Alert Priorities block, the AlertPriority enum comments, 2
+     section-header comments, 6 convenience-method docstrings) left over from
+     before the 2026-08-28 CRITICAL-only email change — corrected to
+     "Telegram only" (or removed where no longer accurate). Comments/
+     docstrings only, no behavior change; the 3 remaining "Telegram + Email"
+     mentions (CRITICAL cases) are still accurate and left as-is.
+  Full suite re-run clean after both fixes.
 - 2026-08-28 (fourth same-day change) Alert email narrowed to CRITICAL-only
   (shared/alert_service.py) — operator request after B alone (the only
   variant with alerts.enabled=true) was generating 4-8+ emails/day into a

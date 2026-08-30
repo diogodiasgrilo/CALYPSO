@@ -57,6 +57,11 @@ class StrangleStrategy(HydraStrategy):
 
     BOT_NAME = "STRANGLE"
     requires_protective_wings = False  # undefined-risk: naked shorts by design
+    # A strangle has no long wings, so the base class's "E1-EN: full IC"
+    # heartbeat line (written for a 4-leg iron condor) would misdescribe this
+    # 2-leg naked structure. Cosmetic/log-only — mirrors GhauriMeanReversion's
+    # identical override.
+    _show_ic_schedule_in_heartbeat = False
 
     def __init__(self, *args, **kwargs):
         """Construct, then enforce the dry-run-only gate.

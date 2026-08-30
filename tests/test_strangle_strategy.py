@@ -579,3 +579,28 @@ class TestNakedSettlement:
         booked, worthless = s._settlement_booked_pnl(e, "call", settlement_level=6700.0)
         assert worthless is True
         assert booked == pytest.approx(2000.0)  # OTM → full credit kept
+
+
+class TestHeartbeatDoesNotClaimFullIC:
+    """2026-08-29 audit-follow-up (cosmetic): a strangle has no long wings, so
+    HydraStrategy's shared 'E1-EN: full IC' heartbeat line (written for a
+    4-leg iron condor) misdescribes this 2-leg naked structure. Mirrors the
+    identical GhauriMeanReversionStrategy fix from the 2026-08-28 audit
+    (tests/test_ghauri_strategy.py::TestHeartbeatDoesNotClaimFullIC) — Strangle
+    was found to have the same gap, unfixed, one day later."""
+
+    def test_strangle_overrides_the_flag_to_false(self):
+        assert StrangleStrategy._show_ic_schedule_in_heartbeat is False
+
+    def test_strangle_omits_the_full_ic_schedule_line(self, monkeypatch):
+        from bots.hydra.base_strategy import MEICStrategy
+        monkeypatch.setattr(MEICStrategy, "get_detailed_position_status", lambda self: [])
+        inst = StrangleStrategy.__new__(StrangleStrategy)
+        inst.market_data = SimpleNamespace(spx_open=100.0, vix_open=15.0)
+        inst.current_price = 105.0
+        inst._current_trend = None
+        inst.vix_gate_enabled = False
+
+        lines = HydraStrategy.get_detailed_position_status(inst)
+
+        assert not any("full IC" in line or "Up-day" in line or "Down-day" in line for line in lines)

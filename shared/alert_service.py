@@ -33,13 +33,17 @@ Timezone:
     DST transitions (EST ↔ EDT) are handled automatically via pytz.
 
 Alert Priorities:
-    CRITICAL: Telegram + Email (circuit breaker, emergency exit, naked positions)
-    HIGH: Telegram + Email (stop loss, max loss, position issues)
-    MEDIUM: Telegram + Email (position opened, profit target, daily summaries)
-    LOW: Telegram + Email (informational, startup/shutdown)
+    CRITICAL: Telegram + Email (circuit breaker, emergency exit, naked positions,
+              daily halt, ITM risk close, critical intervention)
+    HIGH:     Telegram only (stop loss, max loss, position issues)
+    MEDIUM:   Telegram only (position opened, profit target, daily summaries)
+    LOW:      Telegram only (informational, startup/shutdown)
 
 Note: All priority levels send to Telegram for immediate visibility.
-      Email provides a permanent record with rich HTML formatting.
+      Only CRITICAL also sends email (see _should_send_email) — narrowed from
+      HIGH/MEDIUM/LOW-also-email on 2026-08-28 at the operator's request (the
+      live variant alone was generating 4-8+ emails/day into a personal inbox
+      for every stop loss, position close, and daily summary).
 
 Usage:
     from shared.alert_service import AlertService, AlertPriority
@@ -106,9 +110,9 @@ def describe_exception(e: Exception) -> str:
 class AlertPriority(Enum):
     """Alert priority levels determining delivery channels."""
     CRITICAL = "critical"  # Telegram + Email
-    HIGH = "high"          # Telegram + Email
-    MEDIUM = "medium"      # Telegram + Email (except POSITION_OPENED → Telegram only)
-    LOW = "low"            # Telegram only (except DAILY_SUMMARY and agent reports → both)
+    HIGH = "high"          # Telegram only (was + Email before 2026-08-28)
+    MEDIUM = "medium"      # Telegram only (was + Email before 2026-08-28)
+    LOW = "low"            # Telegram only
 
 
 class AlertType(Enum):
@@ -158,7 +162,7 @@ class AlertType(Enum):
     EMERGENCY_CLOSE = "emergency_close"      # Emergency position close event
     DATA_QUALITY = "data_quality"            # Data quality issue (stale quotes, invalid P&L)
 
-    # Market Status Events (Telegram + Email)
+    # Market Status Events (Telegram only — none of these are CRITICAL, see _should_send_email)
     MARKET_OPENING_SOON = "market_opening_soon"  # 1h, 30m, 15m countdown
     MARKET_OPEN = "market_open"                   # Market just opened
     MARKET_CLOSED = "market_closed"               # Market just closed
@@ -1580,7 +1584,7 @@ class AlertService:
         )
 
     # =========================================================================
-    # MARKET STATUS ALERTS (Telegram + Email)
+    # MARKET STATUS ALERTS (Telegram only — none of these are CRITICAL, see _should_send_email)
     # =========================================================================
 
     def market_opening_soon(
@@ -1590,7 +1594,7 @@ class AlertService:
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
         """
-        Send market opening countdown alert (LOW - Telegram + Email).
+        Send market opening countdown alert (LOW - Telegram only).
 
         Called at 1h, 30m, 15m before market open.
         """
@@ -1620,7 +1624,7 @@ class AlertService:
         spy_price: Optional[float] = None,
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Send market open notification (LOW - Telegram + Email)."""
+        """Send market open notification (LOW - Telegram only)."""
         extra = details or {}
         if vix_level is not None:
             extra["vix"] = vix_level
@@ -1645,7 +1649,7 @@ class AlertService:
         day_change_pct: Optional[float] = None,
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Send market closed notification (LOW - Telegram + Email)."""
+        """Send market closed notification (LOW - Telegram only)."""
         extra = details or {}
         if spy_close is not None:
             extra["spy_close"] = spy_close
@@ -1670,7 +1674,7 @@ class AlertService:
         next_open_date: str,
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Send market holiday notification (LOW - Telegram + Email)."""
+        """Send market holiday notification (LOW - Telegram only)."""
         extra = details or {}
 
         return self.send_alert(
@@ -1687,7 +1691,7 @@ class AlertService:
         close_time: str,
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Send early close day warning (LOW - Telegram + Email)."""
+        """Send early close day warning (LOW - Telegram only)."""
         extra = details or {}
 
         return self.send_alert(
@@ -1708,7 +1712,7 @@ class AlertService:
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
         """
-        Send big pre-market gap alert (HIGH - Telegram + Email).
+        Send big pre-market gap alert (HIGH - Telegram only).
 
         This is for significant overnight/premarket moves that will affect positions.
         """
