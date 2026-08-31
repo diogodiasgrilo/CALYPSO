@@ -1568,9 +1568,19 @@ class TestFix82OvernightCheck:
         s.contracts_per_entry = 1
         s._critical_intervention_required = False
         s._critical_intervention_reason = None
+        # 2026-08-31: the halt paths now call this explicitly (see
+        # bots/hydra/__init__.py version history) — mock it, the real
+        # method needs state this minimal stub doesn't have.
+        s._save_state_to_disk = MagicMock()
         return s
 
-    def test_overnight_positions_trigger_halt(self):
+    def test_overnight_positions_trigger_halt(self, monkeypatch):
+        """2026-08-31: a non-empty read now gets ONE confirm-before-alarm
+        re-check (see bots/hydra/__init__.py version history) before
+        latching — a genuine overnight position must survive BOTH reads,
+        not just the first. Was a single strict=True call; now two."""
+        import bots.hydra.strategy as strategy_mod
+        monkeypatch.setattr(strategy_mod.time, "sleep", lambda *_: None)
         s = self._make_strategy()
         s.registry.get_positions.return_value = {"stale-1"}
         s._read_open_positions = MagicMock(return_value=[
@@ -1579,10 +1589,19 @@ class TestFix82OvernightCheck:
         s._reset_for_new_day()
         assert s._critical_intervention_required is True
         s.alert_service.send_alert.assert_called_once()
-        # strict=True so a fetch failure would be distinguishable
-        s._read_open_positions.assert_called_once_with(strict=True)
+        # strict=True on both the initial read and the confirm-before-alarm
+        # re-check — both calls saw the same non-empty position.
+        assert s._read_open_positions.call_count == 2
+        for call in s._read_open_positions.call_args_list:
+            assert call.kwargs == {"strict": True}
 
-    def test_fetch_failure_triggers_conservative_halt(self):
+    def test_fetch_failure_triggers_conservative_halt(self, monkeypatch):
+        """2026-08-31: a fetch failure now gets STATE004_MAX_ATTEMPTS bounded
+        retries (see bots/hydra/__init__.py version history) before latching
+        — the terminal halt-on-exhaustion behavior this test pins is
+        unchanged, only the path to get there."""
+        import bots.hydra.strategy as strategy_mod
+        monkeypatch.setattr(strategy_mod.time, "sleep", lambda *_: None)
         s = self._make_strategy()
         s.registry.get_positions.return_value = {"stale-1"}
         s._read_open_positions = MagicMock(
@@ -1591,6 +1610,7 @@ class TestFix82OvernightCheck:
         s._reset_for_new_day()
         assert s._critical_intervention_required is True
         s.alert_service.send_alert.assert_called_once()
+        assert s._read_open_positions.call_count == strategy_mod.STATE004_MAX_ATTEMPTS
 
     # The "no overnight positions → clean registry → proceed to full
     # reset" path falls through into the whole _reset_for_new_day body

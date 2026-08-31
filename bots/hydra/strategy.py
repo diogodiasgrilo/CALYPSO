@@ -126,6 +126,24 @@ CALM_PLACEMENT_HEADROOM_SEC = 60
 # ~75 min of failed reads before the operator is paged.
 SETTLEMENT_MAX_STRICT_READ_FAILURES = 5
 
+# STATE-004 fix (2026-08-31 forensic): the new-day overnight-position check
+# used to halt the bot PERMANENTLY (_critical_intervention_required, no
+# retry, no expiry) on a single failed broker read — including a routine
+# ~20-27s calypso-broker reconnect blip at market open, which froze 5 of 7
+# live variants for ~6 hours until a manual restart. Bounded retry before
+# latching. Delay matches main.py's BROKER_OUTAGE_RECHECK_S (already
+# calibrated for this exact broker's reconnect behavior) rather than
+# inventing a new number. Worst case if every attempt genuinely hangs
+# (not just fails fast, like this incident did): up to
+# STATE004_MAX_ATTEMPTS * BrokerClient's ~35s HTTP timeout, plus
+# (STATE004_MAX_ATTEMPTS - 1) * STATE004_RETRY_DELAY_S between attempts —
+# roughly 3.5 minutes. Acceptable: this runs once/day at the date-rollover
+# boundary, when STATE-004's own premise is "there should be zero open
+# positions anyway," and TIME-001's operation lock correctly serializes
+# concurrent ticks during the wait.
+STATE004_MAX_ATTEMPTS = 4
+STATE004_RETRY_DELAY_S = 20
+
 # MKT-034: VIX-scaled entry time shifting (DISABLED since v1.10.3 — code preserved)
 # When enabled via vix_time_shift.enabled, these slots replace config entry_times.
 ALL_ENTRY_SLOTS = [
@@ -11865,6 +11883,17 @@ class HydraStrategy(MEICStrategy):
                 "date": self.daily_state.date,
                 "state": self.state.value,
                 "last_heartbeat_at": last_heartbeat_at,  # Polish Item 2 (ARGUS)
+                # 2026-08-31 forensic: persisted for VISIBILITY only (dashboard,
+                # ARGUS) — deliberately NOT restored on process restart (see
+                # _load_state_file_history), so "restart clears the halt"
+                # stays the operational convention unchanged. Key name matches
+                # get_dashboard_metrics()'s existing "critical_intervention" key.
+                # getattr-defensive: base_strategy.__init__ always sets both
+                # (see MEICStrategy.__init__), but a strategy built via
+                # __new__() for testing/partial-construction may not have
+                # reached __init__ yet.
+                "critical_intervention": getattr(self, "_critical_intervention_required", False),
+                "critical_intervention_reason": getattr(self, "_critical_intervention_reason", ""),
                 "next_entry_index": self._next_entry_index,
                 # Phase 2 X-1: top-level contract count for dashboard / agents / HOMER.
                 # Individual entries already carry their own `contracts` (written inside
@@ -12649,6 +12678,33 @@ class HydraStrategy(MEICStrategy):
             logger.error(f"orphan-sweep alert send failed: {describe_exception(exc)}")
         return len(orphans)
 
+    def _read_open_positions_for_new_day_reset(self) -> List[Dict[str, Any]]:
+        """STATE-004: bounded retry around the overnight-position broker read.
+
+        A single failed read here used to halt the bot PERMANENTLY (see
+        STATE004_MAX_ATTEMPTS's module-level comment) — including on a
+        routine, self-healing broker reconnect blip. Retry up to
+        STATE004_MAX_ATTEMPTS times, STATE004_RETRY_DELAY_S apart, logging
+        each intermediate failure at WARNING. On final exhaustion, let the
+        exception propagate to the caller's except block unchanged (still
+        logs CRITICAL, alerts, and latches the halt — that part is correct
+        and stays; only the missing retry budget was the bug).
+        """
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, STATE004_MAX_ATTEMPTS + 1):
+            try:
+                return self._read_open_positions(strict=True)
+            except Exception as e:
+                last_exc = e
+                if attempt < STATE004_MAX_ATTEMPTS:
+                    logger.warning(
+                        f"STATE-004: overnight-position read failed (attempt "
+                        f"{attempt}/{STATE004_MAX_ATTEMPTS}): {e} — retrying "
+                        f"in {STATE004_RETRY_DELAY_S}s"
+                    )
+                    time.sleep(STATE004_RETRY_DELAY_S)
+        raise last_exc
+
     def _reset_for_new_day(self):
         """
         Reset state for a new trading day.
@@ -12689,11 +12745,12 @@ class HydraStrategy(MEICStrategy):
         # IBKR but keeps the registry tidy if a multi-bot future
         # resurrects it.
         try:
-            open_positions = self._read_open_positions(strict=True)
+            open_positions = self._read_open_positions_for_new_day_reset()
         except Exception as e:
             error_msg = (
                 f"CRITICAL: broker overnight-position check failed at "
-                f"new-day reset ({e}) — halting for safety"
+                f"new-day reset after {STATE004_MAX_ATTEMPTS} attempts "
+                f"({e}) — halting for safety"
             )
             logger.critical(error_msg)
             self.alert_service.send_alert(
@@ -12701,14 +12758,45 @@ class HydraStrategy(MEICStrategy):
                 title=f"{self.BOT_NAME} Overnight Position Check Failed!",
                 message=error_msg,
                 priority=AlertPriority.CRITICAL,
-                details={"error": str(e)},
+                details={"error": str(e), "attempts": STATE004_MAX_ATTEMPTS},
                 contracts=self.contracts_per_entry,
             )
             self._critical_intervention_required = True
             self._critical_intervention_reason = (
                 f"Overnight position verification failed: {e}"
             )
+            self._save_state_to_disk()
             return
+
+        if open_positions:
+            # Confirm-before-alarm (same pattern as _recon_recheck_at below):
+            # a non-empty read can itself be a transitional/misleading
+            # snapshot during a reconnect blip rather than a genuine
+            # overnight position. Re-check once before declaring an
+            # emergency — only latch if the SECOND read still shows it.
+            logger.warning(
+                f"STATE-004: {len(open_positions)} position(s) found open — "
+                f"re-checking once in {STATE004_RETRY_DELAY_S}s before "
+                f"declaring an overnight-position emergency"
+            )
+            time.sleep(STATE004_RETRY_DELAY_S)
+            try:
+                open_positions = self._read_open_positions(strict=True)
+            except Exception as recheck_exc:
+                # Treat a failed re-check itself as the broker-outage path,
+                # not a confirmed overnight position — fall through with
+                # the ORIGINAL (possibly stale) open_positions so a genuine
+                # emergency still isn't silently dropped, but don't compound
+                # a transient failure into two different alert types.
+                # Audit finding (2026-08-31): this used to be a bare `pass`
+                # with zero log trace — an operator seeing the CRITICAL
+                # alert below had no way to tell "confirmed twice" from
+                # "confirmed once, then the re-check itself broke."
+                logger.warning(
+                    f"STATE-004: confirm-before-alarm re-check itself failed "
+                    f"({recheck_exc}) — proceeding on the ORIGINAL read, not "
+                    f"re-confirmed"
+                )
 
         if open_positions:
             # Genuine overnight 0DTE — 0DTE options always settle same day,
@@ -12736,6 +12824,7 @@ class HydraStrategy(MEICStrategy):
             self._critical_intervention_reason = (
                 "Overnight 0DTE positions detected - investigate immediately"
             )
+            self._save_state_to_disk()
             return  # Don't reset state, need to handle existing positions
 
         # Broker shows nothing open — clean up any stale registry entries

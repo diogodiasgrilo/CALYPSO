@@ -36,6 +36,103 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-08-31 STATE-004 permanent-halt fix + fleet-wide halt detection.
+  Root cause: at 09:30:29 ET a ~20-27s calypso-broker reconnect blip (the
+  broker's own session-auth recovered normally within seconds — this was
+  purely a strategy-layer overreaction) caused `_reset_for_new_day()`'s
+  overnight-position check to catch one failed `_read_open_positions`
+  call and latch `_critical_intervention_required=True` PERMANENTLY, no
+  retry. That flag is checked FIRST in `_run_strategy_check_internal`, so
+  it froze market-data updates, entry logic, and everything else for A,
+  C, D, E, F (5 of 7 live variants) for ~6 hours until a manual restart.
+  A and C silently sat out their entire trading day (zero entries). The
+  dashboard's SPX chart also rendered as a flat blue line instead of
+  candlesticks for the affected variants — not a separate bug, a correct,
+  honest downstream consequence: the chart's `chooseSeriesType()` (see
+  dashboard/frontend/src/components/market/SPXChart.tsx) draws a plain
+  line when >50% of visible 1-min bars are "dojis" (open=high=low=close),
+  which every bar was during the ~2h16m freeze.
+  Fix (bots/hydra/strategy.py):
+    1. New `_read_open_positions_for_new_day_reset()` — bounded retry
+       (STATE004_MAX_ATTEMPTS=4, STATE004_RETRY_DELAY_S=20s between
+       attempts, matching main.py's own BROKER_OUTAGE_RECHECK_S
+       precedent) before the except block's existing (unchanged)
+       CRITICAL-log + alert + permanent-latch on final exhaustion — that
+       terminal behavior is CORRECT and stays; only the missing retry
+       budget was the bug. A bare "stop halting on first failure" fix
+       without this would have been WORSE than today: main.py's call
+       site sets `last_day = today` unconditionally regardless of
+       success, so a bare failure would leave the bot silently stuck in
+       DAILY_COMPLETE forever with zero retry and zero alert.
+    2. Confirm-before-alarm on the adjacent "genuine overnight positions
+       found" branch: a single re-check (not a loop) before latching, so
+       a transitional/misleading non-empty read during a reconnect blip
+       doesn't false-alarm. On a re-check failure, falls through treating
+       the original read as confirmed (fail closed, matches strict=True's
+       existing house philosophy) — and now logs a WARNING naming that
+       ambiguity explicitly (an adversarial post-implementation audit
+       caught this as a silent `except: pass` with zero log trace in the
+       first draft; fixed, test now asserts the log line fires).
+    3. The halt flag is now persisted to the state file
+       (`critical_intervention` / `critical_intervention_reason` in
+       `_save_state_to_disk`'s `state_data`, key name matching
+       `get_dashboard_metrics()`'s existing key; read via `getattr` with
+       safe defaults since not every partial-construction/test path has
+       these attributes set) — previously invisible outside the
+       in-process flag, which is why ARGUS (running every 15 min the
+       whole time) never caught it. Explicitly NOT wired into the
+       restore-on-restart path — "restart clears the halt" stays the
+       unchanged operational convention; this is persist-for-visibility
+       only. `_save_state_to_disk()` is also now called explicitly at
+       both latch points, closing the ~10s window before main.py's
+       periodic save would otherwise catch it.
+  Covers ALL 7 variants with this ONE base-class fix — confirmed every
+  variant override (`calendar_strategy_base.py` D/E, `ghauri_strategy.py`
+  F, `brandon/strategy.py` B/C) calls `super()._reset_for_new_day()` as
+  its first line with no wrapping try/except; G doesn't override the
+  method at all.
+  ARGUS (`services/argus/health_check.sh`), separately:
+    - Fixed a real bash bug in `is_market_hours()` — `date +"%H"` is
+      zero-padded, and `[[ ]]` arithmetic parses a leading-zero operand
+      as octal, so "08"/"09" threw `value too great for base` every
+      8:00-8:59 and 9:00-9:59 ET hour (no `set -e`, so it silently
+      misbehaved rather than crashing) — exactly the hour of this
+      incident. `is_trading_session()` already had the correct `10#`
+      fix; ported it over.
+    - Added a per-variant `critical_intervention` check reading the new
+      state-file field — unconditional, not gated on trading-session
+      hours, since a halt matters at any hour. Failure text is
+      unambiguously prefixed `CRITICAL_INTERVENTION: <unit> HALTED —
+      <reason>` so it can't be mistaken for routine noise (disk space,
+      stale log) when skimming the alert inbox.
+    - Extended variant coverage from {A, B, C} to all 7 (A-G) — D, E, F,
+      G previously had ZERO ARGUS coverage of any kind. D and G are
+      dry-run-locked (no real orders) but still make the real broker
+      overnight-position call, so they were just as exposed to this bug.
+      Refactored the duplicated B/C-only block into a loop.
+  A one-time, non-blocking staged fire drill (deliberately trip STATE-004
+  on a dry-run-locked variant post-deploy, confirm the real alert/log
+  pipeline on the live VM) is still open — see the plan file for context;
+  not required before this fix ships.
+  Also investigated but NOT part of this fix: today's original incident's
+  own CRITICAL alert produced zero trace anywhere in the journal despite
+  the code provably executing all the way through — exhaustively ruled
+  out log-level filtering, logger shadowing, custom filters, anti-spam
+  gate suppression, Pub/Sub-availability short-circuiting, and journald
+  rate-limiting via code reading. A two-layer reproduction test
+  (tests/test_state004_overnight_check_2026_08_31.py, mirroring
+  tests/test_alert_send_failure_logging_2026_08_04.py +
+  tests/test_alert_publish_reliability.py's patterns) drove the REAL
+  AlertService code and the CRITICAL alert line fired cleanly — proving
+  the Python code is correct in isolation, so the incident's silence was
+  environment/infra-specific to that host that morning, not an
+  application bug. ARGUS's new fleet-wide check means the fleet no longer
+  depends solely on that one alert-delivery path succeeding regardless.
+  Plan + 2 Explore agents + 1 independent design-review agent + 1
+  independent adversarial post-implementation audit (found 2 real gaps,
+  both fixed: the missing version-history entry you're reading now, and
+  the silent except-swallow in item 2 above). Full suite 2545+ passed
+  throughout; negative-control-verified for every sub-fix.
 - 2026-08-29 Two minor cosmetic/doc gaps found by the 2026-08-28 fleet audit,
   fixed on operator approval:
   1. G (bots/hydra/strangle_strategy.py) now overrides

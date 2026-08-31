@@ -620,6 +620,15 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 if today != last_day:
                     trade_logger.log_event("New trading day detected - resetting strategy")
                     strategy._reset_for_new_day()
+                    # 2026-08-31 forensic: `last_day` is set UNCONDITIONALLY here
+                    # regardless of whether _reset_for_new_day() succeeded — this
+                    # is intentional, don't "fix" it in isolation. STATE-004's own
+                    # retry budget (strategy.py: STATE004_MAX_ATTEMPTS /
+                    # _read_open_positions_for_new_day_reset) is what protects a
+                    # transient broker blip now; without it, a bare failure here
+                    # with this line still unconditional would leave the bot
+                    # silently stuck in DAILY_COMPLETE forever (this loop would
+                    # never attempt the reset again today).
                     last_day = today
                     last_snapshot_time = None
                     # Polish Item 1: reset per-day alert flags (first-of-day

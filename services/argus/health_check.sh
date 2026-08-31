@@ -45,9 +45,18 @@ STATE_FILE="${CALYPSO_DIR}/data/hydra_state.json"
 # I-H1: per-variant state files. Whichever of B/C holds the live paper seat
 # (B since the 2026-07-24 swap; was C before) previously had ZERO ARGUS
 # coverage — a crash/freeze/stale-state there reported PASS. CHECK 9 below
-# watches both B and C regardless of which is currently live.
-VARIANT_B_STATE_FILE="${CALYPSO_DIR}/data/variant_b/hydra_state.json"
-VARIANT_C_STATE_FILE="${CALYPSO_DIR}/data/variant_c/hydra_state.json"
+# watches B and C regardless of which is currently live.
+# 2026-08-31: extended to D-G too — the 6-hour STATE-004 halt incident hit
+# A/C/D/E/F, and D/E/F/G had ZERO coverage before this (only A inline + B/C
+# via CHECK 9). D and G are "dry-run-locked" (no real orders) but still make
+# the real broker overnight-position check, so they're just as exposed to
+# this exact bug — covering them is correct, not scope creep. All follow the
+# identical data/variant_<id>/hydra_state.json convention.
+VARIANT_IDS=("b" "c" "d" "e" "f" "g")
+declare -A VARIANT_STATE_FILE
+for _vid in "${VARIANT_IDS[@]}"; do
+    VARIANT_STATE_FILE["${_vid}"]="${CALYPSO_DIR}/data/variant_${_vid}/hydra_state.json"
+done
 GCS_BACKUPS="gs://calypso-backups"
 # Circuit breakers live in the calypso-broker process (P5a/commit 13776d6), not
 # in hydra, and the broker logs to a rotating FILE (not journald). Check 3 scans
@@ -76,7 +85,15 @@ WARNINGS=()
 # accounts for pre-market data fetching + post-market settlement work.
 is_market_hours() {
     local hour_et
-    hour_et=$(TZ="America/New_York" date +"%H")
+    # 2026-08-31 fix: `date +"%H"` is zero-padded ("09"), and bash `[[ ]]`
+    # arithmetic parses a leading-zero operand as octal — "08"/"09" aren't
+    # valid octal digits, so this silently threw `value too great for base`
+    # every 8:00-8:59 and 9:00-9:59 ET hour (no `set -e`, so it just fails
+    # false-y instead of crashing) — exactly the hour of the 2026-08-31
+    # STATE-004 incident, so ARGUS's log-staleness checks were blind for
+    # that whole hour. `10#` forces base-10 parsing. Mirrors the identical,
+    # already-correct fix in is_trading_session() below.
+    hour_et=$((10#$(TZ="America/New_York" date +"%H")))
     local dow
     dow=$(date +"%u")
     if [[ "$dow" -le 5 ]] && [[ "$hour_et" -ge 9 ]] && [[ "$hour_et" -lt 17 ]]; then
@@ -201,6 +218,30 @@ except Exception:
     if [[ -f "${vstate}" ]]; then
         if ! "${VENV_PYTHON}" -c "import json; json.load(open('${vstate}'))" 2>/dev/null; then
             FAILURES+=("${unit} state file is not valid JSON: ${vstate}")
+        fi
+    fi
+
+    # 2026-08-31: critical_intervention halt detection. A process can be
+    # ALIVE, HEARTBEATING NORMALLY (state-saves keep firing even fully
+    # halted), and have VALID state JSON while internally dead-halted via
+    # self._critical_intervention_required — that's exactly what happened
+    # for ~6 hours today and ARGUS reported PASS the entire time, because
+    # nothing here ever looked at this field. Unconditional (not gated on
+    # trading-session/market-hours) — a halt matters at any hour.
+    if [[ -f "${vstate}" ]]; then
+        local v_ci
+        v_ci=$("${VENV_PYTHON}" -c "
+import json
+try:
+    with open('${vstate}') as f:
+        s = json.load(f)
+    if s.get('critical_intervention'):
+        print(s.get('critical_intervention_reason') or '(no reason recorded)')
+except Exception:
+    pass
+" 2>/dev/null)
+        if [[ -n "${v_ci}" ]]; then
+            FAILURES+=("CRITICAL_INTERVENTION: ${unit} HALTED — ${v_ci}")
         fi
     fi
 
@@ -418,6 +459,24 @@ if [[ -f "${STATE_FILE}" ]]; then
         state_status="corrupt"
         FAILURES+=("State file is not valid JSON: ${STATE_FILE}")
     fi
+    # 2026-08-31: critical_intervention halt detection for variant A — mirrors
+    # the same check added to check_variant_health() for B-G (A uses its own
+    # separate inline checks, not that shared function, so this is duplicated
+    # here rather than routing A through it). Unconditional — not gated on
+    # trading-session/market-hours.
+    hydra_ci=$("${VENV_PYTHON}" -c "
+import json
+try:
+    with open('${STATE_FILE}') as f:
+        s = json.load(f)
+    if s.get('critical_intervention'):
+        print(s.get('critical_intervention_reason') or '(no reason recorded)')
+except Exception:
+    pass
+" 2>/dev/null)
+    if [[ -n "${hydra_ci}" ]]; then
+        FAILURES+=("CRITICAL_INTERVENTION: hydra HALTED — ${hydra_ci}")
+    fi
 else
     state_status="missing"
     WARNINGS+=("State file not found (may be normal outside trading)")
@@ -457,29 +516,29 @@ elif ! command -v gsutil >/dev/null 2>&1; then
 fi
 
 # =========================================================================
-# CHECK 9: Variant coverage (I-H1) — whichever of B/C holds the LIVE
-# real-paper-order seat (B since 2026-07-24; was C before) MUST be watched;
-# both are watched regardless so a future swap needs no code change here.
-# Uses check_variant_health() (process + heartbeat + state integrity + log
-# staleness). Only runs if the unit is installed on this host (a single-bot
-# host without the variant units shouldn't false-FAIL).
+# CHECK 9: Variant coverage (I-H1, extended 2026-08-31 to all of B-G) —
+# whichever of B/C holds the LIVE real-paper-order seat MUST be watched;
+# all six are watched regardless so a future live-seat swap needs no code
+# change here. Uses check_variant_health() (process + heartbeat + state
+# integrity + critical_intervention halt + log staleness). Only runs if the
+# unit is installed on this host (a single-bot host without the variant
+# units shouldn't false-FAIL).
 # =========================================================================
-variant_c_status="ok"
-variant_b_status="ok"
-if systemctl list-unit-files hydra_variant_c.service >/dev/null 2>&1; then
-    pre_c=${#FAILURES[@]}
-    check_variant_health "hydra_variant_c" "${VARIANT_C_STATE_FILE}"
-    [[ ${#FAILURES[@]} -gt ${pre_c} ]] && variant_c_status="fail"
-else
-    variant_c_status="not_installed"
-fi
-if systemctl list-unit-files hydra_variant_b.service >/dev/null 2>&1; then
-    pre_b=${#FAILURES[@]}
-    check_variant_health "hydra_variant_b" "${VARIANT_B_STATE_FILE}"
-    [[ ${#FAILURES[@]} -gt ${pre_b} ]] && variant_b_status="fail"
-else
-    variant_b_status="not_installed"
-fi
+declare -A VARIANT_STATUS
+for _vid in "${VARIANT_IDS[@]}"; do
+    _unit="hydra_variant_${_vid}"
+    if systemctl list-unit-files "${_unit}.service" >/dev/null 2>&1; then
+        _pre=${#FAILURES[@]}
+        check_variant_health "${_unit}" "${VARIANT_STATE_FILE[${_vid}]}"
+        if [[ ${#FAILURES[@]} -gt ${_pre} ]]; then
+            VARIANT_STATUS["${_vid}"]="fail"
+        else
+            VARIANT_STATUS["${_vid}"]="ok"
+        fi
+    else
+        VARIANT_STATUS["${_vid}"]="not_installed"
+    fi
+done
 
 # =========================================================================
 # BUILD RESULT
@@ -492,8 +551,13 @@ fi
 # Build JSON log entry — replaced Saxo-era keys (token_keeper,
 # token_cache, token_age_min) with IBKR-era keys (heartbeat,
 # heartbeat_age_min, breaker, breaker_opens_today, backup).
+# 2026-08-31: variant_* keys extended from {b,c} to all of b-g.
+variants_json=""
+for _vid in "${VARIANT_IDS[@]}"; do
+    variants_json="${variants_json}\"variant_${_vid}\":\"${VARIANT_STATUS[${_vid}]}\","
+done
 log_entry=$(cat <<JSONEOF
-{"timestamp":"${TIMESTAMP}","status":"${overall}","hydra":"${hydra_status}","heartbeat":"${heartbeat_status}","heartbeat_age_min":"${heartbeat_age_min}","breaker":"${breaker_status}","breaker_opens_today":"${breaker_opens_today}","disk_pct":"${disk_pct}","disk":"${disk_status}","memory_pct":"${memory_pct}","memory":"${memory_status}","log":"${log_status}","log_age_min":"${log_age_min}","state_file":"${state_status}","backup":"${backup_status}","variant_c":"${variant_c_status}","variant_b":"${variant_b_status}","failures":${#FAILURES[@]},"warnings":${#WARNINGS[@]}}
+{"timestamp":"${TIMESTAMP}","status":"${overall}","hydra":"${hydra_status}","heartbeat":"${heartbeat_status}","heartbeat_age_min":"${heartbeat_age_min}","breaker":"${breaker_status}","breaker_opens_today":"${breaker_opens_today}","disk_pct":"${disk_pct}","disk":"${disk_status}","memory_pct":"${memory_pct}","memory":"${memory_status}","log":"${log_status}","log_age_min":"${log_age_min}","state_file":"${state_status}","backup":"${backup_status}",${variants_json}"failures":${#FAILURES[@]},"warnings":${#WARNINGS[@]}}
 JSONEOF
 )
 
