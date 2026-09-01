@@ -48,6 +48,8 @@ def _make_instance(**brandon_attrs):
         brandon_accel_peak_locality_pts=25.0,
         brandon_accel_peak_persistence_enabled=False,
         brandon_accel_peak_persistence_tolerance_pts=10.0,
+        # 2026-09-01: hydration-cap fix default (was a bare 80 literal).
+        brandon_gex_max_contracts_to_hydrate=250,
         brandon_overlay_enabled=False,
         brandon_overlay_trigger_distance_pts=25.0,
         brandon_overlay_butterfly_width=10,
@@ -852,8 +854,10 @@ class TestGEXProfileFetch:
 
         def fake_fetch(*a, **k):
             fetched["n"] += 1
+            # 2026-09-01: fetch_polygon_chain_with_greeks now returns
+            # (contracts, candidates_found), not a bare list.
             return [{"details": {"strike_price": 6800, "contract_type": "call"},
-                     "open_interest": 100, "greeks": {"gamma": 0.001}}]
+                     "open_interest": 100, "greeks": {"gamma": 0.001}}], 1
 
         monkeypatch.setattr(
             bstrat.gex_provider, "fetch_polygon_chain_with_greeks", fake_fetch
