@@ -54,7 +54,7 @@ class TestVariantView:
         s._load_variant_state = lambda vid: None
         out = s._build_telegram_variant_view("b")
         assert "no fresh state" in out
-        assert "Brandon Narrow (7-slot)" in out  # B's display_name
+        assert "Brandon Narrow (6-slot)" in out  # B's display_name
 
 
 class TestDelegation:

@@ -1,5 +1,5 @@
 {
-  "_comment_variant": "HYDRA Variant B \u2014 Brandon Trojan Horse stack with NARROW 5/10pt widths (same as variant C). CURRENT STATE (since the 2026-07-24 live-seat swap, RUNBOOKS.md RB-9): B is the LIVE paper seat at 7 contracts, 7-slot entry grid (09:45\u201312:45, 30min grid). C is now dry-run-shadow. History: 2026-05-13 cut from 7 slots to 4 after a 5/4-5/12 review found commission drag dominated at the original 7-slot x 15c sizing (each Brandon narrow-spread entry pays $2.50/leg x 4 legs x 15c = $150 round-trip; 7 slots = $1,050/day in fees alone). Same 2026-05-13 change: contracts_per_entry 15 -> 10 (same commission-drag logic). 2026-07-01: widened back 4 -> 7 base slots as the per-slot tester for slot_edge (attempt all 7 every zone, gates filter). Later re-sized 10c -> 7c for the live swap. Pre-2026-05-05 design used HYDRA wide widths; retired because Brandon GEX-ADJ + put-only VIX gate combined to skip B on most days. NOTE: this checked-in file is a sample/template, not deploy-authoritative \u2014 the VM's live copy is edited directly there (see CLAUDE.md Config Files) and may diverge from this value.",
+  "_comment_variant": "HYDRA Variant B \u2014 Brandon Trojan Horse stack with NARROW 5/10pt widths (same as variant C). CURRENT STATE (since the 2026-09-02 slot-audit change): B is the LIVE paper seat at 7 contracts, 6-slot entry grid (09:45\u201312:45, 30min grid, 11:15 REMOVED). C is dry-run-shadow, still running the original schedule (kept as a control -- see the vix_regime._comment_max_entries note below for the finding). History: 2026-05-13 cut from 7 slots to 4 after a 5/4-5/12 review found commission drag dominated at the original 7-slot x 15c sizing (each Brandon narrow-spread entry pays $2.50/leg x 4 legs x 15c = $150 round-trip; 7 slots = $1,050/day in fees alone). Same 2026-05-13 change: contracts_per_entry 15 -> 10 (same commission-drag logic). 2026-07-01: widened back 4 -> 7 base slots as the per-slot tester for slot_edge (attempt all 7 every zone, gates filter). Later re-sized 10c -> 7c for the live swap. 2026-09-02: dropped 11:15 (7 -> 6 slots) after a per-slot P&L audit found it B's clear worst performer, independently confirmed on C. Pre-2026-05-05 design used HYDRA wide widths; retired because Brandon GEX-ADJ + put-only VIX gate combined to skip B on most days. NOTE: this checked-in file is a sample/template, not deploy-authoritative \u2014 the VM's live copy is edited directly there (see CLAUDE.md Config Files) and may diverge from this value.",
   "bot_name": "HYDRA",
   "dry_run": false,
   "_comment_credentials": "IBKR OAuth credentials are loaded from systemd $CREDENTIALS_DIRECTORY on the VM, or env vars in dev. Not in this file.",
@@ -11,7 +11,6 @@
       "09:45",
       "10:15",
       "10:45",
-      "11:15",
       "11:45",
       "12:15",
       "12:45"
@@ -88,7 +87,7 @@
     "hold_check_lean_tolerance": 1.0,
     "min_entries_before_roc_gate": 3,
     "vix_regime": {
-      "_comment_max_entries": "2026-07-01: widened 4->7 base slots (09:45-12:45, 30min grid) as the per-slot TESTER for slot_edge; attempt all 7 every zone, gates filter. Was [4,4,3,2].",
+      "_comment_max_entries": "2026-07-01: widened 4->7 base slots (09:45-12:45, 30min grid) as the per-slot TESTER for slot_edge; attempt all 7 every zone, gates filter. Was [4,4,3,2]. 2026-09-02: dropped to 6 slots -- removed 11:15 after a per-slot audit found it B's worst performer (60% WR, -$3,538 net over 20 entries) AND independently confirmed bad on C too, with losses clustering on the SAME calendar days for both variants (07-13/07-16/08-19/08-28), ruling out per-variant noise. C left running 11:15 unchanged as an ongoing control for this finding.",
       "enabled": true,
       "breakpoints": [
         18.0,
@@ -96,10 +95,10 @@
         28.0
       ],
       "max_entries": [
-        7,
-        7,
-        7,
-        7
+        6,
+        6,
+        6,
+        6
       ],
       "put_stop_buffer": [
         null,

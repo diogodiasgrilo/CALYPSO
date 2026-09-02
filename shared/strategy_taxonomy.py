@@ -122,7 +122,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
     ),
     "b": StrategyMeta(
         id="b",
-        display_name="Brandon Narrow (7-slot)",
+        display_name="Brandon Narrow (6-slot)",  # 2026-09-02: 11:15 dropped after a per-slot P&L audit (was 7-slot)
         short_name="BRANDON-B",
         strategy_class="brandon",
         group_id="ic_0dte",
