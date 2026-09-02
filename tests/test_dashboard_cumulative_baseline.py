@@ -51,7 +51,7 @@ def _seed_db(path: Path) -> None:
             date TEXT, entry_number INTEGER, total_credit REAL,
             call_spread_width REAL, put_spread_width REAL, contracts INTEGER
         );
-        CREATE TABLE trade_stops (date TEXT, entry_number INTEGER, side TEXT);
+        CREATE TABLE trade_stops (date TEXT, entry_number INTEGER, side TEXT, net_pnl REAL);
         """
     )
     # 2 pre-baseline days, 1 boundary-1 day, 2 post-baseline days.
@@ -79,11 +79,13 @@ def _seed_db(path: Path) -> None:
         ],
     )
     conn.executemany(
-        "INSERT INTO trade_stops (date, entry_number, side) VALUES (?, ?, ?)",
+        "INSERT INTO trade_stops (date, entry_number, side, net_pnl) VALUES (?, ?, ?, ?)",
         [
-            ("2026-06-03", 1, "call"),
-            ("2026-06-04", 1, "put"),
-            ("2026-06-05", 1, "put"),
+            # No exit_reason column in this fixture (pre-v11 shape) -- net_pnl < 0
+            # is the fallback "genuine stop" definition, so each must be a real loss.
+            ("2026-06-03", 1, "call", -150.0),
+            ("2026-06-04", 1, "put", -75.0),
+            ("2026-06-05", 1, "put", -200.0),
         ],
     )
     conn.commit()
@@ -94,6 +96,41 @@ def _reader(tmp_path: Path) -> BacktestingDBReader:
     db = tmp_path / "backtesting.db"
     _seed_db(db)
     return BacktestingDBReader(db)
+
+
+def test_total_stops_excludes_take_profit_when_exit_reason_present(tmp_path):
+    """2026-09-02: the dashboard's total_stops must use the same canonical
+    "genuine stop" definition as the bot's own self-heal (exit_reason IN
+    stop_loss/gex_breach) once that column exists — a Brandon take-profit
+    WIN must not inflate the stop count just because it also writes a
+    trade_stops row."""
+    db = tmp_path / "backtesting.db"
+    conn = sqlite3.connect(str(db))
+    conn.executescript(
+        """
+        CREATE TABLE daily_summaries (date TEXT PRIMARY KEY, net_pnl REAL);
+        CREATE TABLE trade_entries (
+            date TEXT, entry_number INTEGER, total_credit REAL,
+            call_spread_width REAL, put_spread_width REAL, contracts INTEGER
+        );
+        CREATE TABLE trade_stops (
+            date TEXT, entry_number INTEGER, side TEXT, net_pnl REAL, exit_reason TEXT
+        );
+        """
+    )
+    conn.executemany(
+        "INSERT INTO trade_stops (date, entry_number, side, net_pnl, exit_reason) VALUES (?, ?, ?, ?, ?)",
+        [
+            ("2026-06-10", 1, "put", -100.0, "stop_loss"),
+            ("2026-06-10", 2, "call", -80.0, "gex_breach"),
+            ("2026-06-10", 3, "put", 60.0, "take_profit"),   # a WIN -- must NOT count
+            ("2026-06-10", 4, "put", -30.0, "early_close"),  # EOD flatten -- must NOT count
+        ],
+    )
+    conn.commit()
+    conn.close()
+    o = asyncio.run(BacktestingDBReader(db).get_cumulative_overrides())
+    assert o["total_stops"] == 2  # stop_loss + gex_breach only
 
 
 def test_full_history_when_no_baseline(tmp_path):
@@ -155,7 +192,7 @@ def test_no_baseline_empty_db_preserves_null_fallback(tmp_path):
         "CREATE TABLE daily_summaries (date TEXT, net_pnl REAL);"
         "CREATE TABLE trade_entries (date TEXT, total_credit REAL, "
         "call_spread_width REAL, put_spread_width REAL, contracts INTEGER);"
-        "CREATE TABLE trade_stops (date TEXT);"
+        "CREATE TABLE trade_stops (date TEXT, net_pnl REAL);"
     )
     conn.commit()
     conn.close()

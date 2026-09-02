@@ -82,6 +82,23 @@ class BacktestingDBReader:
             self._local.conn = None
             return []
 
+    def _trade_stops_has_exit_reason(self) -> bool:
+        """v11's exit_reason is added via ALTER TABLE on an already-existing
+        trade_stops table (shared/data_recorder.py) — only present once the
+        writing bot process has restarted at least one time after 2026-06-15.
+        Referencing a genuinely absent column raises sqlite3.Error, which
+        _query's broad except swallows and turns into an EMPTY result for the
+        whole (multi-subquery) get_cumulative_overrides call — silently
+        dropping cumulative_pnl/winning_days/etc. too, not just total_stops.
+        Checked via PRAGMA so the canonical stop filter can degrade gracefully
+        instead (mirrors _ACTUAL_STOPS's existing pre/post-v11 handling)."""
+        try:
+            conn = self._get_connection()
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(trade_stops)")]
+            return "exit_reason" in cols
+        except sqlite3.Error:
+            return False
+
     async def get_today_ohlc(self, date_str: str) -> list[dict]:
         """Get 1-minute OHLC bars for a date."""
         return await to_thread(
@@ -273,7 +290,7 @@ class BacktestingDBReader:
         ds, p_ds = self._baseline_clause(baseline_date)
         ds_and, p_dsand = self._baseline_clause(baseline_date, leading="AND")
         te, p_te = self._baseline_clause(baseline_date)
-        ts, p_ts = self._baseline_clause(baseline_date)
+        ts_and, p_tsand = self._baseline_clause(baseline_date, leading="AND")
         # When a baseline is set, COALESCE the SUMs to 0 (not NULL) so an EMPTY
         # rebased window (e.g. baseline=tomorrow) authoritatively OVERRIDES the
         # stale metrics-file rollup in apply_db_cumulative — which only adopts a
@@ -285,6 +302,26 @@ class BacktestingDBReader:
         # the two spreads × $100/pt × contracts (matches the bot's
         # `capital_deployed`: e.g. C's 10c × 5pt = $5,000). entry_days = distinct
         # days that actually placed a trade, for the avg-capital-per-day figure.
+        # total_stops: canonical "genuine stop" definition, matching the bot's own
+        # self-heal (bots/hydra/strategy.py:_reconcile_cumulative_metrics_from_db,
+        # extended 2026-09-02) and shared/sheets_db_shim.py's established filter —
+        # exit_reason IN ('stop_loss','gex_breach') excludes Brandon take-profit
+        # (a win, not a stop) and MKT-018/047 early-close/flatten rows (not stops).
+        # Legacy pre-v11 rows (NULL exit_reason) fall back to net_pnl < 0, matching
+        # what those rows always meant (written before Brandon's TP/breach paths
+        # existed, so every pre-v11 row IS a real stop-loss). Previously an
+        # unfiltered COUNT(*) here overcounted vs. the bot's own metrics file in
+        # the opposite direction from the file's undercounting bug — the two
+        # numbers disagreed for two different wrong reasons; this makes them agree.
+        has_exit_reason = await to_thread(self._trade_stops_has_exit_reason)
+        stop_filter = (
+            "(exit_reason IN ('stop_loss','gex_breach') OR (exit_reason IS NULL AND net_pnl < 0))"
+            if has_exit_reason
+            # Pre-v11 DB (or a bare test schema) with no exit_reason column at all —
+            # every row predates Brandon's TP/breach paths, so net_pnl < 0 alone is
+            # the correct "genuine stop" definition (same fallback _ACTUAL_STOPS uses).
+            else "(net_pnl < 0)"
+        )
         rows = await to_thread(
             self._query,
             f"""SELECT
@@ -293,14 +330,14 @@ class BacktestingDBReader:
                 (SELECT COUNT(*) FROM daily_summaries WHERE ROUND(net_pnl, 2) < 0 {ds_and}) AS losing_days,
                 (SELECT COUNT(*) FROM trade_entries {te}) AS total_entries,
                 (SELECT ROUND(COALESCE(SUM(total_credit), {z}), 2) FROM trade_entries {te}) AS total_credit_collected,
-                (SELECT COUNT(*) FROM trade_stops {ts}) AS total_stops,
+                (SELECT COUNT(*) FROM trade_stops WHERE {stop_filter} {ts_and}) AS total_stops,
                 (SELECT MAX(date) FROM daily_summaries {ds}) AS last_updated,
                 (SELECT ROUND(COALESCE(SUM(
                     MAX(COALESCE(call_spread_width, 0), COALESCE(put_spread_width, 0))
                     * 100 * COALESCE(contracts, 1)), {z}), 2) FROM trade_entries {te}) AS capital_deployed,
                 (SELECT COUNT(DISTINCT date) FROM trade_entries {te}) AS entry_days
             """,
-            p_ds + p_dsand + p_dsand + p_te + p_te + p_ts + p_ds + p_te + p_te,
+            p_ds + p_dsand + p_dsand + p_te + p_te + p_tsand + p_ds + p_te + p_te,
         )
         row = rows[0] if rows else {}
         if row:

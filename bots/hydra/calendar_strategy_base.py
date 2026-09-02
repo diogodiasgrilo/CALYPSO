@@ -306,6 +306,18 @@ class CalendarStrategyBase(HydraStrategy):
         summary["realized_pnl"] = self.daily_state.total_realized_pnl
         return summary
 
+    def _cumulative_tracking_pnl(self, summary: dict, net_pnl: float) -> float:
+        """A carried calendar's net_pnl re-includes the still-open position's
+        live unrealized mark on every day it's held (see MEICStrategy's
+        docstring for the full mechanism) — book $0 into the LIFETIME cumulative
+        tracking on a pure hold day; the real close P&L only on the day it
+        actually closes, since total_realized_pnl is 0 until a genuine
+        close/stop/settlement posts to it. The live unrealized mark itself is
+        still shown correctly elsewhere (alerts, the dashboard's intraday P&L
+        curve) — only the LIFETIME tracking is re-scoped to realized-only here.
+        """
+        return self.daily_state.total_realized_pnl - self.daily_state.total_commission
+
     # ------------------------------------------------------------------
     # Two-expiry data layer (Phase 2) — pick expiries, resolve per-expiry
     # conids, read per-expiry quotes + IV. Thin wrappers over the existing

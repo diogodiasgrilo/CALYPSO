@@ -6287,8 +6287,23 @@ class HydraStrategy(MEICStrategy):
                 "entries_placed": summary.get("entries_completed", 0),
                 "entries_stopped": entries_stopped_per_entry,
                 "entries_expired": entries_expired_per_entry,
-                "gross_pnl": summary.get("total_pnl", 0),
-                "net_pnl": summary.get("total_pnl", 0) - summary.get("total_commission", 0),
+                # Routed through _cumulative_tracking_pnl (2026-09-02 metrics-drift
+                # fix) so a carried calendar's DB row doesn't re-book the same open
+                # position's running unrealized mark every day it's held — see
+                # CalendarStrategyBase._cumulative_tracking_pnl. No-op for A/B/C/F/G
+                # (default hook returns net_pnl unchanged, so gross/net below equal
+                # exactly what this line computed before).
+                "gross_pnl": (
+                    self._cumulative_tracking_pnl(
+                        summary,
+                        summary.get("total_pnl", 0) - summary.get("total_commission", 0),
+                    )
+                    + summary.get("total_commission", 0)
+                ),
+                "net_pnl": self._cumulative_tracking_pnl(
+                    summary,
+                    summary.get("total_pnl", 0) - summary.get("total_commission", 0),
+                ),
                 "commission": summary.get("total_commission", 0),
                 "long_salvage_revenue": summary.get("long_salvage_revenue", 0.0),
                 "day_of_week": now.strftime('%A'),
@@ -6394,8 +6409,29 @@ class HydraStrategy(MEICStrategy):
         write — we re-derive cumulative_pnl + per-day net_pnl + win/loss from it. That
         makes the metrics file a SELF-HEALING derived view: any drift (past correction,
         corruption, restart-timing) is corrected on the next close and cannot accumulate.
-        Only net_pnl is DB-authoritative; capital_deployed/contracts stay (metrics-only,
-        return_pct re-derived). No-op when already consistent (the normal case)."""
+        Only net_pnl/total_stops/double_stops are DB-authoritative; capital_deployed/
+        contracts/total_entries/total_credit_collected stay (metrics-only, no confirmed
+        drift found there; return_pct re-derived). No-op when already consistent (the
+        normal case).
+
+        EXTENDED 2026-09-02: total_stops/double_stops re-derived from trade_stops too.
+        A follow-up fleet-wide audit found C's total_stops stuck at 7 in the metrics
+        file while trade_stops actually held 29 rows — the 2026-07-20 pass above only
+        ever reconciled cumulative_pnl/daily_returns/win-loss, never the stop counters,
+        which _book_daily_cumulative increments via the EXACT same "increment once,
+        idempotent-by-date, never revisited" pattern that caused the original
+        cumulative_pnl drift. Root cause of C's specific gap: _book_daily_cumulative
+        only ever increments these from daily_state.call/put_stops_triggered, which
+        _execute_stop_loss sets — but Brandon's take-profit/GEX-breach exits and the
+        shared MKT-018/047 early-close/flatten path all close a position through
+        _close_entry_early instead, which writes a real trade_stops row (via
+        _record_stop_to_db) but never touches those counters. "Genuine stop" here uses
+        the same definition shared/sheets_db_shim.py already established for HOMER/
+        HERMES/CLIO: exit_reason IN ('stop_loss','gex_breach') — excludes take_profit
+        (a win, not a stop) and early_close/EOD flattens (not stops). Legacy rows
+        written before the v11 exit_reason migration (NULL) fall back to net_pnl < 0,
+        matching what those rows always meant at the time (Brandon's TP/breach paths
+        didn't exist yet, so every pre-v11 trade_stops row IS a real stop-loss)."""
         if not self._data_recorder:
             return
         try:
@@ -6403,6 +6439,18 @@ class HydraStrategy(MEICStrategy):
             con = _sqlite.connect(f"file:{self._data_recorder.db_path}?mode=ro", uri=True)
             db = {r[0]: round((r[1] or 0.0), 2)
                   for r in con.execute("SELECT date, net_pnl FROM daily_summaries")}
+            _STOP_FILTER = (
+                "(exit_reason IN ('stop_loss','gex_breach') "
+                "OR (exit_reason IS NULL AND net_pnl < 0))"
+            )
+            db_total_stops = con.execute(
+                f"SELECT COUNT(*) FROM trade_stops WHERE {_STOP_FILTER}"
+            ).fetchone()[0]
+            db_double_stops = con.execute(
+                "SELECT COUNT(*) FROM (SELECT date, entry_number FROM trade_stops "
+                f"WHERE {_STOP_FILTER} GROUP BY date, entry_number "
+                "HAVING COUNT(DISTINCT side) = 2)"
+            ).fetchone()[0]
             con.close()
             if not db:
                 return
@@ -6420,14 +6468,21 @@ class HydraStrategy(MEICStrategy):
             db_cum = round(sum(db.values()), 2)   # authoritative lifetime total
             old_cum = round(float(cm.get("cumulative_pnl", 0.0)), 2)
             drift = round(db_cum - old_cum, 2)
-            if corrected or abs(drift) > 0.01:
+            old_stops = int(cm.get("total_stops", 0) or 0)
+            old_double_stops = int(cm.get("double_stops", 0) or 0)
+            stops_drift = (db_total_stops != old_stops) or (db_double_stops != old_double_stops)
+            if corrected or abs(drift) > 0.01 or stops_drift:
                 logger.warning(
-                    "METRICS-RECONCILE %s: self-healed from daily_summaries — corrected %d "
-                    "daily_returns net_pnl; cumulative_pnl $%.2f -> $%.2f (drift $%.2f had "
-                    "accumulated vs the authoritative DB). Root-cause guard active.",
+                    "METRICS-RECONCILE %s: self-healed from daily_summaries/trade_stops — "
+                    "corrected %d daily_returns net_pnl; cumulative_pnl $%.2f -> $%.2f "
+                    "(drift $%.2f); total_stops %d -> %d; double_stops %d -> %d. "
+                    "Root-cause guard active.",
                     date_str, corrected, old_cum, db_cum, drift,
+                    old_stops, db_total_stops, old_double_stops, db_double_stops,
                 )
                 cm["cumulative_pnl"] = db_cum
+                cm["total_stops"] = db_total_stops
+                cm["double_stops"] = db_double_stops
                 # win/loss over the reconciled per-day rows (trading days only)
                 cm["winning_days"] = sum(1 for r in dr if float(r.get("net_pnl", 0)) >= 0)
                 cm["losing_days"] = sum(1 for r in dr if float(r.get("net_pnl", 0)) < 0)

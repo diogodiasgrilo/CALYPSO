@@ -6111,7 +6111,25 @@ class MEICStrategy(abc.ABC):
 
         # Apply this day's results to the LIFETIME cumulative metrics + persist.
         # Idempotent by date — see _book_daily_cumulative.
-        self._book_daily_cumulative(summary, net_pnl, capital_deployed)
+        self._book_daily_cumulative(
+            summary, self._cumulative_tracking_pnl(summary, net_pnl), capital_deployed
+        )
+
+    def _cumulative_tracking_pnl(self, summary: dict, net_pnl: float) -> float:
+        """P&L to book into the LIFETIME cumulative tracking (a daily_returns row
+        + cumulative_pnl) and to persist into daily_summaries for this settlement.
+
+        Default: today's own net_pnl — correct for a same-day strategy where
+        nothing is still open at settlement, so total_pnl already IS today's
+        result. Overridden by CalendarStrategyBase, whose total_pnl re-includes
+        a carried multi-day position's live unrealized mark on EVERY day it's
+        held (2026-09-02 metrics-drift audit, found via a $2.4k-vs-real-~$150
+        gap on variant E's lifetime P&L) — left as raw net_pnl here it would get
+        counted again on every day the same position stays open, wildly
+        overstating cumulative P&L without a single extra dollar ever changing
+        hands.
+        """
+        return net_pnl
 
     def _book_daily_cumulative(self, summary: dict, net_pnl: float,
                                capital_deployed: float) -> None:

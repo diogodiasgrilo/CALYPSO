@@ -124,6 +124,99 @@ Version History:
   default reverted, alert logic removed, deadline restructuring reverted
   to the old blocking `with` form) — all three failed exactly as expected.
   Full suite 2555 passed throughout.
+- 2026-09-02 Fleet-wide metrics/DB drift audit — two real bugs closed, plus a
+  one-time historical remediation. Found while answering a routine "has D/E
+  made money" question: E's `hydra_metrics.json` showed a -$2,599.20 lifetime
+  loss; the real, `dc_outcomes`-verified result was only about -$151 (~17x
+  overstated). Traced to two independent bugs, one calendar-only and one
+  fleet-wide:
+    1. CALENDAR DOUBLE-COUNTING (D/E). A carried multi-day calendar's
+       `total_pnl` re-includes the still-OPEN position's live unrealized
+       mark on EVERY day it's held (`_get_total_saxo_pnl` sums
+       `active_entries`, and `CalendarStrategyBase._reset_for_new_day`
+       re-attaches a carried entry to `daily_state.entries` on every reset —
+       intentional, for the carry mechanic itself). `_book_daily_cumulative`
+       and `_record_daily_summary_to_db` both booked that inflated value as
+       if it were a fresh day's result, so the SAME open trade's running
+       mark got counted again for every day it stayed open. Fixed via a new
+       overridable `_cumulative_tracking_pnl(summary, net_pnl)` hook on
+       `MEICStrategy` (`bots/hydra/base_strategy.py`) — a no-op for
+       A/B/C/F/G (same-day strategies, where `total_pnl` already IS today's
+       own result) — overridden in `CalendarStrategyBase`
+       (`bots/hydra/calendar_strategy_base.py`) to book $0 on a pure hold
+       day and the real close P&L (net of that day's commission) only on
+       the day a position actually closes. Wired into both the in-memory
+       cumulative-metrics booking (`base_strategy.py:log_daily_summary`)
+       and the DB write (`strategy.py:_record_daily_summary_to_db`) so
+       `daily_summaries.gross_pnl`/`net_pnl` stop re-corrupting on every
+       future settlement too — the existing 2026-07-20 self-heal
+       (`_reconcile_cumulative_metrics_from_db`) then keeps `daily_returns`/
+       `cumulative_pnl` correct automatically from here on, same as it
+       already did for the non-calendar variants.
+    2. total_stops NEVER COVERED BY THE 2026-07-20 SELF-HEAL (all variants).
+       That fix only ever re-derived `cumulative_pnl`/`daily_returns`/
+       win-loss from the DB — `total_stops`/`double_stops` kept the exact
+       same "increment once, idempotent-by-date, never revisited" fragility
+       that caused the original drift. Confirmed live on C: metrics file
+       said 7 stops, `trade_stops` actually held 29 rows. Root cause of the
+       gap's SIZE: Brandon's take-profit/GEX-breach exits and the shared
+       MKT-018/047 early-close/flatten path all close a position through
+       `_close_entry_early` (writes a real `trade_stops` row via
+       `_record_stop_to_db`), never through `_execute_stop_loss` (the only
+       place that increments the in-memory counters). Fixed by extending
+       `_reconcile_cumulative_metrics_from_db` (`strategy.py`) to also
+       re-derive `total_stops`/`double_stops` from `trade_stops`, using the
+       "genuine stop" definition `shared/sheets_db_shim.py` already
+       established (`exit_reason IN ('stop_loss','gex_breach')` — excludes
+       take-profit wins and early-close/EOD flattens; a legacy NULL
+       `exit_reason` — pre-v11 rows, written before Brandon's TP/breach
+       paths existed — falls back to `net_pnl < 0`). Self-corrects on the
+       next real settlement for every variant; no manual remediation
+       needed (unlike bug 1, there was no already-reported-to-the-user
+       wrong number riding on it).
+    Also aligned `dashboard/backend/services/db_reader.py`'s
+    `get_cumulative_overrides` total_stops query to the same canonical
+    definition (was a raw unfiltered `COUNT(*)`, overcounting in the
+    opposite direction from the bot's undercount) — guarded behind a
+    `PRAGMA table_info` check so a DB predating the v11 `exit_reason`
+    column (or a bare test schema) degrades to the `net_pnl < 0` fallback
+    instead of raising `sqlite3.Error` on the missing column and silently
+    blanking every OTHER field in the same combined query too (`_query`'s
+    broad except swallows any SQL error into an empty result) — a real
+    regression this rewrite would otherwise have introduced, caught by its
+    own test suite before deploy.
+    One-time historical remediation (D/E only — bug 2 needed none): with
+    both services stopped, `daily_summaries.gross_pnl`/`net_pnl` rewritten
+    from `dc_outcomes` (authoritative per-trade ledger) — a close date gets
+    `dc_outcomes.realized_pnl` minus that day's already-recorded commission
+    delta, every other date zeroed — then `hydra_metrics.json`'s
+    `daily_returns`/`cumulative_pnl` re-derived by hand using the identical
+    algorithm `_reconcile_cumulative_metrics_from_db` runs on every
+    settlement (done manually once so the correction was visible
+    immediately rather than waiting for that night's close). This also
+    fixed a separate, pre-existing, already-partially-fixed issue found
+    along the way: D's 2026-07-10 `daily_summaries` row still held the
+    stale pre-mark-sanity-guard phantom stop (-$797.40), never corrected
+    after `dc_outcomes` itself was fixed to the real -$117.40 (see the
+    2026-07-10 entry below); the uniform "trust dc_outcomes" remediation
+    rule fixed this for free. D: cumulative_pnl
+    -$8,899.85 -> -$6,129.05 (34 of 55 daily_summaries rows corrected). E:
+    -$2,599.20 -> -$109.00 (50 of 56 rows corrected) — E's real lifetime
+    result was near-flat, not a meaningful loss.
+    New tests: `tests/test_metrics_drift_fix_2026_09_02.py` (16 tests
+    covering the hook's default/override behavior, the two wiring call
+    sites, and the extended self-heal's stop-definition filtering —
+    including a legacy-NULL-exit_reason fallback case and a case proving a
+    total_stops-only mismatch alone still triggers a save even when
+    cumulative_pnl is already correct, which the pre-fix self-heal would
+    have missed entirely). `tests/test_dashboard_cumulative_baseline.py`
+    gained a canonical-filter regression test plus two existing fixtures'
+    bare-bones `trade_stops` schemas widened to match what a real table has
+    always had (`net_pnl`), exposing the missing-column regression above.
+    Every sub-fix negative-control-verified against the real production
+    files (the calendar hook override removed, the total_stops self-heal
+    extension neutered) — both failed exactly as expected. Full suite 2572
+    passed, 15 skipped, throughout.
 - 2026-08-31 STATE-004 permanent-halt fix + fleet-wide halt detection.
   Root cause: at 09:30:29 ET a ~20-27s calypso-broker reconnect blip (the
   broker's own session-auth recovered normally within seconds — this was
