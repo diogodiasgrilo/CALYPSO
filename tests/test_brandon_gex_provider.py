@@ -411,7 +411,7 @@ class TestFetchPolygonChainWithGreeks:
                     return self._per_contract_response(t, oi=1000, gamma=0.0012, iv=0.21)
             return {"status": "ERROR"}
 
-        result = fetch_polygon_chain_with_greeks(
+        result, candidates_found = fetch_polygon_chain_with_greeks(
             underlying="SPX", expiry=date(2026, 5, 8),
             api_key="KEY", http_fetch=fake_http,
             oi_threshold=50, spot=None,
@@ -420,6 +420,9 @@ class TestFetchPolygonChainWithGreeks:
         assert sorted(per_contract_calls) == ["A", "B"]
         # All 4 contracts in result, but only A/B have greeks
         assert len(result) == 4
+        # A and B are the only ones that passed the OI filter -- both fit
+        # under any reasonable cap, so candidates_found == hydrated here.
+        assert candidates_found == 2
         a = next(c for c in result if c["details"]["ticker"] == "A")
         c_skipped = next(c for c in result if c["details"]["ticker"] == "C")
         assert a.get("greeks") is not None
@@ -444,13 +447,14 @@ class TestFetchPolygonChainWithGreeks:
                     return self._per_contract_response(t, oi=1000)
             return {"status": "ERROR"}
 
-        fetch_polygon_chain_with_greeks(
+        _result, candidates_found = fetch_polygon_chain_with_greeks(
             underlying="SPX", expiry=date(2026, 5, 8),
             api_key="KEY", http_fetch=fake_http,
             oi_threshold=50, spot=6800, spot_window_pct=0.05,
         )
         # Only ATM was within ±5% of spot
         assert per_contract_calls == ["ATM"]
+        assert candidates_found == 1
 
     def test_max_contracts_cap(self):
         from datetime import date
@@ -468,13 +472,18 @@ class TestFetchPolygonChainWithGreeks:
             ticker = url.split("/")[-1].split("?")[0]
             return self._per_contract_response(ticker, oi=1000)
 
-        fetch_polygon_chain_with_greeks(
+        _result, candidates_found = fetch_polygon_chain_with_greeks(
             underlying="SPX", expiry=date(2026, 5, 8),
             api_key="KEY", http_fetch=fake_http,
             oi_threshold=50, spot=6800, spot_window_pct=0.50,  # generous window
             max_contracts_to_hydrate=10,
         )
         assert len(per_contract_calls) == 10
+        # 2026-09-01: candidates_found reports the TRUE pre-cap count (all
+        # 100 passed the OI+window filter) even though only 10 got hydrated
+        # -- this is exactly the signal the caller uses to detect a binding
+        # cap and fire the DATA_QUALITY alert (see strategy.py).
+        assert candidates_found == 100
 
     def test_per_contract_failure_does_not_break_chain(self):
         from datetime import date
@@ -490,7 +499,7 @@ class TestFetchPolygonChainWithGreeks:
                 return {"status": "ERROR", "error": "Not found"}
             return self._per_contract_response("OK", oi=1000)
 
-        result = fetch_polygon_chain_with_greeks(
+        result, _candidates_found = fetch_polygon_chain_with_greeks(
             underlying="SPX", expiry=date(2026, 5, 8),
             api_key="KEY", http_fetch=fake_http,
             oi_threshold=50, spot=None,
@@ -504,11 +513,12 @@ class TestFetchPolygonChainWithGreeks:
         from datetime import date
         def fake_http(url):
             return self._make_chain_response([])
-        result = fetch_polygon_chain_with_greeks(
+        result, candidates_found = fetch_polygon_chain_with_greeks(
             underlying="SPX", expiry=date(2026, 5, 8),
             api_key="KEY", http_fetch=fake_http,
         )
         assert result == []
+        assert candidates_found == 0
 
 
 class TestBuildProfileDeltas:

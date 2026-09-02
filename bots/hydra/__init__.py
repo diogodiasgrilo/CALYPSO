@@ -36,6 +36,94 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-01 GEX hydration cap fix (Brandon B/C) — raised 80 -> 250, added
+  a wall-clock deadline, made a binding cap alertable.
+  Root cause: `bots/hydra/brandon/gex_provider.py`'s two-pass Polygon fetch
+  (chain snapshot for OI, then individual per-contract calls to hydrate
+  greeks/IV, since Polygon's Starter tier omits both from the bulk
+  endpoint) capped the per-contract hydration pass at a hardcoded 80
+  contracts. Found while investigating a real 2026-09-01 put-side stop on
+  B: the defensive-hedge's GEX-confirmation check logged `gex_confirmed=
+  False` continuously for 2+ hours while a real threat developed. Traced
+  to the cap — live-checked against the real SPX chain (spot ~7630): 195
+  real, liquid (OI>=50), near-the-money (±5% of spot) contracts qualified,
+  but only 80 (41%) got hydrated. An un-hydrated contract contributes
+  EXACTLY ZERO to the GEX picture (no partial/discounted contribution, no
+  IV fallback — a stale module docstring claiming otherwise was also
+  fixed) and is also ineligible for delta-target strike selection. Not new
+  that day — a 2026-07-17 incident (already documented in this file, see
+  the DEGRADED-DATA FLOOR entry) hit an even more extreme version of the
+  same gap (80/1000 raw chain) and caused real damage: 3 phantom $0-credit
+  entries on B, churn on C. That incident's fix added a floor guard, but
+  only for the entry-time delta-target picker — the accel-zone strike
+  adjuster and the defensive-hedge's GEX-confirmation gate, both live
+  consumers of the same undersized profile, were never protected, and the
+  coverage gap itself was never made visible (logged at INFO only, no
+  comparison to the real candidate count, no alert).
+  Fix (`bots/hydra/brandon/gex_provider.py`, `bots/hydra/brandon/strategy.py`):
+    1. `max_contracts_to_hydrate` raised 80 -> 250 (~28% headroom over the
+       195-candidate peak observed), now config-driven via
+       `strategy.brandon.gex.max_contracts_to_hydrate` (config_variant_b/c.json)
+       instead of a bare literal, matching every sibling GEX knob.
+    2. `GEX_HYDRATE_WORKERS` raised 8 -> 12 and a new
+       `GEX_HYDRATE_DEADLINE_S = 15.0` wall-clock deadline added on the
+       hydration pass itself — this fetch runs SYNCHRONOUSLY in the
+       entry-time decision path (force_refresh=True), so an unbounded
+       `pool.map()` at the raised cap risked stalling an entry decision up
+       to 160s on a genuinely bad Polygon day (up from today's already-
+       uncapped 50s at the old cap/worker count). Whatever hasn't
+       completed by the deadline is abandoned — same disposition as an
+       ordinary per-call failure (un-hydrated, contributes zero GEX), not
+       a crash or a raised exception. Implemented by submitting futures
+       explicitly and calling `pool.shutdown(wait=False)` rather than a
+       `with ThreadPoolExecutor(...) as pool:` block — the latter's
+       `__exit__` blocks until EVERY submitted call finishes regardless of
+       how long `concurrent.futures.wait(..., timeout=...)` was told to
+       wait, silently defeating the deadline (verified via negative
+       control — reverting to the `with` form makes the deadline test
+       fail exactly as expected).
+    3. `fetch_polygon_chain_with_greeks()` now returns
+       `(contracts, candidates_found)` instead of a bare list —
+       `candidates_found` is the real pre-cap count of contracts that
+       passed the OI+spot-window filter. Logged alongside the existing
+       chain/hydrated counts, and when it exceeds the cap, fires a
+       MEDIUM-priority `DATA_QUALITY` alert via the same
+       `_brandon_send_telegram` pattern already used for the 2026-07-17
+       incident's guard — static/generic title (numbers only in the
+       message body/details, not the title) so AlertService's dedup
+       fingerprint collapses repeats instead of alerting fresh every
+       3-minute refresh cycle while the condition persists.
+  Explicitly out of scope (deferred, not forgotten): no degraded-data
+  floor/guard added to the accel-zone adjuster or the hedge's GEX-
+  confirmation gate itself (mirroring the delta-target picker's existing
+  floor) — fixing the root cause plus adding real visibility should
+  substantially close the gap; a decision-layer guard is better scoped to
+  a follow-up if the raised cap still gets exceeded on an unusually liquid
+  day (which the new alert will now actually surface). `spot_window_pct`
+  (5%) and `oi_threshold` (50) also left untouched — narrowing the window
+  would change `total_abs_gex` (the denominator every cluster-strength
+  threshold divides by, shared by the strike adjuster, the hedge gate, AND
+  the GEX breach-exit), a live decision-logic change that doesn't belong
+  riding alongside a pure infrastructure fix.
+  Design independently reviewed before implementation (changed the cap
+  size from an initial 200 to 250, added the wall-clock deadline that
+  wasn't in the original draft, caught that the fix needs a function
+  signature change rather than just a log line, confirmed severity was
+  worse than initially estimated — zero contribution, not discounted).
+  New tests: `tests/test_gex_hydration_cap_2026_09_01.py` (11 tests: raised
+  default pinned two ways — the function default AND the separate
+  strategy-config-read default that actually matters in production, since
+  a negative control found the function-default check alone wouldn't have
+  caught a reverted config-read line; the wall-clock deadline actually
+  bounds the wait and logs; the alert fires only when genuinely binding,
+  not at/under the cap). Existing tests updated for the new return
+  signature across `tests/test_brandon_gex_provider.py`,
+  `tests/test_gex_fetch_reliability_and_guard.py`, and
+  `tests/test_brandon_strategy_integration.py`. Every sub-fix
+  negative-control-verified against the real production files (config
+  default reverted, alert logic removed, deadline restructuring reverted
+  to the old blocking `with` form) — all three failed exactly as expected.
+  Full suite 2555 passed throughout.
 - 2026-08-31 STATE-004 permanent-halt fix + fleet-wide halt detection.
   Root cause: at 09:30:29 ET a ~20-27s calypso-broker reconnect blip (the
   broker's own session-auth recovered normally within seconds — this was

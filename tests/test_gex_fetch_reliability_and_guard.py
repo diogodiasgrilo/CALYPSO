@@ -47,14 +47,16 @@ class TestParallelHydration:
             return {"results": chain}              # chain snapshot
 
         t0 = time.perf_counter()
-        out = fetch_polygon_chain_with_greeks(
+        out, candidates_found = fetch_polygon_chain_with_greeks(
             underlying="SPX", expiry=date(2026, 6, 10), api_key="k",
             http_fetch=fake_http, spot=spot, max_contracts_to_hydrate=80,
         )
         elapsed = time.perf_counter() - t0
         assert calls["contract"] == len(strikes)
         assert sum(1 for c in out if c.get("greeks")) == len(strikes)
-        # serial would be 21×50ms ≈ 1.05s; parallel (8 workers) ≈ 3 waves ≈ 150ms
+        assert candidates_found == len(strikes)
+        # serial would be 21×50ms ≈ 1.05s; parallel (2026-09-01: 12 workers)
+        # ≈ 2 waves ≈ 100ms
         assert elapsed < 0.5, f"hydration not parallelized: {elapsed:.2f}s"
 
     def test_per_contract_failures_dropped_no_raise(self):
@@ -68,7 +70,7 @@ class TestParallelHydration:
                 return {"results": {"greeks": {"gamma": 0.001}, "implied_volatility": 0.2}}
             return {"results": chain}
 
-        out = fetch_polygon_chain_with_greeks(
+        out, _candidates_found = fetch_polygon_chain_with_greeks(
             underlying="SPX", expiry=date(2026, 6, 10), api_key="k",
             http_fetch=fake_http, spot=spot,
         )
@@ -91,7 +93,7 @@ class TestChainPullRetry:
             return {"results": chain}
 
         with patch.object(gex_provider._time, "sleep"):   # skip the backoff
-            out = fetch_polygon_chain_with_greeks(
+            out, _candidates_found = fetch_polygon_chain_with_greeks(
                 underlying="SPX", expiry=date(2026, 6, 10), api_key="k",
                 http_fetch=fake_http, spot=7000.0,
             )

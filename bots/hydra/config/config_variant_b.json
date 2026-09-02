@@ -187,12 +187,12 @@
         "butterfly_width_pts": 10,
         "butterfly_cutoff_hour": 12,
         "butterfly_cutoff_minute": 30,
-        "_comment_confirm_staging": "2026-08-25: confirm_seconds=0 / use_adjuster_gex_gate=false are the BEHAVIOR-PRESERVING defaults -- B stays on today's immediate-fire, flat-0.05-no-locality-no-persistence hedge-arming logic until C's staged trial (both mechanisms active on C) supports a deliberate promotion. Do not flip these on B without first reviewing C's BRANDON-OVERLAY-ARM-PENDING/CONFIRMED and gex_confirmed logs over a real trading window. See bots/hydra/__init__.py version history and the C block below for the trial config.",
-        "confirm_seconds": 0.0,
-        "severity_bypass_distance_pts": 0.0,
+        "_comment_confirm_staging": "2026-09-01: PROMOTED to match C's staged trial after a real trading-week review (60+ genuine watch-eligible moments on C over 2026-08-25 through 2026-09-01, zero confirmed placements, no evidence of dangerous under-defense on the one live threatened position checked) plus the 2026-08-31 evidence that the old flat-0.05-no-locality gate let 3 real hedges fire on B in one afternoon under materially the same conditions C rejected all week. Now matches C exactly: confirm_seconds=10, severity_bypass_distance_pts=5 (a genuinely fast/severe threat still hedges immediately), use_adjuster_gex_gate=true (reuses the strike adjuster's tuned accel_min_pct/accel_peak_locality_pts/accel_peak_persistence_enabled instead of the old rubber-stamp-prone flat 0.05-no-locality check). Reversible: set confirm_seconds=0, severity_bypass_distance_pts=0, use_adjuster_gex_gate=false to restore the prior behavior. See bots/hydra/__init__.py version history.",
+        "confirm_seconds": 10,
+        "severity_bypass_distance_pts": 5.0,
         "_comment_debit_spread_disabled": "2026-08-25: the MORNING debit-spread hedge has a clean, consistently-losing real-dollar record on B with zero offsetting wins found anywhere; the AFTERNOON butterfly's one clearly-attributable large outcome was a genuine win (a real ~2.6pt pin) with no comparable clean loss data against it. Full sourcing, exact numbers, and methodology (not just an unlocatable 'audit' -- every figure here is independently reproducible from the log lines / SQL queries cited): docs/postmortems/2026-08-25_brandon_hedge_pnl_reconstruction.md. Trade-off, not a bug: from entry open until butterfly_cutoff, a threatened position now has NO overlay hedge at all (previously the debit spread was always live in that window) -- the credit+buffer stop remains the backstop throughout regardless. Reversible: set back to true if the routine-mode data changes. See also bots/hydra/__init__.py version history.",
         "debit_spread_enabled": false,
-        "use_adjuster_gex_gate": false
+        "use_adjuster_gex_gate": true
       },
       "hydra_stop_shadow": {
         "_comment": "When true, computes HYDRA's existing credit+buffer stop every tick in parallel without acting. First fire per side per day is Telegrammed for head-to-head comparison against Brandon's GEX breach (which IS the live stop in B/C).",
@@ -257,7 +257,7 @@
   "alerts": {
     "enabled": true,
     "phone_number": "+1XXXXXXXXXX",
-    "email": "your@email.com"
+    "email": "diogodiasgrilo@gmail.com"
   },
   "logging": {
     "log_level": "INFO",

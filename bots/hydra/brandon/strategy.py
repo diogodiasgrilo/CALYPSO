@@ -321,6 +321,17 @@ class BrandonHydraStrategy(HydraStrategy):
         self.brandon_accel_peak_persistence_tolerance_pts = float(
             gex.get("accel_peak_persistence_tolerance_pts", 10.0)
         )
+        # 2026-09-01: was a bare 80 literal at the call site — a live check
+        # found 80 silently excluded 59% of real, liquid, near-the-money
+        # candidates (195 qualified, only 80 hydrated) on an ordinary day.
+        # Raised to 250 (see gex_provider.GEX_HYDRATE_WORKERS/
+        # GEX_HYDRATE_DEADLINE_S for the paired worker-count + wall-clock
+        # changes that keep this safe under a genuinely slow Polygon day).
+        # Config-driven so it can be retuned without a deploy if the new
+        # DATA_QUALITY alert below starts firing on a busier day than this.
+        self.brandon_gex_max_contracts_to_hydrate = int(
+            gex.get("max_contracts_to_hydrate", 250)
+        )
 
         ov = bcfg.get("defensive_overlay") or {}
         self.brandon_overlay_enabled = bool(ov.get("enabled", False))
@@ -2737,7 +2748,7 @@ class BrandonHydraStrategy(HydraStrategy):
                 # 2-pass fetch: chain endpoint for OI (Greeks-stripped on
                 # Starter), then per-contract endpoint for Greeks/IV on the
                 # most liquid strikes near spot.
-                contracts = gex_provider.fetch_polygon_chain_with_greeks(
+                contracts, candidates_found = gex_provider.fetch_polygon_chain_with_greeks(
                     underlying=self.brandon_polygon_underlying,
                     expiry=expiry_date,
                     api_key=api_key,
@@ -2745,7 +2756,7 @@ class BrandonHydraStrategy(HydraStrategy):
                     oi_threshold=50,
                     spot=spot,
                     spot_window_pct=0.05,
-                    max_contracts_to_hydrate=80,
+                    max_contracts_to_hydrate=self.brandon_gex_max_contracts_to_hydrate,
                 )
                 try:
                     from shared.market_hours import US_EASTERN, get_us_market_time
@@ -2806,7 +2817,8 @@ class BrandonHydraStrategy(HydraStrategy):
             dropped = chain_total - contributed
             logger.info(
                 "Brandon GEX profile refreshed (force=%s): spot=%.2f, %d strikes contributed, "
-                "%d positive / %d negative clusters; chain=%d, hydrated_with_greeks_or_iv=%d, dropped=%d",
+                "%d positive / %d negative clusters; chain=%d, hydrated_with_greeks_or_iv=%d, "
+                "dropped=%d, candidates_found=%d, hydrate_cap=%d",
                 force_refresh,
                 profile.spot,
                 contributed,
@@ -2815,7 +2827,50 @@ class BrandonHydraStrategy(HydraStrategy):
                 chain_total,
                 with_greeks_or_iv,
                 dropped,
+                candidates_found,
+                self.brandon_gex_max_contracts_to_hydrate,
             )
+            # 2026-09-01: candidates_found is how many real, liquid,
+            # near-the-money contracts PASSED the OI/spot-window filter
+            # before the max_contracts_to_hydrate cap was applied — if it
+            # exceeds the cap, real candidates are being silently excluded
+            # from the GEX picture the accel-zone adjuster and the
+            # defensive-hedge confirmation gate both rely on (this exact,
+            # previously-invisible gap is what led to this fix — see
+            # bots/hydra/__init__.py version history). Fire every time it's
+            # binding at all, not past some margin — AlertService's own
+            # dedup collapses repeats within its MEDIUM-priority window, so
+            # this can't spam. Keep the title static/generic (no raw
+            # numbers) so every occurrence fingerprints identically and
+            # actually gets deduped instead of alerting fresh each time.
+            if candidates_found > self.brandon_gex_max_contracts_to_hydrate:
+                logger.warning(
+                    "Brandon GEX hydration cap binding: %d candidates found, "
+                    "only %d hydrated (cap=%d) — %d real near-the-money "
+                    "contract(s) excluded from this GEX profile",
+                    candidates_found, contributed, self.brandon_gex_max_contracts_to_hydrate,
+                    candidates_found - self.brandon_gex_max_contracts_to_hydrate,
+                )
+                self._brandon_send_telegram(
+                    message=(
+                        f"{candidates_found} real, liquid, near-the-money contracts qualified "
+                        f"for GEX hydration this refresh, but only "
+                        f"{self.brandon_gex_max_contracts_to_hydrate} could be hydrated (cap) — "
+                        f"{candidates_found - self.brandon_gex_max_contracts_to_hydrate} excluded. "
+                        f"Excluded contracts contribute ZERO to the GEX picture the strike "
+                        f"adjuster and defensive-hedge confirmation both rely on. Consider "
+                        f"raising strategy.brandon.gex.max_contracts_to_hydrate."
+                    ),
+                    title="Brandon GEX hydration cap binding",
+                    priority_name="MEDIUM",
+                    alert_type_name="DATA_QUALITY",
+                    details={
+                        "candidates_found": candidates_found,
+                        "hydrate_cap": self.brandon_gex_max_contracts_to_hydrate,
+                        "excluded": candidates_found - self.brandon_gex_max_contracts_to_hydrate,
+                        "chain_total": chain_total,
+                    },
+                )
             return profile
 
     # ------------------------------------------------------------------

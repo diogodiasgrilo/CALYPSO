@@ -26,8 +26,15 @@ per-contract gamma to per-share notional dollars.
 
 The fetcher is injectable so tests do not hit the network. Pagination is
 handled by following Polygon's `next_url` field. Greeks are optional in the
-Polygon response — the Options Starter tier exposes IV but not γ, so the
-provider falls back to BS-gamma when γ is missing.
+Polygon response — the Options Starter tier's bulk chain-snapshot endpoint
+omits BOTH γ and IV entirely (2026-09-01 correction: this docstring
+previously claimed IV survives on the bulk endpoint; it does not — see
+`fetch_per_contract_snapshot`'s own docstring and
+`fetch_polygon_chain_with_greeks`, which is the only path that actually
+populates either field, via individual per-contract calls for a capped
+subset of strikes). An un-hydrated contract has neither γ nor IV and
+contributes ZERO to the GEX calculation (`build_profile` drops it) — there
+is no BS-gamma fallback for contracts the two-pass fetch never hydrated.
 """
 
 from __future__ import annotations
@@ -48,7 +55,23 @@ logger = logging.getLogger(__name__)
 # Per-contract greek hydration is fanned out across a small thread pool — urllib
 # releases the GIL during socket I/O, so ~80 calls / 8 workers ≈ 1s vs the ~6-8s
 # serial loop that tripped the 5s read-timeout / 20s fetch_lock (2026-06-10).
-GEX_HYDRATE_WORKERS = 8
+# 2026-09-01: raised 8 -> 12 alongside GEX_HYDRATE_MAX_CONTRACTS_DEFAULT's
+# 80 -> 250 bump (see that constant's comment) so the pathological-case
+# ceiling (Polygon read-timeouts on every call) doesn't triple right along
+# with the cap — see GEX_HYDRATE_DEADLINE_S for the actual wall-clock bound
+# this relies on instead of trusting worker count alone.
+GEX_HYDRATE_WORKERS = 12
+# Hard wall-clock budget on the whole per-contract hydration pass (2026-09-01).
+# This fetch runs SYNCHRONOUSLY in the entry-time decision path
+# (force_refresh=True), so an unbounded pool.map() means a genuinely bad
+# Polygon day (every per-contract call timing out at its own 5s limit) could
+# stall an entry decision for ceil(candidates/workers) x 5s -- 160s at
+# 250 candidates / 12 workers if every single call timed out. Whatever
+# hasn't completed by this deadline is abandoned (same disposition as an
+# ordinary per-call failure: stays un-hydrated, contributes zero GEX) rather
+# than blocking further. Decouples "how bad can a degraded-Polygon day get"
+# from "how big is the cap" -- see fetch_polygon_chain_with_greeks.
+GEX_HYDRATE_DEADLINE_S = 15.0
 # The chain pull is the single point whose failure aborts the WHOLE fetch (and
 # makes the caller fall back to a STALE profile). Retry it with backoff so a
 # transient Polygon read-timeout doesn't degrade strike selection.
@@ -525,16 +548,26 @@ def fetch_polygon_chain_with_greeks(
     oi_threshold: int = 50,
     spot: Optional[float] = None,
     spot_window_pct: float = 0.05,
-    max_contracts_to_hydrate: int = 80,
-) -> list[dict]:
+    max_contracts_to_hydrate: int = 250,
+) -> tuple[list[dict], int]:
     """Two-pass fetch: chain for OI, per-contract for Greeks/IV.
 
     Polygon Starter ($29/mo) returns OI in the chain snapshot but omits
-    Greeks and IV. This wrapper fetches the chain, then hydrates the most
-    liquid strikes via per-contract calls. Strikes that don't meet the OI
-    threshold OR fall outside `spot ± spot_window_pct` keep their chain
-    payload (no greeks) — they contribute ~0 to GEX anyway because their
-    gamma at far-OTM is microscopic.
+    Greeks and IV entirely (see the module docstring — a contract this
+    function doesn't hydrate contributes ZERO GEX, not a discounted amount).
+    This wrapper fetches the chain, then hydrates the most liquid strikes
+    via per-contract calls. Strikes that don't meet the OI threshold OR
+    fall outside `spot ± spot_window_pct` keep their chain payload (no
+    greeks) — they contribute ~0 to GEX anyway because their gamma at
+    far-OTM is microscopic.
+
+    2026-09-01: `max_contracts_to_hydrate` raised 80 -> 250 after a live
+    check found 80 was silently excluding 59% of real, liquid,
+    near-the-money candidates (195 qualified, only 80 got hydrated) on an
+    ordinary trading day — not an edge case. See bots/hydra/__init__.py
+    version history for the full incident writeup. `candidates_found` (the
+    pre-cap count, now returned) makes a recurrence of this gap visible to
+    the caller instead of requiring an ad-hoc investigation to discover.
 
     Args:
         underlying: e.g. "SPX"
@@ -548,9 +581,13 @@ def fetch_polygon_chain_with_greeks(
         max_contracts_to_hydrate: hard cap on per-contract calls per refresh
 
     Returns:
-        List of contract dicts. Strikes selected for hydration carry
-        merged greeks/implied_volatility; the rest carry only the chain
-        payload (which build_profile will drop if greeks AND iv are absent).
+        (contracts, candidates_found) — contracts is the full list; strikes
+        selected for hydration carry merged greeks/implied_volatility, the
+        rest carry only the chain payload (which build_profile will drop if
+        greeks AND iv are absent). candidates_found is how many contracts
+        PASSED the OI + spot-window filter BEFORE the max_contracts_to_hydrate
+        cap was applied — compare it to max_contracts_to_hydrate to tell
+        whether the cap is actually binding today.
     """
     # Pass 1: the chain pull. This is the single point whose failure aborts the
     # WHOLE fetch (the caller then returns a STALE profile → too-close strikes,
@@ -576,7 +613,7 @@ def fetch_polygon_chain_with_greeks(
         if _attempt < GEX_CHAIN_FETCH_ATTEMPTS - 1:
             _time.sleep(GEX_CHAIN_RETRY_BACKOFF_S * (_attempt + 1))
     if not contracts:
-        return contracts
+        return contracts, 0
 
     # Filter to strikes worth hydrating
     candidates: list[dict] = []
@@ -589,6 +626,8 @@ def fetch_polygon_chain_with_greeks(
             if strike is None or abs(float(strike) - spot) > spot * spot_window_pct:
                 continue
         candidates.append(c)
+
+    candidates_found = len(candidates)
 
     # Hydrate top-N by OI to bound API load
     candidates.sort(key=lambda c: int(c.get("open_interest") or 0), reverse=True)
@@ -617,9 +656,37 @@ def fetch_polygon_chain_with_greeks(
 
     if candidates:
         workers = min(GEX_HYDRATE_WORKERS, len(candidates))
-        with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as pool:
-            list(pool.map(_hydrate, candidates))
-    return contracts
+        # 2026-09-01: NOT a `with ThreadPoolExecutor(...) as pool:` block —
+        # that form's __exit__ calls shutdown(wait=True), which blocks until
+        # EVERY submitted call finishes regardless of how long we're willing
+        # to wait, silently defeating GEX_HYDRATE_DEADLINE_S. Submit futures
+        # explicitly, wait only up to the deadline, and shut down with
+        # wait=False so a caller on the synchronous entry-time path is never
+        # blocked past the deadline by a genuinely slow Polygon. Any calls
+        # still in flight past the deadline keep running in background
+        # threads and harmlessly mutate their own (already-abandoned-by-then)
+        # contract dict when they eventually finish — each `_hydrate` call
+        # only touches the one dict it was given, so a late finish can't
+        # corrupt a profile that's already been built from the pre-deadline
+        # snapshot of `contracts`.
+        pool = concurrent.futures.ThreadPoolExecutor(max_workers=workers)
+        try:
+            futures = [pool.submit(_hydrate, c) for c in candidates]
+            _done, not_done = concurrent.futures.wait(
+                futures, timeout=GEX_HYDRATE_DEADLINE_S
+            )
+            if not_done:
+                logger.warning(
+                    "Brandon GEX hydration hit its %.0fs wall-clock deadline "
+                    "with %d/%d per-contract calls still in flight — "
+                    "proceeding with partial hydration (un-hydrated "
+                    "contracts contribute zero GEX, same as an ordinary "
+                    "per-call failure)",
+                    GEX_HYDRATE_DEADLINE_S, len(not_done), len(futures),
+                )
+        finally:
+            pool.shutdown(wait=False)
+    return contracts, candidates_found
 
 
 def fetch_polygon_chain(
