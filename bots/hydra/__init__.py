@@ -36,6 +36,52 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-03 Two bugs found in a routine daily audit of 2026-09-02 (D/E, all
+  variants), fixed same day:
+    1. D's mark-sanity guard (`CalendarStrategyBase._dc_refresh_marks`, the
+       2026-07-10 calendar-arbitrage check) applied unconditionally regardless
+       of `dc_phase` — correct for the CALENDAR phase it was built for
+       (different expiries per leg, so "long >= near short" genuinely holds),
+       but WRONG once TRANSFORMED, when both call legs (and both put legs)
+       move to the SAME expiry and become a plain debit vertical, where the
+       further-OTM long strike legitimately prices BELOW the short strike
+       every tick. This rejected 1,138 consecutive real, correct marks for
+       D's transformed `dctm_20260901_001` across the entire 2026-09-02
+       session (~1 every 20s, the whole RTH day) — not a P&L bug (the guard
+       kept the position's prior stale mark rather than acting on it, so
+       nothing wrong got booked), but its live unrealized P&L was frozen for
+       a full session. Fixed by gating the check on
+       `entry.dc_phase == DCPhase.CALENDAR`. New tests in
+       `tests/test_calendar_fill_model.py::TestRefreshMarkSanityGuard`
+       reproduce the exact real 2026-09-02 quote values (call long-short=
+       -2.85, put=-1.40) and confirm they're now accepted once transformed,
+       while an explicit regression test pins the original CALENDAR-phase
+       protection is unchanged. Negative-control-verified against the real
+       file (phase gate removed → both new tests fail as expected).
+    2. `log_daily_summary()` (`bots/hydra/base_strategy.py`) unconditionally
+       logged "Daily summary logged to Google Sheets" whenever
+       `self.trade_logger` was truthy, without checking whether a write
+       actually happened — since `google_sheets.enabled=false` on every
+       variant (post Sheets->DB migration), this fired every day on every
+       variant, always false. Traced one level deeper:
+       `TradeLoggerService.log_daily_summary` (`shared/logger_service.py`)
+       had no `return` in either branch (implicit `None` always), discarding
+       the real success/failure signal `GoogleSheetsLogger.log_daily_summary`
+       already reports. Fixed both: the service method now returns the real
+       result (`False` when disabled, propagated bool when enabled); the
+       caller gates its log line on that return value (INFO when it actually
+       logged, DEBUG when it didn't). Purely cosmetic — no dollar or
+       behavioral impact, found while auditing E's log for the calendar
+       fix above. New tests: `tests/test_sheets_log_message_accuracy_2026_09_03.py`
+       (5 tests, source-level wiring checks given the heavy mock surface of
+       `log_daily_summary` itself). Negative-control-verified.
+  Both found and fixed same-day via a 7-variant parallel daily-audit workflow
+  (also used to verify the 2026-09-02 metrics-drift fix + B's 11:15 slot
+  removal — see those entries below — both held up cleanly on their first
+  live day, including a real self-heal correction caught in the act: A's
+  total_stops 161->157, B's 19->34 with double_stops 0->8). Full suite 2577
+  passed throughout (2572 prior + 5 new; the calendar-fill-model additions
+  land inside the existing file's count).
 - 2026-09-01 GEX hydration cap fix (Brandon B/C) — raised 80 -> 250, added
   a wall-clock deadline, made a binding cap alertable.
   Root cause: `bots/hydra/brandon/gex_provider.py`'s two-pass Polygon fetch

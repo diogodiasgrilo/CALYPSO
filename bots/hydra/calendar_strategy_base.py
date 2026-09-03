@@ -688,8 +688,22 @@ class CalendarStrategyBase(HydraStrategy):
         # at -$797. Reject the whole tick (KEEP the prior good marks, return
         # not-fresh) so no stop/transform/close acts on it; the next clean tick
         # resumes. A REAL adverse move keeps long >= short, so genuine stops fire.
+        #
+        # ONLY VALID PRE-TRANSFORM (2026-09-03 fix): "further-dated long >= near
+        # short" only holds while the two legs have DIFFERENT expiries (the
+        # CALENDAR phase this guard was built for). Once TRANSFORMED, both call
+        # legs share the SAME expiry and both put legs share the SAME expiry —
+        # the position is now a same-expiry debit vertical, where the long strike
+        # being FURTHER OTM than the short strike legitimately prices it LOWER,
+        # every single tick. Applying this check unconditionally rejected 1,138
+        # consecutive real, correct marks for D's transformed dctm_20260901_001
+        # across the full 2026-09-02 session (found in a routine daily audit) —
+        # the position's live P&L was effectively frozen all day, not because of
+        # bad data, but because this guard didn't know the position had already
+        # transformed.
         _CAL_ARB_EPS = 0.10
-        if all(k in quotes for k in ("long_call", "short_call", "long_put", "short_put")):
+        if (getattr(entry, "dc_phase", None) == DCPhase.CALENDAR
+                and all(k in quotes for k in ("long_call", "short_call", "long_put", "short_put"))):
             call_side = (quotes["long_call"].get("mid") or 0) - (quotes["short_call"].get("mid") or 0)
             put_side = (quotes["long_put"].get("mid") or 0) - (quotes["short_put"].get("mid") or 0)
             if call_side < -_CAL_ARB_EPS or put_side < -_CAL_ARB_EPS:

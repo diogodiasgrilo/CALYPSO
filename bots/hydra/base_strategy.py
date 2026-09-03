@@ -6106,8 +6106,15 @@ class MEICStrategy(abc.ABC):
             sheets_summary["cumulative_pnl_eur"] = 0
 
         if self.trade_logger:
-            self.trade_logger.log_daily_summary(sheets_summary)
-            logger.info(f"Daily summary logged to Google Sheets (Net P&L: ${net_pnl:.2f}, Commission: ${commission:.2f})")
+            # log_daily_summary() itself no-ops (returns False) when Sheets logging
+            # is disabled (google_sheets.enabled=false, the case on every variant
+            # today, per the Sheets->DB migration) -- gate the log line on its real
+            # return value so it stops claiming a write happened when nothing was
+            # actually sent (found 2026-09-03, misleading but harmless log text).
+            if self.trade_logger.log_daily_summary(sheets_summary):
+                logger.info(f"Daily summary logged to Google Sheets (Net P&L: ${net_pnl:.2f}, Commission: ${commission:.2f})")
+            else:
+                logger.debug(f"Daily summary NOT logged to Google Sheets (disabled) — Net P&L: ${net_pnl:.2f}, Commission: ${commission:.2f}")
 
         # Apply this day's results to the LIFETIME cumulative metrics + persist.
         # Idempotent by date — see _book_daily_cumulative.

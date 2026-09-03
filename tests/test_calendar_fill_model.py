@@ -251,3 +251,53 @@ class TestRefreshMarkSanityGuard:
         }
         e = self._entry()
         assert self._strat(q)._dc_refresh_marks(e) is True
+
+    def test_transformed_phase_accepts_the_same_quotes_calendar_phase_rejects(self):
+        """2026-09-03 fix: once TRANSFORMED, both call legs (and both put legs)
+        share the SAME expiry -- a same-expiry debit vertical where the long
+        strike, being further OTM, legitimately prices BELOW the short strike
+        every tick. The exact quote shape test_impossible_mark_rejected_keeps_prior
+        correctly rejects for a real CALENDAR (different expiries) must be ACCEPTED
+        once transformed -- this is the literal quote shape that rejected 1,138
+        consecutive real marks for D's transformed dctm_20260901_001 across the
+        full 2026-09-02 session (found in a routine daily audit)."""
+        q = {
+            "short_call": self._rt(24.0, 23.8, 24.2),
+            "long_call":  self._rt(15.0, 14.8, 15.2),  # long < short -- fine, same expiry now
+            "short_put":  self._rt(44.5, 44.3, 44.7),
+            "long_put":   self._rt(28.0, 27.8, 28.2),
+        }
+        e = self._entry()
+        e.dc_phase = DCPhase.TRANSFORMED
+        assert self._strat(q)._dc_refresh_marks(e) is True
+        assert e.legs["long_call"].price != 5.0  # prices actually updated, not frozen
+
+    def test_transformed_phase_reproduces_the_real_2026_09_02_incident_values(self):
+        """Same call_side/put_side differentials actually logged in production
+        (call long-short=-2.85, put=-1.40) against D's real transformed position
+        that session -- proves the fix resolves the ACTUAL incident, not just a
+        synthetic analog."""
+        q = {
+            "short_call": self._rt(26.80, 26.60, 27.00),
+            "long_call":  self._rt(23.95, 23.75, 24.15),   # 26.80 - 23.95 = 2.85 below short
+            "short_put":  self._rt(49.15, 48.95, 49.35),
+            "long_put":   self._rt(47.75, 47.55, 47.95),   # 49.15 - 47.75 = 1.40 below short
+        }
+        e = self._entry()
+        e.dc_phase = DCPhase.TRANSFORMED
+        assert self._strat(q)._dc_refresh_marks(e) is True
+
+    def test_calendar_phase_unaffected_negative_control(self):
+        """The ORIGINAL 07-10 protection must still hold for a genuine (untransformed)
+        calendar -- explicit regression pin, not just relying on the older test
+        staying green, since this is the exact invariant the fix must not break."""
+        q = {
+            "short_call": self._rt(24.0, 23.8, 24.2),
+            "long_call":  self._rt(15.0, 14.8, 15.2),  # BAD for a real calendar
+            "short_put":  self._rt(44.5, 44.3, 44.7),
+            "long_put":   self._rt(28.0, 27.8, 28.2),
+        }
+        e = self._entry()
+        assert e.dc_phase == DCPhase.CALENDAR  # sanity: _entry()'s default
+        assert self._strat(q)._dc_refresh_marks(e) is False
+        assert all(e.legs[n].price == 5.0 for n in ("short_call", "long_call", "short_put", "long_put"))

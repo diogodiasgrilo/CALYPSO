@@ -4344,15 +4344,22 @@ class TradeLoggerService:
         if self.google_logger.enabled:
             self.google_logger.sync_positions_with_saxo(saxo_positions)
 
-    def log_daily_summary(self, summary: Dict[str, Any]):
+    def log_daily_summary(self, summary: Dict[str, Any]) -> bool:
         """
         Log daily summary metrics to Google Sheets.
 
         Args:
             summary: Dictionary with daily performance metrics
+
+        Returns:
+            bool: True if actually logged to Sheets, False if disabled (this used
+            to return None either way, silently discarding the real success signal
+            GoogleSheetsLogger.log_daily_summary already reports -- found 2026-09-03
+            via a caller that needs to know whether the write really happened).
         """
         if self.google_logger.enabled:
-            self.google_logger.log_daily_summary(summary)
+            return self.google_logger.log_daily_summary(summary)
+        return False
 
     def get_accumulated_theta_from_daily_summary(self, since_date: str = None) -> Optional[float]:
         """
