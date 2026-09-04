@@ -36,6 +36,68 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-04 Brandon AFTERNOON BUTTERFLY hedge DISABLED on B (live seat).
+  `strategy.brandon.defensive_overlay.butterfly_enabled: false`. With
+  `debit_spread_enabled` already false (2026-08-25), no overlay hedge can now
+  fire on B at all — but `enabled` is deliberately LEFT TRUE so the
+  BRANDON-OVERLAY-WATCH distance-from-short telemetry keeps logging (the whole
+  `_brandon_check_overlay` call, and therefore that logging, is gated on
+  `enabled` at brandon/strategy.py:1042).
+  DECIDED ON: the hedge risks MORE than the loss it defends. Every butterfly
+  debit actually paid — $1,925 / $1,960 / $2,065 / $2,240 (hedge_placements,
+  DB-verified) — exceeds an IC side's loss, which the A2 %-of-width stop
+  already bounds at 0.40 x 5pt x 100 x 7c = ~$1,400 nominal (observed live
+  stops: $1,190 / $1,215 / $1,295 / $1,610 / $1,785). Adding a ~$2,000
+  max-loss position to defend a ~$1,400 already-bounded loss roughly DOUBLES
+  exposure on a threatened entry; the IC's left tail was already truncated by
+  the stop, so the hedge's one legitimate job (converting an unbounded tail
+  into a bounded one) was already done, for free. Supporting evidence: no
+  price/EV veto exists anywhere in `evaluate_overlay` (2026-08-31 deployed
+  $6,230 of debit in one afternoon against ICs that took $315 of actual
+  damage); the structure is 3.57:1 max payoff vs the 6-8:1 a 0DTE-butterfly
+  specialist source considers workable, at a ~10-15% pin rate; and the source
+  strategy (Brendan Johns, via a SINGLE unaudited Theta Profits interview —
+  the codebase's "Brandon" is a misnaming) specifies hedging in TWO SENTENCES
+  with no trigger, sizing, strike, or exit rule, so ~80% of this overlay was
+  authored locally and should be judged on its own merits, not its pedigree.
+  Live-era record (30 DB-verified days, 2026-07-24 -> 09-03): the overlay
+  contributed +$1,880 and B made +$4,284.80 with it vs +$2,404.80 without —
+  but including 2026-09-04's -$1,960 the whole program goes NET NEGATIVE
+  (~-$80 over 31 days), and it REDUCED winning days 16 -> 14 while raising
+  losing days 4 -> 6. Butterfly-only: +$3,815 settled, +$1,855 incl. 09-04.
+  Already-disabled morning debit spread, for the record: 0 wins / 8 losses
+  (-$1,935) on B and 0/4 on C — 0-for-11 combined; that kill was correct.
+  EXPLICITLY NOT THE REASON (and refuted in adversarial review, recorded here
+  so it is not resurrected): the claim that the butterfly is "guaranteed worth
+  zero in the tail" / positively correlated with the IC is FALSE. The IC's
+  loss LOCKS at the touch (the stop fires) while the butterfly settles at 4pm,
+  so in a poke-and-revert — the dominant loss mode for a stop-based 0DTE IC —
+  it genuinely can pay. On 2026-09-01 E#5's put stopped at -$1,610 and SPX
+  closed 7630.30; a fly pinned where it would have armed was worth ~+$1,500.
+  Relatedly, 3 of the 4 "blowup days the hedge ignored" were MORNING events
+  outside the butterfly window entirely (debit-spread territory), so the
+  butterfly's tail record is n=1 and that one leans FOR it.
+  OPEN QUESTION this deliberately does NOT foreclose: whether the ARMING GATE
+  is miscalibrated. It stood down at 1.42pt from a short on 2026-09-01
+  (gex_confirmed=False all the way in) and then armed on 2026-09-04 when every
+  IC finished 10pt+ OTM. Keeping `enabled: true` preserves the distance-at-tick
+  trail needed to answer that at zero cost and zero risk. Also note EVERY
+  butterfly win predates a config change (trigger 25 -> 15pt, then the
+  2026-09-02 arming-gate promotion), so the historical record describes
+  decision rules that no longer exist; post-promotion real-money record is
+  0 wins / 1 loss.
+  Method: 7-agent workflow (B history, C history, code mechanics, web research)
+  + 2 adversarial verifiers, BOTH of which refuted parts of the first-pass
+  analysis — one found a missed $490 morning-hedge loss on 2026-07-24 (win-only
+  detection query; corrected figures used above), the other falsified the
+  structural argument as described. The recommendation was re-argued on cost
+  asymmetry, which survives both. New tests:
+  `TestVariantBOverlayStructuresDisabled` in
+  `tests/test_brandon_strategy_integration.py` pins all three flags — important
+  because config_variant_*.json carries skip-worktree on the VM, which does NOT
+  prevent a `git pull` fast-forward from silently re-arming a real-money hedge
+  (verified 2026-08-19). Negative-control-verified. REVERSIBLE: set
+  `butterfly_enabled: true`.
 - 2026-09-03 Two bugs found in a routine daily audit of 2026-09-02 (D/E, all
   variants), fixed same day:
     1. D's mark-sanity guard (`CalendarStrategyBase._dc_refresh_marks`, the

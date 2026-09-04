@@ -2053,6 +2053,53 @@ class TestOverlayTriggerDistanceConfigWiring:
         assert self._extract_trigger_distance_pts(cfg) == 15.0
 
 
+class TestVariantBOverlayStructuresDisabled:
+    """2026-09-04: B's afternoon butterfly was disabled after a full historical
+    review (decisive reason: every butterfly debit actually paid, $1,925-$2,240,
+    EXCEEDS the loss it defends -- an IC side is already bounded by the A2
+    %-of-width stop at ~$1,400 nominal / $1,190-$1,785 observed -- so the hedge
+    roughly doubled exposure on a threatened entry rather than truncating a tail
+    the stop had already truncated).
+
+    Pins the deployed shape of config_variant_b.json's defensive_overlay. This
+    matters more than a normal config test because config_variant_*.json carries
+    skip-worktree on the VM, which does NOT stop a `git pull` fast-forward from
+    overwriting it (verified 2026-08-19) -- so a future commit touching this
+    sample could silently re-arm a real-money hedge with no error anywhere.
+    Uses the same extraction expressions brandon/strategy.py's __init__ uses."""
+
+    def _load(self, filename: str) -> dict:
+        path = Path(__file__).resolve().parents[1] / "bots" / "hydra" / "config" / filename
+        with open(path) as f:
+            return json.load(f)
+
+    def _overlay(self, config: dict) -> dict:
+        bcfg = (config.get("strategy", {}) or {}).get("brandon", {}) or {}
+        return bcfg.get("defensive_overlay") or {}
+
+    def test_variant_b_butterfly_is_disabled(self):
+        ov = self._overlay(self._load("config_variant_b.json"))
+        assert bool(ov.get("butterfly_enabled", True)) is False
+
+    def test_variant_b_debit_spread_stays_disabled(self):
+        # Killed 2026-08-25 on a 0-wins / 8-losses (B) + 0/4 (C) record.
+        ov = self._overlay(self._load("config_variant_b.json"))
+        assert bool(ov.get("debit_spread_enabled", True)) is False
+
+    def test_variant_b_overlay_stays_enabled_so_watch_logging_survives(self):
+        """DELIBERATE, and load-bearing: brandon/strategy.py gates the whole
+        _brandon_check_overlay call (and therefore the BRANDON-OVERLAY-WATCH
+        distance-from-short logging) on `enabled`. Flipping this to false to
+        'fully turn the hedge off' would ALSO silence the telemetry we kept it
+        for -- the open question of whether the arming GATE is miscalibrated
+        (it stood down at 1.42pt from a short on 2026-09-01 where a butterfly
+        would plausibly have paid ~+$1,500, then armed on 2026-09-04 when every
+        IC finished 10pt+ OTM). With both structures disabled, no hedge can fire
+        regardless, so leaving this true costs nothing and buys the data."""
+        ov = self._overlay(self._load("config_variant_b.json"))
+        assert bool(ov.get("enabled", False)) is True
+
+
 class TestOverlayWatchLoggingAccuracy:
     """Round-1 review finding: BRANDON-OVERLAY-WATCH's gex_confirmed field
     originally logged `profile is not None` -- true whenever ANY profile
