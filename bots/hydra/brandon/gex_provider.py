@@ -1,10 +1,43 @@
 """Gamma Exposure (GEX) provider sourced from Polygon.io.
 
-Computes per-strike GEX for a given underlying + expiry using the standard
-SpotGamma / Vol Signals dealer-positioning convention:
+SIGN CONVENTION — READ THIS BEFORE CHANGING ANYTHING HERE.
 
-    Dealers assumed SHORT calls (retail buys calls → dealer fills the sell),
-    LONG puts (retail sells puts for premium → dealer fills the buy).
+This module uses an INVERTED dealer-positioning assumption relative to the
+published SpotGamma / SqueezeMetrics convention. That is deliberate, but the
+docstring here previously called it "the standard SpotGamma convention",
+which is wrong and actively misleading — the published convention is the
+OPPOSITE of what this code computes, and that mislabel cost real
+investigation time on 2026-09-04. Stated precisely:
+
+    THIS MODULE assumes dealers SHORT calls (retail buys calls → dealer
+    fills the sell) and LONG puts (retail sells puts for premium → dealer
+    fills the buy). Calls are negated; puts are positive.
+
+    PUBLISHED SpotGamma / SqueezeMetrics assumes the reverse — dealers LONG
+    calls, SHORT puts (customers buy protective puts and sell covered
+    calls). Under that convention calls are positive and puts negative.
+
+CONSEQUENCE, measured on live data (2026-09-04 audit): because SPX 0DTE call
+open interest sits above spot and put OI below it, negating calls puts
+essentially ALL negative ("accelerator") clusters ABOVE spot — live profile
+showed 76 positive / 1 negative below spot vs 57 negative / 7 positive
+above. The put branch of every accel-zone consumer is therefore near-blind
+by construction: across the full log retention the put gate confirmed 0
+times in 843 watch ticks inside 25pt of a short, while all three real
+put-side stop-losses in the same window went undefended. The strike adjuster
+compensates with `accel_peak_locality_pts` (see gex_strike_adjuster's
+AdjusterConfig docstring, which has documented this hemisphere collapse
+since 2026-05-13) — that is a mitigation for this convention's side effect,
+NOT an independent feature.
+
+WHICH CONVENTION IS CORRECT IS AN OPEN QUESTION, deliberately not resolved
+here. The "retail buys calls" half is well supported for SPX 0DTE; the
+"retail sells puts" half is questionable for the same product, where 0DTE
+put buying is also heavy. Rather than flip a live trading assumption on
+argument alone, GEXProfile.with_flipped_sign_convention() + brandon/
+gex_shadow.py score the alternate read alongside the live one on every
+decision, so the choice can eventually be made on recorded evidence. Nothing
+acts on the shadow.
 
 This gives signed GEX where:
 
@@ -46,7 +79,7 @@ import time as _time
 import urllib.error
 import urllib.parse
 import urllib.request
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timezone
 from typing import Callable, Iterable, Optional
 
@@ -117,10 +150,24 @@ class GEXCluster:
     # that side — only shorts within a small radius of the peak are forbidden.
     # See gex_strike_adjuster.AdjusterConfig.accel_peak_locality_pts.
     peak_strike: float = 0.0
+    # 2026-09-05 instrumentation: how many contiguous strikes this cluster
+    # spans, and its |total_gex| as a fraction of the normalization base.
+    # Both were previously uncomputable by any consumer, which is why the
+    # 2026-09-04 gate audit could not tell a genuine 345pt gamma wall from a
+    # single-strike OI artifact without re-deriving clusters by hand. Logged
+    # on every adjuster/overlay decision now. n_strikes defaults to 0 for
+    # profiles built before this field existed (treat 0 as "unknown", not
+    # "empty") — see _cluster_width_ok.
+    n_strikes: int = 0
+    strength_pct: float = 0.0
 
     @property
     def sign(self) -> str:
         return "positive" if self.total_gex > 0 else "negative"
+
+    @property
+    def width_pts(self) -> float:
+        return self.strike_high - self.strike_low
 
 
 @dataclass(frozen=True)
@@ -161,11 +208,51 @@ class GEXProfile:
     def total_abs_gex(self) -> float:
         return sum(abs(sg.gex) for sg in self.strikes)
 
-    def positive_clusters(self, min_strength_pct: float = 0.05) -> tuple[GEXCluster, ...]:
-        return _detect_clusters(self.strikes, sign=+1, min_strength_pct=min_strength_pct)
+    def positive_clusters(
+        self,
+        min_strength_pct: float = 0.05,
+        *,
+        min_cluster_strikes: int = 1,
+        normalization_window_pts: Optional[float] = None,
+    ) -> tuple[GEXCluster, ...]:
+        return _detect_clusters(
+            self.strikes, sign=+1, min_strength_pct=min_strength_pct,
+            min_cluster_strikes=min_cluster_strikes,
+            normalization_window_pts=normalization_window_pts, spot=self.spot,
+        )
 
-    def negative_clusters(self, min_strength_pct: float = 0.05) -> tuple[GEXCluster, ...]:
-        return _detect_clusters(self.strikes, sign=-1, min_strength_pct=min_strength_pct)
+    def negative_clusters(
+        self,
+        min_strength_pct: float = 0.05,
+        *,
+        min_cluster_strikes: int = 1,
+        normalization_window_pts: Optional[float] = None,
+    ) -> tuple[GEXCluster, ...]:
+        return _detect_clusters(
+            self.strikes, sign=-1, min_strength_pct=min_strength_pct,
+            min_cluster_strikes=min_cluster_strikes,
+            normalization_window_pts=normalization_window_pts, spot=self.spot,
+        )
+
+    def with_flipped_sign_convention(self) -> "GEXProfile":
+        """Return this profile with every strike's signed GEX negated.
+
+        Flipping the dealer-positioning assumption (see the module docstring's
+        SIGN CONVENTION section) is EXACTLY a negation of every per-strike
+        contribution — ``sign * oi * gamma * ...`` with ``sign`` inverted for
+        both contract types — so the alternate convention needs no re-fetch
+        and no re-hydration. Under the flip, what was a negative ("accel")
+        cluster becomes positive and vice versa, which is precisely the
+        hemisphere swap the 2026-09-04 audit identified as the reason the put
+        branch never confirms (0 of 843 watch ticks inside 25pt).
+
+        Used ONLY by the shadow gate (brandon/gex_shadow.py) to log what a
+        standard-convention read WOULD have decided. Nothing acts on it.
+        """
+        return replace(
+            self,
+            strikes=tuple(replace(sg, gex=-sg.gex) for sg in self.strikes),
+        )
 
 
 def black_scholes_gamma(spot: float, strike: float, iv: float, t_years: float, r: float = 0.0) -> float:
@@ -283,8 +370,11 @@ def build_profile(
         if gamma <= 0:
             continue
 
-        # SpotGamma / Vol Signals convention: dealers short calls, long puts.
-        # Calls are negated so dealer-perspective signed GEX comes out right.
+        # THIS MODULE'S convention (dealers short calls, long puts) — which is
+        # the INVERSE of published SpotGamma/SqueezeMetrics. See the module
+        # docstring's SIGN CONVENTION section before changing this line: it is
+        # the single line that decides which hemisphere "accel" zones live in,
+        # and therefore which side of the condor the adjuster defends.
         sign = -1.0 if ctype == "call" else +1.0
         contribution = sign * oi * gamma * spot * spot * 100.0
         by_strike[float(strike)] = by_strike.get(float(strike), 0.0) + contribution
@@ -307,17 +397,67 @@ def _detect_clusters(
     *,
     sign: int,
     min_strength_pct: float,
+    min_cluster_strikes: int = 1,
+    normalization_window_pts: Optional[float] = None,
+    spot: float = 0.0,
 ) -> tuple[GEXCluster, ...]:
     """Detect contiguous runs of strikes whose GEX has the requested sign.
 
     A cluster is a maximal run where every strike has gex matching `sign`
     (one zero-GEX or wrong-sign strike breaks the run). After detection,
-    clusters whose |total_gex| is below min_strength_pct × total_abs_gex
-    are filtered out so noise around zero doesn't get reported as walls.
+    clusters whose |total_gex| is below min_strength_pct × the normalization
+    base are filtered out so noise around zero doesn't get reported as walls.
+
+    min_cluster_strikes (2026-09-05, BUG 1 of the gate audit): a run of ONE
+    strike used to qualify as a "wall". Its strike_low == strike_high ==
+    peak_strike, so the downstream peak-locality test is satisfied trivially
+    and a single high-OI strike could veto an entry or arm a hedge. On the
+    live 2026-09-04 profile the ONLY negative cluster clearing the 0.10
+    threshold was NEG[7715-7715] — one strike, 16.94% — and it was the sole
+    source of every put-side overlay confirmation on record. Requiring >= N
+    contiguous strikes restores the intended "a wall is a localized BAND, not
+    a single point" meaning. Default 1 preserves legacy behavior for any
+    caller that doesn't opt in.
+
+    normalization_window_pts (2026-09-05, BUG 2): min_strength_pct is
+    normalized over the |GEX| of the ENTIRE chain by default. On a 0DTE book
+    whose gamma is concentrated at the money, that inverts the intended
+    meaning of the threshold — measured on the live 2026-09-04 profile, the
+    genuine 345pt call wing NEG[7755-8100] scored 9.25% and FAILED the 0.10
+    gate while the single ATM strike scored 16.94% and PASSED. No value of
+    min_strength_pct can repair that, because the units are wrong, not the
+    number. Passing a window restricts the normalization base to strikes
+    within +/- window_pts of spot, so a cluster is scored against the gamma
+    that is actually near the money. None = legacy whole-chain behavior.
+
+    KNOWN SCOPE-MIXING PROPERTY of the windowed mode, stated so a future
+    reader does not mistake it for a bug: a cluster's FULL total_gex is
+    scored against a WINDOWED basis, so a cluster extending past the window
+    scores higher than if both were windowed. On the live 2026-09-04 shape
+    that is precisely the intended correction (the 345pt wall goes 8.96% ->
+    17.18% and begins to qualify), but the windowed score is therefore not a
+    strict "fraction of local gamma". Windowing both sides would need a rule
+    for clusters straddling the window edge; that choice is deferred until
+    the shadow shows whether windowing helps at all.
+
+    Both new parameters default to the legacy behavior. Nothing in the live
+    decision path passes non-default values yet — they exist so the shadow
+    gate can score the corrected reads alongside the live one. See
+    brandon/gex_shadow.py.
     """
     if not strikes:
         return ()
-    total_abs = sum(abs(sg.gex) for sg in strikes)
+    if normalization_window_pts is not None and normalization_window_pts > 0 and spot > 0:
+        lo, hi = spot - normalization_window_pts, spot + normalization_window_pts
+        basis = [sg for sg in strikes if lo <= sg.strike <= hi]
+        # An empty/degenerate window must not silently divide by ~0 and pass
+        # everything — fall back to the whole chain rather than inventing a
+        # threshold from two stray strikes.
+        if len(basis) < 3:
+            basis = list(strikes)
+    else:
+        basis = list(strikes)
+    total_abs = sum(abs(sg.gex) for sg in basis)
     if total_abs <= 0:
         return ()
     threshold = min_strength_pct * total_abs
@@ -330,14 +470,22 @@ def _detect_clusters(
             run.append(sg)
         else:
             if run:
-                _flush_cluster(out, run, threshold)
+                _flush_cluster(out, run, threshold, total_abs, min_cluster_strikes)
                 run = []
     if run:
-        _flush_cluster(out, run, threshold)
+        _flush_cluster(out, run, threshold, total_abs, min_cluster_strikes)
     return tuple(out)
 
 
-def _flush_cluster(out: list[GEXCluster], run: list[StrikeGEX], threshold: float) -> None:
+def _flush_cluster(
+    out: list[GEXCluster],
+    run: list[StrikeGEX],
+    threshold: float,
+    total_abs: float,
+    min_cluster_strikes: int = 1,
+) -> None:
+    if len(run) < max(1, min_cluster_strikes):
+        return
     total = sum(sg.gex for sg in run)
     if abs(total) < threshold:
         return
@@ -348,6 +496,8 @@ def _flush_cluster(out: list[GEXCluster], run: list[StrikeGEX], threshold: float
             strike_high=run[-1].strike,
             total_gex=total,
             peak_strike=peak.strike,
+            n_strikes=len(run),
+            strength_pct=(abs(total) / total_abs) if total_abs > 0 else 0.0,
         )
     )
 

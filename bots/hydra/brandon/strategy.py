@@ -839,6 +839,16 @@ class BrandonHydraStrategy(HydraStrategy):
                 spot=spot, proposed_short=entry.short_call_strike, profile=profile, config=cfg,
                 prior_profile=prior_profile, force_unconfirmed=force_unconfirmed,
             )
+            # v16 telemetry (2026-09-05): record the decision + shadow verdicts
+            # BEFORE the strikes are mutated below, so reference_strike is the
+            # strike the adjuster actually judged, not a post-SHIFT value.
+            self._brandon_record_gex_decision(
+                consumer="adjuster", entry_number=entry.entry_number, side="call",
+                spot=spot, reference_strike=entry.short_call_strike,
+                live_action=r.action.name,
+                live_adjuster_predicate=(r.action == gex_strike_adjuster.AdjustAction.SKIP),
+                live_overlay_predicate=False, profile=profile,
+            )
             if r.action == gex_strike_adjuster.AdjustAction.SHIFT and r.new_strike is not None:
                 width = entry.long_call_strike - entry.short_call_strike
                 logger.info(
@@ -882,6 +892,17 @@ class BrandonHydraStrategy(HydraStrategy):
             r = gex_strike_adjuster.adjust_put_strike(
                 spot=spot, proposed_short=entry.short_put_strike, profile=profile, config=cfg,
                 prior_profile=prior_profile, force_unconfirmed=force_unconfirmed,
+            )
+            # v16 telemetry — see the call-side note above. The put side is the
+            # one the audit found near-blind (0 acting SKIPs in 83 evaluations),
+            # so recording its shadow verdicts is the primary reason this
+            # instrumentation exists.
+            self._brandon_record_gex_decision(
+                consumer="adjuster", entry_number=entry.entry_number, side="put",
+                spot=spot, reference_strike=entry.short_put_strike,
+                live_action=r.action.name,
+                live_adjuster_predicate=(r.action == gex_strike_adjuster.AdjustAction.SKIP),
+                live_overlay_predicate=False, profile=profile,
             )
             if r.action == gex_strike_adjuster.AdjustAction.SHIFT and r.new_strike is not None:
                 if already_aborted:
@@ -1941,6 +1962,23 @@ class BrandonHydraStrategy(HydraStrategy):
                             entry.entry_number, side, watch_distance, short,
                             cfg.trigger_distance_pts, gex_confirmed,
                         )
+                        # v16 telemetry (2026-09-05). Recorded on the SAME
+                        # 60s-throttled cadence as the watch line above, not
+                        # every tick — the throttle already gives one sample
+                        # per side per minute inside the watch band, which is
+                        # the resolution the 2026-09-04 audit needed and could
+                        # not get. This is the record that will show whether
+                        # the corrected gate would have confirmed on the put
+                        # side where the live one never does (0 of 843 ticks
+                        # inside 25pt).
+                        self._brandon_record_gex_decision(
+                            consumer="overlay", entry_number=entry.entry_number,
+                            side=side, spot=spot, reference_strike=short,
+                            live_action=str(bool(gex_confirmed)),
+                            live_adjuster_predicate=False,
+                            live_overlay_predicate=bool(gex_confirmed),
+                            profile=profile,
+                        )
 
             proposal = defensive_overlay.evaluate_overlay(
                 threatened_side=side,
@@ -2830,6 +2868,14 @@ class BrandonHydraStrategy(HydraStrategy):
                 candidates_found,
                 self.brandon_gex_max_contracts_to_hydrate,
             )
+            # v16 (2026-09-05): persist this refresh. gex_shared_cache keeps
+            # exactly ONE overwritten JSON, so before this every profile that
+            # drove every historical decision was unrecoverable — which is
+            # why the 2026-09-04 gate audit could not answer "what did the
+            # profile look like when it decided X" for any date. Pure
+            # observation; wrapped so a recorder failure can never disturb a
+            # trading decision.
+            self._brandon_record_gex_snapshot(profile, candidates_found)
             # 2026-09-01: candidates_found is how many real, liquid,
             # near-the-money contracts PASSED the OI/spot-window filter
             # before the max_contracts_to_hydrate cap was applied — if it
@@ -2890,6 +2936,148 @@ class BrandonHydraStrategy(HydraStrategy):
     # ------------------------------------------------------------------
     # Hedge-leg persistence (survives mid-day restart)
     # ------------------------------------------------------------------
+
+    # ------------------------------------------------------------------
+    # v16 (2026-09-05): GEX forensics + shadow-gate telemetry.
+    # PURE OBSERVATION — every method here is wrapped so a recorder or
+    # shadow failure can never disturb a live trading decision.
+    # ------------------------------------------------------------------
+
+    def _brandon_variant_tag(self) -> str:
+        try:
+            from bots.hydra.strategy import HYDRA_VARIANT_ID
+            return HYDRA_VARIANT_ID or "a"
+        except Exception:
+            return "?"
+
+    def _brandon_record_gex_snapshot(self, profile, candidates_found: int) -> None:
+        """Persist one GEX refresh to gex_profile_snapshots (v16 table).
+
+        Why this exists: gex_shared_cache stores ONE atomically-overwritten
+        brandon_gex_profile.json, so historically every profile that drove
+        every decision was gone the moment the next refresh landed. The
+        2026-09-04 gate audit could not reconstruct a single past decision's
+        inputs. Recording the full per-strike GEX makes all of it derivable
+        after the fact.
+        """
+        rec = getattr(self, "_data_recorder", None)
+        if rec is None or profile is None:
+            return
+        try:
+            import json as _json
+            from shared.market_hours import get_us_market_time
+            now = get_us_market_time()
+            pos = profile.positive_clusters(min_strength_pct=self.brandon_decel_min_pct)
+            neg = profile.negative_clusters(min_strength_pct=self.brandon_accel_min_pct)
+
+            def _cl(cs):
+                return [
+                    {"low": c.strike_low, "high": c.strike_high, "peak": c.peak_strike,
+                     "total_gex": c.total_gex, "n_strikes": c.n_strikes,
+                     "strength_pct": c.strength_pct, "sign": c.sign}
+                    for c in cs
+                ]
+
+            rec.record_gex_snapshot({
+                "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "date": now.strftime("%Y-%m-%d"),
+                "variant": self._brandon_variant_tag(),
+                "spot": profile.spot,
+                "expiry": str(profile.expiry),
+                "n_strikes": len(profile.strikes),
+                "chain_total": profile.chain_total,
+                "hydrated_count": profile.hydrated_count,
+                "candidates_found": candidates_found,
+                "hydrate_cap": self.brandon_gex_max_contracts_to_hydrate,
+                "total_abs_gex": profile.total_abs_gex(),
+                "n_positive_clusters": len(pos),
+                "n_negative_clusters": len(neg),
+                "strikes_json": _json.dumps(
+                    [[sg.strike, round(sg.gex, 4)] for sg in profile.strikes]
+                ),
+                "clusters_json": _json.dumps({"positive": _cl(pos), "negative": _cl(neg)}),
+            })
+        except Exception as exc:
+            logger.debug("GEX snapshot record failed (non-fatal): %s", exc)
+
+    def _brandon_record_gex_decision(
+        self, *, consumer: str, entry_number, side: str, spot: float,
+        reference_strike: float, live_action: str,
+        live_adjuster_predicate: bool, live_overlay_predicate: bool,
+        cluster=None, profile=None,
+    ) -> None:
+        """Record one accel-zone decision + every shadow variant's verdict.
+
+        `consumer` is 'adjuster' or 'overlay' — they ask DIFFERENT questions
+        of the same profile (audit BUG 4: the adjuster tests whether a
+        cluster CONTAINS the proposed short, the overlay whether one lies
+        entirely BEYOND spot), and that divergence was invisible in
+        production. Both predicates are recorded for every decision so the
+        disagreement rate is finally measurable.
+        """
+        rec = getattr(self, "_data_recorder", None)
+        if rec is None:
+            return
+        try:
+            import json as _json
+            from shared.market_hours import get_us_market_time
+            from .gex_shadow import evaluate_shadow, disagreement_summary
+            now = get_us_market_time()
+
+            shadow = ()
+            if profile is not None:
+                shadow = evaluate_shadow(
+                    profile,
+                    spot=spot,
+                    threatened_side=side,
+                    reference_strike=reference_strike,
+                    min_strength_pct=self.brandon_accel_min_pct,
+                    peak_locality_pts=getattr(self, "brandon_accel_peak_locality_pts", 25.0),
+                )
+            disagreement = disagreement_summary(shadow)
+            if disagreement:
+                # Only log when a correction would have decided differently —
+                # logging every agreement would double the volume of an
+                # already-chatty subsystem for no information.
+                logger.info(
+                    "BRANDON-GEX-SHADOW E#%s %s (%s): %s",
+                    entry_number, side, consumer, disagreement,
+                )
+
+            rec.record_gex_decision({
+                "timestamp": now.strftime("%Y-%m-%d %H:%M:%S"),
+                "date": now.strftime("%Y-%m-%d"),
+                "variant": self._brandon_variant_tag(),
+                "consumer": consumer,
+                "entry_number": entry_number,
+                "side": side,
+                "spot": spot,
+                "reference_strike": reference_strike,
+                "live_action": live_action,
+                "live_adjuster_predicate": 1 if live_adjuster_predicate else 0,
+                "live_overlay_predicate": 1 if live_overlay_predicate else 0,
+                "cluster_low": getattr(cluster, "strike_low", None),
+                "cluster_high": getattr(cluster, "strike_high", None),
+                "cluster_peak": getattr(cluster, "peak_strike", None),
+                "cluster_n_strikes": getattr(cluster, "n_strikes", None),
+                "cluster_strength_pct": getattr(cluster, "strength_pct", None),
+                "shadow_json": _json.dumps([
+                    {"variant": v.variant,
+                     "adjuster_predicate": v.adjuster_predicate,
+                     "overlay_predicate": v.overlay_predicate,
+                     "n_zones": v.n_zones,
+                     "cluster": (
+                         {"low": v.cluster.strike_low, "high": v.cluster.strike_high,
+                          "peak": v.cluster.peak_strike, "n_strikes": v.cluster.n_strikes,
+                          "strength_pct": v.cluster.strength_pct}
+                         if v.cluster is not None else None
+                     )}
+                    for v in shadow
+                ]),
+                "shadow_disagrees": 1 if disagreement else 0,
+            })
+        except Exception as exc:
+            logger.debug("GEX decision record failed (non-fatal): %s", exc)
 
     def _brandon_resolve_hedge_state_path(self) -> str:
         """Return the path to the variant's hedge_legs JSON sidecar, under the

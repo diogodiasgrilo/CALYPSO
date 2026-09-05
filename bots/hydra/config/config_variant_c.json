@@ -173,6 +173,8 @@
         "breach_confirmation_seconds": 90,
         "decel_min_pct": 0.05,
         "accel_min_pct": 0.1,
+        "_comment_accel_peak_locality_pts": "2026-09-05: made EXPLICIT at its existing code-default value (25.0) \u2014 no behavior change. The 2026-09-04 gate audit found this threshold set in NEITHER B's nor C's config, so live trading was running an untuned default that was asserted on 2026-05-13 and never derived from data. It is load-bearing: it is the sole mitigation for the hemisphere collapse the module's inverted-vs-SpotGamma sign convention causes (see gex_provider.py's SIGN CONVENTION docstring), and it is what stops every call short \u2014 which by definition sits above spot \u2014 from landing inside the call-wing 'accel' cluster and being SKIP'd. Surfacing it here so a future retune is a config change with a visible current value, not an invisible code default. Calibration data is now being recorded to the gex_decisions table.",
+        "accel_peak_locality_pts": 25.0,
         "max_shift_pts": 25.0,
         "shift_buffer_pts": 5.0,
         "breach_exit_advisory": true,

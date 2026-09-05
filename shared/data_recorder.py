@@ -34,7 +34,7 @@ Schema v10 (2026-06-12) adds: a first-class `date` column on spread_snapshots
 backfilled from the timestamp prefix, with an index — so per-day queries and
 per-day maintenance match every other table (date, entry_number).
 
-Current SCHEMA_VERSION = 15 (see the module constant; this docstring intro
+Current SCHEMA_VERSION = 16 (see the module constant; this docstring intro
 describes v10 as an example of the migration pattern, not the current version —
 see the dated comment blocks above each MIGRATION_V{N}_SQL for the full history).
 """
@@ -60,7 +60,7 @@ def _describe_exception(e: Exception) -> str:
 
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 15
+SCHEMA_VERSION = 16
 
 # ============================================================================
 # Schema Migration SQL
@@ -238,6 +238,71 @@ MIGRATION_V15_SQL = [
 # v7: shadow entries table — records what OTM-based selection WOULD have chosen
 # at each entry attempt, for retroactive comparison vs credit-based selection.
 # Pure observation — does not affect trading behavior.
+# v16 (2026-09-05): GEX forensics + shadow-gate telemetry. The 2026-09-04 gate
+# audit could not answer a single "what did the profile actually look like when
+# it decided X" question, because gex_shared_cache keeps exactly ONE
+# atomically-overwritten brandon_gex_profile.json — every profile that drove
+# every historical decision is gone. These two tables are the fix, and they are
+# a PREREQUISITE for calibrating any of the gate corrections: without recorded
+# per-refresh state, a shadow disagreement can be counted but never diagnosed.
+#
+# gex_profile_snapshots: one row per GEX profile refresh. `strikes_json` is the
+# full per-strike signed GEX (the raw material — everything else is derivable
+# from it), `clusters_json` the derived clusters WITH width/peak/strength so a
+# reader doesn't have to re-run detection to see what the gate saw.
+CREATE_GEX_SNAPSHOTS_SQL = """
+CREATE TABLE IF NOT EXISTS gex_profile_snapshots (
+    timestamp TEXT NOT NULL,
+    date TEXT NOT NULL,
+    variant TEXT,
+    spot REAL,
+    expiry TEXT,
+    n_strikes INTEGER,
+    chain_total INTEGER,
+    hydrated_count INTEGER,
+    candidates_found INTEGER,
+    hydrate_cap INTEGER,
+    total_abs_gex REAL,
+    n_positive_clusters INTEGER,
+    n_negative_clusters INTEGER,
+    strikes_json TEXT,
+    clusters_json TEXT,
+    PRIMARY KEY (timestamp, variant)
+);
+CREATE INDEX IF NOT EXISTS idx_gex_snapshots_date ON gex_profile_snapshots(date);
+"""
+
+# gex_decisions: one row per real accel-zone decision (strike adjuster or
+# defensive overlay), capturing the LIVE verdict, the qualifying cluster's
+# full shape, and every SHADOW variant's verdict on the same moment. This is
+# the table that will eventually settle whether the sign convention / width
+# floor / windowed normalization corrections should be adopted -- see
+# bots/hydra/brandon/gex_shadow.py. Nothing reads it to make decisions.
+CREATE_GEX_DECISIONS_SQL = """
+CREATE TABLE IF NOT EXISTS gex_decisions (
+    timestamp TEXT NOT NULL,
+    date TEXT NOT NULL,
+    variant TEXT,
+    consumer TEXT,           -- 'adjuster' | 'overlay'
+    entry_number INTEGER,
+    side TEXT,               -- 'call' | 'put'
+    spot REAL,
+    reference_strike REAL,
+    live_action TEXT,        -- SKIP/SHIFT/KEEP for adjuster; True/False for overlay
+    live_adjuster_predicate INTEGER,
+    live_overlay_predicate INTEGER,
+    cluster_low REAL,
+    cluster_high REAL,
+    cluster_peak REAL,
+    cluster_n_strikes INTEGER,
+    cluster_strength_pct REAL,
+    shadow_json TEXT,        -- [{variant, adjuster_predicate, overlay_predicate, n_zones, cluster{...}}, ...]
+    shadow_disagrees INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_gex_decisions_date ON gex_decisions(date);
+CREATE INDEX IF NOT EXISTS idx_gex_decisions_disagree ON gex_decisions(shadow_disagrees);
+"""
+
 CREATE_SHADOW_ENTRIES_SQL = """
 CREATE TABLE IF NOT EXISTS shadow_entries (
     date TEXT NOT NULL,
@@ -446,6 +511,12 @@ class DataRecorder:
                 # gets stamped anyway. CREATE IF NOT EXISTS is cheap and harmless here.
                 conn.executescript(CREATE_SHADOW_ENTRIES_SQL)
                 conn.executescript(CREATE_SHADOW_INDEX_SQL)
+                # v16: GEX forensics + shadow telemetry. Same unconditional
+                # CREATE IF NOT EXISTS treatment as shadow_entries above —
+                # these are pure-observation tables, cheap to ensure, and a
+                # missing one must never break a schema stamp.
+                conn.executescript(CREATE_GEX_SNAPSHOTS_SQL)
+                conn.executescript(CREATE_GEX_DECISIONS_SQL)
 
                 # Add new columns (catch duplicate column errors)
                 migration_sql = []
@@ -801,6 +872,77 @@ class DataRecorder:
                 conn.commit()
 
         return self._safe_write("record_shadow_entry", _write)
+
+    # ========================================================================
+    # v16 (2026-09-05): GEX forensics + shadow-gate telemetry
+    # Pure observation. Never read by any trading decision.
+    # ========================================================================
+
+    def record_gex_snapshot(self, snap: Dict[str, Any]) -> bool:
+        """Persist one GEX profile refresh.
+
+        The 2026-09-04 gate audit hit a wall on every forensic question
+        because gex_shared_cache keeps exactly ONE overwritten profile JSON —
+        the two profiles that decided the 09-04 arm, and every profile from
+        09-01, no longer exist. This makes each refresh durable so future
+        calibration works from recorded state instead of inference.
+
+        Keyed (timestamp, variant) with INSERT OR IGNORE: B and C share a
+        fetch under the cross-process lock and both record it, so the same
+        profile legitimately arrives twice under different variants; a true
+        duplicate (same variant re-recording the same refresh) is ignored.
+        """
+        def _write():
+            cols = [
+                "timestamp", "date", "variant", "spot", "expiry",
+                "n_strikes", "chain_total", "hydrated_count",
+                "candidates_found", "hydrate_cap", "total_abs_gex",
+                "n_positive_clusters", "n_negative_clusters",
+                "strikes_json", "clusters_json",
+            ]
+            placeholders = ", ".join(["?"] * len(cols))
+            col_names = ", ".join(cols)
+            values = tuple(snap.get(c) for c in cols)
+            with self._connect() as conn:
+                conn.execute(
+                    f"INSERT OR IGNORE INTO gex_profile_snapshots ({col_names}) "
+                    f"VALUES ({placeholders})",
+                    values,
+                )
+                conn.commit()
+
+        return self._safe_write("record_gex_snapshot", _write)
+
+    def record_gex_decision(self, dec: Dict[str, Any]) -> bool:
+        """Persist one real accel-zone decision plus every shadow verdict.
+
+        No primary key / no INSERT OR IGNORE on purpose: a variant can
+        legitimately evaluate the SAME entry+side many times in a session
+        (per-tick overlay watch, entry retries), and each evaluation is a
+        distinct observation whose disagreement rate we want to measure.
+        Deduplicating would silently discard exactly the repeated-evaluation
+        instability that the 2026-09-04 razor-edge finding is about.
+        """
+        def _write():
+            cols = [
+                "timestamp", "date", "variant", "consumer", "entry_number",
+                "side", "spot", "reference_strike", "live_action",
+                "live_adjuster_predicate", "live_overlay_predicate",
+                "cluster_low", "cluster_high", "cluster_peak",
+                "cluster_n_strikes", "cluster_strength_pct",
+                "shadow_json", "shadow_disagrees",
+            ]
+            placeholders = ", ".join(["?"] * len(cols))
+            col_names = ", ".join(cols)
+            values = tuple(dec.get(c) for c in cols)
+            with self._connect() as conn:
+                conn.execute(
+                    f"INSERT INTO gex_decisions ({col_names}) VALUES ({placeholders})",
+                    values,
+                )
+                conn.commit()
+
+        return self._safe_write("record_gex_decision", _write)
 
     # ========================================================================
     # Settlement Writes (once per day after 4 PM)

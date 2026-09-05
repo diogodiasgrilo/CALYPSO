@@ -146,6 +146,27 @@ def _has_accel_zone_on_side(
 ) -> bool:
     """True if a confirming accel (negative-GEX) cluster exists on this side.
 
+    PREDICATE DIVERGENCE FROM THE STRIKE ADJUSTER — documented 2026-09-05
+    after the gate audit found it undocumented and invisible in production.
+    These two consumers ask DIFFERENT questions of the same profile:
+
+        THIS FUNCTION (overlay):  is there a qualifying cluster lying
+            ENTIRELY BEYOND spot on the threatened side?
+            (`strike_low > spot` for calls / `strike_high < spot` for puts)
+
+        gex_strike_adjuster:      does a qualifying cluster CONTAIN the
+            proposed short? (`strike_low <= short <= strike_high`)
+
+    `use_adjuster_gex_gate: true` in the variant configs shares the tuned
+    THRESHOLDS (accel_min_pct / peak-locality / persistence) — it does NOT
+    unify these predicates, and the config comment there was never claiming
+    it did. Consequence: a negative cluster STRADDLING spot makes the
+    adjuster abort an entry while this function reports "no accel zone" on
+    either side. That really happens (2026-09-04 10:15 and 10:46 ET). Both
+    predicates are now recorded on every decision (gex_decisions table, see
+    strategy._brandon_record_gex_decision) so the disagreement rate is
+    measurable rather than theoretical.
+
     reference_strike / peak_locality_pts: when both are given, a cluster
     only confirms if its |GEX| peak is within peak_locality_pts of
     reference_strike (the threatened short strike) — mirrors

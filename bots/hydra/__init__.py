@@ -36,6 +36,101 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-05 GEX gate: correctness fixes, full forensic instrumentation, and a
+  SHADOW gate. Follows the 2026-09-04 audit (7 agents + 2 adversarial
+  verifiers, both of which passed the conclusion at high confidence) that
+  found the accel-zone gate structurally broken rather than mistuned. FIVE
+  defects, all verified against live code and live data:
+    BUG 1 (width)  — a run of ONE strike qualified as a "gamma wall". Its
+      strike_low == strike_high == peak_strike, so the peak-locality test is
+      satisfied trivially. On the live 2026-09-04 profile the only negative
+      cluster clearing 0.10 was a single strike at 16.94%, and it was the
+      sole source of every put-side overlay confirmation on record.
+    BUG 2 (normalization) — cluster strength is scored against the |GEX| of
+      the WHOLE chain, which on a 0DTE book inverts the threshold's meaning:
+      the genuine 345pt call wing scored 9.25% and FAILED the 0.10 gate while
+      one ATM strike scored 16.94% and PASSED. No value of accel_min_pct can
+      repair that — the units are wrong, not the number.
+    BUG 3 (sign convention) — gex_provider assumes dealers SHORT calls /
+      LONG puts, the INVERSE of published SpotGamma (long calls / short
+      puts), while the docstring called it "the standard SpotGamma
+      convention". That mislabel cost real investigation time. The inversion
+      puts essentially all "accel" clusters ABOVE spot (live: 76 pos / 1 neg
+      below spot vs 57 neg / 7 pos above), leaving the put branch near-blind:
+      0 confirmations in 843 watch ticks inside 25pt of a short, while all
+      three real put-side stop-losses in the same window went undefended.
+      gex_strike_adjuster's own docstring has described this hemisphere
+      collapse since 2026-05-13; accel_peak_locality_pts is a MITIGATION for
+      it, not an independent feature.
+    BUG 4 (predicate divergence) — the adjuster asks "does a cluster CONTAIN
+      the proposed short", the overlay asks "is there a cluster entirely
+      BEYOND spot". `use_adjuster_gex_gate: true` shares THRESHOLDS, not the
+      predicate. A spot-straddling cluster therefore aborts an entry while
+      the overlay reports no accel zone on either side (seen live 2026-09-04
+      10:15 and 10:46 ET). Undocumented until now, and invisible in prod.
+    BUG 5 — the SHIFT branch has never fired in 17 sessions across B and C;
+      the adjuster is a call-side veto only.
+  LIVE IMPACT, which is the part that matters and dwarfs the hedge question:
+  over 18 sessions the adjuster vetoed 43 entries while B PLACED 39. Every
+  veto aborts the whole condor (require-both-sides), and all 43 had already
+  cleared the MKT-011 credit gate. Two sessions were wiped out entirely
+  (2026-08-25, 6 aborts; 2026-08-27, 7 aborts) with zero entries, $0.00, and
+  nothing ever close to threatened. At B's ~$90/entry that is ~$3,900 of
+  forgone credit — the same order as the period's entire realized P&L.
+  WHAT SHIPPED HERE (deliberately NOT a behavior flip):
+    1. `bots/hydra/brandon/gex_provider.py` — `_detect_clusters` gains
+       `min_cluster_strikes` (width floor) and `normalization_window_pts`
+       (local normalization basis, with a <3-strike fallback to whole-chain
+       so a degenerate window can't become a near-zero denominator that
+       passes everything). GEXCluster gains `n_strikes` / `strength_pct` /
+       `width_pts` — previously NO consumer could tell a 345pt wall from a
+       single-strike artifact without re-deriving clusters by hand. BOTH new
+       parameters DEFAULT TO LEGACY BEHAVIOR; the live gate is byte-identical
+       until someone opts in. Added `GEXProfile.with_flipped_sign_convention()`
+       (a pure negation of every strike's signed GEX — the alternate
+       convention needs no re-fetch). Module docstring rewritten to state the
+       convention honestly and flag it as the open question it is.
+    2. `bots/hydra/brandon/gex_shadow.py` (NEW) — scores 5 variants (`live`,
+       `width_floor`, `windowed`, `flipped_sign`, `all_fixes`) against every
+       real decision, reporting BOTH predicates so BUG 4's disagreement rate
+       becomes measurable. NOTHING ACTS ON IT. Peak-persistence deliberately
+       not shadowed (it needs a prior profile; folding it in would make a
+       disagreement uninterpretable) — so a shadow False is conclusive and a
+       shadow True is an upper bound.
+    3. Schema v16 — `gex_profile_snapshots` (one row per refresh, full
+       per-strike GEX + derived clusters) and `gex_decisions` (one row per
+       real decision + every shadow verdict). This is the PREREQUISITE for
+       calibrating anything: gex_shared_cache keeps ONE atomically-
+       overwritten profile JSON, so before this every profile that drove
+       every historical decision was gone, which is precisely why the
+       2026-09-04 audit could not reconstruct a single past decision's
+       inputs. Decisions are deliberately NOT deduplicated (repeated
+       evaluation of the same side is the razor-edge signal, not noise);
+       snapshots ARE deduped per (timestamp, variant) since B and C share a
+       fetch and both record it.
+    4. Wired into all three real decision points (adjuster call side,
+       adjuster put side, overlay watch). Every path is exception-swallowed:
+       telemetry must never be able to abort a trade. New
+       `BRANDON-GEX-SHADOW` log line fires ONLY on disagreement.
+    5. Docs — `defensive_overlay._has_accel_zone_on_side` now documents the
+       predicate divergence; `accel_peak_locality_pts` made EXPLICIT at its
+       existing 25.0 default in B's and C's configs (no behavior change) —
+       the audit found it set in NEITHER config, so live trading ran an
+       untuned default asserted on 2026-05-13 and never derived.
+  EXPLICITLY DEFERRED, pending shadow data: flipping the sign convention,
+  adopting the windowed normalization, adopting the width floor in the live
+  gate, reviving SHIFT, and the 43-vs-39 abort-rate policy question. Each
+  changes which entries B places and must be decided on recorded evidence,
+  not argument. Note also that every butterfly win on record predates a
+  config change (trigger 25 -> 15pt, then the 2026-09-02 arming-gate
+  promotion), so the historical record describes rules that no longer exist.
+  New tests: `tests/test_gex_shadow_and_cluster_fixes_2026_09_05.py` (34
+  tests — legacy-behavior preservation first and hardest, the three
+  corrections, shadow scoring, v16 tables incl. the upgrade path from a v15
+  DB, dedup semantics, and the non-fatal property of every telemetry path).
+  Both cluster fixes negative-control-verified against the real file. This
+  branch is IBKR PAPER only — an earlier draft of this analysis called it
+  "live money", which a verifier correctly flagged as overstated.
 - 2026-09-04 Brandon AFTERNOON BUTTERFLY hedge DISABLED on B (live seat).
   `strategy.brandon.defensive_overlay.butterfly_enabled: false`. With
   `debit_spread_enabled` already false (2026-08-25), no overlay hedge can now
