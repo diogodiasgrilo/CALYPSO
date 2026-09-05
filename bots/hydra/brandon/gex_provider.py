@@ -105,6 +105,29 @@ GEX_HYDRATE_WORKERS = 12
 # than blocking further. Decouples "how bad can a degraded-Polygon day get"
 # from "how big is the cap" -- see fetch_polygon_chain_with_greeks.
 GEX_HYDRATE_DEADLINE_S = 15.0
+
+# Minimum contiguous strikes for a same-sign run to count as a gamma "wall".
+# LIVE DEFAULT since 2026-09-06 (was an opt-in parameter defaulting to 1 for
+# one day). A run of ONE strike has strike_low == strike_high == peak_strike,
+# so every downstream peak-locality test passes it trivially and a single
+# high-OI strike could veto an entry or arm a hedge on its own. The live
+# 2026-09-04 profile contained exactly such an artifact -- NEG[7715-7715]
+# scoring 16.94%, the single strongest negative cluster on the board.
+#
+# SHIPPED AS A DEFAULT, NOT SHADOWED, because it is provably INERT for B's
+# live entry selection: measured across all 44 real BRANDON-GEX-ADJ SKIPs in
+# the log-retention window, the NARROWEST cited zone was 30pt = 7 strikes at
+# SPX's 5pt increment, and every other SKIP cited 75-405pt. No recorded veto
+# would change. What it removes is the FUTURE case the 09-04 profile shows is
+# real, plus the sole source of the overlay's put-side confirmations. Kept as
+# a named constant rather than a config knob because it is a correctness floor
+# ("a wall is not one point"), not a tunable -- same treatment as _CAL_ARB_EPS
+# in calendar_strategy_base. Revert = set to 1 here.
+#
+# The shadow gate scores a `legacy_no_floor` arm (min_cluster_strikes=1) so we
+# keep measuring whether this floor ever actually bites -- see gex_shadow.py.
+MIN_CLUSTER_STRIKES = 2
+
 # The chain pull is the single point whose failure aborts the WHOLE fetch (and
 # makes the caller fall back to a STALE profile). Retry it with backoff so a
 # transient Polygon read-timeout doesn't degrade strike selection.
@@ -212,7 +235,7 @@ class GEXProfile:
         self,
         min_strength_pct: float = 0.05,
         *,
-        min_cluster_strikes: int = 1,
+        min_cluster_strikes: int = MIN_CLUSTER_STRIKES,
         normalization_window_pts: Optional[float] = None,
     ) -> tuple[GEXCluster, ...]:
         return _detect_clusters(
@@ -225,7 +248,7 @@ class GEXProfile:
         self,
         min_strength_pct: float = 0.05,
         *,
-        min_cluster_strikes: int = 1,
+        min_cluster_strikes: int = MIN_CLUSTER_STRIKES,
         normalization_window_pts: Optional[float] = None,
     ) -> tuple[GEXCluster, ...]:
         return _detect_clusters(
@@ -397,7 +420,7 @@ def _detect_clusters(
     *,
     sign: int,
     min_strength_pct: float,
-    min_cluster_strikes: int = 1,
+    min_cluster_strikes: int = MIN_CLUSTER_STRIKES,
     normalization_window_pts: Optional[float] = None,
     spot: float = 0.0,
 ) -> tuple[GEXCluster, ...]:
@@ -482,7 +505,7 @@ def _flush_cluster(
     run: list[StrikeGEX],
     threshold: float,
     total_abs: float,
-    min_cluster_strikes: int = 1,
+    min_cluster_strikes: int = MIN_CLUSTER_STRIKES,
 ) -> None:
     if len(run) < max(1, min_cluster_strikes):
         return

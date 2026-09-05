@@ -14,7 +14,9 @@ blind on a live seat:
      satisfied trivially). On the live 2026-09-04 profile the only negative
      cluster clearing the 0.10 threshold was a single strike at 16.94%, and
      it was the sole source of every put-side overlay confirmation on
-     record. Shadowed as `width_floor` (min_cluster_strikes=2).
+     record. SHIPPED LIVE 2026-09-06 as gex_provider.MIN_CLUSTER_STRIKES=2
+     after being measured inert for entry selection; the `legacy_no_floor`
+     arm now reproduces the OLD behavior to confirm it stays inert.
 
   2. NORMALIZATION — cluster strength is scored against the |GEX| of the
      WHOLE chain. On a 0DTE book that inverts the threshold's meaning: the
@@ -62,14 +64,14 @@ from bots.hydra.brandon.gex_provider import GEXCluster, GEXProfile
 # aggregate mass is what currently swamps the denominator.
 SHADOW_WINDOW_PTS = 100.0
 
-# Minimum contiguous strikes for a run to count as a wall under the width
-# correction. 2 is the least aggressive value that still excludes the
-# single-strike artifact; the audit's own recommendation was "2-3".
-SHADOW_MIN_CLUSTER_STRIKES = 2
+# (The width floor itself is no longer shadowed — it shipped live on
+# 2026-09-06 as gex_provider.MIN_CLUSTER_STRIKES = 2 after being measured
+# inert for entry selection. The `legacy_no_floor` arm now reproduces the OLD
+# behavior instead, so we keep measuring whether the live floor ever bites.)
 
 SHADOW_VARIANTS: Tuple[str, ...] = (
     "live",
-    "width_floor",
+    "legacy_no_floor",
     "windowed",
     "flipped_sign",
     "all_fixes",
@@ -107,14 +109,24 @@ class ShadowVerdict:
 
 
 def _zones_for(variant: str, profile: GEXProfile, min_strength_pct: float):
-    """The accel ('negative') clusters this variant would see."""
+    """The accel ('negative') clusters this variant would see.
+
+    NOTE (2026-09-06): the width floor SHIPPED as the live default
+    (gex_provider.MIN_CLUSTER_STRIKES = 2) once it was measured to be inert
+    for B's entry selection — the narrowest zone any of the 44 real SKIPs
+    cited was 30pt = 7 strikes. So the arm here is INVERTED relative to the
+    original design: `legacy_no_floor` reproduces the OLD single-strike-
+    permitting behavior, so we keep measuring whether the now-live floor ever
+    actually changes an outcome. If that arm never disagrees with `live`, the
+    floor is confirmed inert in production and the arm can be retired.
+    """
     if variant == "flipped_sign" or variant == "all_fixes":
         prof = profile.with_flipped_sign_convention()
     else:
         prof = profile
     kwargs = {}
-    if variant in ("width_floor", "all_fixes"):
-        kwargs["min_cluster_strikes"] = SHADOW_MIN_CLUSTER_STRIKES
+    if variant == "legacy_no_floor":
+        kwargs["min_cluster_strikes"] = 1   # pre-2026-09-06 behavior
     if variant in ("windowed", "all_fixes"):
         kwargs["normalization_window_pts"] = SHADOW_WINDOW_PTS
     return prof.negative_clusters(min_strength_pct=min_strength_pct, **kwargs)

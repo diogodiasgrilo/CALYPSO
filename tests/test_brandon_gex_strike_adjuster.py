@@ -109,9 +109,22 @@ class TestAdjustCallStrike:
     def test_skip_takes_precedence_over_shift(self):
         # An accel zone (call OI) overlapping proposed AND a decel wall (put OI)
         # further OTM → skip wins (don't shift past an accel zone).
+        #
+        # 2026-09-06: the accel side was ONE contract at 6850, which formed a
+        # single-strike cluster. gex_provider.MIN_CLUSTER_STRIKES=2 shipped that
+        # day and correctly rejects those (a wall is not one point), so this
+        # fixture stopped producing an accel zone at all and the assertion fell
+        # through to SHIFT. Widened to 3 contiguous strikes, matching this
+        # class's own test_skip_when_inside_accel_zone. The behaviour under
+        # test — SKIP taking precedence over SHIFT — is unchanged; only the
+        # fixture's realism was at fault. (Real production accel zones are far
+        # wider still: the narrowest cited by any of B's 44 live SKIPs was
+        # 30pt = 7 strikes.)
         prof = _profile(
             [
-                _contract(6850, "call", 100000),  # accel cluster around proposed
+                _contract(6845, "call", 100000),  # accel cluster around proposed
+                _contract(6850, "call", 100000),
+                _contract(6855, "call", 100000),
                 _contract(6900, "put", 100000),   # decel wall further OTM
                 _contract(6905, "put", 100000),
             ],

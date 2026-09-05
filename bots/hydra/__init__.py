@@ -36,6 +36,46 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-06 (second same-day change) GEX width floor SHIPPED LIVE —
+  `gex_provider.MIN_CLUSTER_STRIKES = 2` is now the default everywhere, one
+  day after landing as an opt-in parameter.
+  WHY IT SHIPPED INSTEAD OF STAYING SHADOWED, which is the point worth
+  recording: it was MEASURED inert for B's live entry selection rather than
+  assumed to be. Across all 44 real BRANDON-GEX-ADJ SKIPs in the log-retention
+  window the cited zone widths were 30(x1), 75(x4), 110, 145, 205(x2),
+  210(x3), 250(x5), 270(x3), 295(x2), 330, 335(x4), 350, 355, 375(x2),
+  380(x4), 385(x4), 395, 400(x3), 405 — the NARROWEST is 30pt = 7 contiguous
+  strikes at SPX's 5pt increment. A floor of 2 changes none of them. Removing
+  clusters can only ever reduce SKIPs, and every SKIP that fired cited a
+  cluster that survives the floor, so the historical veto record is unchanged
+  by construction. What the floor removes is (a) the FUTURE case the live
+  2026-09-04 profile proves is real — NEG[7715-7715], one strike, 16.94%, the
+  single strongest negative cluster on that board, which simply never happened
+  to align with a strike we were selling — and (b) the sole source of the
+  defensive overlay's put-side confirmations (relevant only if the hedge ever
+  returns; it is disabled on B).
+  This corrects an over-cautious call from 2026-09-05, when all three audit
+  corrections were lumped together as "wait for the shadow". They are not
+  equivalent: shadowing a change that is provably inert delays nothing and
+  teaches nothing. The discipline that should have been applied, and is now:
+  a change that MOVES BEHAVIOUR AND LACKS EVIDENCE gets shadowed; a
+  CORRECTNESS FIX WITH NO BEHAVIOUR CHANGE ships. The other two corrections
+  are correctly classified — `windowed` normalization genuinely moves which
+  entries are vetoed and stays shadowed, and the sign flip already has a
+  verdict of DO NOT FLIP from the 2026-09-06 research.
+  Kept as a named module constant, not a config knob: this is a correctness
+  floor ("a wall is not one point"), not a tunable — same treatment as
+  `_CAL_ARB_EPS` in calendar_strategy_base. Revert = set it to 1.
+  The shadow arm was INVERTED accordingly: `width_floor` became
+  `legacy_no_floor` (min_cluster_strikes=1), so production keeps measuring
+  whether the now-live floor ever actually bites. If that arm never disagrees
+  with `live`, inertness is confirmed in production and the arm can retire.
+  Tests updated from pinning the legacy default to pinning the live one, plus
+  a regression pin on the exact inertness property that justified shipping
+  (a 7-strike/30pt cluster — the narrowest real SKIP ever cited — must pass
+  untouched). Negative-control-verified: reverting the constant to 1 fails 4
+  tests. NOTE for whoever runs these next: clear __pycache__ after changing
+  this constant — stale bytecode made the restore look like a failure here.
 - 2026-09-06 Shutdown hang FIXED, and its cause corrected on the record.
   SYMPTOM: after a graceful shutdown completed and logged, processes sat until
   systemd's 100s TimeoutStopSec and were SIGKILLed (2026-08-31 during RTH;
@@ -140,7 +180,7 @@ Version History:
        convention needs no re-fetch). Module docstring rewritten to state the
        convention honestly and flag it as the open question it is.
     2. `bots/hydra/brandon/gex_shadow.py` (NEW) — scores 5 variants (`live`,
-       `width_floor`, `windowed`, `flipped_sign`, `all_fixes`) against every
+       `legacy_no_floor`, `windowed`, `flipped_sign`, `all_fixes`) against every
        real decision, reporting BOTH predicates so BUG 4's disagreement rate
        becomes measurable. NOTHING ACTS ON IT. Peak-persistence deliberately
        not shadowed (it needs a prior profile; folding it in would make a

@@ -16,9 +16,23 @@ shadowed rather than flipped on a live seat:
   BUG 4 (predicates)    - the adjuster asks "cluster CONTAINS the short",
                           the overlay asks "cluster entirely BEYOND spot".
 
-These tests pin the new primitives and the shadow scoring. The live gate's
-behavior must be UNCHANGED by default — that is tested first and hardest,
-because every new parameter defaults to legacy behavior on purpose.
+These tests pin the new primitives and the shadow scoring.
+
+UPDATED 2026-09-06 — the three corrections did NOT all stay shadowed:
+  * BUG 1 (width floor) SHIPPED LIVE as gex_provider.MIN_CLUSTER_STRIKES = 2.
+    It went live rather than into the shadow because it was MEASURED inert for
+    entry selection: across all 44 real BRANDON-GEX-ADJ SKIPs in the log
+    window, the narrowest cited zone was 30pt = 7 strikes (rest 75-405pt), so
+    no recorded veto changes. Shadowing a provably-inert change is theatre.
+  * BUG 2 (normalization) stays SHADOWED — it genuinely moves which entries
+    get vetoed and there is no evidence yet that it moves them for the better.
+  * BUG 3 (sign) stays SHADOWED, and the 2026-09-06 research verdict is DO NOT
+    FLIP — the put-side-blindness argument for it was refuted (ungated
+    variants A and G show the same put-lean, so that lean is a property of
+    selling 0DTE index premium, not of this gate).
+The shadow's `width_floor` arm was therefore INVERTED into `legacy_no_floor`,
+which reproduces the old single-strike-permitting behavior so we keep
+measuring whether the now-live floor ever actually bites.
 """
 
 from __future__ import annotations
@@ -64,52 +78,74 @@ def _real_0904_shape():
     return _profile(pairs, spot=7718.34)
 
 
-# ───────────────────────── legacy behavior must not move ─────────────────────────
-class TestDefaultsPreserveLiveBehavior:
-    def test_single_strike_cluster_still_qualifies_by_default(self):
-        """BUG 1 is a REAL current behavior; the fix must be opt-in so the
-        live gate is untouched until the shadow justifies flipping it."""
-        p = _real_0904_shape()
-        zones = p.negative_clusters(min_strength_pct=0.10)
-        assert any(c.n_strikes == 1 and c.strike_low == 7715 for c in zones)
+# ───────────── what the LIVE default does (width floor shipped 2026-09-06) ─────────────
+class TestLiveDefaults:
+    """The width floor SHIPPED as the live default on 2026-09-06, one day after
+    landing as an opt-in parameter. It went live rather than into the shadow
+    because it was measured INERT for entry selection: across all 44 real
+    BRANDON-GEX-ADJ SKIPs in the log-retention window, the narrowest cited zone
+    was 30pt = 7 strikes (the rest 75-405pt), so no recorded veto changes.
+    The windowed normalization did NOT ship — it genuinely moves selection and
+    stays shadowed."""
 
-    def test_whole_chain_normalization_is_the_default(self):
+    def test_single_strike_cluster_is_rejected_by_default(self):
+        """The 2026-09-04 live profile's NEG[7715-7715] artifact (16.94%, the
+        single strongest negative cluster on the board) must no longer qualify."""
         p = _real_0904_shape()
-        # No window passed -> basis is the whole chain; the diffuse 70-strike
-        # tail is scored against everything and fails the 10% gate.
         zones = p.negative_clusters(min_strength_pct=0.10)
+        assert not any(c.n_strikes == 1 for c in zones)
+
+    def test_the_live_default_constant_is_two(self):
+        from bots.hydra.brandon.gex_provider import MIN_CLUSTER_STRIKES
+        assert MIN_CLUSTER_STRIKES == 2
+
+    def test_whole_chain_normalization_is_STILL_the_default(self):
+        """The normalization fix deliberately did NOT ship — it changes which
+        entries get vetoed and has no supporting evidence yet."""
+        p = _real_0904_shape()
+        zones = p.negative_clusters(min_strength_pct=0.10)
+        # The diffuse 70-strike tail still fails against a whole-chain basis.
         assert not any(c.n_strikes > 10 for c in zones)
 
-    def test_new_fields_are_populated_without_changing_selection(self):
+    def test_new_fields_are_populated(self):
         p = _real_0904_shape()
-        legacy_ranges = {(c.strike_low, c.strike_high)
-                         for c in p.negative_clusters(min_strength_pct=0.10)}
-        assert legacy_ranges  # non-empty, so the comparison is meaningful
-        for c in p.negative_clusters(min_strength_pct=0.10):
-            assert c.n_strikes >= 1
+        for c in p.negative_clusters(min_strength_pct=0.05):
+            assert c.n_strikes >= 2          # the floor now guarantees this
             assert 0.0 <= c.strength_pct <= 1.0
             assert c.width_pts == c.strike_high - c.strike_low
 
 
 # ───────────────────────── BUG 1: width floor ─────────────────────────
 class TestWidthFloor:
-    def test_min_cluster_strikes_rejects_the_single_strike_artifact(self):
+    def test_explicit_floor_of_one_restores_the_legacy_artifact(self):
+        """min_cluster_strikes=1 is the pre-2026-09-06 behavior, and is what
+        the shadow's `legacy_no_floor` arm uses to keep measuring whether the
+        now-live floor ever actually bites."""
         p = _real_0904_shape()
-        before = p.negative_clusters(min_strength_pct=0.10)
-        after = p.negative_clusters(min_strength_pct=0.10, min_cluster_strikes=2)
-        assert any(c.n_strikes == 1 for c in before)
-        assert not any(c.n_strikes == 1 for c in after)
+        legacy = p.negative_clusters(min_strength_pct=0.10, min_cluster_strikes=1)
+        live = p.negative_clusters(min_strength_pct=0.10)
+        assert any(c.n_strikes == 1 for c in legacy)
+        assert not any(c.n_strikes == 1 for c in live)
+        assert legacy != live   # the arm is not a no-op on this profile
 
     def test_width_floor_does_not_touch_genuinely_wide_clusters(self):
+        """The inertness property that justified shipping it live: a real
+        multi-strike wall is unaffected."""
         p = _profile([(7700, -100.0), (7705, -100.0), (7710, -100.0), (7800, 50.0)])
-        z1 = p.negative_clusters(min_strength_pct=0.05)
-        z2 = p.negative_clusters(min_strength_pct=0.05, min_cluster_strikes=2)
+        z1 = p.negative_clusters(min_strength_pct=0.05, min_cluster_strikes=1)
+        z2 = p.negative_clusters(min_strength_pct=0.05)
         assert z1 == z2
 
-    def test_floor_of_one_is_a_noop(self):
-        p = _real_0904_shape()
-        assert (p.negative_clusters(min_strength_pct=0.10)
-                == p.negative_clusters(min_strength_pct=0.10, min_cluster_strikes=1))
+    def test_inert_on_the_narrowest_zone_any_real_veto_ever_cited(self):
+        """Regression pin for the measurement that justified going live: the
+        narrowest real SKIP zone was 30pt = 7 contiguous strikes. The floor
+        must leave a cluster that size completely untouched."""
+        pairs = [(k, -100.0) for k in range(7700, 7735, 5)]  # 7 strikes, 30pt
+        pairs.append((7800, 20.0))
+        p = _profile(pairs, spot=7690.0)
+        z = p.negative_clusters(min_strength_pct=0.05)
+        assert len(z) == 1 and z[0].n_strikes == 7
+        assert z[0].strike_high - z[0].strike_low == 30
 
 
 # ───────────────────────── BUG 2: windowed normalization ─────────────────────────
@@ -227,18 +263,18 @@ class TestDisagreementSummary:
     def test_empty_when_every_variant_agrees(self):
         agree = (
             ShadowVerdict("live", True, True, None, 1),
-            ShadowVerdict("width_floor", True, True, None, 1),
+            ShadowVerdict("legacy_no_floor", True, True, None, 1),
         )
         assert disagreement_summary(agree) == ""
 
     def test_renders_only_the_disagreeing_variants(self):
         v = (
             ShadowVerdict("live", True, True, None, 1),
-            ShadowVerdict("width_floor", False, True, None, 0),   # differs
+            ShadowVerdict("legacy_no_floor", False, True, None, 0),   # differs
             ShadowVerdict("windowed", True, True, None, 1),       # agrees
         )
         s = disagreement_summary(v)
-        assert "live:" in s and "width_floor:" in s
+        assert "live:" in s and "legacy_no_floor:" in s
         assert "windowed:" not in s
 
     def test_empty_on_no_verdicts(self):
