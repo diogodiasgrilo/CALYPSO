@@ -1407,5 +1407,61 @@ and is a no-op.
         sys.exit(1)
 
 
+def _hard_exit(code: int):
+    """Exit immediately, bypassing CPython interpreter finalization.
+
+    ROOT CAUSE (established 2026-09-06, correcting the record). After
+    run_bot()'s graceful shutdown has fully completed and logged, the process
+    was spending 58-100+s inside Py_FinalizeEx and getting SIGKILLed by
+    systemd at TimeoutStopSec (100s). The blocker is NOT any Python thread:
+      * Every thread in the SHUTDOWN-DIAG line is a daemon — the logger's
+        _process_log_queue (logger_service.py), the "Dummy-N" threads (created
+        outside the threading module, e.g. by grpc), and
+        Thread-CommitBatchPublisher (daemon=True in the installed
+        google-cloud-pubsub). Daemon threads cannot block threading._shutdown().
+      * On 2026-09-03 ALL SEVEN units were SIGKILLed in the same second, and
+        six of them (A/C/D/E/F/G) never publish to Pub/Sub and had no
+        Thread-CommitBatchPublisher at all. That alone rules out the publisher
+        as the cause — the 2026-09-05 traceback from that thread is a
+        consequence of shutdown, not its trigger.
+    What actually persists to SIGKILL are grpc-core's process-global native
+    threads (grpc_global_tim / event_engine / lifeguard). AlertService.close()
+    already documents (2026-08-18) that those are process-wide singletons torn
+    down only by grpc's own sequence at real interpreter exit and CANNOT be
+    eliminated per-channel — which is exactly why closing channels was never
+    going to fix this. The escape hatch is to not run finalization at all.
+
+    WHY os._exit IS SAFE HERE — each precondition verified, not assumed:
+      * ZERO atexit handlers are registered anywhere in shared/, bots/ or
+        services/ (pinned by a test — see tests/test_shutdown_hard_exit_*).
+      * DataRecorder commits per write; nothing is buffered awaiting exit.
+      * _save_state_to_disk writes tmp + os.replace (atomic, already durable).
+      * Logging handlers flush per record, and logging.shutdown() runs below.
+      * This runs ONLY after main()/run_bot() has returned, i.e. after the
+        graceful shutdown sequence is complete. It skips no bot logic.
+
+    THE ONE REAL DOWNSIDE: any atexit handler added to this codebase in future
+    would be silently skipped. The test above exists to catch that.
+    """
+    try:
+        logging.shutdown()
+    except Exception:
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    os._exit(code)
+
+
 if __name__ == "__main__":
-    main()
+    _exit_code = 0
+    try:
+        main()
+    except SystemExit as e:
+        # Preserve main()'s own sys.exit(1) paths — without this, every error
+        # exit would be reported to systemd as a clean 0.
+        _exit_code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+    finally:
+        _hard_exit(_exit_code)

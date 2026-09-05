@@ -423,6 +423,28 @@ class AlertService:
 
         def _do_close():
             try:
+                # 2026-09-06: stop() BEFORE transport.close(). The publisher
+                # runs a background commit thread per sequencer
+                # (Thread-CommitBatchPublisher); closing the transport out from
+                # under an in-flight commit is what produced the truncated
+                # "Exception in thread Thread-CommitBatchPublisher" traceback
+                # observed on 2026-09-05. stop() flushes outstanding batches and
+                # refuses new publishes, so the commit thread finishes cleanly
+                # instead of being amputated mid-RPC. Cosmetic — that traceback
+                # was a CONSEQUENCE of shutdown, never its cause (the thread is
+                # daemon=True and cannot block interpreter exit; six variants
+                # that never publish at all hung identically on 2026-09-03).
+                # Still inside the bounded daemon thread below, so a stop() that
+                # blocks on flush cannot extend shutdown past CLOSE_TIMEOUT_S.
+                try:
+                    publisher.stop()
+                except RuntimeError:
+                    pass  # already stopped — stop()/close() are idempotent here
+                except Exception as e:  # noqa: BLE001 — never fatal on shutdown
+                    logger.debug(
+                        f"AlertService.close(): publisher.stop() failed "
+                        f"(non-fatal): {e}"
+                    )
                 publisher.transport.close()
             except Exception as e:  # noqa: BLE001 — never fatal, see docstring
                 result[0] = e

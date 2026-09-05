@@ -4814,8 +4814,27 @@ class TradeLoggerService:
         # Stop the logging thread
         self._stop_logging = True
 
-        # Wait for queue to empty
-        self.log_queue.join()
+        # Wait for queue to empty — BOUNDED (2026-09-06). Queue.join() blocks
+        # until every task_done() lands, with no timeout: if the consumer
+        # thread has already died (unhandled exception) or is wedged on a
+        # Sheets/network call, this blocks the SHUTDOWN PATH forever. The
+        # thread join immediately below already uses a 5s bound, so an
+        # unbounded wait here was the inconsistent one. Poll instead, and
+        # proceed on timeout — pending log lines are best-effort by
+        # definition, and losing a few is strictly better than never exiting.
+        # (Distinct from the grpc-core finalization stall main.py._hard_exit
+        # handles; this one would block BEFORE we ever reach that.)
+        _join_deadline = time.time() + 5.0
+        while time.time() < _join_deadline:
+            if self.log_queue.unfinished_tasks == 0:
+                break
+            time.sleep(0.05)
+        else:
+            logger.warning(
+                "Trade logger shutdown: log queue still had %d unfinished "
+                "task(s) after 5s — proceeding (pending lines dropped)",
+                self.log_queue.unfinished_tasks,
+            )
 
         # Wait for thread to finish
         if self._log_thread:

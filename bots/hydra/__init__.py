@@ -36,6 +36,55 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-06 Shutdown hang FIXED, and its cause corrected on the record.
+  SYMPTOM: after a graceful shutdown completed and logged, processes sat until
+  systemd's 100s TimeoutStopSec and were SIGKILLed (2026-08-31 during RTH;
+  2026-09-03 all seven units in the same second; 2026-09-05 on B).
+  THE CAUSE WAS MISATTRIBUTED. The 2026-09-05 "Exception in thread
+  Thread-CommitBatchPublisher" traceback made Pub/Sub look responsible. It is
+  not: that thread is daemon=True (verified in the DEPLOYED library at
+  pubsub_v1/publisher/_batch/thread.py:239) and daemon threads cannot block
+  threading._shutdown(); and on 2026-09-03 six of the seven hung units
+  (A/C/D/E/F/G) never publish and had no such thread at all. Every thread in
+  the SHUTDOWN-DIAG lines is a daemon. The real blocker is CPython
+  interpreter finalization (Py_FinalizeEx) with grpc-core's process-global
+  native threads (grpc_global_tim / event_engine / lifeguard) resident —
+  which AlertService.close() has correctly documented since 2026-08-18 as
+  process-wide singletons that CANNOT be torn down per-channel. That is
+  precisely why every previous channel-closing mitigation failed: it was
+  addressing something that was never going to be sufficient.
+  FIX A (bots/hydra/main.py) — _hard_exit() calls os._exit() under the
+  __main__ guard, strictly AFTER main()/run_bot()'s graceful shutdown has
+  returned, so no bot logic is skipped. Preconditions VERIFIED, not assumed:
+  zero atexit handlers anywhere in shared/ bots/ services/ (now pinned by an
+  AST scanner test, with its own negative control); DataRecorder commits per
+  write; _save_state_to_disk is tmp + os.replace; logging handlers flush per
+  record and logging.shutdown() + stream flushes run before the exit.
+  main()'s own sys.exit(1) paths are preserved via an explicit SystemExit
+  catch — without that, every error exit would report a clean 0 to systemd.
+  FIX B (shared/alert_service.py) — publisher.stop() before
+  transport.close(), inside the existing bounded daemon thread. Cosmetic:
+  closing the transport under an in-flight commit is what truncated that
+  traceback. Not a cause.
+  FIX C (bots/hydra/brandon/gex_provider.py) — pool.shutdown(wait=False)
+  became (wait=False, cancel_futures=True). This is a SEPARATE latent hang
+  introduced by the 2026-09-01 deadline work: concurrent.futures registers
+  every executor in _threads_queues and _python_exit joins those workers with
+  NO timeout, so wait=False alone does not deregister them — a hydration
+  worker blocked in a Polygon call at SIGTERM would hang exit on its own.
+  FIX D (shared/logger_service.py) — the unbounded self.log_queue.join() on
+  the shutdown path is now a bounded poll (5s, matching the thread join
+  immediately below it). If the consumer thread died or wedged, that join
+  blocked shutdown forever, BEFORE _hard_exit could ever be reached.
+  IMPACT: removes a ~155s window (100s TimeoutStopSec + 30s RestartSec + ~25s
+  startup) with no stop monitoring on the live 7c seat. Honest scope note: the
+  exposure has never actually been realized on B — the one RTH kill
+  (2026-08-31 11:44 ET) did not include it. New tests:
+  tests/test_shutdown_hard_exit_2026_09_06.py (10). Negative-control-verified
+  against the real files (atexit scanner catches a planted handler; reverting
+  the __main__ guard fails 5 tests). AFTER SEVERAL CLEAN RESTARTS, consider
+  lowering TimeoutStopSec from 100s toward ~40s — but NOT below the 88s
+  worst-case APPLICATION-phase math already documented in deploy/hydra.service.
 - 2026-09-05 GEX gate: correctness fixes, full forensic instrumentation, and a
   SHADOW gate. Follows the 2026-09-04 audit (7 agents + 2 adversarial
   verifiers, both of which passed the conclusion at high confidence) that

@@ -835,7 +835,18 @@ def fetch_polygon_chain_with_greeks(
                     GEX_HYDRATE_DEADLINE_S, len(not_done), len(futures),
                 )
         finally:
-            pool.shutdown(wait=False)
+            # cancel_futures=True is load-bearing, not tidiness (2026-09-06).
+            # concurrent.futures registers every ThreadPoolExecutor in the
+            # module-global _threads_queues, and _python_exit — installed via
+            # threading._register_atexit — joins those worker threads with NO
+            # timeout during interpreter shutdown. shutdown(wait=False) alone
+            # does NOT deregister them, so a hydration worker still blocked in
+            # a Polygon HTTP call when SIGTERM arrives would hang process exit
+            # on its own, independently of the grpc-core finalization stall
+            # that main.py._hard_exit addresses. cancel_futures drops the
+            # queued-but-unstarted work so only genuinely in-flight calls can
+            # linger, and those are bounded by the per-call read timeout.
+            pool.shutdown(wait=False, cancel_futures=True)
     return contracts, candidates_found
 
 
