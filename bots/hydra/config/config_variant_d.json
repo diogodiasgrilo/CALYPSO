@@ -23,7 +23,10 @@
       "profit_trigger_pct": 0.075,
       "pre_transform_stop_pct": 0.20,
       "wing_width": 5,
-      "eod_close_if_no_transform": true,
+      "_comment_eod_close_if_no_transform": "MUST STAY false. Was true through 2026-07-17, which force-closed this 6-15 DTE structure at 15:55 the SAME session — harvesting ~1/8 to 1/15 of the position's life while paying the full round-trip bid/ask on 4 legs. Result: 19 trades, ZERO wins, -$4,877.40 = 80% of D's entire lifetime loss. That is not the source strategy, it is a different trade. Flipped false ~2026-07-20; D's only winner since (dctm_20260818_001, +$511.50) transformed SEVEN DAYS after entry and would have been deleted by a same-day close. This sample previously said true while the VM said false — and skip-worktree does NOT stop a git pull from overwriting the VM copy (verified 2026-08-19), so that divergence was a live hazard that could have silently reverted D to the losing config.",
+      "eod_close_if_no_transform": false,
+      "_comment_dry_run_fill_model": "0.5 = half-spread. Synced from the VM 2026-09-06. History worth keeping: this was set to 0.5 on 2026-07-09 but written as a bare scalar under the double_calendar sub-block, a form the pre-0043298 reader only accepted as a dict at the strategy level — so it was SILENTLY IGNORED and D ran at full-touch 1.0 until 2026-07-20. All 19 same-day trades ran at 1.0; the June-July sample therefore contains no agg=0.5 data at all. The resolver now always logs the value it resolved (calendar_strategy_base.py:436-441). NOTE: neither 1.0 nor 0.5 has ever been validated against a real fill — D has never placed an order.",
+      "dry_run_fill_model": 0.5,
       "eod_cutoff_et": "15:55",
       "prefer_friday": true,
       "entry_time_et": "10:00"
