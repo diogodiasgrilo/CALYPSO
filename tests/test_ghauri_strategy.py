@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import sys
 from datetime import datetime, time as dt_time
+from math import sqrt
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -41,6 +42,7 @@ def _inst(**overrides):
     inst.ghauri_delta_max_reads = 6
     inst.ghauri_width_pt = 10.0
     inst.ghauri_strike_search_pts = 150.0
+    inst.ghauri_em_multiplier = 0.50  # live default since 2026-09-06 — see TestExpectedMoveMultiplier
     inst.ghauri_profit_target_pct = 0.50
     inst.ghauri_pct_of_credit = 1.00
     inst.ghauri_trail_arm_pct = 0.25
@@ -287,7 +289,8 @@ class TestShouldAttemptEntry:
         assert inst._ghauri_upper_boundary is None
 
     def test_scenario_a_no_touch_all_day_stays_waiting_not_daily_complete(self):
-        # SPX open 6500, VIX 15 -> EM = 6500*0.15/sqrt(252) ~= 61.4pt.
+        # SPX open 6500, VIX 15 -> raw VIX30 EM = 6500*0.15/sqrt(252) ~= 61.4pt,
+        # x em_multiplier 0.50 = ~30.7pt (see TestExpectedMoveMultiplier).
         # Price drifts only slightly all day -> never touches either boundary.
         inst = self._armed_inst()
         for hour, minute, px in [(9, 35, 6500), (10, 30, 6510), (11, 45, 6495), (12, 55, 6520)]:
@@ -373,6 +376,92 @@ class TestShouldAttemptEntry:
         result = inst._should_attempt_entry(_et(13, 5))
         assert result is False
         assert inst.state != MEICState.DAILY_COMPLETE
+
+
+class TestExpectedMoveMultiplier:
+    """2026-09-06: F had placed ZERO entries in its entire life (7 sessions).
+
+    Diagnosis, from a 139-session replay of real market_ticks against F's own
+    formula: the pre-13:00 trigger rate was 4.3% — the boundary sat at ~the
+    95th percentile of actual pre-cutoff SPX excursions, so by construction it
+    could only fire ~1 session in 20. Root cause: VIX/sqrt(252) de-annualises
+    a THIRTY-DAY implied vol, while the source strategy's "expected move" is
+    the 0DTE ATM STRADDLE — which prices far below VIX30. An independent
+    backtest of the same published rules reports ~70% of sessions triggering;
+    F was at 5%.
+
+    em_multiplier=0.50 restores a straddle-equivalent boundary. These tests
+    pin the mechanism and the calibrated default, NOT the strategy's edge —
+    this change raises frequency, not expectancy (F is permanently one-sided,
+    the leg shape behind onesided_entry_negative_expectancy on B/C).
+    """
+
+    def _armed(self, mult, spx_open=6500.0, vix_open=15.0):
+        return _inst(
+            current_price=spx_open,
+            market_data=SimpleNamespace(spx_open=spx_open, vix_open=vix_open),
+            ghauri_em_multiplier=mult,
+        )
+
+    def test_multiplier_scales_the_boundary_linearly(self):
+        full = self._armed(1.00)
+        full._should_attempt_entry(_et(9, 35))
+        half = self._armed(0.50)
+        half._should_attempt_entry(_et(9, 35))
+        full_em = full._ghauri_upper_boundary - 6500.0
+        half_em = half._ghauri_upper_boundary - 6500.0
+        assert full_em == pytest.approx(6500.0 * 0.15 / sqrt(252), rel=1e-9)
+        assert half_em == pytest.approx(full_em * 0.50, rel=1e-9)
+
+    def test_boundary_is_symmetric_around_the_open(self):
+        inst = self._armed(0.50)
+        inst._should_attempt_entry(_et(9, 35))
+        up = inst._ghauri_upper_boundary - 6500.0
+        dn = 6500.0 - inst._ghauri_lower_boundary
+        assert up == pytest.approx(dn, rel=1e-12)
+
+    def test_a_move_that_the_OLD_boundary_ignored_now_fires(self):
+        """The whole point, made executable. A ~35pt move at VIX 15 is a
+        completely ordinary session — it is well inside the old +/-61pt
+        boundary (no trigger, F's actual 7-day experience) and outside the
+        new +/-30.7pt one."""
+        old = self._armed(1.00)
+        old._should_attempt_entry(_et(9, 35))
+        old.current_price = 6535.0
+        assert old._should_attempt_entry(_et(10, 30)) is False   # old: ignored
+
+        new = self._armed(0.50)
+        new._should_attempt_entry(_et(9, 35))
+        new.current_price = 6535.0
+        assert new._should_attempt_entry(_et(10, 30)) is True    # new: fires
+        assert new._ghauri_pending_fire_side == "call"
+
+    def test_multiplier_of_one_reproduces_pre_fix_behaviour(self):
+        """Revert path: setting it back to 1.0 must restore the exact old
+        boundary, so this is a one-value rollback."""
+        inst = self._armed(1.00)
+        inst._should_attempt_entry(_et(9, 35))
+        assert inst._ghauri_upper_boundary == pytest.approx(
+            6500.0 + 6500.0 * 0.15 / sqrt(252), rel=1e-9
+        )
+
+    def test_deployed_config_carries_the_calibrated_value(self):
+        """Pins the shipped default. F's config is NOT skip-worktree, but a
+        silent revert here would put F straight back to trading ~1 day in 20
+        with no error anywhere."""
+        import json
+        from pathlib import Path
+        p = Path(__file__).resolve().parents[1] / "bots" / "hydra" / "config" / "config_variant_f.json"
+        cfg = json.loads(p.read_text())
+        assert cfg["strategy"]["ghauri"]["em_multiplier"] == 0.50
+
+    def test_code_default_matches_the_config(self):
+        """If the config key were ever dropped, the code default must land on
+        the calibrated value, not the old 1.0."""
+        import inspect
+        from bots.hydra import ghauri_strategy
+        src = inspect.getsource(ghauri_strategy.GhauriMeanReversionStrategy.__init__)
+        assert 'ghauri_cfg.get("em_multiplier", 0.50)' in src
 
 
 class TestStopFormula:

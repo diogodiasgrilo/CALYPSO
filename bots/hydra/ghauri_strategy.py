@@ -183,6 +183,33 @@ class GhauriMeanReversionStrategy(HydraStrategy):
         self.ghauri_delta_max_reads = int(ghauri_cfg.get("delta_max_reads", 6))
         self.ghauri_width_pt = float(ghauri_cfg.get("width_pt", 10.0))
         self.ghauri_strike_search_pts = float(ghauri_cfg.get("strike_search_pts", 150.0))
+        # Scales the VIX-derived expected move that sets the entry boundary.
+        # 2026-09-06: added at 0.50 after F placed ZERO entries in its first 7
+        # sessions and a 139-session replay (2026-02-05..09-04, real
+        # market_ticks, F's own formula) measured the true trigger rate at
+        # 4.3% pre-cutoff — the boundary sat at roughly the 95th percentile of
+        # what SPX actually does before 13:00 ET, so by construction it could
+        # only fire on ~1 session in 20.
+        # ROOT CAUSE: VIX/sqrt(252) de-annualises a THIRTY-DAY implied vol.
+        # The source strategy's "expected move" is the 0DTE ATM STRADDLE,
+        # which prices well below VIX30 (0DTE ATM IV runs under it, and VIX
+        # carries a variance risk premium). Measured on this data,
+        # |close-prev_close| / EM averages 0.54 where a calibrated 1-sigma
+        # gives 0.798 — the VIX proxy overstates the real daily move by ~48%.
+        # An independent backtest of the SAME published rules reports ~70% of
+        # sessions triggering (447 trades / 634 days); F was triggering 5%.
+        # 0.50 restores a straddle-equivalent boundary (±36pt at VIX 15 vs
+        # ±73pt) -> ~44% of sessions, and puts the line near the p75 rather
+        # than the p95 of real pre-13:00 excursions.
+        # NOT DONE HERE, deliberately: sqrt(252) also annualises to a FULL
+        # day while the gate only watches 09:30-13:00 (the variance-correct
+        # window factor is sqrt(210/390) = 0.734, which would take this to
+        # ~0.37 and ~65%). One change at a time — measure this first.
+        # NOTE this raises FREQUENCY, not edge. F is permanently one-sided,
+        # the exact leg shape behind the onesided_entry_negative_expectancy
+        # finding on B/C. F is dry-run-locked so observing costs nothing, but
+        # the honest framing is that this STARTS the test, it doesn't pass it.
+        self.ghauri_em_multiplier = float(ghauri_cfg.get("em_multiplier", 0.50))
 
         # Exit
         self.ghauri_profit_target_pct = float(ghauri_cfg.get("profit_target_pct", 0.50))
@@ -293,12 +320,14 @@ class GhauriMeanReversionStrategy(HydraStrategy):
             vix_open = self.market_data.vix_open
             if not spx_open or spx_open <= 0 or not vix_open or vix_open <= 0:
                 return False  # session open data not available yet this tick
-            expected_move = spx_open * (vix_open / 100) / sqrt(252)
+            raw_em = spx_open * (vix_open / 100) / sqrt(252)
+            expected_move = raw_em * self.ghauri_em_multiplier
             self._ghauri_upper_boundary = spx_open + expected_move
             self._ghauri_lower_boundary = spx_open - expected_move
             logger.info(
                 f"GHAURI: EM boundaries set for today — SPX open {spx_open:.2f}, "
-                f"VIX open {vix_open:.2f}, EM ±{expected_move:.2f} -> "
+                f"VIX open {vix_open:.2f}, raw VIX30 EM ±{raw_em:.2f} × "
+                f"mult {self.ghauri_em_multiplier:.2f} = EM ±{expected_move:.2f} -> "
                 f"upper {self._ghauri_upper_boundary:.2f} / "
                 f"lower {self._ghauri_lower_boundary:.2f}"
             )
