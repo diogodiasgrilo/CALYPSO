@@ -36,6 +36,61 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-06 (third same-day change) STATE-004 restart-gap backstop.
+  THE GAP: `_reset_for_new_day()` — where the overnight-position check lives —
+  only fires when a RUNNING process observes the ET date change under it. On a
+  day where no process survives across ET midnight (VM reboot, crash storm, a
+  deploy straddling midnight), `main.py:run_bot` seeds `last_day = today` and
+  `strategy.py` stamps `daily_state.date = today` unconditionally at startup,
+  so the reset never runs and STATE-004 is silently skipped for that day.
+  Real in code; LATENT in production — all 7 units logged "Resetting for new
+  trading day" on every date from Aug 14 to Sep 6, so the gap has never yet
+  cost an actual check.
+  HONEST VALUE FRAMING (found by the adversarial review, recorded here so the
+  next reader doesn't over-rate this): the missed check is NOT an unexamined
+  blind spot. `_check_hourly_reconciliation`'s orphan sweep runs on the FIRST
+  market-hours tick (`_last_reconciliation_time` is None) and fires
+  logger.critical + a CRITICAL alert ~2 minutes after the open on a genuine
+  overnight leg. So the real delta this buys is halt-BEFORE-the-open instead
+  of CRITICAL-alert-AFTER-it — worth having, not a hole being plugged.
+  THE FIX: the check body moved to `_run_overnight_position_check()`, which
+  returns CLEAN / POSITIONS_CONFIRMED / READ_FAILED rather than deciding
+  policy. `_reset_for_new_day` keeps its historical policy byte-for-byte
+  (including halting on a failed read — the statements after it wipe
+  daily_state). A new pre-market hook `run_overnight_check_if_owed()` runs the
+  same check from main.py when owed. `overnight_check_date` is persisted and
+  restored (same-day only) so the check runs at most once per ET day across
+  restarts; it is stamped ONLY on the clean path, so a halt or a read failure
+  leaves it owed and re-derived.
+  THE REVIEW'S BLOCKING FINDING, and why READ_FAILED must not halt on the hook
+  path: a green broker `/health` only proves the SESSION family is up.
+  `get_positions` runs on the independent PORTFOLIO family with its own
+  circuit breaker, shared by all 7 processes through the one broker. The naive
+  design (lift the body verbatim, keep its read-failure latch) would halt the
+  live seat — no entries AND no stop monitoring — for a whole session on a
+  FLAT pre-market account, clearable only by another restart, on exactly the
+  day a restart just happened. The hook now logs WARNING + a MEDIUM
+  DATA_QUALITY alert and leaves the check owed to retry.
+  WINDOW: `OVERNIGHT_CHECK_WINDOW_END_ET = 09:20`. The check reads the WHOLE
+  account (no symbol/variant filter), so it must complete before ANY variant
+  can legitimately hold a position. The fleet floor is 09:30, NOT B's 09:45 —
+  variant F sets `entry_times = [09:30]` and is event-triggered from the open.
+  09:20 leaves ~10 min over the check's own ~4-minute worst-case retry budget.
+  The same market-closed branch also runs at 16:30 with 0DTE legs legitimately
+  open, which is why the guard is "before the window ends", not "market
+  closed". Two tests pin this invariant.
+  NOT TO BE CONFUSED WITH the separate, still-unbuilt work of SCOPING
+  STATE-004 to per-variant conids for D/E coexistence — that one is a go-live
+  gate that cannot bind until D/E have an execution path at all (see the same
+  date's correction in docs/NEXT_STEPS.md), and two design attempts at it were
+  adversarially refuted. This change is about WHEN the check runs, not WHAT it
+  scopes to.
+  Tests: 22 new (tests/test_state004_restart_gap_2026_09_06.py) + the 13
+  existing STATE-004 tests still green (one assertion updated: the clean path
+  now saves twice — once for the stamp, once at the end of the reset).
+  Three mutations verified to fail the new suite: halting on READ_FAILED,
+  dropping the stamp, and nesting the restore inside the Brandon `hasattr`
+  guard (which would restore on B/C only and re-alert A/D/E/F/G every restart).
 - 2026-09-06 (second same-day change) GEX width floor SHIPPED LIVE —
   `gex_provider.MIN_CLUSTER_STRIKES = 2` is now the default everywhere, one
   day after landing as an opt-in parameter.

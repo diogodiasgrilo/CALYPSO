@@ -144,6 +144,38 @@ SETTLEMENT_MAX_STRICT_READ_FAILURES = 5
 STATE004_MAX_ATTEMPTS = 4
 STATE004_RETRY_DELAY_S = 20
 
+# STATE-004 outcome constants (2026-09-06). The check body was extracted from
+# _reset_for_new_day into _run_overnight_position_check() so it can ALSO run
+# from a pre-market hook, closing the "restart gap": if no process survives
+# across ET midnight, every process starts with the date already stamped to
+# today, _reset_for_new_day never fires, and the overnight check is silently
+# skipped for that day. The two call sites diverge only on READ_FAILED — see
+# _run_overnight_position_check's docstring.
+# Latest ET wall-clock time at which the pre-market overnight check may START.
+#
+# WHY A MARGIN AND NOT SIMPLY 09:30: the check reads the WHOLE account (no
+# symbol or variant filter), so it must complete before ANY variant can hold a
+# legitimate position, or it would read that position as an overnight
+# emergency and halt. The fleet's true floor is 09:30, not 09:45 — variant F
+# (Ghauri) sets entry_times = [09:30] and is event-triggered from the open.
+#
+# The check's own worst case is ~4 minutes (STATE004_MAX_ATTEMPTS attempts at
+# BrokerClient's ~35s HTTP timeout, plus 3 x STATE004_RETRY_DELAY_S between
+# them, plus the 20s confirm-before-alarm sleep). 09:20 leaves ~10 minutes of
+# headroom over that pathological case before the 09:30 open.
+#
+# INVARIANT (asserted in tests): this constant plus the worst-case check
+# duration must stay strictly earlier than the earliest possible entry across
+# EVERY variant. If a variant is ever configured to enter before ~09:30, move
+# this earlier or give the check a per-variant scope.
+OVERNIGHT_CHECK_WINDOW_END_ET = dt_time(9, 20)
+
+OVERNIGHT_CHECK_CLEAN = "clean"
+OVERNIGHT_CHECK_POSITIONS = "positions_confirmed"
+OVERNIGHT_CHECK_READ_FAILED = "read_failed"
+OVERNIGHT_CHECK_ALREADY_DONE = "already_done"
+OVERNIGHT_CHECK_SKIPPED_HALTED = "skipped_halted"
+
 # MKT-034: VIX-scaled entry time shifting (DISABLED since v1.10.3 — code preserved)
 # When enabled via vix_time_shift.enabled, these slots replace config entry_times.
 ALL_ENTRY_SLOTS = [
@@ -11948,6 +11980,12 @@ class HydraStrategy(MEICStrategy):
                 # __new__() for testing/partial-construction may not have
                 # reached __init__ yet.
                 "critical_intervention": getattr(self, "_critical_intervention_required", False),
+                # STATE-004 restart-gap backstop (2026-09-06). UNLIKE
+                # critical_intervention above, this one IS restored on
+                # restart (same-day only, see _load_state_file_history) —
+                # it records that the overnight check already ran cleanly
+                # today, so a mid-session restart doesn't re-run it.
+                "overnight_check_date": getattr(self, "_overnight_check_date", None),
                 "critical_intervention_reason": getattr(self, "_critical_intervention_reason", ""),
                 "next_entry_index": self._next_entry_index,
                 # Phase 2 X-1: top-level contract count for dashboard / agents / HOMER.
@@ -12760,29 +12798,43 @@ class HydraStrategy(MEICStrategy):
                     time.sleep(STATE004_RETRY_DELAY_S)
         raise last_exc
 
-    def _reset_for_new_day(self):
+    def _run_overnight_position_check(self) -> str:
         """
-        Reset state for a new trading day.
+        STATE-004 core: ask the broker whether any option position survived
+        overnight, and act on the answer.
 
-        OVERRIDE: Uses BOT_NAME ("HYDRA") instead of hardcoded "MEIC" in parent class.
+        Returns one of the three ``OVERNIGHT_CHECK_*`` outcome constants:
+
+        * ``OVERNIGHT_CHECK_CLEAN`` — the broker confirms nothing is open.
+          Stale registry entries are swept, ``_overnight_check_date`` is
+          stamped with today's ET date and persisted, so the check is not
+          repeated for the rest of the ET day.
+        * ``OVERNIGHT_CHECK_POSITIONS`` — a genuine overnight position was
+          confirmed TWICE (confirm-before-alarm). The CRITICAL alert is sent
+          and ``_critical_intervention_required`` is latched HERE, exactly as
+          the historical in-line code did.
+        * ``OVERNIGHT_CHECK_READ_FAILED`` — the broker read exhausted
+          ``STATE004_MAX_ATTEMPTS``. Nothing is alerted and nothing is latched
+          here; the exception is stashed on ``_overnight_check_read_error`` and
+          the CALLER decides what it means. The date is deliberately NOT
+          stamped, so the check stays owed and can be retried.
+
+        Extracted from ``_reset_for_new_day`` (2026-09-06) so the identical
+        check can also run from the pre-market hook — see
+        ``run_overnight_check_if_owed``. The two callers differ ONLY in how
+        they treat READ_FAILED:
+
+        * the midnight reset keeps its historical "halt conservatively"
+          behaviour, because the statements right after it WIPE ``daily_state``
+          — a failed read there must never be mistaken for "all settled";
+        * the pre-market hook must NOT halt over a transient portfolio-family
+          outage. A green broker ``/health`` only proves the *session* family is
+          up; ``get_positions`` runs on the independent *portfolio* family with
+          its own circuit breaker, and that breaker is shared by all 7 strategy
+          processes through the one broker. Halting the live seat there would
+          stop entries AND stop monitoring for the session, on a flat account,
+          clearable only by another restart.
         """
-        from bots.hydra.base_strategy import MEICDailyState
-
-        logger.info("Resetting for new trading day")
-
-        # Per-day alert dedup: clear the emergency-close once-per-conid set so a
-        # fresh day starts clean (conids differ day-to-day, so this is hygiene
-        # against unbounded growth, not correctness). See
-        # base_strategy._emergency_close_alert_once.
-        if hasattr(self, "_emergency_close_alerted"):
-            self._emergency_close_alerted.clear()
-
-        # POS-003: a fresh day starts with no recently-closed conids (conids differ
-        # day-to-day; this also bounds the dict's growth).
-        self._recent_close_conids = {}
-
-        # STATE-004: Check for overnight 0DTE positions (should NEVER happen).
-        #
         # P7-audit M7: the prior Saxo design gated this on
         # `self.registry.get_positions(self.BOT_NAME)` as a fast cache hit
         # before round-tripping to the broker. On IBKR the Position
@@ -12792,39 +12844,24 @@ class HydraStrategy(MEICStrategy):
         # fired on IBKR.
         #
         # Fix: ask the broker directly. ``_read_open_positions(strict=True)``
-        # raises on a fetch failure so a broker outage halts the reset
-        # conservatively instead of being mistaken for "all settled".
+        # raises on a fetch failure so a broker outage is never silently
+        # mistaken for "all settled".
         #
         # Any stale registry entries (left over from a prior write that
         # didn't unregister cleanly) get cleaned up too — harmless on
         # IBKR but keeps the registry tidy if a multi-bot future
         # resurrects it.
+        self._overnight_check_read_error = None
         try:
             open_positions = self._read_open_positions_for_new_day_reset()
         except Exception as e:
-            error_msg = (
-                f"CRITICAL: broker overnight-position check failed at "
-                f"new-day reset after {STATE004_MAX_ATTEMPTS} attempts "
-                f"({e}) — halting for safety"
-            )
-            logger.critical(error_msg)
-            self.alert_service.send_alert(
-                alert_type=AlertType.CRITICAL_INTERVENTION,
-                title=f"{self.BOT_NAME} Overnight Position Check Failed!",
-                message=error_msg,
-                priority=AlertPriority.CRITICAL,
-                details={"error": str(e), "attempts": STATE004_MAX_ATTEMPTS},
-                contracts=self.contracts_per_entry,
-            )
-            self._critical_intervention_required = True
-            self._critical_intervention_reason = (
-                f"Overnight position verification failed: {e}"
-            )
-            self._save_state_to_disk()
-            return
+            # Report-only. The caller owns the alert/halt decision because the
+            # right answer differs by call site (see the class docstring above).
+            self._overnight_check_read_error = e
+            return OVERNIGHT_CHECK_READ_FAILED
 
         if open_positions:
-            # Confirm-before-alarm (same pattern as _recon_recheck_at below):
+            # Confirm-before-alarm (same pattern as _recon_recheck_at):
             # a non-empty read can itself be a transitional/misleading
             # snapshot during a reconnect blip rather than a genuine
             # overnight position. Re-check once before declaring an
@@ -12880,11 +12917,10 @@ class HydraStrategy(MEICStrategy):
                 "Overnight 0DTE positions detected - investigate immediately"
             )
             self._save_state_to_disk()
-            return  # Don't reset state, need to handle existing positions
+            return OVERNIGHT_CHECK_POSITIONS
 
         # Broker shows nothing open — clean up any stale registry entries
-        # (vestigial on IBKR; defensive for the multi-bot legacy code path)
-        # and fall through to the normal reset.
+        # (vestigial on IBKR; defensive for the multi-bot legacy code path).
         try:
             stale_position_ids = self.registry.get_positions(self.BOT_NAME)
         except Exception as e:
@@ -12904,6 +12940,165 @@ class HydraStrategy(MEICStrategy):
                     logger.error(
                         f"Registry error unregistering stale {pos_id}: {e}"
                     )
+
+        # Clean: stamp the date so the pre-market hook knows the check is
+        # satisfied for today, and PERSIST it immediately. The stamp is only
+        # written on this path — a halt or a read failure deliberately leaves
+        # the check owed so it is re-derived rather than assumed done.
+        self._overnight_check_date = get_us_market_time().strftime("%Y-%m-%d")
+        try:
+            self._save_state_to_disk()
+        except Exception as e:
+            # Memory-only stamp is still correct for this process; it just
+            # won't survive a restart, which re-runs the (clean) check.
+            logger.warning(
+                f"STATE-004: could not persist overnight_check_date ({e}) — "
+                f"stamp is in-memory only for this process"
+            )
+        return OVERNIGHT_CHECK_CLEAN
+
+    def run_overnight_check_if_owed(self) -> str:
+        """
+        Pre-market entry point for the STATE-004 overnight-position check.
+
+        Closes the "restart gap": ``_reset_for_new_day`` — which is where
+        STATE-004 historically lived — only fires when a process observes the
+        ET date CHANGE under it. On a day where no process survived across ET
+        midnight (VM reboot, crash storm, a deploy straddling midnight), every
+        process starts with ``last_day``/``daily_state.date`` already stamped to
+        today, the reset never runs, and the overnight check is silently
+        skipped for that day.
+
+        Called from ``main.py``'s market-closed branch under a hard
+        ``now_et < 09:30 ET`` guard. That window matters: this check reads the
+        WHOLE account (``_read_open_positions`` has no symbol or variant
+        filter), so it must only ever run at a moment when NO variant can
+        legitimately be holding a position. Pre-market satisfies that by
+        construction — the earliest configured entry across the whole fleet is
+        09:45 (variant B). The same market-closed branch also runs at 16:30
+        while 0DTE legs are still legitimately open, which is exactly why the
+        caller's guard is "before the open", not merely "market closed".
+
+        **Invariant for future variants:** if any variant is ever configured to
+        enter before 09:30 ET, this hook must move earlier (or gain a
+        per-variant scope) — otherwise it would read that variant's legitimate
+        position as an overnight emergency.
+
+        Returns an ``OVERNIGHT_CHECK_*`` constant (including
+        ``OVERNIGHT_CHECK_ALREADY_DONE`` / ``OVERNIGHT_CHECK_SKIPPED_HALTED``
+        for the two no-op paths) so the caller and the tests can assert on what
+        actually happened.
+        """
+        today = get_us_market_time().strftime("%Y-%m-%d")
+        if getattr(self, "_overnight_check_date", None) == today:
+            return OVERNIGHT_CHECK_ALREADY_DONE
+
+        if getattr(self, "_critical_intervention_required", False):
+            # Already halted for some other reason — running the check would
+            # only stack a second alert on an operator who is already paged.
+            return OVERNIGHT_CHECK_SKIPPED_HALTED
+
+        outcome = self._run_overnight_position_check()
+
+        if outcome == OVERNIGHT_CHECK_READ_FAILED:
+            err = getattr(self, "_overnight_check_read_error", None)
+            msg = (
+                f"{self.BOT_NAME} pre-market overnight-position check could "
+                f"not reach the broker after {STATE004_MAX_ATTEMPTS} attempts "
+                f"({err}). The check is left OWED and retries on the next "
+                f"loop while still pre-market. NOT halting: this is a read "
+                f"failure on a pre-market (flat) account, not a confirmed "
+                f"position."
+            )
+            logger.warning(msg)
+            try:
+                self.alert_service.send_alert(
+                    alert_type=AlertType.DATA_QUALITY,
+                    title=f"{self.BOT_NAME} Pre-Market Overnight Check Deferred",
+                    message=msg,
+                    priority=AlertPriority.MEDIUM,
+                    details={
+                        "error": str(err),
+                        "attempts": STATE004_MAX_ATTEMPTS,
+                    },
+                )
+            except Exception as alert_exc:
+                logger.warning(
+                    f"STATE-004: deferred-check alert failed to send "
+                    f"({alert_exc}) — the WARNING above is the record"
+                )
+        elif outcome == OVERNIGHT_CHECK_CLEAN:
+            logger.info(
+                f"STATE-004 pre-market check: broker confirms 0 open "
+                f"position(s) for {self.BOT_NAME} — overnight check satisfied "
+                f"for {today} (restart-gap backstop)."
+            )
+
+        return outcome
+
+    def _reset_for_new_day(self):
+        """
+        Reset state for a new trading day.
+
+        OVERRIDE: Uses BOT_NAME ("HYDRA") instead of hardcoded "MEIC" in parent class.
+        """
+        from bots.hydra.base_strategy import MEICDailyState
+
+        logger.info("Resetting for new trading day")
+
+        # Per-day alert dedup: clear the emergency-close once-per-conid set so a
+        # fresh day starts clean (conids differ day-to-day, so this is hygiene
+        # against unbounded growth, not correctness). See
+        # base_strategy._emergency_close_alert_once.
+        if hasattr(self, "_emergency_close_alerted"):
+            self._emergency_close_alerted.clear()
+
+        # POS-003: a fresh day starts with no recently-closed conids (conids differ
+        # day-to-day; this also bounds the dict's growth).
+        self._recent_close_conids = {}
+
+        # STATE-004: Check for overnight 0DTE positions (should NEVER happen).
+        #
+        # The check body now lives in _run_overnight_position_check() so the
+        # pre-market hook in main.py can run the IDENTICAL logic on a day where
+        # no process survived across ET midnight (the "restart gap" — see
+        # run_overnight_check_if_owed). Behaviour on THIS path is unchanged
+        # from the historical in-line version, including halting on a failed
+        # broker read.
+        outcome = self._run_overnight_position_check()
+
+        if outcome == OVERNIGHT_CHECK_READ_FAILED:
+            # Historical behaviour, deliberately preserved: at the new-day
+            # reset a failed read must NOT be mistaken for "all settled",
+            # because the statements below WIPE daily_state. Halt for safety.
+            # (The pre-market hook treats the same outcome differently — there
+            # the account is flat and halting would be a pure false positive.)
+            err = getattr(self, "_overnight_check_read_error", None)
+            error_msg = (
+                f"CRITICAL: broker overnight-position check failed at "
+                f"new-day reset after {STATE004_MAX_ATTEMPTS} attempts "
+                f"({err}) — halting for safety"
+            )
+            logger.critical(error_msg)
+            self.alert_service.send_alert(
+                alert_type=AlertType.CRITICAL_INTERVENTION,
+                title=f"{self.BOT_NAME} Overnight Position Check Failed!",
+                message=error_msg,
+                priority=AlertPriority.CRITICAL,
+                details={"error": str(err), "attempts": STATE004_MAX_ATTEMPTS},
+                contracts=self.contracts_per_entry,
+            )
+            self._critical_intervention_required = True
+            self._critical_intervention_reason = (
+                f"Overnight position verification failed: {err}"
+            )
+            self._save_state_to_disk()
+            return
+
+        if outcome == OVERNIGHT_CHECK_POSITIONS:
+            # The CRITICAL alert and the intervention latch already fired
+            # inside the check itself.
+            return  # Don't reset state, need to handle existing positions
 
         self.daily_state = MEICDailyState()
         self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
@@ -13978,6 +14173,21 @@ class HydraStrategy(MEICStrategy):
             if saved_state.get("date") != today:
                 logger.info(f"State file is from {saved_state.get('date')}, not today ({today}) - starting fresh")
                 return False
+
+            # STATE-004 restart-gap backstop (2026-09-06). Restored at the SAME
+            # indent as the daily_state.* restores below — deliberately NOT
+            # nested inside the Brandon `hasattr` guard, which would restore it
+            # on B/C only and leave A/D/E/F/G re-running the check (and
+            # re-alerting) on every single restart.
+            #
+            # Safe to restore because we only get here when the state file is
+            # from TODAY (the date check above returns False otherwise), and
+            # because the stamp is only ever written on the CLEAN path — a halt
+            # or a failed broker read leaves it unset, so those are re-derived.
+            # This is not in tension with the "restart clears the halt"
+            # convention: the halt flag itself is still deliberately not
+            # restored (see _save_state_to_disk).
+            self._overnight_check_date = saved_state.get("overnight_check_date")
 
             # Restore historical data
             self.daily_state.date = today

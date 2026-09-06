@@ -122,6 +122,9 @@ the VM (per its memory/journal). To take D live:
       at all. These are genuine **go-live gates that bind only once execution exists** — sequence them after
       the C-exec work, not before it. Two design attempts at the scoping were adversarially refuted
       (2026-09-06) for reachable fail-opens; do not restart that work until it is actually on the critical path.
+      **Do not confuse this with the STATE-004 *restart-gap* backstop, which DID ship 2026-09-06** (pre-market
+      hook + persisted `overnight_check_date`; see `bots/hydra/__init__.py`). That one changed *when* the check
+      runs; this one is about *what conids it scopes to*. They are independent.
 - [ ] Validate the edge (backtest/soak) and confirm the risk-free transform invariant survives real fills.
 - [x] **Edge-read instrument BUILT (2026-06-23).** `scripts/analyze_calendar_edge.py` (logic in the unit-tested
       `bots/hydra/dc_edge.py`, 2 adversarial audit passes) answers the MVL-D "V1 — edge sanity" question from

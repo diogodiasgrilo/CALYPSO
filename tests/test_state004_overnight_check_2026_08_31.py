@@ -59,6 +59,7 @@ from bots.hydra.strategy import (  # noqa: E402
     STATE004_RETRY_DELAY_S,
 )
 from shared.alert_service import AlertType, AlertPriority  # noqa: E402
+from shared.market_hours import get_us_market_time  # noqa: E402
 from shared.ib_client import IBClientError  # noqa: E402
 
 
@@ -168,11 +169,17 @@ class TestState004RetryIntegration:
 
         assert s._critical_intervention_required is False
         assert s.alert_service.send_alert.call_count == 0
-        # _reset_for_new_day() always ends with ONE _save_state_to_disk() call
-        # on the normal success path (unrelated to Fix 2's halt-persistence
-        # calls) — one call here, not zero, confirms we reached the clean
-        # end of the function rather than an early-return latch path.
-        assert s._save_state_to_disk.call_count == 1
+        # The clean path saves TWICE since the 2026-09-06 restart-gap fix:
+        # once inside _run_overnight_position_check() to persist the
+        # overnight_check_date stamp, then once at the end of
+        # _reset_for_new_day() as before. Two, not zero, still confirms we
+        # reached the clean end of the function rather than an early-return
+        # latch path.
+        assert s._save_state_to_disk.call_count == 2
+        # Stronger, more direct expression of the same intent: the stamp is
+        # ONLY written on the clean path, so its presence proves we did not
+        # take a halt/read-failure early return.
+        assert s._overnight_check_date == get_us_market_time().strftime("%Y-%m-%d")
 
     def test_failure_exhausting_the_full_retry_budget_still_halts_and_alerts(self, _no_real_sleep):
         """The permanent latch on final exhaustion is CORRECT and must stay —

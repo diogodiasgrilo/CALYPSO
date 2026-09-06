@@ -1228,6 +1228,16 @@ class MEICStrategy(abc.ABC):
         self._critical_intervention_required = False
         self._critical_intervention_reason = ""
 
+        # STATE-004 restart-gap backstop (2026-09-06). ET date ("%Y-%m-%d") on
+        # which the overnight-position check last completed CLEANLY. Persisted
+        # in the state file and restored only for same-day state, so a process
+        # that starts after ET midnight without ever running _reset_for_new_day
+        # still knows the check is owed. A halt or a broker read failure
+        # deliberately leaves this unstamped so the check is re-derived rather
+        # than assumed done. Set here (base) so all 7 variants inherit it.
+        self._overnight_check_date: Optional[str] = None
+        self._overnight_check_read_error: Optional[Exception] = None
+
         # Orphaned order tracking (ORDER-008)
         self._orphaned_orders: List[str] = []
 

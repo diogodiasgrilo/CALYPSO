@@ -67,7 +67,7 @@ from shared.alert_service import AlertType, AlertPriority
 from bots.hydra.alert_hooks import IBKRAlertHooks
 
 # Import bot-specific strategy
-from bots.hydra.strategy import HydraStrategy
+from bots.hydra.strategy import HydraStrategy, OVERNIGHT_CHECK_WINDOW_END_ET
 
 # Configure main logger
 logger = logging.getLogger(__name__)
@@ -757,6 +757,79 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
 
                     sleep_time = calculate_sleep_duration(max_sleep=900)
                     market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
+
+                    # STATE-004 restart-gap backstop (2026-09-06).
+                    #
+                    # _reset_for_new_day() — where the overnight-position check
+                    # historically lived — only fires when a process observes the
+                    # ET date CHANGE under it. If NO process survives across ET
+                    # midnight (VM reboot, crash storm, a deploy straddling
+                    # midnight), every process starts with the date already
+                    # stamped to today, the reset never runs, and the check is
+                    # silently skipped for that day.
+                    #
+                    # Guards, all of which matter:
+                    #   * now_et.time() < OVERNIGHT_CHECK_WINDOW_END_ET (09:20)
+                    #     — MANDATORY. The check reads the WHOLE account (no
+                    #     symbol/variant filter), so it may only run when no
+                    #     variant can legitimately hold a position. This same
+                    #     market-closed branch ALSO runs at 16:30 with 0DTE legs
+                    #     still legitimately open, which is why the guard is
+                    #     "before the window ends", not merely "market closed".
+                    #     The 10-minute margin before the 09:30 open covers the
+                    #     check's own ~4-minute worst-case retry budget; see the
+                    #     constant's comment in strategy.py.
+                    #   * weekday + not a holiday — no point on a closed day; the
+                    #     next real rollover covers it.
+                    #   * owed — run_overnight_check_if_owed() no-ops once the
+                    #     check has completed cleanly for this ET date.
+                    #
+                    # Deliberately NOT inside the once-per-day
+                    # `last_session_check_date` block below: a deferred or failed
+                    # check must be free to retry on the next loop while still
+                    # pre-market. Runs before the open, so its retry sleeps cost
+                    # nothing and can't stall stop monitoring.
+                    _oc_owed = (
+                        now_et.weekday() < 5
+                        and not holiday_name
+                        and hasattr(strategy, "run_overnight_check_if_owed")
+                        and getattr(strategy, "_overnight_check_date", None)
+                        != now_et.strftime("%Y-%m-%d")
+                    )
+                    if _oc_owed and now_et.time() < OVERNIGHT_CHECK_WINDOW_END_ET:
+                        try:
+                            if broker.ensure_connected():
+                                _oc = strategy.run_overnight_check_if_owed()
+                                if _oc not in ("already_done", "clean"):
+                                    trade_logger.log_event(
+                                        f"Pre-market overnight-position check: {_oc}"
+                                    )
+                            else:
+                                trade_logger.log_event(
+                                    "Pre-market overnight-position check deferred "
+                                    "— broker session unavailable; will retry."
+                                )
+                        except Exception as e:
+                            # Never let the backstop take the bot down: the
+                            # midnight reset remains the primary path and the
+                            # hourly orphan sweep is a further backstop.
+                            trade_logger.log_error(
+                                f"Pre-market overnight-position check errored "
+                                f"({e}) — continuing; check stays owed."
+                            )
+                    elif _oc_owed and now_et < market_open_time:
+                        # Owed, but the process came up too late in the
+                        # pre-market window to run the check safely (e.g. a
+                        # RestartSec=30 crash loop spanning 09:20-09:30).
+                        # Deliberately skipped rather than run into RTH. The
+                        # hourly reconciliation's orphan sweep still fires a
+                        # CRITICAL alert ~2 min after the open if a genuine
+                        # overnight leg exists, so this is not a blind spot.
+                        trade_logger.log_event(
+                            "Pre-market overnight-position check SKIPPED — "
+                            f"started after {OVERNIGHT_CHECK_WINDOW_END_ET:%H:%M} ET. "
+                            "Orphan sweep remains the backstop."
+                        )
 
                     if now_et < market_open_time and now_et.weekday() < 5 and not holiday_name:
                         seconds_until_open = (market_open_time - now_et).total_seconds()
