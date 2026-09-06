@@ -93,6 +93,8 @@ E is **dry-run-LOCKED** (un-flippable constructor lock). Two stages:
       enters when IV < ~1yr median).
 - [ ] **Coexistence MUST-FIXes** (shared with D — land once in `CalendarStrategyBase`): scope C's STATE-004
       overnight guard + orphan sweep to per-variant conids; per-variant buying-power budget.
+      **NOT the current blocker (corrected 2026-09-06)** — E, like D, has zero order-placement code, so these
+      gates cannot bind yet. See the same note under Strategy D below; build the execution path first.
 - [ ] **Multi-contract ladder fix** (§1) before sizing > 1 contract.
 - [ ] Remove the dry-run constructor lock only via a documented manual flip + a fresh same-ET-day paper
       smoke PASS — never an auto-flip. Write E's go-live runbook (model on `D_GOLIVE_RUNBOOK.md`).
@@ -105,8 +107,21 @@ D is **dry-run-LOCKED** and the go-live audit verdict is **NO-GO** (see
 [`D_GOLIVE_SCOPE_AND_AUDIT.md`](migration/D_GOLIVE_SCOPE_AND_AUDIT.md)). D already runs as a dry-run variant on
 the VM (per its memory/journal). To take D live:
 - [ ] Follow [`D_GOLIVE_RUNBOOK.md`](migration/D_GOLIVE_RUNBOOK.md) in full (DG-1..DG-11 gate).
-- [ ] Build the real-order execution path (D is fully simulated today).
+- [ ] **BUILD THE REAL-ORDER EXECUTION PATH — this is THE blocker, and it is first.** D is *fully* simulated:
+      `grep -c "place_order\|place_and_wait_for_fill"` returns **0** across `double_calendar_strategy.py`,
+      `spy_double_calendar_strategy.py` AND `calendar_strategy_base.py`. The only order-placement site in the
+      entire bot tree is `strategy.py:2291`, which no calendar path reaches. Both constructors additionally
+      hard-refuse `dry_run=False` before any broker I/O. The work is the six `C-exec1..6` items in
+      [`D_GOLIVE_SCOPE_AND_AUDIT.md`](migration/D_GOLIVE_SCOPE_AND_AUDIT.md) §C (two CRITICAL: the fill model
+      C-exec4 and the real transform C-exec5), whose own verdict is *"NO-GO today. This is a build, not a flip."*
 - [ ] Ship the **coexistence MUST-FIXes** (shared with E — STATE-004 / orphan sweep scoping + per-variant BP).
+      **CORRECTED 2026-09-06 — these are NOT what blocks D/E today, and should NOT be built first.** The
+      framing "STATE-004 is the live blocker keeping D/E dry-run-locked" propagated through several docs (and
+      into both constructors' own error messages) and is false: scoping a halt that guards against unexpected
+      *open positions* is a guard in front of a door that does not exist, because D/E cannot open a position
+      at all. These are genuine **go-live gates that bind only once execution exists** — sequence them after
+      the C-exec work, not before it. Two design attempts at the scoping were adversarially refuted
+      (2026-09-06) for reachable fail-opens; do not restart that work until it is actually on the critical path.
 - [ ] Validate the edge (backtest/soak) and confirm the risk-free transform invariant survives real fills.
 - [x] **Edge-read instrument BUILT (2026-06-23).** `scripts/analyze_calendar_edge.py` (logic in the unit-tested
       `bots/hydra/dc_edge.py`, 2 adversarial audit passes) answers the MVL-D "V1 — edge sanity" question from

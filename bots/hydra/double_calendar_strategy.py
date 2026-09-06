@@ -110,12 +110,20 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
             raise ConfigError(
                 "DoubleCalendarStrategy (Strategy D) is dry-run-LOCKED. The entry / "
                 "transformer / debit-P&L / multi-day-settlement logic IS implemented "
-                "(Phases 1-7), but running it with real paper orders next to the live "
-                "variants requires the coexistence MUST-FIXes (scope STATE-004 + "
-                "orphan sweep to per-variant conids; budget buying power). Going live "
-                "is a gated, multi-week build, NOT a config flip — follow the canonical "
-                "runbook docs/migration/D_GOLIVE_RUNBOOK.md. Set dry_run=true, or do "
-                "not select strategy.name='double_calendar'."
+                "(Phases 1-7), but there is NO REAL-ORDER EXECUTION PATH AT ALL — this "
+                "module and calendar_strategy_base contain ZERO place_order / "
+                "place_and_wait_for_fill calls. That is the actual blocker: the six "
+                "C-exec1..6 items in docs/migration/D_GOLIVE_SCOPE_AND_AUDIT.md section "
+                "C (two CRITICAL — the fill model C-exec4 and the real transform "
+                "C-exec5). CORRECTED 2026-09-06: this message previously named the "
+                "coexistence MUST-FIXes (STATE-004 / orphan-sweep scoping, buying-power "
+                "budget) as the requirement, and that framing propagated into several "
+                "docs. They are real GO-LIVE GATES, but they are NOT what blocks D "
+                "today and must not be built first — a halt that guards against "
+                "unexpected OPEN positions cannot bind on a strategy that cannot open "
+                "one. Going live is a gated, multi-week build, NOT a config flip — "
+                "follow the canonical runbook docs/migration/D_GOLIVE_RUNBOOK.md. Set "
+                "dry_run=true, or do not select strategy.name='double_calendar'."
             )
         # Sidecar-load guard, set BEFORE super().__init__ (which calls
         # _recover_positions_from_saxo AND may call _save_state_to_disk during

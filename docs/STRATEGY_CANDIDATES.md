@@ -6,6 +6,25 @@
 
 ---
 
+> **⚠️ CORRECTION 2026-09-06 — affects two entries' scores.** Several entries below mark a candidate down
+> because "`STATE-004`'s overnight-position halt is a live, currently-unresolved go-live gate — the literal,
+> documented reason Strategy D remains `dry_run_locked` today." **That premise is false.** Verified directly:
+> `place_order` / `place_and_wait_for_fill` appear **zero** times in `double_calendar_strategy.py`,
+> `spy_double_calendar_strategy.py` **and** `calendar_strategy_base.py`; the only order-placement site in the
+> bot tree is `strategy.py:2291`, which no calendar path reaches; and both constructors hard-refuse
+> `dry_run=False` before any broker I/O. D and E are blocked by having **no execution path at all** — the six
+> `C-exec1..6` items in `docs/migration/D_GOLIVE_SCOPE_AND_AUDIT.md` §C — not by STATE-004 scoping, which is a
+> genuine go-live gate that cannot bind until execution exists.
+>
+> **Concretely affected:** *21 DTE Put Broken Wing Butterfly* (Ease 5, justified partly by "STATE-004 turned
+> out to be a sharper, currently-open blocker") and *SPX Put Credit Spread* (Ease **7→4**, explicitly "the
+> STATE-004 finding"). Both markdowns rest on a mis-scoped blocker. The underlying concern is still real for a
+> multi-day strategy — it would need the overnight-halt question answered *eventually* — but it is a
+> downstream gate, not the immediate wall these scores treated it as. **Re-derive both Ease scores before
+> using this doc to pick what to build.** Two design attempts at the scoping were adversarially refuted
+> (2026-09-06) for reachable fail-opens, so treat "just scope STATE-004" as unsolved and non-trivial in its
+> own right, rather than as a small prerequisite.
+
 ## How to use this doc
 
 Each candidate gets 5 scores, **0–10, higher is always better/more attractive** (no dimension is inverted, so you never have to remember "low is good" for any column). There's no blessed formula for combining them into one number — different scores matter more or less depending on what you're optimizing for at the time (fast to ship vs. genuinely diversifying vs. don't want a 6th thing to babysit). The summary table includes a simple unweighted average purely for rough sorting; treat it as a tiebreaker, not a verdict.
