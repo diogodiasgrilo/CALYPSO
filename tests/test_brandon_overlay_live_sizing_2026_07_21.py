@@ -73,7 +73,7 @@ class TestLiveOverlaySizing:
         s._place_option_order = place
         s._flatten_accumulated_partial = lambda *a, **k: pytest.fail(
             "must not unwind on a full fill")
-        s._brandon_place_overlay(SimpleNamespace(entry_number=5), _butterfly())
+        s._brandon_place_overlay(SimpleNamespace(entry_number=5, contracts=10), _butterfly())
 
         total = sum(int(c["quantity"]) for c in calls)
         assert total == 40, f"expected 40 contracts, placed {total}"
@@ -88,7 +88,7 @@ class TestLiveOverlaySizing:
         s = _live_stub(max_per_order=15)
         s._place_option_order = place
         s._flatten_accumulated_partial = lambda *a, **k: None
-        s._brandon_place_overlay(SimpleNamespace(entry_number=5), _butterfly())
+        s._brandon_place_overlay(SimpleNamespace(entry_number=5, contracts=10), _butterfly())
 
         assert all(int(c["quantity"]) <= 15 for c in calls)
         # the 20-lot body is chunked 15 + 5
@@ -99,7 +99,7 @@ class TestLiveOverlaySizing:
         s = _live_stub()
         s._place_option_order = lambda **kw: {"uic": int(kw["strike"]), "fill_price": 1.0}
         s._flatten_accumulated_partial = lambda *a, **k: None
-        s._brandon_place_overlay(SimpleNamespace(entry_number=5), _butterfly())
+        s._brandon_place_overlay(SimpleNamespace(entry_number=5, contracts=10), _butterfly())
 
         legs = s._brandon_hedge_legs[5]
         assert sorted(l.quantity for l in legs) == [10, 10, 20]
@@ -120,7 +120,7 @@ class TestLiveOverlaySizing:
         s = _live_stub()
         s._place_option_order = place
         s._flatten_accumulated_partial = lambda *a, **k: pytest.fail("full fill")
-        s._brandon_place_overlay(SimpleNamespace(entry_number=6), _butterfly())
+        s._brandon_place_overlay(SimpleNamespace(entry_number=6, contracts=10), _butterfly())
 
         body = next(l for l in s._brandon_hedge_legs[6] if l.strike == 7510.0)
         assert body.quantity == 20
@@ -142,7 +142,7 @@ class TestLiveOverlaySizing:
         s._brandon_alert_overlay_partial = (
             lambda entry, proposal, *, placed, expected: alerts.append((placed, expected))
         )
-        s._brandon_place_overlay(SimpleNamespace(entry_number=7), _butterfly())
+        s._brandon_place_overlay(SimpleNamespace(entry_number=7, contracts=10), _butterfly())
 
         # nothing tracked for settlement
         assert not s._brandon_hedge_legs.get(7)
@@ -169,7 +169,7 @@ class TestLiveOverlaySizing:
         s._place_option_order = place
         s._flatten_accumulated_partial = lambda *a, **k: flat_calls.append(a)
         s._brandon_alert_overlay_partial = lambda *a, **k: None
-        s._brandon_place_overlay(SimpleNamespace(entry_number=9), _butterfly())
+        s._brandon_place_overlay(SimpleNamespace(entry_number=9, contracts=10), _butterfly())
 
         assert not s._brandon_hedge_legs.get(9)
         # filled: 7500 wing (10) + 7510 body first chunk (15) + 7520 wing (10)
@@ -188,7 +188,7 @@ class TestOverlayLegOrderAndCap:
         s = _live_stub()
         s._place_option_order = place
         s._flatten_accumulated_partial = lambda *a, **k: None
-        s._brandon_place_overlay(SimpleNamespace(entry_number=5), _butterfly())
+        s._brandon_place_overlay(SimpleNamespace(entry_number=5, contracts=10), _butterfly())
 
         last_long = max(i for i, x in enumerate(seq) if x == BuySell.BUY)
         first_short = min(i for i, x in enumerate(seq) if x == BuySell.SELL)

@@ -87,6 +87,16 @@ from .hedge_position import HedgeLeg, HedgeSettlement
 
 logger = logging.getLogger(__name__)
 
+# ORDER-006b overlay quantity envelope (2026-09-06). Every defensive-overlay
+# leg is scaled to contracts_per_entry: a butterfly is 1x / 2x / 1x (4x total),
+# a debit spread 1x / 1x (2x total). These bounds sit well above both shapes so
+# no legitimate structure trips them, while still catching the 2026-06-10
+# 98-vs-14 bug class cold (at 7 contracts/entry: leg 98 > 3x7=21, total
+# 112 > 6x7=42). See the pre-flight block in _brandon_place_overlay for why
+# neither existing ORDER-006 check can catch this on its own.
+_OVERLAY_MAX_LEG_MULTIPLE = 3
+_OVERLAY_MAX_TOTAL_MULTIPLE = 6
+
 
 _GEX_REFRESH_SECONDS = 3 * 60    # 2026-05-13: cut 15min → 3min after divergence audit. With force_refresh at entry time, the background TTL only governs breach-exit / overlay ticks, where freshness matters less and Polygon's underlying snapshot only updates every ~15 min anyway. 3 min strikes the balance between staleness on the strike-adjuster re-check path and avoiding wasted fetches between entries.
 _GEX_FAILURE_COOLDOWN = 60       # don't hammer a flaky API
@@ -2097,6 +2107,80 @@ class BrandonHydraStrategy(HydraStrategy):
         position id. Hedges are held to expiry —
         intraday management of the hedge itself is not yet wired.
         """
+        # ORDER-006b PRE-FLIGHT SIZE ENVELOPE (2026-09-06).
+        # WHY THIS EXISTS: neither ORDER-006 check can catch a bad overlay
+        # quantity, so the 2026-06-10 98-vs-14 bug class had NO live guard.
+        #   * Check 1 (per-order cap) is structurally unreachable here:
+        #     chunk = min(remaining, chunk_cap) with chunk_cap ==
+        #     max_contracts_per_order, so every chunk is <= the cap BY
+        #     CONSTRUCTION and `amount > max_contracts_per_order` can never be
+        #     true inside this loop, no matter how wrong `remaining` is.
+        #   * Check 2 (per-underlying cap) compares against
+        #     _get_current_position_size(), which does NOT include the overlay
+        #     being placed (legs are recorded only after a full fill), so the
+        #     baseline is CONSTANT across this structure's chunks. That method's
+        #     own docstring calls this a "bounded soft-edge" — true for
+        #     ACCUMULATION across overlays, but it does not bound a single
+        #     structure whose leg quantity is itself wrong. A 98-contract leg
+        #     places as 7 chunks of 14, each passing both checks.
+        # The 2026-07-21 fix removed the specific multiplication bug that caused
+        # 98-vs-14; it did not add a guard against the CLASS. This is that guard.
+        #
+        # Validates the PROPOSAL before any order goes out, against the only
+        # invariant that actually holds: every overlay leg is scaled to
+        # contracts_per_entry (butterfly = 1x/2x/1x -> 4x total; debit spread =
+        # 1x/1x -> 2x total). Multiples are deliberately loose (3x per leg, 6x
+        # total) so no legitimate structure can trip them, while a 7x error like
+        # 98-vs-14 (leg 98 > 3x7=21, total 112 > 6x7=42) is caught cold.
+        # Fails CLOSED: refuses the whole structure, places nothing, alerts.
+        # Baseline MUST be entry.contracts, not self.contracts_per_entry.
+        # The proposer builds these legs from OverlayConfig(contracts=
+        # int(getattr(entry, "contracts", 1) or 1)) — the hedged ENTRY's own
+        # size — so that is the only value the leg quantities are guaranteed to
+        # be a multiple of. The two diverge in real situations: a config change
+        # or a restart leaves entries carrying their original contract count
+        # while self.contracts_per_entry holds the new one (B ran 15 -> 10 -> 7
+        # over its life). Validating against the strategy default would then
+        # refuse a perfectly legitimate hedge on a larger legacy entry.
+        cpe = max(1, int(getattr(entry, "contracts", 1) or 1))
+        max_leg = _OVERLAY_MAX_LEG_MULTIPLE * cpe
+        max_total = _OVERLAY_MAX_TOTAL_MULTIPLE * cpe
+        proposed_total = sum(abs(int(l.quantity)) for l in proposal.legs)
+        oversized = [l for l in proposal.legs if abs(int(l.quantity)) > max_leg]
+        if oversized or proposed_total > max_total:
+            detail = (
+                f"legs={[(l.side, l.contract_type, l.strike, int(l.quantity)) for l in proposal.legs]} "
+                f"total={proposed_total} entry_contracts={cpe} "
+                f"limits=(leg<={max_leg}, total<={max_total})"
+            )
+            logger.critical(
+                "ORDER-006b REJECTED overlay for E#%s %s — quantity envelope "
+                "exceeded, NOTHING placed. This is the 2026-06-10 98-vs-14 bug "
+                "class: %s",
+                entry.entry_number, proposal.threatened_side, detail,
+            )
+            self._brandon_send_telegram(
+                message=(
+                    f"Overlay placement REFUSED for entry #{entry.entry_number} "
+                    f"({proposal.threatened_side} side). A proposed leg quantity is "
+                    f"far outside the expected envelope for {cpe} contracts/entry — "
+                    f"this is the signature of a sizing bug, so nothing was placed. "
+                    f"{detail}"
+                ),
+                title="Brandon overlay refused — quantity envelope",
+                priority_name="CRITICAL",
+                alert_type_name="CIRCUIT_BREAKER",
+                details={"entry_number": entry.entry_number,
+                         "side": proposal.threatened_side,
+                         "total_contracts": proposed_total,
+                         "max_total": max_total},
+            )
+            self._log_safety_event(
+                "OVERLAY_SIZE_REJECTED",
+                f"E#{entry.entry_number} {proposal.threatened_side}: {detail}",
+            )
+            return
+
         legs_summary = ", ".join(
             f"{l.side[0].upper()}{l.contract_type[0].upper()} {l.strike:.0f}×{l.quantity}"
             for l in proposal.legs
@@ -2227,6 +2311,7 @@ class BrandonHydraStrategy(HydraStrategy):
         expected_contracts = sum(int(l.quantity) for l in proposal.legs)
         placed_contracts = 0
         chunk_cap = max(1, int(getattr(self, "max_contracts_per_order", 15)))
+
         # B3 (2026-07-21): place protective LONG wings BEFORE the short body, so
         # the short leg is never open without its cover. A butterfly's proposal
         # order is (long lower, short pin×2, long upper) — placing in that order

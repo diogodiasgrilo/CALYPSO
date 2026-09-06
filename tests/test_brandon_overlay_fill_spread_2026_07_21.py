@@ -81,7 +81,7 @@ class TestOverlayRealQuotePricing:
             7520.0: {"bid": 5.0, "ask": 5.4, "mid": 5.2, "last": None, "mark": None},
         }
         s = _stub(quotes)
-        s._brandon_place_overlay(SimpleNamespace(entry_number=5), _butterfly())
+        s._brandon_place_overlay(SimpleNamespace(entry_number=5, contracts=10), _butterfly())
         legs = {(l.strike, l.side): l for l in s._brandon_hedge_legs[5]}
 
         assert legs[(7500.0, "long")].fill_price == pytest.approx(12.2)
@@ -98,7 +98,7 @@ class TestOverlayRealQuotePricing:
             pin_strike=None,
             reason="test",
         )
-        s._brandon_place_overlay(SimpleNamespace(entry_number=1), proposal)
+        s._brandon_place_overlay(SimpleNamespace(entry_number=1, contracts=10), proposal)
         leg = s._brandon_hedge_legs[1][0]
         assert leg.conid == 90000
         assert leg.fill_price == pytest.approx(1.1)
@@ -106,7 +106,7 @@ class TestOverlayRealQuotePricing:
     def test_falls_back_to_black_scholes_when_no_quote_available(self, caplog):
         s = _stub(quotes_by_strike={})  # no conids resolve → no quotes anywhere
         with caplog.at_level("WARNING"):
-            s._brandon_place_overlay(SimpleNamespace(entry_number=1), _butterfly())
+            s._brandon_place_overlay(SimpleNamespace(entry_number=1, contracts=10), _butterfly())
         for leg in s._brandon_hedge_legs[1]:
             expected = hedge_position.estimate_fill_price(
                 contract_type="call", strike=leg.strike, spot=7510.0, t_years=0.01)
@@ -119,7 +119,7 @@ class TestOverlayRealQuotePricing:
         quotes = {7510.0: {"bid": 8.0, "ask": 8.4, "mid": 8.2, "last": None, "mark": None}}
         s = _stub(quotes)
         with caplog.at_level("WARNING"):
-            s._brandon_place_overlay(SimpleNamespace(entry_number=1), _butterfly())
+            s._brandon_place_overlay(SimpleNamespace(entry_number=1, contracts=10), _butterfly())
         legs = {(l.strike, l.side): l for l in s._brandon_hedge_legs[1]}
 
         assert legs[(7510.0, "short")].fill_price == pytest.approx(8.2)
@@ -136,7 +136,7 @@ class TestOverlayRealQuotePricing:
 
     def test_no_expiry_falls_back_for_every_leg(self):
         s = _stub({7500.0: {"bid": 1.0, "ask": 1.2, "mid": 1.1, "last": None, "mark": None}}, expiry=None)
-        s._brandon_place_overlay(SimpleNamespace(entry_number=1), _butterfly())
+        s._brandon_place_overlay(SimpleNamespace(entry_number=1, contracts=10), _butterfly())
         for leg in s._brandon_hedge_legs[1]:
             expected = hedge_position.estimate_fill_price(
                 contract_type="call", strike=leg.strike, spot=7510.0, t_years=0.01)
