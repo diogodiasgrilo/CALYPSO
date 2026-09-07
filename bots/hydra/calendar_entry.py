@@ -69,6 +69,17 @@ class CalendarEntry(IronCondorEntry):
     # analogue — this is the calendar's cost basis.
     net_debit: float = 0.0
 
+    # Same opening cost priced at MID (agg=0) and FULL TOUCH (agg=1), zero extra
+    # slippage — record-only, never used by a trading decision (2026-09-07). They
+    # exist so the entry debit can be re-priced at any aggressiveness offline:
+    #     net_debit(a) = mid_net_debit + a * (touch_net_debit - mid_net_debit)
+    # Before this, only the post-haircut number was stored, so the 2026-09-06
+    # forensic could not answer "what would D have done at a different fill
+    # model?" — the bid/ask had already been discarded. 0.0 means "not captured"
+    # (pre-2026-09-07 entries, or a partial quote at entry time).
+    mid_net_debit: float = 0.0
+    touch_net_debit: float = 0.0
+
     # Opening liquidation P&L (dollars) captured at fill — unrealized_pnl on the
     # FIRST mark, which is structurally negative by the full round-trip bid/ask
     # spread (the dry-run marks at liquidation, not mid). Decision TRIGGERS

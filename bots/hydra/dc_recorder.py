@@ -40,7 +40,7 @@ def _dte(from_iso: Optional[str], to_iso: Optional[str]) -> Optional[int]:
 
 
 class DCDataRecorder:
-    SCHEMA_VERSION = 1
+    SCHEMA_VERSION = 2
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -67,6 +67,7 @@ class DCDataRecorder:
                     call_strike REAL, put_strike REAL, net_debit REAL, contracts INTEGER,
                     short_call_uic INTEGER, long_call_uic INTEGER,
                     short_put_uic INTEGER, long_put_uic INTEGER,
+                    mid_net_debit REAL, touch_net_debit REAL,
                     PRIMARY KEY (date, entry_number)
                 );
                 CREATE TABLE IF NOT EXISTS dc_transformations (
@@ -86,14 +87,63 @@ class DCDataRecorder:
                     timestamp TEXT, entry_number INTEGER, dc_phase TEXT,
                     net_debit REAL, calendar_value REAL, unrealized_pnl REAL,
                     short_call_price REAL, long_call_price REAL,
-                    short_put_price REAL, long_put_price REAL
+                    short_put_price REAL, long_put_price REAL,
+                    mid_calendar_value REAL, touch_calendar_value REAL,
+                    fill_agg REAL, fill_slip REAL
                 );
                 CREATE TABLE IF NOT EXISTS dc_schema_info (version INTEGER);
                 """
             )
             cur = self._conn.execute("SELECT version FROM dc_schema_info LIMIT 1")
-            if cur.fetchone() is None:
+            row = cur.fetchone()
+            if row is None:
                 self._conn.execute("INSERT INTO dc_schema_info (version) VALUES (?)", (self.SCHEMA_VERSION,))
+            else:
+                self._migrate(int(row[0]))
+
+    def _migrate(self, from_version: int) -> None:
+        """Additive-only migrations for an EXISTING dc_calendar.db.
+
+        The CREATE TABLE statements above are ``IF NOT EXISTS``, so a DB created
+        under an older schema keeps its original columns and needs explicit
+        ALTERs. Every migration here must be additive (ADD COLUMN with a NULL
+        default) — this DB holds D's and E's entire trade history and must never
+        be rewritten in place.
+
+        v1 -> v2 (2026-09-07): record the same marks priced at MID and FULL TOUCH
+        so any fill aggressiveness is recoverable offline by interpolation. The
+        v1 schema stored only the post-haircut price, discarding the bid/ask —
+        which is why the 2026-09-06 forensic could not re-price D's history after
+        discovering it had run 19 trades at full touch under a silently-ignored
+        ``dry_run_fill_model: 0.5``. Old rows keep NULL in the new columns; that
+        is the honest value, since the information was never captured.
+        """
+        if from_version >= self.SCHEMA_VERSION:
+            return
+        additions = {
+            "dc_calendar_entries": ["mid_net_debit REAL", "touch_net_debit REAL"],
+            "dc_calendar_snapshots": [
+                "mid_calendar_value REAL", "touch_calendar_value REAL",
+                "fill_agg REAL", "fill_slip REAL",
+            ],
+        }
+        for table, cols in additions.items():
+            try:
+                existing = {r[1] for r in self._conn.execute(f"PRAGMA table_info({table})")}
+            except Exception as e:
+                logger.warning("DC schema migrate: cannot read %s (%s)", table, e)
+                continue
+            for coldef in cols:
+                name = coldef.split()[0]
+                if name in existing:
+                    continue
+                try:
+                    self._conn.execute(f"ALTER TABLE {table} ADD COLUMN {coldef}")
+                    logger.info("DC schema migrate: added %s.%s", table, name)
+                except Exception as e:
+                    logger.warning("DC schema migrate: %s.%s failed (%s)", table, name, e)
+        self._conn.execute("UPDATE dc_schema_info SET version = ?", (self.SCHEMA_VERSION,))
+        logger.info("DC schema migrated v%s -> v%s", from_version, self.SCHEMA_VERSION)
 
     def _exec(self, sql: str, params: tuple) -> None:
         if not self._conn:
@@ -111,8 +161,9 @@ class DCDataRecorder:
             """INSERT OR REPLACE INTO dc_calendar_entries
                (date, entry_number, strategy_id, structure, entry_time, spx_at_entry,
                 short_expiry, long_expiry, short_dte, long_dte, call_strike, put_strike,
-                net_debit, contracts, short_call_uic, long_call_uic, short_put_uic, long_put_uic)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                net_debit, contracts, short_call_uic, long_call_uic, short_put_uic, long_put_uic,
+                mid_net_debit, touch_net_debit)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 date, entry.entry_number, getattr(entry, "strategy_id", ""),
                 getattr(entry, "structure", "double_calendar"),
@@ -123,6 +174,8 @@ class DCDataRecorder:
                 entry.net_debit, entry.contracts,
                 entry.short_call_uic, entry.long_call_uic,
                 entry.short_put_uic, entry.long_put_uic,
+                getattr(entry, "mid_net_debit", None) or None,
+                getattr(entry, "touch_net_debit", None) or None,
             ),
         )
 
@@ -160,12 +213,22 @@ class DCDataRecorder:
         self._exec(
             """INSERT INTO dc_calendar_snapshots
                (timestamp, entry_number, dc_phase, net_debit, calendar_value, unrealized_pnl,
-                short_call_price, long_call_price, short_put_price, long_put_price)
-               VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                short_call_price, long_call_price, short_put_price, long_put_price,
+                mid_calendar_value, touch_calendar_value, fill_agg, fill_slip)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 timestamp, entry.entry_number, entry.dc_phase.value, entry.net_debit,
                 getattr(entry, "calendar_value", 0.0), entry.unrealized_pnl,
                 entry.short_call_price, entry.long_call_price,
                 entry.short_put_price, entry.long_put_price,
+                # Record-only (schema v2). NULL when the tick wasn't priced at
+                # mid/touch — e.g. a partial quote, or a mark carried over from a
+                # prior tick because this one failed the sanity guard. NULL is the
+                # honest value there; do NOT coalesce it to 0.0, which would read
+                # as "the calendar was worth nothing at mid".
+                getattr(entry, "_dc_mark_mid_value", None),
+                getattr(entry, "_dc_mark_touch_value", None),
+                getattr(entry, "_dc_mark_fill_agg", None),
+                getattr(entry, "_dc_mark_fill_slip", None),
             ),
         )

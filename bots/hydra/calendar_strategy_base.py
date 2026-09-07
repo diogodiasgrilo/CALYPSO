@@ -459,7 +459,13 @@ class CalendarStrategyBase(HydraStrategy):
             agg, slip,
         )
 
-    def _dc_fill_price(self, qrow: dict, action: str) -> Optional[float]:
+    def _dc_fill_price(
+        self,
+        qrow: dict,
+        action: str,
+        agg: Optional[float] = None,
+        slip: Optional[float] = None,
+    ) -> Optional[float]:
         """Realistic dry-run fill for ONE leg — model the bid/ask spread instead of
         the optimistic MID (2026-06-17). A real marketable order BUYS toward the ASK
         and SELLS toward the BID; ``aggressiveness`` (config dry_run_fill_model,
@@ -471,14 +477,28 @@ class CalendarStrategyBase(HydraStrategy):
         than it would be after crossing 4–6 real spreads (the "too good to be true"
         artifact). Falls back to the mid when a side is missing. ``action`` is
         ``"buy"`` or ``"sell"``. Returns None if there is no usable mid.
+
+        ``agg`` / ``slip`` override the configured values for THIS call only
+        (2026-09-07). Callers use that to price the same quote at mid (agg=0,
+        slip=0) and full touch (agg=1, slip=0) alongside the acting fill, so the
+        recorder can store all three. Rationale: ``dc_calendar_snapshots`` stored
+        only the post-haircut price, which threw the bid/ask away — making it
+        IMPOSSIBLE to re-price history at a different aggressiveness. A 2026-09-06
+        forensic wanted exactly that (D ran at full touch for 19 trades because a
+        scalar ``dry_run_fill_model`` under the sub-block was silently ignored
+        until 2026-07-20) and could not do it. Recording mid + touch makes any
+        aggressiveness an exact linear interpolation, forever.
         """
         mid = qrow.get("mid")
         if mid is None or mid <= 0:
             return None
         raw = qrow.get("raw") or {}
         bid, ask = raw.get("bid"), raw.get("ask")
-        agg = float(getattr(self, "_dc_fill_agg", 1.0))
-        slip = float(getattr(self, "_dc_fill_slippage", 0.0))
+        agg = float(getattr(self, "_dc_fill_agg", 1.0)) if agg is None else float(agg)
+        slip = (
+            float(getattr(self, "_dc_fill_slippage", 0.0))
+            if slip is None else float(slip)
+        )
         if action == "buy":
             px = mid + agg * (ask - mid) if (ask and ask >= mid) else mid
             px += slip
@@ -486,6 +506,58 @@ class CalendarStrategyBase(HydraStrategy):
             px = mid - agg * (mid - bid) if (bid and 0 < bid <= mid) else mid
             px -= slip
         return max(0.0, px)
+
+    def _dc_calendar_value_at(
+        self, quotes: dict, contracts: int, agg: float
+    ) -> Optional[float]:
+        """LIQUIDATION value of a 4-leg double calendar priced at aggressiveness
+        ``agg`` with zero extra slippage (2026-09-07).
+
+        Mirrors ``CalendarEntry.calendar_value`` exactly — (long - short) on each
+        side, summed, x100 x contracts — but prices the legs at an arbitrary
+        ``agg`` rather than the configured one. Recording this at agg=0 (mid) and
+        agg=1 (full touch) alongside the acting value lets ANY aggressiveness be
+        recovered later by linear interpolation:
+
+            value(a) = mid_value + a * (touch_value - mid_value)
+
+        Returns None if any leg lacks a usable quote, so a partial tick is never
+        recorded as a real value.
+        """
+        need = ("long_call", "short_call", "long_put", "short_put")
+        if not all(n in quotes for n in need):
+            return None
+        px = {}
+        for name in need:
+            action = "buy" if name.startswith("short") else "sell"
+            p = self._dc_fill_price(quotes[name], action, agg=agg, slip=0.0)
+            if p is None:
+                return None
+            px[name] = p
+        call_val = px["long_call"] - px["short_call"]
+        put_val = px["long_put"] - px["short_put"]
+        return (call_val + put_val) * 100 * contracts
+
+    def _dc_net_debit_at(
+        self, quotes: dict, contracts: int, agg: float
+    ) -> Optional[float]:
+        """OPENING cost of the same 4-leg calendar at aggressiveness ``agg``
+        (2026-09-07). Mirrors the net_debit computation in the entry path: buy the
+        longs, sell the shorts. Same interpolation property as
+        ``_dc_calendar_value_at``. Returns None on any missing leg."""
+        need = ("long_call", "short_call", "long_put", "short_put")
+        if not all(n in quotes for n in need):
+            return None
+        px = {}
+        for name in need:
+            action = "sell" if name.startswith("short") else "buy"
+            p = self._dc_fill_price(quotes[name], action, agg=agg, slip=0.0)
+            if p is None:
+                return None
+            px[name] = p
+        return (
+            px["long_call"] + px["long_put"] - px["short_call"] - px["short_put"]
+        ) * 100 * contracts
 
     def _dc_quote_is_realtime(self, q: dict) -> bool:
         """True unless the broker DEFINITIVELY flags the quote as delayed/frozen.
@@ -623,6 +695,11 @@ class CalendarStrategyBase(HydraStrategy):
             leg.price = mark_fill[name]        # immediate liquidation mark (round-trip cost)
             leg.position_id = f"DRY_{base_id}_{_DC_LEG_ABBR[name]}"
         entry.net_debit = net_debit
+        # Cost-basis at mid and at full touch (2026-09-07) so the entry debit can
+        # be re-priced at any aggressiveness offline. Best-effort: a None here
+        # only loses analysis detail, never blocks the entry.
+        entry.mid_net_debit = self._dc_net_debit_at(quotes, n, 0.0) or 0.0
+        entry.touch_net_debit = self._dc_net_debit_at(quotes, n, 1.0) or 0.0
         entry.dc_phase = DCPhase.CALENDAR
         entry.contracts = n
         # Capture the OPENING liquidation mark now (legs' `price` are the
@@ -717,6 +794,23 @@ class CalendarStrategyBase(HydraStrategy):
                 return False
         for name, px in candidate.items():
             entry.legs[name].price = px
+        # Record-only (2026-09-07): the SAME tick priced at mid and at full touch,
+        # so dc_calendar_snapshots can store all three and any aggressiveness is
+        # recoverable offline. Computed AFTER the sanity guard so a rejected tick
+        # never contributes. Best-effort — a failure here must never affect a
+        # trading decision, so it only clears the detail.
+        try:
+            n = entry.contracts or self.contracts_per_entry
+            entry._dc_mark_mid_value = self._dc_calendar_value_at(quotes, n, 0.0)
+            entry._dc_mark_touch_value = self._dc_calendar_value_at(quotes, n, 1.0)
+            entry._dc_mark_fill_agg = float(getattr(self, "_dc_fill_agg", 1.0))
+            entry._dc_mark_fill_slip = float(getattr(self, "_dc_fill_slippage", 0.0))
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("[CAL] mid/touch mark detail unavailable: %s", e)
+            entry._dc_mark_mid_value = None
+            entry._dc_mark_touch_value = None
+            entry._dc_mark_fill_agg = None
+            entry._dc_mark_fill_slip = None
         return True
 
     def _dc_past_eod_cutoff(self) -> bool:

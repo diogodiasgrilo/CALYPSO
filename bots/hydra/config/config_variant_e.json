@@ -16,6 +16,8 @@
     "strike_increment": 1,
     "_comment_spy_double_calendar": "Strategy-E-specific knobs (consumed by SpyDoubleCalendarStrategy). Short leg ~35 DTE (\u00b1 tolerance), long leg = short + ~7 days (\u00b1 tolerance), same strike per leg. Strikes are expected-move based: call \u2248 spot + em_fraction\u00d7EM, put \u2248 spot \u2212 em_fraction\u00d7EM (em_fraction 1.0 = \u00b11 SD). Low-IV entry gate: enter only when VIX <= max_vix_entry (a proxy \u2014 true IV-rank vs a 1-yr median is a go-live refinement). Management: laddered profit-taking (close a cumulative share of the original contracts as the return-on-risk crosses each rung), plus a trading-day time-exit that closes ALL remaining contracts within time_exit_days_before trading days of the short expiry (never hold through expiry). NO hard stop.",
     "spy_double_calendar": {
+      "_comment_dry_run_fill_model": "0.5 = half-spread, MATCHING variant D (2026-09-07). Before this, E had NO fill-model key anywhere, so it fell through to the code default of 1.0 (full touch) while D ran at 0.5 — meaning the two members of the calendar_multiday comparability group were simulated under DIFFERENT cost assumptions, which made the D-vs-E head-to-head (the entire point of the group) invalid. Neither 0.5 nor 1.0 has ever been validated against a real fill; the value is chosen for CONSISTENCY, not accuracy. Schema v2 now records each mark at mid AND full touch, so this choice is re-derivable offline by interpolation rather than baked into the record.",
+      "dry_run_fill_model": 0.5,
       "short_dte_target": 35,
       "short_dte_tolerance": 5,
       "long_gap_days": 7,

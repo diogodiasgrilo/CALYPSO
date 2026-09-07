@@ -36,6 +36,50 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-07 Calendar schema v2 — record every mark at MID and FULL TOUCH, so
+  the fill assumption stops being unfalsifiable. Also sets E's fill model.
+  THE PROBLEM: dc_calendar_snapshots v1 stored only the post-haircut leg price
+  and discarded the bid/ask that produced it. That made it IMPOSSIBLE to answer
+  the one question that decides D and E — "what would this have done at a
+  different fill assumption?" The 2026-09-06 forensic needed exactly that and
+  could not do it: it found D had run 19 trades at full touch (agg=1.0) because
+  `dry_run_fill_model: 0.5` was written as a bare scalar under the
+  double_calendar sub-block, a form the pre-0043298 reader silently ignored
+  until 2026-07-20 — and ~74% of D's -$4,877 same-day-era loss was that modeled
+  crossing cost, at double the intended setting, unrecoverable after the fact.
+  THE FIX: `_dc_fill_price` gains `agg`/`slip` overrides so the same quote can
+  be priced at mid (0,0) and full touch (1,0) alongside the acting fill. Two new
+  helpers, `_dc_calendar_value_at` / `_dc_net_debit_at`, mirror
+  CalendarEntry.calendar_value and the entry-debit computation exactly. Both
+  endpoints are recorded, making ANY aggressiveness an exact linear
+  interpolation: value(a) = mid + a * (touch - mid). Pinned by a test.
+  SCHEMA: DCDataRecorder 1 -> 2, additive ALTER TABLE migration (this DB holds
+  D's and E's entire history and must never be rewritten). New columns:
+  dc_calendar_snapshots += mid_calendar_value, touch_calendar_value, fill_agg,
+  fill_slip; dc_calendar_entries += mid_net_debit, touch_net_debit. Pre-v2 rows
+  keep NULL, deliberately NOT 0.0 — the information was never captured, and 0.0
+  would read as "the calendar was worth nothing at mid".
+  RECORD-ONLY: the detail is computed AFTER the mark-sanity guard and wrapped so
+  a failure can never affect a trading decision. A test asserts _dc_refresh_marks
+  still commits marks and returns True when the helper raises — the 2026-09-03
+  incident (1,138 rejected marks in one session) is the precedent for why a
+  recording path must never be able to freeze a live position's P&L.
+  VARIANT E: had NO fill-model key anywhere, so it fell through to the code
+  default of 1.0 while D ran at 0.5 — meaning the two members of the
+  calendar_multiday comparability group were simulated under DIFFERENT cost
+  assumptions, making the D-vs-E head-to-head (the whole point of the group)
+  invalid. Set to 0.5 to match D. Chosen for CONSISTENCY, not accuracy: neither
+  value has ever been validated against a real fill. Schema v2 makes the choice
+  re-derivable rather than baked in.
+  ALSO: scripts/probe_calendar_spread.py — a READ-ONLY probe that quotes a live
+  D-style SPX calendar and reports the real spread and the round-trip cost at
+  each aggressiveness, to check the forensic's 14.3%-of-debit figure against a
+  live chain. Places no orders. It cannot answer whether a limit order near mid
+  would FILL — only a real order can.
+  Tests: 20 new (tests/test_dc_mid_touch_recording_2026_09_07.py). Five
+  mutations verified to fail it: reusing the liquidation actions for the entry
+  debit, coalescing NULL to 0.0, dropping the migration, letting the
+  record-only failure abort the mark refresh, and ignoring the agg override.
 - 2026-09-06 (third same-day change) STATE-004 restart-gap backstop.
   THE GAP: `_reset_for_new_day()` — where the overnight-position check lives —
   only fires when a RUNNING process observes the ET date change under it. On a
