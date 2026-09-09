@@ -686,8 +686,29 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         lp = self._dc_fill_price(aq["long_put"], "sell")
         wc = self._dc_fill_price(aq["wing_call"], "buy")
         wp = self._dc_fill_price(aq["wing_put"], "buy")
+        # Telemetry helper (2026-09-09) — record EVERY gate evaluation, not just
+        # the ones that fire. Before this only 2 rows existed in the entire
+        # history of the strategy; the other ~4,700 evaluations went to a
+        # rotating log. Fire-and-forget: never raises into the trading path.
+        def _attempt(outcome, credit=None, threshold=None, px=None,
+                     mid_credit=None, touch_credit=None):
+            rec = getattr(self, "_dc_recorder", None)
+            if not rec:
+                return
+            try:
+                now = get_us_market_time()
+                rec.record_transform_attempt(
+                    entry, now.isoformat(), now.strftime("%Y-%m-%d"), outcome,
+                    transform_credit=credit, threshold=threshold, leg_px=px,
+                    mid_credit=mid_credit, touch_credit=touch_credit,
+                    fill_agg=float(getattr(self, "_dc_fill_agg", 1.0)),
+                )
+            except Exception as e:  # pragma: no cover - defensive
+                logger.debug("[DCTM] attempt telemetry skipped: %s", e)
+
         if any(m is None or m <= 0 for m in (lc, lp, wc, wp)):
             logger.info("[DCTM] transform deferred — incomplete fills (lc=%s lp=%s wc=%s wp=%s)", lc, lp, wc, wp)
+            _attempt("incomplete_quotes")
             return False
 
         # ARB-SANITY on the transform's own inputs (2026-09-09) — the analogue
@@ -718,9 +739,31 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
                 "short_put=%.3f wing_put=%.3f",
                 call_spread_pts, put_spread_pts, wing, sc_q or 0.0, wc, sp_q or 0.0, wp,
             )
+            _attempt("arb_rejected", px={
+                "long_call": lc, "long_put": lp, "wing_call": wc, "wing_put": wp,
+                "short_call": sc_q, "short_put": sp_q,
+            })
             return False
 
         transform_credit = (lc + lp - wc - wp) * 100 * n
+        # The same credit at mid (agg=0) and full touch (agg=1), so the gate is
+        # recomputable offline at ANY fill aggressiveness — the input that
+        # decides this strategy and has never met a real order.
+        def _credit_at(agg):
+            try:
+                px = [self._dc_fill_price(aq[k], act, agg=agg, slip=0.0)
+                      for k, act in (("long_call", "sell"), ("long_put", "sell"),
+                                     ("wing_call", "buy"), ("wing_put", "buy"))]
+                if any(p is None for p in px):
+                    return None
+                return (px[0] + px[1] - px[2] - px[3]) * 100 * n
+            except Exception:
+                return None
+        _mid_credit, _touch_credit = _credit_at(0.0), _credit_at(1.0)
+        _px = {
+            "long_call": lc, "long_put": lp, "wing_call": wc, "wing_put": wp,
+            "short_call": sc_q, "short_put": sp_q,
+        }
         # Commission-inclusive threshold (2026-09-09) — the transformer's own 4
         # legs plus the 4 already paid to open. The old threshold had EXACTLY
         # zero margin by construction (worst-case IC loss is exactly wing*100*n),
@@ -735,6 +778,8 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
                 "[DCTM] transform NOT risk-free yet: credit $%.2f < debit+wing $%.2f — holding",
                 transform_credit, threshold,
             )
+            _attempt("below_threshold", credit=transform_credit, threshold=threshold,
+                     px=_px, mid_credit=_mid_credit, touch_credit=_touch_credit)
             return False
 
         # FIRE: the longs become wings on the short expiry → a same-expiry IC.
@@ -805,6 +850,8 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
             threshold, transform_credit, wing,
             float(getattr(self, "_dc_fill_agg", 1.0)),
         )
+        _attempt("fired", credit=transform_credit, threshold=threshold, px=_px,
+                 mid_credit=_mid_credit, touch_credit=_touch_credit)
         if getattr(self, "_dc_recorder", None):
             self._dc_recorder.record_transformation(entry, get_us_market_time().strftime("%Y-%m-%d"))
         return True

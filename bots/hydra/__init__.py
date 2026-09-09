@@ -36,6 +36,44 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-09 (second same-day change) Calendar schema v3 — record EVERY
+  transform-gate evaluation, and give snapshots a trade identity.
+  THE GAP: D's transform gate is the strategy's whole thesis (the calendar leg
+  is 0-for-23), and it is evaluated on every monitoring tick — order 600 times
+  per trade. Only the evaluations that FIRED were ever persisted: 2 rows, in
+  the entire history of the strategy. Everything else went to a rotating log,
+  of which ~955 of ~4,700 evaluations survived. So the central question was
+  being answered from a 2-of-8 binary while a continuous distance-to-gate
+  series was computed and thrown away every tick.
+  NEW TABLE dc_transform_attempts — one row per evaluation, outcome in
+  {fired, below_threshold, arb_rejected, incomplete_quotes}, carrying the
+  credit, the threshold, the margin, all six modelled leg prices, and the
+  credit at agg=0 AND agg=1. That last part matters: it makes the gate
+  recomputable offline at ANY fill aggressiveness, which is the input that
+  decides this strategy and has never been validated against a real order.
+  A test pins the interpolation identity against the acting credit.
+  ATTRIBUTION: dc_calendar_snapshots gains strategy_id + entry_date. It only
+  carried entry_number, which is ALWAYS 1 on D and E (verified against the
+  live DBs — the distinct set is literally [1]), so 59,305 D rows and 69,660 E
+  rows could not be tied to a specific trade except by guessing from
+  timestamps.
+  OVERWRITE GUARD: a UNIQUE index on dc_outcomes.strategy_id. The PK is
+  (entry_date, entry_number) and INSERT OR REPLACE keys on it; with
+  entry_number pinned at 1 that silently overwrites if two entries ever share
+  an entry_date. Additive (an index, not a table rebuild). No collision has
+  occurred, but the concurrency slot HAS been freed early three times by the
+  vanished-position bug, which is exactly the path that would cause one.
+  ALSO FOUND: E has lost 2 of its 5 entries from tracking (spydc_20260722_001,
+  spydc_20260805_001 have no dc_outcomes row) on top of D's 3. Proportionally
+  worse than D. The watchdog for this is still TODO (Phase 0.6).
+  Telemetry is fire-and-forget throughout — a recording failure must never
+  cost a trade (precedent: 2026-09-03, when a recording-path guard froze a
+  live position's P&L for a whole session).
+  Tests: 13 new (tests/test_dc_transform_attempts_2026_09_09.py). Four
+  mutations verified to fail them. NOTE: the mutation run initially produced a
+  spurious result because rapid file-swapping left a stale __pycache__ entry
+  whose mtime matched — the same class of gotcha as the deploy rule about
+  clearing bytecode. Re-run with cache clearing between mutations.
 - 2026-09-09 Strategy D Phase 0.1/0.3 — charge commissions in the risk-free
   gate, and stop the transformer firing on arbitrage-impossible quotes.
   WHY THIS IS THE WHOLE BALLGAME FOR D: D's calendar leg is 0-for-23

@@ -216,7 +216,8 @@ class TestSchemaMigration:
         DCDataRecorder(p)
 
         c = sqlite3.connect(p)
-        assert c.execute("SELECT version FROM dc_schema_info").fetchone()[0] == 2
+        assert (c.execute("SELECT version FROM dc_schema_info").fetchone()[0]
+                == DCDataRecorder.SCHEMA_VERSION)
         # existing data intact
         assert c.execute("SELECT net_debit FROM dc_calendar_entries").fetchone()[0] == 945.0
         assert c.execute("SELECT calendar_value FROM dc_calendar_snapshots").fetchone()[0] == 900.0
@@ -225,6 +226,9 @@ class TestSchemaMigration:
         scols = {r[1] for r in c.execute("PRAGMA table_info(dc_calendar_snapshots)")}
         assert {"mid_net_debit", "touch_net_debit"} <= ecols
         assert {"mid_calendar_value", "touch_calendar_value", "fill_agg", "fill_slip"} <= scols
+        # v3 attribution columns (2026-09-09) — entry_number is always 1 on D
+        # and E, so without these a snapshot cannot be tied to a trade.
+        assert {"strategy_id", "entry_date"} <= scols
         c.close()
 
     def test_old_rows_keep_NULL_not_zero(self, tmp_path):
@@ -249,13 +253,19 @@ class TestSchemaMigration:
         assert c.execute("SELECT COUNT(*) FROM dc_calendar_snapshots").fetchone()[0] == 1
         c.close()
 
-    def test_fresh_db_is_created_at_v2_with_the_columns(self, tmp_path):
+    def test_fresh_db_is_created_at_current_version_with_the_columns(self, tmp_path):
         p = str(tmp_path / "fresh.db")
         DCDataRecorder(p)
         c = sqlite3.connect(p)
-        assert c.execute("SELECT version FROM dc_schema_info").fetchone()[0] == 2
+        assert (c.execute("SELECT version FROM dc_schema_info").fetchone()[0]
+                == DCDataRecorder.SCHEMA_VERSION)
         scols = {r[1] for r in c.execute("PRAGMA table_info(dc_calendar_snapshots)")}
-        assert {"mid_calendar_value", "touch_calendar_value", "fill_agg", "fill_slip"} <= scols
+        assert {"mid_calendar_value", "touch_calendar_value", "fill_agg",
+                "fill_slip", "strategy_id", "entry_date"} <= scols
+        # A fresh DB must also carry the v3 gate-telemetry table.
+        tabs = {r[0] for r in c.execute(
+            "SELECT name FROM sqlite_master WHERE type='table'")}
+        assert "dc_transform_attempts" in tabs
         c.close()
 
 

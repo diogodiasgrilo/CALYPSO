@@ -40,7 +40,7 @@ def _dte(from_iso: Optional[str], to_iso: Optional[str]) -> Optional[int]:
 
 
 class DCDataRecorder:
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -89,7 +89,18 @@ class DCDataRecorder:
                     short_call_price REAL, long_call_price REAL,
                     short_put_price REAL, long_put_price REAL,
                     mid_calendar_value REAL, touch_calendar_value REAL,
-                    fill_agg REAL, fill_slip REAL
+                    fill_agg REAL, fill_slip REAL,
+                    strategy_id TEXT, entry_date TEXT
+                );
+                CREATE TABLE IF NOT EXISTS dc_transform_attempts (
+                    timestamp TEXT, date TEXT, strategy_id TEXT, entry_number INTEGER,
+                    outcome TEXT,
+                    transform_credit REAL, threshold REAL, margin REAL,
+                    net_debit REAL, wing_width REAL, contracts INTEGER,
+                    long_call_px REAL, long_put_px REAL,
+                    wing_call_px REAL, wing_put_px REAL,
+                    short_call_px REAL, short_put_px REAL,
+                    mid_credit REAL, touch_credit REAL, fill_agg REAL
                 );
                 CREATE TABLE IF NOT EXISTS dc_schema_info (version INTEGER);
                 """
@@ -110,6 +121,28 @@ class DCDataRecorder:
         default) — this DB holds D's and E's entire trade history and must never
         be rewritten in place.
 
+        v2 -> v3 (2026-09-09): attribution + the transform-gate telemetry.
+          * ``dc_calendar_snapshots`` gains ``strategy_id`` / ``entry_date``.
+            Until now a snapshot carried only ``entry_number``, which is
+            ALWAYS 1 for D and E (verified: the distinct set is literally
+            [1]) — so 59,305 D rows and 69,660 E rows were unattributable to
+            a specific trade except by timestamp-range guesswork.
+          * a UNIQUE index on ``dc_outcomes.strategy_id``. The table's PK is
+            ``(entry_date, entry_number)`` and ``INSERT OR REPLACE`` keys on
+            it; with entry_number pinned at 1 that silently overwrites if two
+            entries ever share an entry_date. No collision has happened yet,
+            but the concurrency slot HAS been freed early three times by the
+            vanished-position bug, which is exactly how it would.
+          * ``dc_transform_attempts``, the reason for this migration. D's
+            transform gate is evaluated on every monitoring tick — roughly 600
+            times per trade — but only the 2 evaluations that FIRED were ever
+            persisted. Everything else went to a rotating log. That reduced
+            the strategy's central question to a 2-of-8 binary when a
+            continuous distance-to-gate series was being computed and thrown
+            away. Each row stores the six leg prices plus the credit at mid and
+            at full touch, so the gate is recomputable offline at ANY fill
+            aggressiveness.
+
         v1 -> v2 (2026-09-07): record the same marks priced at MID and FULL TOUCH
         so any fill aggressiveness is recoverable offline by interpolation. The
         v1 schema stored only the post-haircut price, discarding the bid/ask —
@@ -125,6 +158,7 @@ class DCDataRecorder:
             "dc_calendar_snapshots": [
                 "mid_calendar_value REAL", "touch_calendar_value REAL",
                 "fill_agg REAL", "fill_slip REAL",
+                "strategy_id TEXT", "entry_date TEXT",
             ],
         }
         for table, cols in additions.items():
@@ -142,6 +176,20 @@ class DCDataRecorder:
                     logger.info("DC schema migrate: added %s.%s", table, name)
                 except Exception as e:
                     logger.warning("DC schema migrate: %s.%s failed (%s)", table, name, e)
+        # Guard dc_outcomes against the latent INSERT OR REPLACE overwrite.
+        # Additive (an index, not a table rebuild) so the trade history is
+        # never rewritten. Fails harmlessly if duplicates somehow already
+        # exist — better to leave the index off than to lose a row.
+        try:
+            self._conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS idx_dc_outcomes_strategy_id "
+                "ON dc_outcomes(strategy_id)"
+            )
+        except Exception as e:
+            logger.warning(
+                "DC schema migrate: could not add the dc_outcomes strategy_id "
+                "unique index (%s) — duplicate strategy_ids may already exist", e
+            )
         self._conn.execute("UPDATE dc_schema_info SET version = ?", (self.SCHEMA_VERSION,))
         logger.info("DC schema migrated v%s -> v%s", from_version, self.SCHEMA_VERSION)
 
@@ -195,6 +243,56 @@ class DCDataRecorder:
             ),
         )
 
+    def record_transform_attempt(
+        self, entry, timestamp: str, date: str, outcome: str,
+        transform_credit=None, threshold=None,
+        leg_px: Optional[dict] = None,
+        mid_credit=None, touch_credit=None, fill_agg=None,
+    ) -> None:
+        """One row per EVALUATION of the transform gate, fired or not.
+
+        D's gate runs on every monitoring tick — order 600 times per trade —
+        but before 2026-09-09 only the evaluations that FIRED were persisted
+        (2 rows, ever). Everything else went to a rotating log, of which ~955
+        of ~4,700 evaluations survived. That collapsed the strategy's central
+        question into a 2-of-8 binary while a continuous distance-to-gate
+        series was being computed and discarded.
+
+        ``leg_px`` carries the six modelled leg prices and ``mid_credit`` /
+        ``touch_credit`` the transform credit at aggressiveness 0 and 1, so the
+        gate can be recomputed offline at ANY fill assumption — the one input
+        that decides this strategy and has never been validated.
+
+        ``outcome`` is one of: ``fired``, ``below_threshold``, ``arb_rejected``,
+        ``incomplete_quotes``.
+        """
+        px = leg_px or {}
+        margin = (
+            transform_credit - threshold
+            if (transform_credit is not None and threshold is not None) else None
+        )
+        self._exec(
+            """INSERT INTO dc_transform_attempts
+               (timestamp, date, strategy_id, entry_number, outcome,
+                transform_credit, threshold, margin,
+                net_debit, wing_width, contracts,
+                long_call_px, long_put_px, wing_call_px, wing_put_px,
+                short_call_px, short_put_px,
+                mid_credit, touch_credit, fill_agg)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+            (
+                timestamp, date, getattr(entry, "strategy_id", ""),
+                entry.entry_number, outcome,
+                transform_credit, threshold, margin,
+                getattr(entry, "net_debit", None), getattr(entry, "wing_width", None),
+                getattr(entry, "contracts", None),
+                px.get("long_call"), px.get("long_put"),
+                px.get("wing_call"), px.get("wing_put"),
+                px.get("short_call"), px.get("short_put"),
+                mid_credit, touch_credit, fill_agg,
+            ),
+        )
+
     def record_outcome(self, entry, terminal_state: str, realized_pnl: float,
                        spx_at_close: Optional[float], entry_date: str, close_date: str) -> None:
         self._exec(
@@ -214,8 +312,9 @@ class DCDataRecorder:
             """INSERT INTO dc_calendar_snapshots
                (timestamp, entry_number, dc_phase, net_debit, calendar_value, unrealized_pnl,
                 short_call_price, long_call_price, short_put_price, long_put_price,
-                mid_calendar_value, touch_calendar_value, fill_agg, fill_slip)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                mid_calendar_value, touch_calendar_value, fill_agg, fill_slip,
+                strategy_id, entry_date)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 timestamp, entry.entry_number, entry.dc_phase.value, entry.net_debit,
                 getattr(entry, "calendar_value", 0.0), entry.unrealized_pnl,
@@ -230,5 +329,9 @@ class DCDataRecorder:
                 getattr(entry, "_dc_mark_touch_value", None),
                 getattr(entry, "_dc_mark_fill_agg", None),
                 getattr(entry, "_dc_mark_fill_slip", None),
+                # Attribution (schema v3). entry_number is always 1 on D and E,
+                # so without these a snapshot cannot be tied to a trade.
+                getattr(entry, "strategy_id", "") or None,
+                (getattr(entry, "strategy_id", "") or "")[5:13] or None,
             ),
         )
