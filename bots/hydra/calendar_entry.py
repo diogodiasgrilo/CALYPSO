@@ -90,6 +90,19 @@ class CalendarEntry(IronCondorEntry):
     # liquidation value — anchoring changes only WHEN we act, not the EV.
     opening_pnl: float = 0.0
 
+    # Commission bookkeeping (2026-09-09). The risk-free invariant is a CASH
+    # claim — "this position cannot lose money" — so it must charge every fee
+    # the position pays, not just its structural cost. Before this, the
+    # threshold was net_debit + wing*100*n with NO commission term at all, and
+    # the transform's own 4 legs booked zero commission anywhere.
+    #
+    # Impact on the real record: dctm_20260818_001 cleared the old gate by
+    # $11.50. The 8 legs it actually pays (4 to open + 4 to transform) cost
+    # $9.20 at commission_per_leg=1.15, leaving a true margin of $2.30.
+    commission_per_leg: float = 0.0   # rate, stamped at open so the threshold
+                                      # can never be computed without it
+    transform_commission: float = 0.0  # the transformer's own 4 legs
+
     # Transformer outcome (set when the transformer fires; Phase 4).
     transform_credit: float = 0.0   # net cash from selling longs - buying wings (dollars)
     wing_width: float = 0.0         # IC wing width in POINTS, set at transform
@@ -203,13 +216,57 @@ class CalendarEntry(IronCondorEntry):
     # Risk-free invariant
     # ------------------------------------------------------------------
 
+    #: Legs the transformer itself trades: sell 2 back-dated longs, buy 2 wings.
+    TRANSFORM_LEG_COUNT = 4
+
     def risk_free_threshold(self) -> float:
         """Minimum transformer credit (dollars) for the transformed IC to be
-        structurally risk-free: net_debit + wing_width * 100 * contracts."""
-        return self.net_debit + self.wing_width * 100 * self.contracts
+        genuinely risk-free — structural cost PLUS every commission the
+        position pays.
+
+            net_debit + wing_width*100*n          <- structural worst case
+          + open_commission                       <- 4 legs, already paid
+          + TRANSFORM_LEG_COUNT * rate * n        <- 4 legs, about to be paid
+
+        WHY THE FEES BELONG HERE (2026-09-09). The invariant this gate asserts
+        is a CASH claim: `_dc_settle_transformed` logs "max loss $0". But the
+        worst-case IC value at expiry is EXACTLY wing*100*n and the old
+        threshold was EXACTLY net_debit + wing*100*n, so worst-case realized
+        was exactly $0 BEFORE fees — meaning any omitted cost makes the real
+        outcome negative. The gate had zero margin by construction, and then
+        omitted 8 legs of commission on top.
+
+        Measured impact on D's only settled winner, dctm_20260818_001:
+        transform_credit $1,456.50 vs old threshold $1,445.00 = cleared by
+        $11.50. Commissions are $9.20 (8 legs x $1.15 x 1 contract). True
+        margin: $2.30.
+
+        SPXW is European cash-settled, so a held-to-expiry IC pays no closing
+        commission — hence 8 legs, not 12. If a future change closes the IC
+        early instead of letting it settle, add close_commission here.
+
+        Fees default to 0.0, which reproduces the pre-2026-09-09 threshold
+        exactly for any entry that never stamped them (all historical rows).
+        """
+        structural = self.net_debit + self.wing_width * 100 * self.contracts
+        fees = (
+            self.open_commission
+            + self.TRANSFORM_LEG_COUNT * self.commission_per_leg * self.contracts
+        )
+        return structural + fees
 
     def evaluate_risk_free(self) -> bool:
         """Set + return is_risk_free from the realized transform_credit vs the
-        threshold. Call after the transformer fills with measured numbers."""
+        commission-inclusive threshold.
+
+        HONEST LIMITATION — this is NOT an independent verification. The
+        transformer gates on the same inequality against the same numbers, so
+        reaching here implies True. It is retained because (a) it is the single
+        place `is_risk_free` is set, and (b) once a real-order path exists this
+        becomes the post-fill re-check, recomputed from actual fill prices
+        rather than the estimate, and must then be able to return False.
+        Do not read a True here as evidence the position is risk-free; read it
+        as "the estimate cleared the estimate".
+        """
         self.is_risk_free = self.transform_credit >= self.risk_free_threshold()
         return self.is_risk_free

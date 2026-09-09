@@ -528,6 +528,10 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
             # 4-leg open commission (display only; debit P&L is separate).
             entry.open_commission = 4 * self.commission_per_leg * self.contracts_per_entry
             self.daily_state.total_commission += entry.open_commission
+            # Stamp the RATE too (2026-09-09) so risk_free_threshold() can charge
+            # the transformer's own 4 legs. Without it the threshold silently
+            # falls back to fee-free and the "risk-free" gate overstates margin.
+            entry.commission_per_leg = self.commission_per_leg
 
             self._save_state_to_disk()  # persist before returning (crash-window guard)
             if getattr(self, "_dc_recorder", None):
@@ -667,18 +671,65 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         # on these 4 legs is exactly the cost an optimistic mid hid, and it's what
         # makes the risk-free gate honest (the mid made the transform look risk-free
         # cheaper + faster than real fills would allow).
-        lq = self._dc_read_leg_quotes({"long_call": entry.long_call_uic, "long_put": entry.long_put_uic})
-        wq = self._dc_read_leg_quotes({"wing_call": wing_call_conid, "wing_put": wing_put_conid})
-        lc = self._dc_fill_price(lq["long_call"], "sell")
-        lp = self._dc_fill_price(lq["long_put"], "sell")
-        wc = self._dc_fill_price(wq["wing_call"], "buy")
-        wp = self._dc_fill_price(wq["wing_put"], "buy")
+        # ONE atomic quote batch for all six legs (2026-09-09). This used to be
+        # three separate reads (longs, wings, then shorts after the gate fired),
+        # so the credit could be computed from legs quoted at different instants
+        # on a moving tape — and the wing price enters transform_credit with a
+        # MINUS sign, meaning a stale/too-cheap wing inflates the credit in
+        # exactly the direction that fires a bad transform.
+        aq = self._dc_read_leg_quotes({
+            "long_call": entry.long_call_uic, "long_put": entry.long_put_uic,
+            "wing_call": wing_call_conid, "wing_put": wing_put_conid,
+            "short_call": entry.short_call_uic, "short_put": entry.short_put_uic,
+        })
+        lc = self._dc_fill_price(aq["long_call"], "sell")
+        lp = self._dc_fill_price(aq["long_put"], "sell")
+        wc = self._dc_fill_price(aq["wing_call"], "buy")
+        wp = self._dc_fill_price(aq["wing_put"], "buy")
         if any(m is None or m <= 0 for m in (lc, lp, wc, wp)):
             logger.info("[DCTM] transform deferred — incomplete fills (lc=%s lp=%s wc=%s wp=%s)", lc, lp, wc, wp)
             return False
 
+        # ARB-SANITY on the transform's own inputs (2026-09-09) — the analogue
+        # of _CAL_ARB_EPS in _dc_refresh_marks, which guards the CALENDAR phase
+        # only and never runs here.
+        #
+        # The resulting position is a vertical of width `wing` on each side, so
+        # each side's credit is bounded above by wing*100 per contract. A quote
+        # set implying more than that is arbitrage-impossible and no broker
+        # would fill it.
+        #
+        # THIS HAS ALREADY FIRED ON BAD DATA: dctm_20260901_001 transformed on
+        # 2026-09-01 into a 7580/7575 put vertical — 5pt wide, so a $500 ceiling
+        # — and recorded put_spread_credit $538.40. The very next snapshot
+        # confirms it (short_put 49.15 vs long_put 43.766 = 5.384 > 5.00). At
+        # least $38.40 of that trade's margin is provably not obtainable.
+        sc_q = (aq.get("short_call") or {}).get("mid") or entry.short_call_price
+        sp_q = (aq.get("short_put") or {}).get("mid") or entry.short_put_price
+        _ARB_EPS = 0.02  # penny-rounding tolerance, in points
+        call_spread_pts = (sc_q or 0.0) - wc
+        put_spread_pts = (sp_q or 0.0) - wp
+        if call_spread_pts > wing + _ARB_EPS or put_spread_pts > wing + _ARB_EPS:
+            logger.warning(
+                "[DCTM] transform REJECTED — arbitrage-impossible quotes: call side "
+                "%.3f pts and put side %.3f pts against a %.0fpt wing (a vertical "
+                "cannot be worth more than its width). Keeping the calendar; the "
+                "next clean tick may transform. short_call=%.3f wing_call=%.3f "
+                "short_put=%.3f wing_put=%.3f",
+                call_spread_pts, put_spread_pts, wing, sc_q or 0.0, wc, sp_q or 0.0, wp,
+            )
+            return False
+
         transform_credit = (lc + lp - wc - wp) * 100 * n
-        threshold = entry.net_debit + wing * 100 * n
+        # Commission-inclusive threshold (2026-09-09) — the transformer's own 4
+        # legs plus the 4 already paid to open. The old threshold had EXACTLY
+        # zero margin by construction (worst-case IC loss is exactly wing*100*n),
+        # so omitting fees guaranteed a negative real outcome at the boundary.
+        entry.commission_per_leg = (
+            entry.commission_per_leg or getattr(self, "commission_per_leg", 0.0)
+        )
+        entry.wing_width = wing
+        threshold = entry.risk_free_threshold()
         if transform_credit < threshold:
             logger.info(
                 "[DCTM] transform NOT risk-free yet: credit $%.2f < debit+wing $%.2f — holding",
@@ -694,28 +745,65 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         lp_leg.price = lp_leg.fill_price = wp
 
         # Resulting IC credit (display/total_credit): short premium - wing cost.
-        sq = self._dc_read_leg_quotes({"short_call": entry.short_call_uic, "short_put": entry.short_put_uic})
-        sc = sq["short_call"]["mid"] or entry.short_call_price
-        sp = sq["short_put"]["mid"] or entry.short_put_price
+        # Uses the SAME atomic batch the gate priced from (2026-09-09) — the old
+        # second read could disagree with the gate's own numbers.
+        # Both sides are clamped to the vertical's width, which the arb-sanity
+        # check above has already verified is not being violated.
+        sc, sp = sc_q, sp_q
         entry.legs["short_call"].price = sc
         entry.legs["short_put"].price = sp
-        entry.call_spread_credit = max(0.0, sc - wc) * 100 * n
-        entry.put_spread_credit = max(0.0, sp - wp) * 100 * n
+        max_side = wing * 100 * n
+        entry.call_spread_credit = min(max(0.0, sc - wc) * 100 * n, max_side)
+        entry.put_spread_credit = min(max(0.0, sp - wp) * 100 * n, max_side)
+
+        # The transformer trades 4 legs of its own (sell 2 longs, buy 2 wings).
+        # These booked NOWHERE before 2026-09-09 — not on the entry, not in
+        # daily_state, and not in dc_edge's commission estimate (which derives
+        # from close_commission, and a transformed position that settles at
+        # expiry has close_commission == 0, so D's only winner was scored
+        # entirely fee-free).
+        entry.transform_commission = (
+            entry.TRANSFORM_LEG_COUNT * getattr(self, "commission_per_leg", 0.0) * n
+        )
+        # Bookkeeping only — a daily_state roll-up failure must never abort a
+        # transform that has already been decided. The authoritative number is
+        # entry.transform_commission (set above and persisted with the entry).
+        try:
+            self.daily_state.total_commission += entry.transform_commission
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("[DCTM] transform commission roll-up skipped: %s", e)
 
         entry.transform_credit = transform_credit
         entry.wing_width = wing
         entry.transformed_at = get_us_market_time().isoformat()
         entry.dc_phase = DCPhase.TRANSFORMED
-        entry.evaluate_risk_free()  # gate == risk-free condition, so this is True
+        # Redundant by construction (the gate above tests the same inequality
+        # against the same numbers) — see evaluate_risk_free's docstring. Kept
+        # as the single assignment point for is_risk_free, and asserted here so
+        # that if the two ever diverge we fail CLOSED rather than silently
+        # flying a False flag as True.
+        if not entry.evaluate_risk_free():
+            logger.error(
+                "[DCTM] INTERNAL: gate passed (credit $%.2f >= threshold $%.2f) but "
+                "evaluate_risk_free() returned False — refusing the transform.",
+                transform_credit, threshold,
+            )
+            entry.dc_phase = DCPhase.CALENDAR
+            return False
 
         logger.info(
-            "[DCTM-TRANSFORM] E#%s credit $%.2f >= debit+wing $%.2f → IC C %s/%s P %s/%s (exp %s)",
+            "[DCTM-TRANSFORM] E#%s credit $%.2f >= debit+wing+fees $%.2f → IC C %s/%s P %s/%s (exp %s)",
             entry.entry_number, transform_credit, threshold,
             kc, kc + wing, kp, kp - wing, short_exp,
         )
         logger.info(
-            "[DCTM-RISKFREE] E#%s risk-free achieved (max loss $0): debit $%.2f, transform credit $%.2f, wing %.0fpt",
-            entry.entry_number, entry.net_debit, transform_credit, wing,
+            "[DCTM-RISKFREE] E#%s margin $%.2f over a commission-inclusive threshold: "
+            "debit $%.2f + wing $%.2f + fees $%.2f = $%.2f, credit $%.2f, wing %.0fpt. "
+            "NOTE: modelled fills at agg=%.2f, never validated against a real order.",
+            entry.entry_number, transform_credit - threshold, entry.net_debit,
+            wing * 100 * n, entry.open_commission + entry.transform_commission,
+            threshold, transform_credit, wing,
+            float(getattr(self, "_dc_fill_agg", 1.0)),
         )
         if getattr(self, "_dc_recorder", None):
             self._dc_recorder.record_transformation(entry, get_us_market_time().strftime("%Y-%m-%d"))

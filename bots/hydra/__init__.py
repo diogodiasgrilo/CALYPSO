@@ -36,6 +36,55 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-09 Strategy D Phase 0.1/0.3 — charge commissions in the risk-free
+  gate, and stop the transformer firing on arbitrage-impossible quotes.
+  WHY THIS IS THE WHOLE BALLGAME FOR D: D's calendar leg is 0-for-23
+  (scripts/analyze_calendar_edge.py --variant d: mean net return-on-debit
+  -24.95%, CI95 [-29.75%, -20.15%], 0W/23L). Every dollar D has ever made came
+  from the "risk-free transform", so that gate IS the strategy's thesis.
+  DEFECT 1 — the gate charged NO commission. Worst-case IC value at expiry is
+  exactly wing*100*n and the threshold was exactly net_debit + wing*100*n, so
+  worst-case realized P&L was exactly $0 BEFORE fees: zero margin by
+  construction, and any omitted cost makes the real outcome negative. On top of
+  that the transformer's own 4 legs (sell 2 longs, buy 2 wings) booked zero
+  commission ANYWHERE, and dc_edge derives commission from close_commission —
+  which is $0 for a transform that settles at expiry — so D's only winner was
+  scored entirely fee-free. risk_free_threshold() now adds open_commission +
+  4 * commission_per_leg * contracts (8 legs; SPXW is European cash-settled so
+  a held-to-expiry IC pays no closing commission). The rate is stamped on the
+  entry at open so the threshold cannot be computed without it. Entries that
+  never stamped it reproduce the old threshold exactly, so historical rows are
+  unchanged.
+  MEASURED (scripts/rescore_d_transforms.py, new): both transforms still clear,
+  but they are not comparable. dctm_20260818_001 — D's ONLY settled winner —
+  goes from "risk-free by $11.50" to $2.30, which is 0.16% of its own credit,
+  i.e. indistinguishable from zero under a fill model that has never met a real
+  order. dctm_20260901_001 keeps $154.20 (9.89%). So D's record is one genuine
+  transform and one that is noise, not two wins.
+  DEFECT 2 — no arb sanity on the transform's inputs, AND IT HAD ALREADY FIRED.
+  _CAL_ARB_EPS guards only the CALENDAR phase inside _dc_refresh_marks; the
+  transform gate checked nothing and read its legs in THREE separate quote
+  batches. The wing enters transform_credit with a MINUS sign, so a stale or
+  too-cheap wing inflates the credit in exactly the direction that fires a bad
+  transform. Real case: dctm_20260901_001 transformed into a 7580/7575 put
+  vertical — 5pt wide, a $500 ceiling — recording put_spread_credit $538.40
+  (the next snapshot confirms short_put 49.15 vs long_put 43.766 = 5.384).
+  At least $38.40 of that trade's $154.20 margin is not obtainable.
+  Now: all six legs are read in ONE atomic batch, each side is checked against
+  the wing width before the gate, and the booked side credits are clamped to
+  the vertical's ceiling.
+  ALSO: the [DCTM-RISKFREE] log no longer claims "max loss $0" — it prints the
+  actual margin over a fee-inclusive threshold and names the unvalidated fill
+  aggressiveness. evaluate_risk_free()'s docstring now states plainly that it
+  is NOT an independent check (the gate tests the same inequality on the same
+  numbers); it is the hook for a real post-fill verification later, and the
+  transform now fails CLOSED if the two ever disagree.
+  Tests: 12 new (tests/test_d_riskfree_commissions_and_arb_2026_09_09.py).
+  Four mutations verified to fail them. NOTE FOR FUTURE READERS: the first
+  version of the 09-01 regression test passed even with the arb guard deleted —
+  it used cheap longs, so the CREDIT gate rejected it and the test proved
+  nothing. It is now constructed so the credit gate demonstrably passes
+  ($1,560 vs a $1,395 threshold) and only the arb guard can reject it.
 - 2026-09-07 Calendar schema v2 — record every mark at MID and FULL TOUCH, so
   the fill assumption stops being unfalsifiable. Also sets E's fill model.
   THE PROBLEM: dc_calendar_snapshots v1 stored only the post-haircut leg price

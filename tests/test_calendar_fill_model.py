@@ -146,12 +146,14 @@ class TestTransformCreditSpread:
         s.contracts_per_entry = 1
         s.dc_wing_width = 5
         s._get_option_uic = MagicMock(side_effect=[101, 102])  # wing call, wing put
-        # _dc_read_leg_quotes is called for the longs, the wings, and (only if the
-        # transform FIRES) the shorts for the display IC credit.
-        effects = [long_q, wing_q]
-        if short_q is not None:
-            effects.append(short_q)
-        s._dc_read_leg_quotes = MagicMock(side_effect=effects)
+        # Since 2026-09-09 _dc_attempt_transform reads ALL SIX legs in ONE atomic
+        # batch. It used to make three separate calls (longs, wings, then shorts
+        # after the gate fired), so the credit could be priced from legs quoted at
+        # different instants on a moving tape — and the wing enters the credit with
+        # a MINUS sign, so a stale/cheap wing inflates it in exactly the direction
+        # that fires a bad transform. One call, one instant.
+        merged = {**long_q, **wing_q, **(short_q or {})}
+        s._dc_read_leg_quotes = MagicMock(return_value=merged)
         s._dc_recorder = None
         return s
 
@@ -174,6 +176,12 @@ class TestTransformCreditSpread:
         assert fired is True
         assert round(e.transform_credit, 2) == 2160.0     # not the $2300 mid
         assert e.transform_credit < 2300.0
+        # The six legs must be priced from a SINGLE quote instant (2026-09-09).
+        assert s._dc_read_leg_quotes.call_count == 1
+        assert set(s._dc_read_leg_quotes.call_args.args[0]) == {
+            "long_call", "long_put", "wing_call", "wing_put",
+            "short_call", "short_put",
+        }
 
     def test_spread_can_make_transform_defer(self):
         # Wide spreads: realistic credit falls BELOW debit+wing ($1585) → NOT
@@ -182,7 +190,12 @@ class TestTransformCreditSpread:
                   "long_put": _q(8.5, bid=7.0, ask=10.0)}
         wing_q = {"wing_call": _q(1.0, bid=0.2, ask=1.8),
                   "wing_put": _q(1.0, bid=0.2, ask=1.8)}
-        s = self._strat_for_transform(long_q, wing_q)
+        # Shorts are always in the batch since 2026-09-09 (one atomic read).
+        # Priced well inside the 5pt wing so the arb-sanity check is satisfied
+        # and this test still isolates the CREDIT gate, which is its subject.
+        short_q = {"short_call": _q(3.0, bid=2.8, ask=3.2),
+                   "short_put": _q(3.0, bid=2.8, ask=3.2)}
+        s = self._strat_for_transform(long_q, wing_q, short_q)
         e = self._ready_entry()  # debit 1085, threshold 1085 + 5*100 = 1585
         fired = s._dc_attempt_transform(e)
         # realistic credit = (7.5+7.0 - 1.8-1.8)*100 = $1090 < $1585 → defer
