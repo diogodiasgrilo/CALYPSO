@@ -39,12 +39,30 @@ Version History:
 - 2026-09-09 (second same-day change) Calendar schema v3 — record EVERY
   transform-gate evaluation, and give snapshots a trade identity.
   THE GAP: D's transform gate is the strategy's whole thesis (the calendar leg
-  is 0-for-23), and it is evaluated on every monitoring tick — order 600 times
-  per trade. Only the evaluations that FIRED were ever persisted: 2 rows, in
-  the entire history of the strategy. Everything else went to a rotating log,
-  of which ~955 of ~4,700 evaluations survived. So the central question was
-  being answered from a 2-of-8 binary while a continuous distance-to-gate
-  series was computed and thrown away every tick.
+  is 0-for-23). Only the evaluations that FIRED were ever persisted: 2 rows, in
+  the entire history of the strategy. Everything else went to a rotating log.
+  So the central question was being answered from a 2-of-8 binary while the
+  distance-to-gate was computed and thrown away.
+  CORRECTION, verified after this shipped — the commit message for c645b8e and
+  an earlier version of this entry both said the gate is "evaluated on every
+  monitoring tick, order 600 times per trade". THAT IS WRONG.
+  double_calendar_strategy.py:606 gates the call on
+  `pnl_move_pct >= dc_profit_trigger_pct` (7.5%), so _dc_attempt_transform only
+  runs once a position is ALREADY up 7.5% from its opening mark. The "~4,700
+  evaluations" figure quoted from the 2026-09-06 forensic does not describe
+  this call site.
+  This does NOT reduce the table's value — the evaluations worth recording are
+  exactly the ones near the gate, and the P&L trajectory below the trigger is
+  already in dc_calendar_snapshots. But it does change WHEN data appears, and
+  how much: expect tens of rows around a transform decision, not hundreds per
+  trade. For scale, only 23 of 50,292 calendar-phase snapshots (0.05%) ever
+  showed raw pnl/debit >= +7.5% — though that understates the gate's own
+  measure, which is move-from-entry and therefore ~15 points higher because
+  opening_pnl carries the birth toll.
+  ALSO: dc_max_concurrent defaults to 1 and D currently holds an open
+  TRANSFORMED position (dctm_20260901_001, short expiry 2026-09-11), so D will
+  not open a new calendar — and this table will not receive its first row —
+  until that position settles.
   NEW TABLE dc_transform_attempts — one row per evaluation, outcome in
   {fired, below_threshold, arb_rejected, incomplete_quotes}, carrying the
   credit, the threshold, the margin, all six modelled leg prices, and the
