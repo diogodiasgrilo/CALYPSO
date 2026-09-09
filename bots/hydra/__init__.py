@@ -36,6 +36,44 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-09 (third same-day change) Vanished-position watchdog + the
+  LOST_FROM_TRACKING back-fill (Phase 0.6).
+  THE INCIDENT: a calendar lives in two places — dc_open_trades.json
+  (authoritative for monitoring) and dc_calendar_entries (the record) — and is
+  only FINISHED when it also gets a dc_outcomes row. Five positions fell out of
+  the sidecar without one, so they stopped being monitored and were never
+  booked as a win or a loss: D's dctm_20260618_001 ($2,290 debit),
+  dctm_20260803_001 ($950), dctm_20260813_001 ($1,590); E's spydc_20260722_001
+  and spydc_20260805_001. D's lifetime excluded three whole positions; E was
+  missing two of its five entries — 40% of its record. Every one was found by
+  manual audit, never by an alarm. Losing a position also FREED THE CONCURRENCY
+  SLOT, so a fresh calendar opened the next session — in a real-order world
+  that silently doubles exposure.
+  The write-ordering race behind them was fixed 2026-08-18
+  (_reset_for_new_day's re_save_needed) and ALL FIVE predate that fix, so this
+  is a DETECTOR, not the fix: _dc_detect_lost_positions() runs after the
+  sidecar load and alerts HIGH on any entry the DB has open that the sidecar
+  does not hold. The open position is correctly NOT flagged (negative control).
+  BACK-FILL: scripts/backfill_lost_calendars.py, dry-run by default, books each
+  lost entry as terminal_state='LOST_FROM_TRACKING' with its LAST OBSERVED
+  MARK. Read that literally — the position was never closed and nobody knows
+  what it would have settled at. Attribution of historical marks is by TIME
+  WINDOW (pre-v3 snapshots carry no strategy_id), sound only because
+  dc_max_concurrent=1; the script refuses to run if it sees overlapping entries.
+  Measured: D -$398.75 across 3, E -$76.00 across 2 — FAR smaller than the
+  "worst case -$10,959" a 2026-09-06 analysis projected by assuming the whole
+  debit was lost. Corrected: D -6,059.65 -> -6,458.40, E -109.00 -> -185.00
+  (dc_outcomes sums; D's -6,129.05 headline also carries commission).
+  CRITICAL PREREQUISITE, caught before writing any row: dc_edge segmented ONLY
+  on "did it transform", so a LOST_FROM_TRACKING row would have landed in
+  calendar_mvl — the TRUSTWORTHY segment — and contaminated the single number
+  that answers "does D's calendar leg have an edge". Booking them without that
+  filter would have been worse than leaving them out. dc_edge now has a third
+  segment, lost_untracked, excluded from the verdict and carrying an explicit
+  "NEVER CLOSED" caveat. A test proves a fabricated +$5,000 lost row cannot
+  move the verdict.
+  Tests: 9 new (tests/test_lost_calendar_watchdog_2026_09_09.py). Three
+  mutations verified to fail them.
 - 2026-09-09 (second same-day change) Calendar schema v3 — record EVERY
   transform-gate evaluation, and give snapshots a trade identity.
   THE GAP: D's transform gate is the strategy's whole thesis (the calendar leg

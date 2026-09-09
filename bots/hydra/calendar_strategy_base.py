@@ -45,6 +45,7 @@ from bots.hydra.base_strategy import ConfigError, MEICState  # noqa: F401
 from bots.hydra.leg import LEG_NAMES
 from bots.hydra.calendar_entry import CalendarEntry, DCPhase  # noqa: F401
 from bots.hydra.strategy import HydraStrategy
+from shared.alert_service import AlertPriority, AlertType
 from shared.market_hours import get_us_market_time
 
 logger = logging.getLogger(__name__)
@@ -1022,6 +1023,83 @@ class CalendarStrategyBase(HydraStrategy):
         super()._save_state_to_disk()
         self._dc_save_sidecar()
 
+    def _dc_detect_lost_positions(self) -> List[str]:
+        """VANISHED-POSITION WATCHDOG (2026-09-09). Cross-check the sidecar we
+        just loaded against what the DB believes is still open, and alert on any
+        calendar the DB opened but never closed and the sidecar no longer holds.
+
+        WHY THIS EXISTS. A calendar lives in two places: ``dc_open_trades.json``
+        (authoritative for monitoring) and ``dc_calendar_entries`` (the record).
+        A trade is "finished" only when it also gets a ``dc_outcomes`` row. If a
+        position falls out of the sidecar WITHOUT one, it stops being monitored
+        and is never booked as a win or a loss — it simply vanishes, silently,
+        and the strategy's P&L is quietly overstated by whatever it was worth.
+
+        This has happened FIVE times and was found by manual audit, not by any
+        alarm:
+            D  dctm_20260618_001  ($2,290 debit)
+            D  dctm_20260803_001  ($950)
+            D  dctm_20260813_001  ($1,590)
+            E  spydc_20260722_001
+            E  spydc_20260805_001
+        D's stated lifetime P&L excludes three whole positions; E is missing two
+        of its five entries, i.e. 40% of its record.
+
+        It also had a second-order effect that matters far more in a real-order
+        world: losing the position FREED THE CONCURRENCY SLOT, so a fresh
+        calendar opened the next session. With real orders that silently doubles
+        exposure with no alert.
+
+        The known write-ordering race behind these was fixed on 2026-08-18 (see
+        ``_reset_for_new_day``'s ``re_save_needed``) and every one of the five
+        predates that fix. This is therefore a DETECTOR, not a fix — it exists so
+        the next occurrence is loud instead of archaeological.
+
+        Read-only and best-effort: never raises into startup.
+        """
+        rec = getattr(self, "_dc_recorder", None)
+        conn = getattr(rec, "_conn", None) if rec else None
+        if conn is None:
+            return []
+        try:
+            open_in_db = {
+                r[0] for r in conn.execute(
+                    "SELECT e.strategy_id FROM dc_calendar_entries e "
+                    "LEFT JOIN dc_outcomes o ON o.strategy_id = e.strategy_id "
+                    "WHERE o.strategy_id IS NULL AND e.strategy_id IS NOT NULL"
+                )
+            }
+        except Exception as exc:
+            logger.debug("[CAL-WATCHDOG] could not read the DB: %s", exc)
+            return []
+
+        tracked = {
+            getattr(e, "strategy_id", None) for e in self.daily_state.entries
+        }
+        lost = sorted(sid for sid in open_in_db if sid and sid not in tracked)
+        if not lost:
+            return []
+
+        msg = (
+            f"{self.BOT_NAME}: {len(lost)} calendar(s) opened in the DB have NO "
+            f"outcome row and are NOT in the sidecar — they were dropped from "
+            f"tracking and never booked as a win or a loss: {lost}. Lifetime P&L "
+            f"for this strategy EXCLUDES them. Back-fill with "
+            f"scripts/backfill_lost_calendars.py before quoting its results."
+        )
+        logger.critical("[CAL-WATCHDOG] %s", msg)
+        try:
+            self.alert_service.send_alert(
+                alert_type=AlertType.DATA_QUALITY,
+                title=f"{self.BOT_NAME} Calendars Lost From Tracking",
+                message=msg,
+                priority=AlertPriority.HIGH,
+                details={"lost": lost, "count": len(lost)},
+            )
+        except Exception as exc:
+            logger.debug("[CAL-WATCHDOG] alert failed: %s", exc)
+        return lost
+
     def _recover_positions_from_saxo(self) -> bool:
         """Base today-only recovery, then re-adopt multi-day calendars from the
         sidecar (the base load drops a prior-day calendar via its date!=today
@@ -1029,6 +1107,11 @@ class CalendarStrategyBase(HydraStrategy):
         config, so init ordering is safe."""
         base = super()._recover_positions_from_saxo()
         adopted = self._dc_load_sidecar()
+        # Watchdog runs AFTER the sidecar load so `tracked` is the real set.
+        try:
+            self._dc_detect_lost_positions()
+        except Exception as exc:  # pragma: no cover - never break startup
+            logger.debug("[CAL-WATCHDOG] skipped: %s", exc)
         return base or adopted
 
     # ── Per-expiry settlement ──────────────────────────────────────────

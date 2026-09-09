@@ -122,6 +122,11 @@ def _load_outcomes(db_path: str) -> Tuple[list, str]:
         con.close()
 
 
+#: terminal_state written by scripts/backfill_lost_calendars.py for positions
+#: that vanished from tracking and were never closed. Excluded from the verdict.
+LOST_FROM_TRACKING = "LOST_FROM_TRACKING"
+
+
 def _is_transformed(row: dict) -> bool:
     """True iff this outcome transformed (→ untrusted, mid-priced 'risk-free').
 
@@ -370,20 +375,38 @@ def analyze_calendar_edge(db_path: str, *, min_preliminary: int = 10,
     """Read a calendar variant's dry-run edge from its dc_calendar.db.
 
     Returns a dict with ``db_status`` ("ok"/"not_found"/"unreadable"),
-    ``total_outcomes``, two ``segments`` (``calendar_mvl`` = trustworthy
+    ``total_outcomes``, three ``segments`` (``calendar_mvl`` = trustworthy
     non-transformed signal, ``transformed_untrusted`` = excluded mid-priced
-    outcomes), and a ``verdict`` computed on the MVL segment only. Never raises.
+    outcomes, ``lost_untracked`` = excluded positions that were dropped from
+    tracking and never actually closed), and a ``verdict`` computed on the MVL
+    segment only. Never raises.
     """
     rows, status = _load_outcomes(db_path)
-    transformed = [r for r in rows if _is_transformed(r)]
-    mvl = [r for r in rows if not _is_transformed(r)]
+    # LOST_FROM_TRACKING rows are back-filled from a position's LAST OBSERVED
+    # MARK, not a realized close — the trade was never closed at all (see
+    # scripts/backfill_lost_calendars.py). They MUST be excluded from the edge
+    # verdict: they are booked so the lifetime P&L stops silently omitting real
+    # positions, not because anyone knows what they settled at. Without this
+    # filter they would land in calendar_mvl and contaminate the one number
+    # that answers "does the calendar leg have an edge".
+    lost = [r for r in rows if (r.get("terminal_state") or "") == LOST_FROM_TRACKING]
+    rest = [r for r in rows if (r.get("terminal_state") or "") != LOST_FROM_TRACKING]
+    transformed = [r for r in rest if _is_transformed(r)]
+    mvl = [r for r in rest if not _is_transformed(r)]
 
     mvl_summary = _summarize(mvl)
     tr_summary = _summarize(transformed)
+    lost_summary = _summarize(lost)
     verdict = _verdict(mvl_summary, min_preliminary, min_confident)
 
     mvl_summary.pop("_rod_net_pct", None)
     tr_summary.pop("_rod_net_pct", None)
+    lost_summary.pop("_rod_net_pct", None)
+    lost_summary["caveat"] = (
+        "EXCLUDED from the verdict. These positions were dropped from tracking and NEVER "
+        "CLOSED; the P&L shown is the last observed mark, not a realized outcome. Booked so "
+        "lifetime P&L stops silently omitting them — never read as completed trades."
+    )
     tr_summary["caveat"] = (
         "EXCLUDED from the verdict. Transformed outcomes are priced off MIDS in dry-run; the "
         "'risk-free' conversion does not survive real fills + commissions (audit §0.3)."
@@ -393,7 +416,11 @@ def analyze_calendar_edge(db_path: str, *, min_preliminary: int = 10,
         "db_path": db_path,
         "db_status": status,
         "total_outcomes": len(rows),
-        "segments": {"calendar_mvl": mvl_summary, "transformed_untrusted": tr_summary},
+        "segments": {
+            "calendar_mvl": mvl_summary,
+            "transformed_untrusted": tr_summary,
+            "lost_untracked": lost_summary,
+        },
         "verdict": verdict,
     }
 
@@ -460,4 +487,8 @@ def format_edge_report(result: dict, title: str = "Strategy D — DC Time Machin
         lines.append(f"    ⚠ {tr.get('caveat', '')}")
     else:
         lines.append("  transformed (UNTRUSTED): n=0  (none transformed yet)")
+    lost = result["segments"].get("lost_untracked") or {"n": 0}
+    if lost["n"] > 0:
+        lines += _fmt_segment("lost from tracking (NEVER CLOSED — excluded)", lost)
+        lines.append(f"    ⚠ {lost.get('caveat', '')}")
     return "\n".join(lines)
