@@ -34,6 +34,9 @@ ALLOWED_METHODS = frozenset({
     # account / positions
     "get_positions", "get_balance", "get_fx_rate", "get_open_orders",
     "get_order_status", "get_closed_position_price",
+    # Read-only executions feed — the INDEPENDENT anchor for P&L
+    # reconciliation (2026-09-10). Every in-process check is circular.
+    "get_day_executions",
     # orders (writes)
     "place_and_wait_for_fill", "cancel_order",
     # NOTE (2026-06-10): place_vertical_spread was temporarily allowlisted to

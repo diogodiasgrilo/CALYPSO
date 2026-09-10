@@ -2766,6 +2766,77 @@ class IBClient:
             "raw": best,
         }
 
+    def get_day_executions(self, days: int = 1) -> list[dict]:
+        """Every execution the BROKER reports for the last ``days`` days.
+
+        This exists to give the bot an INDEPENDENT anchor for its own P&L.
+        Every reconciliation in the codebase today is circular: the per-entry
+        number and the day total are both incremented by the same statement pair
+        in ``_book_realized_pnl``, and ``daily_summaries.gross_pnl`` derives from
+        that same accumulator — so they cannot disagree by construction and can
+        only catch a booking site that forgot to pass ``entry=``. The failure
+        classes that have actually bitten this codebase (wrong booked amount,
+        missing booking, double booking) are all invisible to it.
+
+        Broker executions share NO code path with ``total_realized_pnl``, so
+        summing their signed cash flow is a genuine external check.
+
+        Returns normalized dicts and ALWAYS includes the untouched record under
+        ``raw``. That is deliberate: the field names in this endpoint are
+        doc-sourced rather than observed (see ``get_closed_position_price``'s
+        note), so callers can discover the true shape and this method does not
+        silently drop a field it failed to guess.
+
+        Read-only. Same ``portfolio`` retry family and the same
+        ``receive_brokerage_accounts`` priming that /iserver/account/trades
+        requires — without it IBKR returns 500 "Please query /accounts first",
+        and ``connect()`` only primes the DIFFERENT /portfolio/accounts
+        namespace.
+        """
+        self._require_connected()
+        self._ib_call("portfolio", self._client.receive_brokerage_accounts)
+        days = max(1, min(int(days), 7))  # IBKR caps the lookback at 7
+        data = self._ib_call("portfolio", self._client.trades, days=str(days)) or []
+        rows = data if isinstance(data, list) else []
+
+        def _f(rec: dict, *names):
+            """First present, parseable numeric among `names`; None if none."""
+            for n in names:
+                v = rec.get(n)
+                if v in (None, ""):
+                    continue
+                try:
+                    return float(str(v).replace(",", ""))
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        out: list[dict] = []
+        for rec in rows:
+            if not isinstance(rec, dict):
+                continue
+            side = str(rec.get("side") or "").strip().upper()
+            out.append({
+                "conid": rec.get("conid") or rec.get("conidEx"),
+                "side": ("BUY" if side in ("B", "BUY")
+                         else "SELL" if side in ("S", "SELL") else side),
+                "price": _f(rec, "price"),
+                "size": _f(rec, "size"),
+                # Names below are NOT confirmed for this endpoint — that is why
+                # `raw` is returned. Do not build arithmetic on a None here
+                # without checking `raw` on live data first.
+                "commission": _f(rec, "commission", "comm", "commision"),
+                "net_amount": _f(rec, "net_amount", "netAmount", "proceeds"),
+                "sec_type": rec.get("sec_type") or rec.get("secType"),
+                "symbol": rec.get("symbol") or rec.get("contract_description_1"),
+                "account": rec.get("account") or rec.get("acctId"),
+                "trade_time": rec.get("trade_time"),
+                "trade_time_r": rec.get("trade_time_r"),
+                "execution_id": rec.get("execution_id"),
+                "raw": rec,
+            })
+        return out
+
     # ─── Options chain ────────────────────────────────────────────────────
 
     def get_option_chain(
