@@ -3922,9 +3922,54 @@ class MEICStrategy(abc.ABC):
                         logger.warning(
                             f"  ORDER-010: booked ${round_trip_commission:.2f} round-trip "
                             f"commission for the failed entry's {leg_name} leg "
-                            f"({entry.contracts}c open + close) — market-order slippage "
-                            f"on this round trip is NOT separately tracked"
+                            f"({entry.contracts}c open + close)"
                         )
+                        # PRICE P&L (2026-09-10). Until now ONLY commission was
+                        # booked here — the note this replaces conceded that
+                        # "market-order slippage on this round trip is NOT
+                        # separately tracked". It is real money: the leg was a
+                        # genuine broker fill on the way IN and again on the way
+                        # OUT, at a market order, so the round trip almost always
+                        # loses the spread. Leaving it unbooked understated the
+                        # true cost of a failed entry in BOTH the day aggregate
+                        # and the per-entry number.
+                        #
+                        # Not hypothetical: this path fired TWICE on 2026-09-09
+                        # (leg 3 and leg 4), unwinding 2 and 3 filled legs.
+                        #
+                        # Sign convention: a short leg was SOLD to open and BOUGHT
+                        # to close, so P&L = open - close. A long leg was BOUGHT
+                        # to open and SOLD to close, so P&L = close - open.
+                        # Prices are option points; x100 x contracts for dollars.
+                        try:
+                            open_px = float(
+                                getattr(entry.legs.get(leg_name), "fill_price", 0.0) or 0.0
+                            )
+                            close_px = float(_res.get("fill_price") or 0.0)
+                            if open_px > 0 and close_px > 0:
+                                per_pt = 100.0 * entry.contracts
+                                leg_pnl = (
+                                    (open_px - close_px) * per_pt
+                                    if leg_name.startswith("short")
+                                    else (close_px - open_px) * per_pt
+                                )
+                                self._book_realized_pnl(leg_pnl, entry)
+                                logger.warning(
+                                    f"  ORDER-010: booked ${leg_pnl:+.2f} round-trip PRICE "
+                                    f"P&L for {leg_name} (open {open_px:.2f} -> close "
+                                    f"{close_px:.2f}, {entry.contracts}c)"
+                                )
+                            else:
+                                logger.warning(
+                                    f"  ORDER-010: {leg_name} round-trip price P&L NOT "
+                                    f"booked — missing a fill price (open={open_px}, "
+                                    f"close={close_px}). Commission still booked."
+                                )
+                        except Exception as pnl_e:  # pragma: no cover - defensive
+                            logger.error(
+                                f"  ORDER-010: failed to book {leg_name} round-trip "
+                                f"price P&L ({pnl_e}) — commission still booked"
+                            )
                         logger.info(f"Unwound {leg_name}: {pos_id} via order {result.get('OrderId')}")
                     else:
                         # Audit fix: a non-full / timed-out market close leaves the

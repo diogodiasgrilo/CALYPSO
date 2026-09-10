@@ -36,6 +36,47 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-10 (fourth same-day change) ORDER-010 round-trip PRICE P&L on failed
+  entries, and the 2026-07-07 overlay residual back-filled.
+  UNWIND PRICE P&L. When an entry fails part-way, `_unwind_partial_entry`
+  closes the legs that did fill. Since 2026-08-20 it booked the round-trip
+  COMMISSION — but the code's own note conceded that "market-order slippage on
+  this round trip is NOT separately tracked". That slippage is real money: each
+  leg was a genuine broker fill on the way IN and again on the way OUT, at a
+  market order, so the round trip almost always loses the spread. Leaving it
+  unbooked understated the true cost of a failed entry in BOTH the day
+  aggregate and the per-entry number. NOT hypothetical — this path fired TWICE
+  on 2026-09-09 on the live seat (failures at leg 3 and leg 4, unwinding 2 and
+  3 legs). Now books `(open - close)` for shorts and `(close - open)` for longs,
+  x100 x contracts, from `entry.legs[name].fill_price` and the close's own
+  `fill_price`. Wrapped so a booking failure can never cost us the close —
+  closing the leg matters more than measuring it — and a missing price logs a
+  WARNING and still books the commission.
+  OVERLAY RESIDUAL. slot_edge had reported an unexplained "$2,533 attribution
+  miss" over its reliable window. Measured per-day: the WHOLE residual is ONE
+  DAY — 2026-07-07, gross 392.42 vs entries 2,925.00, drift -2,532.58. Every
+  other day reconciles to exactly $0.00. Cause: overlay P&L is normally
+  attributed to the entry it defended (correct by design), but the settler
+  looks that entry up by OBJECT IDENTITY, so a restart between placing the
+  hedge and settling it drops the link and books aggregate-only. The v13 column
+  `unattributed_overlay_pnl` exists to record exactly this — and had NEVER
+  carried a non-zero value in B's history, so slot_edge's overlay adjustment
+  was a permanent no-op. Back-filled via scripts/backfill_overlay_residual.py
+  (dry-run by default, backs up first); residual after adjustment is $0.00 and
+  slot_edge's drift warning is now correctly silent.
+  DAY-LEVEL ONLY, deliberately: which entry the hedge belonged to is
+  permanently lost, and guessing would be worse than leaving it unattributed.
+  The root cause — attribute by entry_number rather than object identity — is a
+  separate strategy-side change and is NOT done here.
+  STILL OPEN: `_handle_naked_short` (base_strategy.py:3646) books no realized
+  P&L. Unlike the unwind path it receives only `(leg_name, position_id, uic)`
+  and has NO entry object, so booking needs a uic->entry lookup added to a
+  CRITICAL emergency path. Left for its own pass with its own tests rather than
+  bolted on.
+  Tests: 10 new (tests/test_unwind_roundtrip_pnl_2026_09_10.py). Two mutations
+  verified to fail them, including the short/long sign flip — the error most
+  likely to be made here and the one that would silently invert every unwound
+  long's P&L.
 - 2026-09-10 (third same-day change) slot_edge refuses to score the era whose
   stop records are SIGN-FLIPPED — the analyzer had been publishing -$21,045
   against an actual +$40,277.
