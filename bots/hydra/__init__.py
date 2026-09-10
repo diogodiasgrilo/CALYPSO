@@ -36,6 +36,51 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-10 (eighth same-day change) /iserver/account/trades was never dead —
+  we just never told IBKR WHICH ACCOUNT. One missing kwarg, months of wrong
+  conclusions.
+  THE SYMPTOM that misled everyone: probing the endpoint over a 7-day window
+  containing dozens of real paper fills returned ZERO rows. No error, no
+  exception, a clean empty list. That silence is why it was written up as a
+  paper-account limitation — including in CLAUDE.md and in this file's own
+  entry from earlier today, which said so in as many words.
+  THE ACTUAL CAUSE, traced end to end: (1) we construct
+  `IbkrClient(use_oauth=True, oauth_config=...)` with NO account_id; (2)
+  `$IBIND_ACCOUNT_ID`, ibind's env fallback, is set nowhere in the deploy; (3)
+  so ibind's own `self.account_id` is None; (4) ibind's `trades()` does
+  `if account_id is None: account_id = self.account_id` — still None; (5) its
+  `params_dict(optional=...)` DROPS empty optionals, so the request goes out
+  with `days` and no `accountId`; (6) IBKR answers with an empty list.
+  THE TELL, which is what actually found it: every OTHER IBClient method
+  already passes `account_id=self.account_id` — ELEVEN call sites. The two
+  `trades()` calls were the only ones that did not. An asymmetry that stark is
+  worth more than any amount of reasoning about what IBKR "probably" does on
+  paper accounts.
+  WHAT THIS RE-OPENS. `get_closed_position_price` — the documented F5
+  closed-position fill-price authority — reads this same endpoint, so it has
+  been returning None on EVERY lookup. Its emptiness was also the only thing
+  that stopped the L-M3 double-book from firing on 2026-09-04. That is exactly
+  why the L-M3 guard had to land FIRST (previous entry, deployed 09:19 ET
+  today) and this second: repairing the endpoint without the guard in place
+  would have turned a real -$1,225 day into -$2,485.
+  STILL UNVERIFIED, DELIBERATELY: that the fix makes records actually appear.
+  The mechanism is proven by code-read, not by observation — the endpoint
+  cannot be re-probed until the broker restarts, and the broker must not
+  restart during RTH. Confirm after tonight's restart by calling
+  `get_day_executions(days=7)` and checking for a non-empty list; only then
+  update the "dead endpoint" language in CLAUDE.md and the F5 docs. If it is
+  STILL empty, the paper-limitation theory returns with one more variable
+  eliminated.
+  Also note ibind's own docstring advice on this endpoint: "It is advised to
+  call this endpoint once per session." We call it per lookup. Not changed
+  here; worth revisiting if it proves rate-sensitive.
+  Tests: 9 new, including a guard that any FUTURE `self._client.trades` call
+  site must also pass account_id — the omission being fixed is precisely the
+  kind that gets reintroduced. Mutation (removing the kwarg from both sites =
+  the pre-fix state) fails 4 of them.
+  DEPLOY: touches shared/ib_client.py, which calypso-broker IMPORTS and whose
+  bytecode it holds until restarted. Broker restarts FIRST, then the
+  strategies. NOT during market hours.
 - 2026-09-10 (seventh same-day change) L-M3: the external-close path could
   book a side's P&L that another path had ALREADY booked. Three vectors, all
   closed. Ships with two stale-doc corrections in the same batch.

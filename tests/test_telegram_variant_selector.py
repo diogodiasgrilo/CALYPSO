@@ -44,7 +44,13 @@ class TestVariantView:
         s = _strat()
         s._load_variant_state = lambda vid: dict(_IC_STATE)
         out = s._build_telegram_variant_view("c")
-        assert "Brandon Narrow (3-slot)" in out  # C's display_name
+        # Assert against the taxonomy rather than a hardcoded literal. The
+        # point of this line is "the view renders the variant's display_name",
+        # NOT "the display_name is that exact string" — B's copy of this
+        # assertion hardcoded a slot count and broke on 2026-09-10 when the
+        # label was corrected 6-slot -> 7-slot, which is a legitimate change.
+        from shared.strategy_taxonomy import display_name
+        assert display_name("c") in out
         assert "(C)" in out
         assert "Net P&L: $221.00" in out       # 285 realized − 64 commission
         assert "Stops: 1 call / 0 put" in out
@@ -54,7 +60,8 @@ class TestVariantView:
         s._load_variant_state = lambda vid: None
         out = s._build_telegram_variant_view("b")
         assert "no fresh state" in out
-        assert "Brandon Narrow (6-slot)" in out  # B's display_name
+        from shared.strategy_taxonomy import display_name
+        assert display_name("b") in out  # see the note above
 
 
 class TestDelegation:

@@ -2709,8 +2709,21 @@ class IBClient:
         self._ib_call("portfolio", self._client.receive_brokerage_accounts)
 
         days = max(1, min(int(days), 7))  # IBKR caps the lookback at 7
+        # account_id MUST be passed explicitly (2026-09-10). ibind's trades()
+        # falls back to ITS OWN `self.account_id`, and we construct
+        # IbkrClient(use_oauth=True, oauth_config=...) WITHOUT account_id while
+        # never setting $IBIND_ACCOUNT_ID — so that fallback is None, ibind's
+        # params_dict drops the empty optional, and the request goes out with no
+        # accountId at all. IBKR then answers with an empty list and NO error.
+        #
+        # That silence is why this looked like a paper-account limitation for
+        # months: probing a 7-day window containing dozens of real fills
+        # returned zero rows, cleanly. Every OTHER IBClient method already
+        # passes account_id=self.account_id (11 call sites); these two trades()
+        # calls were the only ones that did not.
         data = self._ib_call(
-            "portfolio", self._client.trades, days=str(days),
+            "portfolio", self._client.trades,
+            days=str(days), account_id=self.account_id,
         ) or []
         rows = data if isinstance(data, list) else []
 
@@ -2796,7 +2809,11 @@ class IBClient:
         self._require_connected()
         self._ib_call("portfolio", self._client.receive_brokerage_accounts)
         days = max(1, min(int(days), 7))  # IBKR caps the lookback at 7
-        data = self._ib_call("portfolio", self._client.trades, days=str(days)) or []
+        # account_id is REQUIRED here — see get_closed_position_price's note.
+        data = self._ib_call(
+            "portfolio", self._client.trades,
+            days=str(days), account_id=self.account_id,
+        ) or []
         rows = data if isinstance(data, list) else []
 
         def _f(rec: dict, *names):
