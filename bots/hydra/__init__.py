@@ -36,6 +36,57 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-10 (twelfth same-day change) Two fixes that both became MORE urgent
+  because of changes made earlier today.
+  1. ORDER-011 — MKT-033 booked NOTHING when it could not read a closing price.
+  `_try_sell_long_leg` detects a long leg sold externally. When the closing
+  execution was unreadable it marked the leg sold, set
+  `*_long_sold_revenue = 0.0`, and — the actual defect — never called
+  `_book_realized_pnl` AT ALL. The long's value was deleted from realized P&L
+  outright. A long option someone paid for is essentially never worth exactly
+  zero, so this understated P&L by the whole remaining value of the leg.
+  WHY TODAY: the opening-vs-closing filter added to `get_closed_position_price`
+  (ninth change) deliberately returns None whenever it cannot distinguish a
+  closing execution from an opening one. Correct — but it means this branch is
+  now reached MORE often. Fixing the lookup without fixing its fallback would
+  have traded a wrong number for a missing one.
+  Now estimates from the live bid (the price the long could actually have been
+  sold at), books it with commission, and labels it an ESTIMATE in both the log
+  and a distinct LONG_SOLD_EXTERNAL_ESTIMATED safety event so it can never be
+  mistaken for a fill. FAILS CLOSED on a stale/non-real-time quote or a
+  non-positive bid — an estimate off a delayed quote is not better than no
+  estimate — and in that case logs CRITICAL that P&L is understated rather than
+  going quiet. A readable execution still wins; the estimate is only a fallback.
+  2. Every IbkrClient was retained for the life of the process. ibind's
+  `auto_register_shutdown` defaults TRUE, and `register_shutdown_handler()`
+  runs on EVERY construction. It does two harmful things for a long-lived
+  reconnecting process:
+    (a) `atexit.register(_close_handler)` where the handler closes over `self`
+        — atexit pins the client, its requests Session and its connection pool
+        forever. calypso-broker re-auths daily and on every session fault, so a
+        broker up for weeks holds weeks' worth of dead clients.
+    (b) it captures the CURRENT SIGINT/SIGTERM handlers and installs its own
+        chaining to them, so each new client captures the PREVIOUS client's
+        handler. One SIGTERM then walks a chain N deep after N reconnects — and
+        it overwrites CALYPSO's own signal handlers, in the process that owns
+        the IBKR session.
+  We need none of it: `disconnect()` already calls `close()` explicitly and
+  main.py installs its own signal handlers. The atexit half cannot even fire in
+  the strategy processes, which exit through `os._exit()` in `_hard_exit()`
+  (2026-09-05) — os._exit bypasses atexit entirely. The accumulation bought
+  nothing. Now `auto_register_shutdown=False`.
+  `disconnect()` also sets `self._client = None`. close() shut the session down
+  but left the object reachable, so a FAILED reconnect left a closed client in
+  place with `_connected` already False. `_require_connected` already treats
+  `client is None` as not-connected and raises cleanly, so nothing downstream
+  sees an AttributeError.
+  Tests: 18 new. FOUR mutations verified to fail them — reverting MKT-033 to
+  booking nothing (5 fail), accepting a non-real-time quote i.e. failing open
+  (1), re-enabling auto_register_shutdown (1), and keeping the stale client
+  reference on disconnect (1). One test pins ibind's upstream behaviour so the
+  workaround gets re-examined rather than carried forever if ibind changes.
+  Full suite 3313 passed.
+  DEPLOY: shared/ib_client.py — broker restarts FIRST.
 - 2026-09-10 (eleventh same-day change) Three verified audit items, shipped
   together. None changes trading logic.
   1. UNWIND ORDER — close SHORT legs FIRST. The unwind runs because an entry

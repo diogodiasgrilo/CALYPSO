@@ -920,6 +920,34 @@ class IBClient:
                 self._client = IbkrClient(
                     use_oauth=True,
                     oauth_config=oauth_cfg,
+                    # auto_register_shutdown defaults TRUE in ibind and is
+                    # actively harmful for a long-lived process that reconnects
+                    # (2026-09-10). RestClient.register_shutdown_handler() does
+                    # two things on EVERY construction:
+                    #
+                    #  1. atexit.register(_close_handler), where _close_handler
+                    #     closes over `self`. atexit holds that forever, so
+                    #     every IbkrClient we ever build is retained for the
+                    #     life of the process together with its requests
+                    #     Session and connection pool. calypso-broker re-auths
+                    #     daily and on every session fault, so a broker that
+                    #     has been up for weeks is holding weeks' worth.
+                    #
+                    #  2. It captures the CURRENT SIGINT/SIGTERM handlers and
+                    #     installs its own that chains to them. Each new client
+                    #     therefore captures the PREVIOUS client's handler as
+                    #     "existing", so one SIGTERM walks a chain N deep after
+                    #     N reconnects — and it overwrites CALYPSO's own signal
+                    #     handlers, in the very process that owns the IBKR
+                    #     session.
+                    #
+                    # We do not need any of it: disconnect() already calls
+                    # self._client.close() explicitly, and main.py installs its
+                    # own signal handlers. The atexit half cannot even fire in
+                    # the strategy processes, which exit via os._exit() in
+                    # _hard_exit() (added 2026-09-05) — os._exit bypasses
+                    # atexit entirely. So the accumulation bought nothing.
+                    auto_register_shutdown=False,
                 )
         except Exception as exc:
             err_str = str(exc).lower()
@@ -1235,6 +1263,15 @@ class IBClient:
                     unclean += 1
                     logger.error("IBClient session close failed: %s", exc)
 
+            # Drop the reference too (2026-09-10). close() shuts the session
+            # down but leaves the object reachable, so a reconnect used to keep
+            # the dead client alive until connect() overwrote the attribute —
+            # and if connect() then FAILED, the closed client stayed in place
+            # with _connected already False. Setting it to None makes the torn
+            # state impossible; _require_connected already treats
+            # `client is None` as "not connected" and raises cleanly, so
+            # nothing downstream sees an AttributeError.
+            self._client = None
             self._connected = False
             self._conid_cache.clear()
             self._secdef_search_primed.clear()  # lockstep with _conid_cache

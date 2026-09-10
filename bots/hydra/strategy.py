@@ -8540,18 +8540,75 @@ class HydraStrategy(MEICStrategy):
                         f"@ ${fill_price:.2f}, revenue=${revenue:.2f}"
                     )
                 else:
-                    logger.warning(
-                        f"MKT-033 AUTO: Entry #{entry.entry_number} long {side} missing, "
-                        f"no closing price found — marking as sold with $0"
-                    )
+                    # ORDER-011 (2026-09-10): the long was SOLD — it did not
+                    # evaporate. Booking $0 (and in fact booking NOTHING: the
+                    # old branch never called _book_realized_pnl at all) simply
+                    # deletes the long's value from realized P&L. A long that
+                    # someone paid for is essentially never worth exactly zero.
+                    #
+                    # This matters MORE as of today: the opening-vs-closing
+                    # filter added to get_closed_position_price deliberately
+                    # returns None whenever it cannot distinguish a closing
+                    # execution from an opening one, so this branch is now
+                    # reached more often than it used to be. Fixing the lookup
+                    # without fixing its fallback would have traded a wrong
+                    # number for a missing one.
+                    #
+                    # Estimate from the live bid instead — the price the long
+                    # could actually have been sold at — and mark it clearly as
+                    # an ESTIMATE so the number is never mistaken for a fill.
+                    # Fail closed on a stale/non-real-time quote: an estimate
+                    # off a delayed quote is not better than no estimate.
+                    est_revenue = 0.0
+                    est_source = "none"
+                    try:
+                        q = self._read_option_quote(long_uic)
+                        if q and self._option_quote_is_realtime(q):
+                            est_bid = float(q.get("bid") or 0)
+                            if est_bid > 0:
+                                est_revenue = est_bid * 100 * entry.contracts
+                                est_source = f"bid ${est_bid:.2f}"
+                    except Exception as e:
+                        logger.warning(
+                            f"MKT-033 AUTO: quote lookup for the $0 fallback "
+                            f"failed ({type(e).__name__}: {e})"
+                        )
+
+                    if est_revenue > 0:
+                        est_commission = self.commission_per_leg * entry.contracts
+                        self._book_realized_pnl(est_revenue, entry)
+                        self.daily_state.total_commission += est_commission
+                        entry.close_commission += est_commission
+                        logger.warning(
+                            f"MKT-033 AUTO: Entry #{entry.entry_number} long {side} "
+                            f"sold externally but NO closing execution was readable — "
+                            f"booking an ESTIMATE of ${est_revenue:.2f} from the live "
+                            f"{est_source} (not an actual fill). Previously this booked "
+                            f"NOTHING, silently deleting the long's value from P&L."
+                        )
+                        self._log_safety_event(
+                            "LONG_SOLD_EXTERNAL_ESTIMATED",
+                            f"Entry #{entry.entry_number} long {side} booked from "
+                            f"quote estimate ${est_revenue:.2f} ({est_source}) — "
+                            f"no closing execution readable"
+                        )
+                    else:
+                        logger.critical(
+                            f"MKT-033 AUTO: Entry #{entry.entry_number} long {side} "
+                            f"sold externally, NO closing execution readable AND no "
+                            f"usable real-time quote — booking $0. This UNDERSTATES "
+                            f"realized P&L by whatever the long was worth; manual "
+                            f"review recommended."
+                        )
+
                     if side == "call":
                         entry.call_long_sold = True
-                        entry.call_long_sold_revenue = 0.0
+                        entry.call_long_sold_revenue = est_revenue
                         entry.long_call_position_id = None
                         entry.long_call_uic = None
                     else:
                         entry.put_long_sold = True
-                        entry.put_long_sold_revenue = 0.0
+                        entry.put_long_sold_revenue = est_revenue
                         entry.long_put_position_id = None
                         entry.long_put_uic = None
                     try:
