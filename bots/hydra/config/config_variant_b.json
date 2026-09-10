@@ -11,6 +11,7 @@
       "09:45",
       "10:15",
       "10:45",
+      "11:15",
       "11:45",
       "12:15",
       "12:45"
@@ -95,10 +96,10 @@
         28.0
       ],
       "max_entries": [
-        6,
-        6,
-        6,
-        6
+        7,
+        7,
+        7,
+        7
       ],
       "put_stop_buffer": [
         null,
@@ -215,7 +216,8 @@
     "eod_flatten": {
       "_comment_skip_otm_pts": "2026-08-18: skip_otm_pts lowered 20 -> 10 after a 19-event MKT-047 historical audit (all variants, back to the mechanism's 2026-06-17 birth) found a 0/19 win rate flattening vs just holding to expiry (net cost ~$805 in the recoverable window) and a real-money 0-for-2 on 2026-08-17 (B lost $175 flattening two puts that both settled OTM). A 15/10/5pt sensitivity re-check on the same 19 events found 10pt recovers ~52% of the historical gap while still protecting the one 2026-08-17 trade that came within 0.36pt of the strike at settlement (E4) -- 15pt changes nothing on that trade, 5pt would have let it ride. See bots/hydra/__init__.py version history.",
       "skip_otm_pts": 10.0
-    }
+    },
+    "_comment_max_entries": "2026-09-10: 11:15 RESTORED (7 slots). The 2026-09-02 cut was wrong on BOTH method and cause. METHOD: it ranked 7 slots and cut the worst without testing whether 'worst of 7' beats chance (permutation p=0.318 \u2014 it does not), and cited C as independent confirmation when B and C correlate r=+0.90 on the same day+slot, i.e. one trade counted twice. CAUSE: the apparent midday weakness was a HEDGE artifact \u2014 the butterfly could only fire before its 12:30 cutoff, and among hedge-eligible slots the midday ones sit closest to the money (11:45 28.2pt / 11:15 37.2pt vs morning 38-48pt), so they absorbed most hedge losses. The tell: 12:45 has the CLOSEST strikes of any slot (26.5pt) and the BEST result (+$293/trade), and is the only slot the 12:30 cutoff made unhedgeable. Ex-hedge, midday is ~break-even (11:15 +$39, 11:45 -$6), not negative; hedges are off since 2026-09-04 so the cause is gone. Restored on cost asymmetry: wrongly cutting a normal slot costs ~$199/entry, wrongly keeping a break-even one ~$39 commission. ALWAYS change max_entries in the SAME edit as entry_times \u2014 a stale cap silently drops the extra slot via the VIX regime."
   },
   "trend_filter": {
     "enabled": true,
