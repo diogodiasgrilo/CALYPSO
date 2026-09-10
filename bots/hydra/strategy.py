@@ -5038,7 +5038,73 @@ class HydraStrategy(MEICStrategy):
                 f"Entry #{entry.entry_number}: strikes snapped to chain"
             )
 
+        # WING-SYMMETRY CHECK (2026-09-10). Runs here because this is the LAST
+        # place all four strikes are mutated — chain snapping (25pt tolerance)
+        # and, on B/C, the Brandon GEX adjuster both move strikes AFTER the
+        # width was chosen, so the two wings can silently end up different
+        # widths.
+        #
+        # Why it matters, per IBKR KB article 600: if the put-side and call-side
+        # strike distances differ, the position is margined as TWO SEPARATE
+        # SPREADS with two separate requirements — roughly DOUBLE the symmetric
+        # iron-condor requirement (which is charged on ONE wing width only).
+        #
+        # Invisible today: the paper account holds ~$1M against a ~$35k peak
+        # requirement, so nothing binds. It becomes real at the $150k-$250k
+        # funding level contemplated for a live account, where a 2x margin
+        # surprise mid-entry means a rejected leg with the others already
+        # filled. Surfaced as a WARNING + safety event rather than a block —
+        # asymmetric wings are a legitimate trade, just a more expensive one,
+        # and skipping the entry would be a worse outcome than paying for it.
+        self._check_wing_symmetry(entry)
+
         return any_changed
+
+    def _check_wing_symmetry(self, entry) -> bool:
+        """Warn when the two wings ended up different widths. Returns True if
+        asymmetric. Never raises, never blocks an entry.
+
+        Per IBKR KB article 600, unequal put-side and call-side strike
+        distances are margined as TWO SEPARATE SPREADS with two separate
+        requirements — roughly DOUBLE the symmetric iron-condor requirement,
+        which is charged on ONE wing width only.
+
+        Called at the end of ``_snap_entry_strikes_to_chain`` because that is
+        the last point all four strikes are mutated: chain snapping (25pt
+        tolerance) and, on B/C, the Brandon GEX strike adjuster both move
+        strikes AFTER the width was chosen, so the wings can silently diverge.
+        ``_calculate_strikes`` itself applies one width per side, so an entry
+        that never reaches the snapper is symmetric by construction.
+
+        Invisible on paper (~$1M of buying power against a ~$35k peak
+        requirement, so nothing binds). It becomes real at the $150k-$250k
+        funding level contemplated for live money, where a 2x margin surprise
+        mid-entry means a rejected leg with the others already filled.
+
+        Warn rather than block: asymmetric wings are a legitimate trade, just a
+        more expensive one, and skipping the entry is the worse outcome.
+        """
+        try:
+            cw = abs(float(entry.long_call_strike) - float(entry.short_call_strike))
+            pw = abs(float(entry.short_put_strike) - float(entry.long_put_strike))
+        except (TypeError, ValueError, AttributeError) as e:
+            logger.debug("wing-symmetry check skipped: %s", e)
+            return False
+        if not (cw > 0 and pw > 0) or abs(cw - pw) <= 0.01:
+            return False
+        wide, narrow = max(cw, pw), min(cw, pw)
+        msg = (
+            f"Entry #{entry.entry_number}: ASYMMETRIC wings — call side "
+            f"{cw:.0f}pt vs put side {pw:.0f}pt. IBKR margins unequal wings as "
+            f"two separate spreads: ~${wide * 100:.0f} + ${narrow * 100:.0f} per "
+            f"contract instead of ~${wide * 100:.0f} for a symmetric condor."
+        )
+        logger.warning("MARGIN-ASYM: %s", msg)
+        try:
+            self._log_safety_event("WING_ASYMMETRY", msg)
+        except Exception:  # pragma: no cover - telemetry must not block
+            pass
+        return True
 
     def _apply_progressive_call_tightening(self, entry: HydraIronCondorEntry) -> bool:
         """

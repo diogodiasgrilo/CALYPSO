@@ -195,7 +195,9 @@
         "severity_bypass_distance_pts": 5.0,
         "use_adjuster_gex_gate": true,
         "_comment_debit_spread_disabled": "2026-08-25: disabled in lockstep with B (same evidence, same rationale). Full sourcing: docs/postmortems/2026-08-25_brandon_hedge_pnl_reconstruction.md. The afternoon butterfly stays enabled and continues to run inside this file's separate confirm_seconds/use_adjuster_gex_gate staged trial above. See also bots/hydra/__init__.py version history.",
-        "debit_spread_enabled": false
+        "debit_spread_enabled": false,
+        "butterfly_enabled": false,
+        "_comment_butterfly_enabled": "2026-09-10: set FALSE explicitly. C had NO butterfly_enabled key at all, so it fell through to the code default of True (defensive_overlay.py:125) and kept hedging AFTER B disabled its butterfly on 2026-09-04 (b69ddb8). That silently broke C's whole purpose: C is B's shadow, and a shadow running a different strategy validates nothing \u2014 every B-vs-C comparison since 09-04 was invalid. It also contaminated the per-slot analysis: hedge losses land on whichever entry's short is threatened, and among hedge-eligible slots (the butterfly can only fire before its 12:30 cutoff) the midday ones sit closest to the money, so C's 11:15 absorbed hedge losses that were then read as a time-of-day effect. Set explicitly rather than by default so the next divergence is visible in the file, not hidden in a fallback. Rationale for hedges-off is B's: hedge debits ($1,925-$2,240) EXCEED the IC-side loss they defend (~$1,400, bounded by the A2 stop)."
       },
       "hydra_stop_shadow": {
         "_comment": "When true, computes HYDRA's existing credit+buffer stop every tick in parallel without acting. First fire per side per day is Telegrammed for head-to-head comparison against Brandon's GEX breach (which IS the live stop in B/C).",

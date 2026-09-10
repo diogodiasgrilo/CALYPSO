@@ -1,5 +1,85 @@
 # Atomic Combo (BAG) Iron-Condor Entry — Live-Cutover Plan
 
+> ## ⚠️ CORRECTIONS 2026-09-10 — read before acting on anything below
+>
+> A verification pass against IBKR primary sources and the installed `ibind`
+> 0.1.23 confirmed this plan's direction but found **three material errors** and
+> one **potentially trade-inverting ambiguity**. The body below is otherwise
+> unchanged; these override it where they conflict.
+>
+> **C1 — §2's margin finding is INFERRED, NOT MEASURED.** §2 states a 10c combo
+> "passed the submission precheck … confirms combos margin defined-risk". It
+> confirms no such thing. `place_vertical_spread` (`ib_client.py:3126`) is
+> **submit-only** — it never calls `what_if_order`, so **no margin figure was
+> ever read**. The same probe found the order never reached IBKR's
+> order-management system (phantom `PendingSubmit`; `OrderID doesn't exist` on
+> cancel), so "it wasn't rejected" is consistent with *no margin check having
+> run*. No naked control was run at the probe's own far-OTM strikes, and the
+> "$1.1M naked" counterfactual is imported from a **different**, near-the-money
+> 2026-06-04 single-leg rejection.
+> **The position-level defined-risk treatment IS verified** from IBKR's published
+> Reg-T table (naked short SPX put ≈ $107,150/contract at SPX 7,630 vs an iron
+> condor's `width × 100` = $500/contract — a 214× ratio). The **order-check-level
+> netting is theoretically expected but empirically unmeasured.**
+> **SETTLE IT FIRST, FREE:** call `what_if_order` with a conidex/BAG
+> `OrderRequest` on the LIVE account. Both the method (`ib_client.py:3629`) and
+> the field exist today. It places **no order** and returns IBKR's own
+> initial-margin block. Do this before sizing to 10c.
+>
+> **C2 — the `allOrNone` claim in the code is FALSE.** `ib_client.py:3050-3055`
+> asserts the ticket "DOES expose `allOrNone` … pass `allOrNone=True` via
+> OrderRequest rather than building a partial-fill watcher." Verified against the
+> installed package: **zero occurrences** of `allOrNone`/`all_or_none` anywhere in
+> ibind 0.1.23, and `OrderRequest` has no such field. The CP API order schema has
+> no AON field and TIF offers only GTC/OPG/DAY/IOC — **no FOK, no AON.**
+> This matters: a guaranteed >2-leg combo cannot partial by *leg*, but it CAN
+> partial by *quantity* (6 of 10 spreads fill, 4 keep working) and there is no way
+> to prevent it. `entry.contracts` is set from config (`strategy.py:6856`) and
+> **never** from the broker's fill count, so a 6-of-10 fill would be stopped,
+> marked and booked as 10. A combo path needs its own fill-count reconcile.
+>
+> **C3 — the reference branch is far staler than stated.** §3 says
+> `hydra-combo-entry` is "64 commits stale". It is **386 commits behind HEAD**. It
+> also lacks GUARD-INVERT, drops `what_if_naked_margin` from the broker allowlist
+> (which would break variant G's margin gate), predates the strangle/registry
+> refactor, and contains a defect where `_unwind_partial_entry` sells the long
+> before buying back the short — **re-creating the naked window the combo exists
+> to remove.** Re-implement on HEAD; do not merge.
+>
+> **C4 — UNRESOLVED: a side/price convention that could INVERT the trade.**
+> IBKR's own CP Web API worked example submits a **credit spread as
+> `side: "BUY"` with a NEGATIVE price**, letting the leg ratio signs define the
+> structure. This repo does the opposite — shorts encoded as `-1` **and**
+> `side="SELL"` with a **positive** price (`ib_client.py:3113-3117`). Under TWS
+> BAG semantics a SELL on the combo **reverses every leg's action**, which would
+> turn this short iron condor into a **long** one. Which convention the CP Web API
+> applies is **UNVERIFIED**. Resolve with a `what_if`/preview before a single real
+> contract.
+>
+> **Also unverified, and material:** whether a **4-leg** SPX combo is permitted at
+> all (IBKR: "the number of legs permissible … varies by exchange"; this plan's
+> two-2-leg-vertical design side-steps it), and whether a USD **index-option**
+> combo takes the bare `28812380` prefix or needs `@CBOE` (`ib_constants.py:49`
+> hardcodes the bare form and the tests only assert self-consistency with it).
+>
+> **Two pre-existing items to fix before 10c regardless:** `min_buying_power_per_ic:
+> 500` is a flat per-contract floor correct only for 5pt wings — at VIX ≥ 22 B uses
+> 10pt wings needing $1,000/contract, so ORDER-004 under-provisions 2×. And **keep
+> the wings equal**: per IBKR KB-600, unequal put/call strike distances are
+> margined as *two separate spreads* (~double), and both MKT-045 chain snapping and
+> the Brandon GEX adjuster mutate strikes *after* width selection.
+>
+> **Capital, corrected:** ~$60k worst case at 10c across all slots vs ~$1,071,500
+> today — an 80–95% reduction. But **fund $150k–$250k, not $60k**: IBKR enforces
+> margin in real time and auto-liquidates in an order you do not control, which can
+> close the long wings first and manufacture the exact naked short the combo
+> prevents. **Stay on Reg-T** — Portfolio Margin gives roughly the same IC
+> requirement while adding a $110k NLV floor and a $100k restricted-trading cliff.
+>
+> **Effort:** ~8–12 focused working days. ~60% of the submit primitives already
+> exist at HEAD; none of it is reachable from a strategy (no `bots/` caller, and
+> `BrokerClient.__getattr__` raises for anything outside `ALLOWED_METHODS`).
+
 > **Status (2026-06-10):** DEFERRED to the live (real-money, COB-routed) account.
 > The interim fix shipped on this paper branch is the **SELL-leg net-credit
 > prevention floor** (`base_strategy._sell_credit_floor_price` +
@@ -34,7 +114,7 @@ Probed via `place_vertical_spread` through `calypso-broker` (far-OTM, non-market
   `PendingSubmit`) at both 1c and 10c. The earlier "Riskless combination orders are
   not allowed" rejection was a **mispriced probe** ($2.00 credit on a ~$0.00 spread),
   not a combo ban — at a fair price it sails through.
-- **MARGIN: defined-risk.** A **10c** combo passed the submission precheck (would be
+- **MARGIN: defined-risk.** ⚠️ **SEE CORRECTION C1 — this is INFERRED, NOT MEASURED.** A **10c** combo passed the submission precheck (would be
   rejected as naked at $1.1M > $996k BP) → confirms combos margin defined-risk →
   **combos would restore 10c.**
 - **ORDER LIFECYCLE: BROKEN on paper.** The accepted combos stick in phantom

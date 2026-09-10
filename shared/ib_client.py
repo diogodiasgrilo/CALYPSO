@@ -3047,11 +3047,28 @@ class IBClient:
             "price you receive in credit" when SELLing a combo.
             (See https://www.ibkrguides.com/traderworkstation/notes-on-combination-orders.htm)
 
-        Atomic-fill enforcement: a combo on the CP API fills atomically on the
-        complex (BAG) book, and the order ticket DOES expose `allOrNone`
-        (boolean) per the IBKR REST OpenAPI spec — so if this combo path is ever
-        promoted to the live entry, pass allOrNone=True via OrderRequest rather
-        than building a WebSocket partial-fill watcher.
+        ⚠️ ATOMIC-FILL ENFORCEMENT — THE PREVIOUS TEXT HERE WAS FALSE
+        (corrected 2026-09-10). It claimed the ticket "DOES expose `allOrNone`
+        … pass allOrNone=True via OrderRequest rather than building a
+        partial-fill watcher." Verified against the pinned ibind 0.1.23 in this
+        repo's venv: **zero** occurrences of `allOrNone`/`all_or_none` anywhere
+        in the package, and `OrderRequest` has no such field (34 fields, none
+        of them AON). The CP API order schema has no AON field either, and TIF
+        offers only GTC / OPG / DAY / IOC — **no FOK, no AON.**
+
+        What IS true: a GUARANTEED combo of >2 legs cannot partial by LEG —
+        IBKR delivers each leg's execution simultaneously and in leg-ratio
+        proportion. But it CAN partial by QUANTITY (6 of 10 spreads fill, 4
+        keep working), and there is no order-level way to prevent that.
+
+        WHY THAT IS DANGEROUS HERE: `entry.contracts` is set from config
+        (strategy.py) and is NEVER read back from the broker's fill count. A
+        6-of-10 fill would therefore be monitored, stopped and booked as 10 —
+        every P&L, cushion and stop figure inflated by 67%. Any promotion of
+        this combo path to the live entry MUST add a fill-count reconcile
+        against the broker (and adopt the real filled quantity) before it is
+        allowed to place a single real order. Do not assume the order layer
+        will protect this invariant; it cannot.
 
         Entry path (IBKR-audit #1): the live/paper entry does NOT use this combo
         method — it LEGS IN via 4 single-leg place_and_wait_for_fill calls (this

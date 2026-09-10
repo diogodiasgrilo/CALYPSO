@@ -6504,8 +6504,42 @@ class MEICStrategy(abc.ABC):
 
         Defined-risk default = the IC floor. A naked strategy (strangle)
         overrides this (S2) to a much larger naked-margin floor.
+
+        WIDTH-AWARE since 2026-09-10. ``min_buying_power_per_ic`` is a FLAT
+        per-contract number, but a defined-risk iron condor's margin IS its
+        width: ``width x $100 x contracts``. B/C configure $500, which is
+        correct for their 5pt wings — but Brandon's narrow-spread rule switches
+        to **10pt wings at VIX >= 22** (brandon/narrow_spread.py), which needs
+        $1,000/contract. The gate was therefore under-provisioning by 2x in
+        exactly the high-volatility conditions where margin is tightest and a
+        rejected leg is most damaging.
+
+        It went unnoticed because the paper account holds ~$1M against a ~$35k
+        peak requirement — the gate never bound. It starts to matter at the
+        $150k-$250k funding level contemplated for a real account, where a 2x
+        under-estimate is the difference between passing and a mid-entry
+        rejection with legs already filled.
+
+        Takes the MAX of configured and derived, never the derived value alone:
+        a width lookup that fails or returns something implausible can only ever
+        raise the floor, never lower it below what the operator set.
         """
-        return self.min_buying_power_per_ic
+        configured = float(self.min_buying_power_per_ic or 0.0)
+        try:
+            width = self._get_vix_adjusted_spread_width(
+                float(getattr(self, "current_vix", 0.0) or 0.0), "call"
+            )
+            derived = float(width) * 100.0
+            if derived > configured:
+                logger.debug(
+                    "ORDER-004 floor raised to $%.0f/contract from the live "
+                    "%.0fpt width (configured $%.0f)",
+                    derived, float(width), configured,
+                )
+            return max(configured, derived)
+        except Exception as e:  # pragma: no cover - defensive
+            logger.debug("ORDER-004 width-aware floor unavailable (%s)", e)
+            return configured
 
     def _check_buying_power(self) -> Tuple[bool, str]:
         """
