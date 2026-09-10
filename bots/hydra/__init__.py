@@ -68,11 +68,21 @@ Version History:
   permanently lost, and guessing would be worse than leaving it unattributed.
   The root cause — attribute by entry_number rather than object identity — is a
   separate strategy-side change and is NOT done here.
-  STILL OPEN: `_handle_naked_short` (base_strategy.py:3646) books no realized
-  P&L. Unlike the unwind path it receives only `(leg_name, position_id, uic)`
-  and has NO entry object, so booking needs a uic->entry lookup added to a
-  CRITICAL emergency path. Left for its own pass with its own tests rather than
-  bolted on.
+  NAKED-SHORT CLOSE — now booked too (same-day follow-up). The earlier note
+  here said this needed a uic->entry lookup; it did not. All three call sites
+  already have `entry` in scope, so `_handle_naked_short` simply takes it as an
+  optional argument. Optional, not required, so a missing entry can never block
+  an emergency close — it logs a WARNING and closes anyway.
+  It also now RETURNS whether the position was confirmed closed, and the callers
+  drop that leg from `filled_legs` on success. That matters: the naked leg is in
+  `filled_legs` too, so without it `_unwind_partial_entry` fires a SECOND close
+  at an already-flat position.
+  The gap was specifically on SUCCESS. On failure the leg stays in filled_legs
+  and the unwind closes and books it; on success the position was already flat,
+  the unwind's close could not fill, and the P&L was simply lost. A test pins
+  that a FAILED close returns False, so the two paths can never both skip it.
+  Variant G is untouched — `requires_protective_wings=False` still returns
+  early, since it holds naked shorts by design.
   Tests: 10 new (tests/test_unwind_roundtrip_pnl_2026_09_10.py). Two mutations
   verified to fail them, including the short/long sign flip — the error most
   likely to be made here and the one that would silently invert every unwound

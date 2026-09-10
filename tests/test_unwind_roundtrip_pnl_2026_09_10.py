@@ -139,3 +139,77 @@ class TestItNeverBreaksTheUnwind:
             s, [("short_call", "p1", 111), ("long_put", "p2", 222)],
             _entry(contracts=7))
         assert s._close_leg_order.call_count == 2   # both legs still closed
+
+
+# ---------------------------------------------------------------------------
+# The naked-short emergency close (2026-09-10)
+# ---------------------------------------------------------------------------
+
+class TestNakedShortBooksPnl:
+    """This path closes a REAL position and booked nothing at all. It was
+    invisible to the usual consistency check because it skews the day aggregate
+    and the per-entry number EQUALLY, so the two still agreed.
+
+    The gap was specifically on SUCCESS: on failure the leg stays in
+    filled_legs and the unwind closes and books it; on success the position was
+    already flat, the unwind's close could not fill, and the P&L vanished."""
+
+    def _s(self, close_px, filled=True):
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.dry_run = False
+        s.contracts_per_entry = 7
+        s.requires_protective_wings = True
+        s.registry = MagicMock()
+        s._cancel_order = MagicMock()
+        s._log_safety_event = MagicMock()
+        s._trigger_critical_intervention = MagicMock()
+        s.alert_service = MagicMock()
+        s._close_leg_order = MagicMock(return_value={
+            "filled": filled, "order_id": "N1", "fill_price": close_px})
+        s.booked = []
+        s._book_realized_pnl = lambda amt, entry=None: s.booked.append(amt)
+        return s
+
+    def test_a_successful_close_books_the_short_round_trip(self):
+        """Sold at 2.00, bought back at 1.20 -> +0.80 x 100 x 7 = +$560."""
+        s = self._s(close_px=1.20)
+        e = _entry(contracts=7, open_px=2.00)
+        assert HydraStrategy._handle_naked_short(s, ("short_call", "p1", 111), e) is True
+        assert s.booked == [pytest.approx(560.0)]
+
+    def test_buying_back_DEARER_is_a_loss(self):
+        s = self._s(close_px=2.80)
+        assert HydraStrategy._handle_naked_short(
+            s, ("short_put", "p1", 111), _entry(contracts=7, open_px=2.00)) is True
+        assert s.booked == [pytest.approx(-560.0)]
+
+    def test_a_FAILED_close_books_nothing_and_returns_False(self):
+        """Returning False keeps the leg in filled_legs so the unwind still
+        closes and books it — the two paths must not both skip it."""
+        s = self._s(close_px=1.20, filled=False)
+        assert HydraStrategy._handle_naked_short(
+            s, ("short_call", "p1", 111), _entry()) is False
+        assert s.booked == []
+        assert s._trigger_critical_intervention.call_count == 1
+
+    def test_no_entry_still_closes_the_position(self):
+        """The emergency close must NEVER be blocked by missing accounting."""
+        s = self._s(close_px=1.20)
+        assert HydraStrategy._handle_naked_short(s, ("short_call", "p1", 111)) is True
+        assert s._close_leg_order.call_count == 1
+        assert s.booked == []
+
+    def test_a_raising_book_call_does_not_undo_the_close(self):
+        s = self._s(close_px=1.20)
+        s._book_realized_pnl = MagicMock(side_effect=RuntimeError("db down"))
+        assert HydraStrategy._handle_naked_short(
+            s, ("short_call", "p1", 111), _entry()) is True
+
+    def test_undefined_risk_strategies_are_still_skipped(self):
+        """Variant G holds naked shorts BY DESIGN — this must stay a no-op for
+        requires_protective_wings=False, and must not report a close."""
+        s = self._s(close_px=1.20)
+        s.requires_protective_wings = False
+        assert HydraStrategy._handle_naked_short(
+            s, ("short_call", "p1", 111), _entry()) in (False, None)
+        assert s._close_leg_order.call_count == 0

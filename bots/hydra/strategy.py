@@ -7733,7 +7733,14 @@ class HydraStrategy(MEICStrategy):
 
             if has_naked_short and self.requires_protective_wings:
                 logger.critical(f"NAKED SHORT DETECTED: {naked_short_info[0]}")
-                self._handle_naked_short(naked_short_info)
+                # Pass `entry` so the emergency close can book its realized P&L
+                # (2026-09-10 — it previously booked nothing at all), and drop
+                # the leg from filled_legs on success so the unwind below does
+                # not fire a SECOND close at an already-flat position.
+                if self._handle_naked_short(naked_short_info, entry):
+                    filled_legs = [
+                        l for l in filled_legs if l[0] != naked_short_info[0]
+                    ]
 
             # Unwind filled legs
             self._unwind_partial_entry(filled_legs, entry)
@@ -7910,7 +7917,14 @@ class HydraStrategy(MEICStrategy):
 
             if has_naked_short and self.requires_protective_wings:
                 logger.critical(f"NAKED SHORT DETECTED: {naked_short_info[0]}")
-                self._handle_naked_short(naked_short_info)
+                # Pass `entry` so the emergency close can book its realized P&L
+                # (2026-09-10 — it previously booked nothing at all), and drop
+                # the leg from filled_legs on success so the unwind below does
+                # not fire a SECOND close at an already-flat position.
+                if self._handle_naked_short(naked_short_info, entry):
+                    filled_legs = [
+                        l for l in filled_legs if l[0] != naked_short_info[0]
+                    ]
 
             # Unwind filled legs
             self._unwind_partial_entry(filled_legs, entry)

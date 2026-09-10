@@ -2632,7 +2632,14 @@ class MEICStrategy(abc.ABC):
 
             if has_naked_short and self.requires_protective_wings:
                 logger.critical(f"NAKED SHORT DETECTED: {naked_short_info[0]}")
-                self._handle_naked_short(naked_short_info)
+                # Pass `entry` so the emergency close can book its realized P&L
+                # (2026-09-10 — it previously booked nothing at all), and drop
+                # the leg from filled_legs on success so the unwind below does
+                # not fire a SECOND close at an already-flat position.
+                if self._handle_naked_short(naked_short_info, entry):
+                    filled_legs = [
+                        l for l in filled_legs if l[0] != naked_short_info[0]
+                    ]
 
             # Unwind filled legs
             self._unwind_partial_entry(filled_legs, entry)
@@ -3643,7 +3650,7 @@ class MEICStrategy(abc.ABC):
         except Exception as exc:
             logger.error(f"short-close-failed alert send failed: {describe_exception(exc)}")
 
-    def _handle_naked_short(self, naked_info: Tuple[str, str, int]):
+    def _handle_naked_short(self, naked_info: Tuple[str, str, int], entry=None) -> bool:
         """
         Handle a naked short position - CRITICAL SAFETY.
 
@@ -3651,6 +3658,25 @@ class MEICStrategy(abc.ABC):
 
         Args:
             naked_info: Tuple of (leg_name, position_id, uic)
+            entry: the IronCondorEntry this leg belongs to, when the caller has
+                it. Optional so the emergency close is never blocked by its
+                absence — but WITHOUT it the realized P&L cannot be booked.
+
+        Returns:
+            True iff the naked short was CONFIRMED CLOSED. Callers use this to
+            drop the leg from ``filled_legs`` before ``_unwind_partial_entry``
+            runs, so the unwind does not issue a second close against a
+            position that is already flat.
+
+        REALIZED P&L (2026-09-10): this path closes a real position and, until
+        now, booked NOTHING — not per-entry, not to the day aggregate. It was
+        invisible to the usual consistency check because it skews the aggregate
+        and the per-entry number EQUALLY, so they still agreed.
+
+        The gap was specifically on SUCCESS. On failure the leg stays in
+        ``filled_legs`` and ``_unwind_partial_entry`` closes it and books it; on
+        success the position was already flat, the unwind's close could not
+        fill, and the P&L was simply lost.
         """
         leg_name, pos_id, uic = naked_info
 
@@ -3720,6 +3746,42 @@ class MEICStrategy(abc.ABC):
                 except Exception as reg_e:
                     logger.error(f"Registry error unregistering {pos_id}: {reg_e}")
                 self._log_safety_event("NAKED_SHORT_CLOSED", f"{leg_name} position {pos_id} closed successfully", "Closed")
+                # Book the round trip. This is a SHORT leg: SOLD to open, BOUGHT
+                # back to close, so P&L = open - close (x100 x contracts). The
+                # quantity is the one actually traded on the close above, so the
+                # booking matches the fill rather than the entry's nominal size.
+                try:
+                    if entry is not None:
+                        open_px = float(
+                            getattr(entry.legs.get(leg_name), "fill_price", 0.0) or 0.0
+                        )
+                        close_px = float(_res.get("fill_price") or 0.0)
+                        qty = self.contracts_per_entry
+                        if open_px > 0 and close_px > 0:
+                            pnl = (open_px - close_px) * 100.0 * qty
+                            self._book_realized_pnl(pnl, entry)
+                            logger.warning(
+                                f"  NAKED-CLOSE: booked ${pnl:+.2f} realized P&L for "
+                                f"{leg_name} (sold {open_px:.2f} -> bought back "
+                                f"{close_px:.2f}, {qty}c)"
+                            )
+                        else:
+                            logger.warning(
+                                f"  NAKED-CLOSE: P&L NOT booked for {leg_name} — "
+                                f"missing a fill price (open={open_px}, "
+                                f"close={close_px})"
+                            )
+                    else:
+                        logger.warning(
+                            f"  NAKED-CLOSE: P&L NOT booked for {leg_name} — caller "
+                            f"passed no entry, so it cannot be attributed"
+                        )
+                except Exception as pnl_e:  # pragma: no cover - defensive
+                    logger.error(
+                        f"  NAKED-CLOSE: failed to book {leg_name} P&L ({pnl_e}) — "
+                        f"the position IS closed, only the accounting is missing"
+                    )
+                return True
             else:
                 # Audit fix: a non-full / timed-out market BUY-to-close leaves the
                 # order WORKING in IBKR's book (place_and_wait_for_fill documents
@@ -3737,10 +3799,12 @@ class MEICStrategy(abc.ABC):
                 logger.critical(f"FAILED to close naked short {pos_id}!")
                 self._log_safety_event("NAKED_SHORT_CLOSE_FAILED", f"{leg_name} position {pos_id} - close returned false", "Failed")
                 self._trigger_critical_intervention(f"Cannot close naked short {pos_id}")
+                return False
         except Exception as e:
             logger.critical(f"Exception closing naked short: {e}")
             self._log_safety_event("NAKED_SHORT_EXCEPTION", f"{leg_name} position {pos_id} - {str(e)}", "Exception")
             self._trigger_critical_intervention(f"Exception closing naked short: {e}")
+        return False
 
     def _validate_realized_credit(
         self,
