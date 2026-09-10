@@ -326,9 +326,9 @@ IBKR has **no per-leg position ID** — every IBClient method that previously to
 Three authoritative sources (in priority order):
 1. **`/iserver/account/orders/{order_id}`** → `avgPrice` / `filledQuantity` (post-fill, before purge)
 2. **`/portfolio/accounts/{accountId}/positions`** → `avg_cost` (live position, normalized by `_normalize_position_dict`)
-3. **`/iserver/account/trades`** → most-recent execution at conid + side (closed-position lookup; replaces Saxo's `closedpositions`)
+3. **`/iserver/account/trades`** → most-recent execution at conid + side (`get_closed_position_price`; replaces Saxo's `closedpositions`). ⚠️ **Returns ZERO rows on this paper account** — probed 2026-09-10 over a 7-day window containing dozens of real fills: endpoint called correctly, no error, empty list. Whether that is a paper-account limitation or a call-shape bug is **unresolved**, and it matters: if a live account revives it, three currently-masked defects activate at once. Source 1 is the one that actually carries the live seat.
 
-`_get_close_fill_price` returns `None` on `FilledPrice == 0` so `_deferred_stop_fill_lookup` (background thread) can re-check after IBKR's sync delay, then apply a P&L correction to `total_realized_pnl` before settlement.
+**Correction (2026-09-10):** two functions this section used to name — `_get_close_fill_price` and `_deferred_stop_fill_lookup` — **do not exist and never did on this branch** (zero definitions, zero references repo-wide). The real function is `base_strategy.py:_spawn_async_fill_correction`, and it is a **deliberate no-op on IBKR**, documented as FIX #75: stop closes route through `_close_position_with_retry` → `_close_leg_order` → `place_and_wait_for_fill`, which polls to a terminal state, so the authoritative fill price is already in hand synchronously and there is nothing to defer. Source 1 above is that price. Do not "restore" a deferred-lookup path on the strength of the old text.
 
 ### What's NOT used
 - **WebSocket streaming** — `StreamingManager` exists but is OFF by default. HYDRA is REST-only on this branch; quotes are snapshot-driven via the warmup-polled `_snapshot_with_preflight`.
@@ -1046,7 +1046,7 @@ Saxo → IBKR migration spans 7 functional phases (F1–F7) + 7 cleanup passes (
 | F2 | Contract qualification (`qualify_contract` + conid cache) |
 | F3 | Option chain (`get_option_chain` via probed secdef behavior) |
 | F4 | Position read + reconciliation (conid-quantity model — IBKR has no per-leg position id) |
-| F5 | Closed-position price (`/iserver/account/trades` + `_deferred_stop_fill_lookup`) |
+| F5 | Closed-position price (`/iserver/account/trades` → `get_closed_position_price`). See the Fill-prices correction above: the deferred-lookup companion named here never existed, and the endpoint returns nothing on paper. |
 | F6 | Order write path (`place_order`, `place_and_wait_for_fill`, `cancel_order`, `modify_order`, cOID dedup) |
 | F7 | Strategy-layer broker abstraction (read helpers + balance + ORDER-004 BP gate) |
 | P1–P7 | Imports, dead-Saxo-helper purge, method ranges audit, broker-abstraction flattening, streaming subsystem, retry + per-family circuit breakers, go-live (re-auth gate, systemd creds, multi-agent code audit) |

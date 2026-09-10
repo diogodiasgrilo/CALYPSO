@@ -12281,6 +12281,16 @@ class HydraStrategy(MEICStrategy):
                     # recovery path already restores these flags).
                     "call_side_pivot_closed": getattr(entry, "call_side_pivot_closed", False),
                     "put_side_pivot_closed": getattr(entry, "put_side_pivot_closed", False),
+                    # L-M3 double-book guard (2026-09-10). Every OTHER disposition
+                    # flag was already persisted; this one was set via setattr and
+                    # never written, so a restart resurrected it as False and the
+                    # external-close path could book the SAME side a second time.
+                    # It must live in the same atomic os.replace save as
+                    # total_realized_pnl, for the same reason brandon_overlay_booked
+                    # does: a guard restored without the total it protects is worse
+                    # than no guard.
+                    "call_side_pnl_booked_external": getattr(entry, "call_side_pnl_booked_external", False),
+                    "put_side_pnl_booked_external": getattr(entry, "put_side_pnl_booked_external", False),
                     # Fix #61: Position merge tracking
                     "call_side_merged": entry.call_side_merged,
                     "put_side_merged": entry.put_side_merged,
@@ -12661,6 +12671,30 @@ class HydraStrategy(MEICStrategy):
             setattr(entry, f"{leg}_uic", None)
             if leg in ("short_call", "short_put"):
                 side = "call" if leg == "short_call" else "put"
+                # L-M3 DOUBLE-BOOK GUARD (2026-09-10). Read the side's PRIOR
+                # disposition BEFORE the setattr below marks it stopped — that
+                # write would otherwise destroy the very evidence this guard
+                # needs. Order matters here; do not hoist the setattr.
+                #
+                # The old guard tested ONE flag, `{side}_side_pnl_booked_external`,
+                # which no other close path sets and which was not even persisted.
+                # Any side already closed and booked by ANOTHER path therefore
+                # looked unbooked here and got booked a second time.
+                prior_stopped = getattr(entry, f"{side}_side_stopped", False)
+                prior_close_reason = getattr(entry, "close_reason", "") or ""
+                already_booked = (
+                    getattr(entry, f"{side}_side_pnl_booked_external", False)
+                    or getattr(entry, f"{side}_side_expired", False)
+                    or getattr(entry, f"{side}_side_skipped", False)
+                    or getattr(entry, f"{side}_side_pivot_closed", False)
+                    # A GENUINE stop booked its P&L at stop time. A Brandon
+                    # TP/BREACH that closed 0 legs (the 06-04 orphan) set
+                    # *_side_stopped but booked NOTHING, so it must still be
+                    # bookable here. This mirrors settlement's own
+                    # `*_genuine_stop` predicate exactly, so the two paths agree
+                    # on what "already booked" means instead of each guessing.
+                    or (prior_stopped and prior_close_reason not in ("TP", "BREACH"))
+                )
                 setattr(entry, f"{side}_side_stopped", True)
                 # L-M3: a short that vanished from the broker (closed externally
                 # or while the bot was down) was marked stopped but its close
@@ -12671,7 +12705,7 @@ class HydraStrategy(MEICStrategy):
                 # tag close_reason so settlement leaves it alone. If the close
                 # price can't be read, alert for manual review rather than
                 # silently dropping it.
-                if not getattr(entry, f"{side}_side_pnl_booked_external", False):
+                if not already_booked:
                     closed = self._read_closed_position_price(conid, buy_or_sell="Buy")
                     close_px_raw = (closed or {}).get("closing_price")
                     try:
@@ -12706,6 +12740,21 @@ class HydraStrategy(MEICStrategy):
                             f"but its close price is unreadable — P&L for this side "
                             f"is UNBOOKED; manual review recommended."
                         )
+                else:
+                    # The guard fired. Log it: a SILENT skip is exactly how the
+                    # double-book hid for so long — the day still reconciled
+                    # because the in-process check compares two numbers that
+                    # descend from the same accumulator. Name which flag stopped
+                    # it so the next reader does not have to re-derive this.
+                    logger.info(
+                        f"L-M3: E#{entry.entry_number} {side} short already "
+                        f"disposed (expired={getattr(entry, f'{side}_side_expired', False)}, "
+                        f"skipped={getattr(entry, f'{side}_side_skipped', False)}, "
+                        f"pivot={getattr(entry, f'{side}_side_pivot_closed', False)}, "
+                        f"booked_external={getattr(entry, f'{side}_side_pnl_booked_external', False)}, "
+                        f"prior_stopped={prior_stopped}, close_reason='{prior_close_reason}') "
+                        f"— NOT re-booking its P&L."
+                    )
 
     @staticmethod
     def _recon_diff_quantities(expected: Dict[Any, int], actual: Dict[Any, int]) -> Dict[Any, tuple]:
@@ -13696,7 +13745,13 @@ class HydraStrategy(MEICStrategy):
                 # double-count it. Skip pivot-closed sides.
                 if (not call_genuine_stop and not entry.call_side_expired
                         and not entry.call_side_skipped
-                        and not getattr(entry, "call_side_pivot_closed", False)):
+                        and not getattr(entry, "call_side_pivot_closed", False)
+                        # L-M3 (2026-09-10): the external-close path books the
+                        # side's ACTUAL close debit. Settlement would re-book the
+                        # full credit on top whenever close_reason was already
+                        # TP/BREACH (so call_genuine_stop is False) — the mirror
+                        # image of the bug fixed in the reconcile path.
+                        and not getattr(entry, "call_side_pnl_booked_external", False)):
                     entry.call_side_expired = True
                     # IBKR-audit #5: book actual settlement P&L (full credit if
                     # OTM/unverifiable; credit - intrinsic if ITM-settled).
@@ -13740,7 +13795,9 @@ class HydraStrategy(MEICStrategy):
                 # _execute_pivot_side_close) to avoid double-counting the credit.
                 if (not put_genuine_stop and not entry.put_side_expired
                         and not entry.put_side_skipped
-                        and not getattr(entry, "put_side_pivot_closed", False)):
+                        and not getattr(entry, "put_side_pivot_closed", False)
+                        # L-M3 (2026-09-10) — see the call-side rationale above.
+                        and not getattr(entry, "put_side_pnl_booked_external", False)):
                     entry.put_side_expired = True
                     # IBKR-audit #5: book actual settlement P&L (full credit if
                     # OTM/unverifiable; credit - intrinsic if ITM-settled).
@@ -14505,6 +14562,13 @@ class HydraStrategy(MEICStrategy):
                 # Directional-pivot close flags (directional_pivot, introduced 2026-05-01)
                 restored_entry.call_side_pivot_closed = entry_data.get("call_side_pivot_closed", False)
                 restored_entry.put_side_pivot_closed = entry_data.get("put_side_pivot_closed", False)
+                # L-M3 double-book guard (2026-09-10) — see _save_state_to_disk.
+                # Defaults False for a state file written before this field
+                # existed, which is the pre-fix behaviour and therefore safe.
+                restored_entry.call_side_pnl_booked_external = entry_data.get(
+                    "call_side_pnl_booked_external", False)
+                restored_entry.put_side_pnl_booked_external = entry_data.get(
+                    "put_side_pnl_booked_external", False)
                 # Fix #61: Restore merge flags
                 restored_entry.call_side_merged = entry_data.get("call_side_merged", False)
                 restored_entry.put_side_merged = entry_data.get("put_side_merged", False)

@@ -122,7 +122,14 @@ STRATEGIES: Dict[str, StrategyMeta] = {
     ),
     "b": StrategyMeta(
         id="b",
-        display_name="Brandon Narrow (6-slot)",  # 2026-09-02: 11:15 dropped after a per-slot P&L audit (was 7-slot)
+        # 2026-09-02 dropped 11:15 (7 -> 6). RESTORED 2026-09-09, so B is back to
+        # 7 slots and this label was stale for a day — it is the alert identity on
+        # the ONLY variant that places real orders, so it must track the live
+        # config. A 2026-09-10 permutation test on B's live era put the whole
+        # per-slot effect at p=0.569 (11:15's entire -$875 was ONE stop on 08-28;
+        # excluding it, 8 entries at +$109), so no slot moves again until it has
+        # >=70 hedge-free live entries. Verified against the VM config, not assumed.
+        display_name="Brandon Narrow (7-slot)",
         short_name="BRANDON-B",
         strategy_class="brandon",
         group_id="ic_0dte",

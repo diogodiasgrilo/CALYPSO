@@ -36,6 +36,76 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-10 (seventh same-day change) L-M3: the external-close path could
+  book a side's P&L that another path had ALREADY booked. Three vectors, all
+  closed. Ships with two stale-doc corrections in the same batch.
+  THE INCIDENT. 2026-09-04 on B (the live seat): entry #4's call side expired
+  worthless and settlement booked +$140.00 at 16:00:24 ET. After a later
+  restart, `_reconcile_recovered_entries_with_broker` reached
+  `_handle_position_discrepancies`, saw the conid gone, and tried to book the
+  SAME side again — logging "L-M3: E#4 call short vanished but its close price
+  is unreadable" at 22:37:24.
+  IT WAS SAVED BY AN UNRELATED BUG. The only reason it did not double-book is
+  that IBKR's /iserver/account/trades returns ZERO rows on this paper account,
+  so the close price came back None. Do NOT treat that as a safety net: it is
+  the accident that hid the defect, and a live account plausibly removes it.
+  IT WOULD NOT HAVE BEEN A MERE DUPLICATE. `get_closed_position_price` applies
+  NO opening-vs-closing filter — it takes any same-side execution at the conid
+  in a days=1 window. Conid 907878374 had a real BUY that day: the Brandon
+  butterfly's own long leg, 7/7 @ $2.00. On a Brandon variant that is
+  SYSTEMATIC, not incidental — the butterfly is pinned at the threatened short
+  strike by construction. The second booking would have been
+  $140 - ($2.00 x 100 x 7) = -$1,260, turning a real -$1,225 day into -$2,485.
+  ROOT CAUSE: two booking paths with DISJOINT idempotency flags. The external
+  path gated on ONE flag, `{side}_side_pnl_booked_external`, which no other
+  close path sets. Settlement gated on `*_side_expired` / `*_side_skipped` /
+  `*_side_pivot_closed` / `*_genuine_stop` and never looked at the external
+  flag. Neither could see the other, and the day still "reconciled" because
+  that check compares two numbers both descended from `_book_realized_pnl`.
+  VECTOR 2, PREVIOUSLY UNNOTICED: `{side}_side_pnl_booked_external` was set by
+  setattr and written NOWHERE. Every other disposition flag is persisted to
+  hydra_state.json; this one was not, so a restart resurrected it as False and
+  the external path could re-book its OWN prior booking. Now persisted in the
+  same atomic os.replace save as total_realized_pnl — same reasoning as
+  brandon_overlay_booked: a guard restored without the total it protects is
+  worse than no guard. Absent key defaults False = pre-fix behaviour = safe.
+  VECTOR 3, PREVIOUSLY UNNOTICED (the mirror image): settlement re-booked the
+  FULL CREDIT on top of an external booking whenever close_reason was already
+  TP/BREACH, because that makes `*_genuine_stop` False. Settlement's guard now
+  excludes `*_side_pnl_booked_external` on both sides.
+  ORDER OF OPERATIONS IS LOAD-BEARING. The guard reads the side's PRIOR
+  disposition BEFORE `setattr(entry, f"{side}_side_stopped", True)` — that
+  write would otherwise destroy the evidence the guard needs and make
+  prior_stopped always True, silently blocking every legitimate external
+  booking. A mutation hoisting the setattr fails 4 tests.
+  THE CARVE-OUT THAT MUST NOT BE SIMPLIFIED: the stopped clause is
+  `prior_stopped and close_reason not in ("TP","BREACH")`, not a bare
+  `prior_stopped`. A Brandon TP/BREACH that closed 0 legs (the 06-04 orphan)
+  sets *_side_stopped but books NOTHING, so it must stay bookable. This mirrors
+  settlement's own `*_genuine_stop` predicate exactly so the two paths agree on
+  what "already booked" means instead of each guessing.
+  The skip is LOGGED, naming which flag fired. A silent skip is how this hid.
+  Tests: 20 new. FIVE mutations verified to fail them — reverting to the
+  single-flag guard (8 fail), bare prior_stopped (1), hoisting the setattr (4),
+  dropping settlement's clause (1), dropping the persistence (1). Includes a
+  NEGATIVE CONTROL that a genuinely-vanished unbooked side is still booked: a
+  guard that blocks legitimate bookings loses real money and would be worse
+  than the bug. Full suite 2821 passed.
+  ALSO IN THIS BATCH (no behaviour change):
+  * strategy_taxonomy display_name "Brandon Narrow (6-slot)" -> "(7-slot)". B
+    restored 11:15 on 2026-09-09; the label is the alert identity on the only
+    variant that places real orders. Verified against the live VM config, which
+    also corrected the config's own stale "11:15 REMOVED" prose. Recorded the
+    standing rule from the 2026-09-10 permutation test (whole per-slot effect
+    p=0.569; 11:15's entire -$875 was ONE stop on 08-28): no slot moves again
+    until it has >=70 live-era hedge-free entries.
+  * CLAUDE.md's Fill-prices section named two functions that DO NOT EXIST and
+    never did on this branch — `_get_close_fill_price` and
+    `_deferred_stop_fill_lookup` (zero defs, zero refs repo-wide). The real
+    `_spawn_async_fill_correction` is a DELIBERATE no-op (FIX #75) because
+    place_and_wait_for_fill already polls to a terminal state. Corrected, with
+    a note not to "restore" a deferred path on the strength of the old text,
+    and the dead-endpoint caveat recorded next to source 3.
 - 2026-09-10 (sixth same-day change) An INDEPENDENT P&L check — the first one
   in this codebase that is not circular.
   THE PROBLEM. Every existing reconciliation compares two numbers descended
