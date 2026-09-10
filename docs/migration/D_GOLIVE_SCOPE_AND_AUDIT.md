@@ -22,11 +22,22 @@ support it. The reasons are structural, not cosmetic:
    action (open/transform/stop/EOD/settle) is simulated from mids + `DRY_*` ids. "Flip dry_run=false"
    does not enable trading — it enables an **unimplemented** path. Verified.
 
-2. **The edge was never validated and its signal is unobservable.** ThetaData lapsed → the offline
-   backtest the code's own history calls "the edge gate" was never run. The term-structure / IV
-   signal that IS the double-calendar's thesis (`_dc_front_back_iv`, field 7633) is not returned by
-   IBKR's SPXW snapshot → D trades its own edge blind. The signal is computed only inside a
-   diagnostic probe and consumed by nothing.
+2. **The edge was never validated.** ThetaData lapsed → the offline backtest the code's own
+   history calls "the edge gate" was never run. The signal is computed only inside a diagnostic
+   probe (`_dc_probe_two_expiry_data`) and consumed by nothing — that half is still true, but it
+   makes the term structure a FUTURE refinement, not a present defect: D enters on a fixed 10:00 ET
+   clock and none of `_dc_pre_entry_gates`' five gates is volatility-related, so D cannot be
+   "blind" to a signal it does not use.
+
+   > **CORRECTED 2026-09-10 — the "unobservable signal" clause of this reason is DEAD, and it was
+   > never an IBKR limitation.** This previously read "the term-structure / IV signal … is not
+   > returned by IBKR's SPXW snapshot → D trades its own edge blind", and that claim was used to
+   > argue against building D. It was a ONE-LINE PARSE BUG on our side: IBKR returns field 7633
+   > percent-suffixed as a string (`'11.8%'`) and `shared/ib_client.py`'s field parser did a bare
+   > `float(v)` inside a try/except that swallowed the ValueError → `iv` became `None` every time.
+   > A 2026-09-09 probe of D's own open position returned **all four legs with live IV and a
+   > complete term structure** (call front-back +1.6 vol pts, put +2.1 — both front > back, the
+   > favourable calendar condition). Fixed 2026-09-10. Do not cite this reason against D again.
 
 3. **The "structurally risk-free" invariant breaks on real fills.** `_dc_attempt_transform`
    (:963-970) computes `transform_credit` and the `debit+wing` threshold purely from MIDS, and

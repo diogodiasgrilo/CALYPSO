@@ -2344,9 +2344,50 @@ class IBClient:
             return {"conid": conid, "raw": row}
 
         def f(field_code: str) -> Optional[float]:
+            """Parse one snapshot field to a float.
+
+            PERCENT-SUFFIXED VALUES (fixed 2026-09-10). IBKR returns implied
+            volatility (field 7633) as a percent-suffixed STRING — e.g.
+            ``'11.8%'`` — and the bare ``float(v)`` here raised ValueError,
+            which the except swallowed into ``None``. No percent-stripping
+            existed anywhere in the repo.
+
+            The cost of that one missing strip: we concluded IBKR does not
+            return IV for SPXW at all. That conclusion is recorded in
+            bots/hydra/__init__.py's 2026-06-15 VM-probe note and became NO-GO
+            reason 2 in docs/migration/D_GOLIVE_SCOPE_AND_AUDIT.md — "the edge
+            signal is unobservable, D trades its own edge blind". It is false.
+            A 2026-09-09 probe of D's own open position returned all four legs
+            with live IV and a complete term structure (call front-back +1.6
+            vol pts, put +2.1).
+
+            A percent string is converted to a FRACTION (11.8% -> 0.118), the
+            conventional representation. Choosing the unit is free here: no
+            consumer has ever received a non-None value, so there is no
+            existing behaviour to preserve. Verified before shipping —
+            gex_provider takes its IV from POLYGON, not IBKR; the IBKR `iv`
+            surfaced by _read_option_greeks has no consumers; and the
+            calendar's _dc_read_iv feeds only _dc_probe_two_expiry_data, which
+            has zero runtime call sites. So this activates no dormant decision
+            path, it only stops discarding the data.
+
+            DELIBERATELY NOT FIXED HERE: IBKR also decorates PRICE fields with
+            a leading 'C' (close) or 'H' (halted), e.g. ``'C7638.04'``, which
+            this parser likewise turns into None. That is a real second bug,
+            but changing price parsing would alter after-hours/settlement
+            behaviour on the live seat — the same class of change behind the
+            2026-07-06 stale-SPX phantom. Fix it separately, deliberately.
+            """
             v = row.get(field_code)
             if v is None or v == "":
                 return None
+            if isinstance(v, str):
+                s = v.strip()
+                if s.endswith("%"):
+                    try:
+                        return float(s[:-1]) / 100.0
+                    except (TypeError, ValueError):
+                        return None
             try:
                 return float(v)
             except (TypeError, ValueError):

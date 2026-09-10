@@ -36,6 +36,39 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-10 IBKR percent-suffixed field parsing — the one-line bug that cost a
+  year of a wrong premise.
+  `IBClient._parse_quote_row`'s inner `f()` did a bare `float(v)` inside a
+  try/except that swallowed ValueError. IBKR returns implied volatility
+  (field 7633) as a PERCENT-SUFFIXED STRING — '11.8%' — so `float('11.8%')`
+  raised and `iv` silently became None on every read. No percent-stripping
+  existed anywhere in the repo.
+  WHAT IT COST: we concluded IBKR does not return IV for SPXW at all. That
+  conclusion is recorded in the 2026-06-15 VM-probe note in this very file, and
+  it became NO-GO REASON 2 in docs/migration/D_GOLIVE_SCOPE_AND_AUDIT.md —
+  "the edge signal is unobservable; D trades its own edge blind" — used to argue
+  against building strategy D. It is FALSE. A 2026-09-09 probe of D's own open
+  position returned all four legs with live IV and a complete term structure
+  (call front-back +1.6 vol pts, put +2.1, both front > back, the favourable
+  calendar condition). Correct that VM-probe note and that NO-GO reason.
+  A percent string now converts to a FRACTION (11.8% -> 0.118). Choosing the
+  unit was free: no consumer has ever received a non-None value.
+  VERIFIED BEFORE SHIPPING that this activates NO dormant decision path —
+  gex_provider takes its IV from POLYGON not IBKR (so B's live GEX subsystem is
+  untouched); the `iv` surfaced by strategy.py's _read_option_greeks has no
+  consumers at all; and calendar _dc_read_iv feeds only
+  _dc_probe_two_expiry_data, which has zero runtime call sites. The fix stops
+  discarding data; it changes no decision.
+  DELIBERATELY NOT FIXED: IBKR also decorates PRICE fields with a leading 'C'
+  (close) or 'H' (halted) — 'C7638.04' — which this parser likewise turns into
+  None. Real second bug, but changing price parsing would alter
+  after-hours/settlement behaviour on the LIVE seat, the same class of change
+  behind the 2026-07-06 stale-SPX phantom. A test pins that prefixes still
+  return None so the omission is a recorded decision, not mistaken coverage.
+  DEPLOY: shared/ib_client.py is imported by calypso-broker, which holds loaded
+  bytecode until restarted — broker FIRST, verify /health, then the strategies.
+  Tests: 13 new (tests/test_ib_iv_percent_parse_2026_09_10.py); the mutation
+  that reverts the percent handling fails 5 of them.
 - 2026-09-09 (third same-day change) Vanished-position watchdog + the
   LOST_FROM_TRACKING back-fill (Phase 0.6).
   THE INCIDENT: a calendar lives in two places — dc_open_trades.json
@@ -2760,7 +2793,10 @@ Version History:
   CONFIRMED the capability: both a Fri 11-DTE short and a Tue +4 long return full
   chains (714 strikes), conids, quotes, and delta/vega/theta, with the long leg
   correctly dearer. TWO findings: (1) IBKR's snapshot returns delta/gamma/vega/
-  theta but NOT implied_vol (field 7633) for SPXW even after warmup — D's CRITICAL
+  theta but NOT implied_vol (field 7633) for SPXW even after warmup [WRONG — SEE
+  THE 2026-09-10 ENTRY: IBKR DOES return 7633; our own parser was discarding it,
+  because IBKR percent-suffixes it as a string and `float('11.8%')` raised into a
+  swallowed except. Not a feed limitation.] — D's CRITICAL
   path (delta-target strikes, mid-based debit, credit-gated transform) does NOT
   use IV, only the informational _dc_front_back_iv signal does (and it already
   degrades to 'no signal'), so D operates fully; the term-structure signal is just
