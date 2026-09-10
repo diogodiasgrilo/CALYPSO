@@ -76,6 +76,18 @@ CASES = [
     ("get_open_orders", (), {}, [{"orderId": "1", "status": "Submitted"}]),
     ("get_order_status", ("O1",), {}, {"order_id": "O1", "status": "Filled"}),
     ("get_closed_position_price", (55813670,), {}, 1.23),
+    # Broker-side executions feed — the INDEPENDENT anchor for P&L
+    # reconciliation (2026-09-10). Every in-process check is circular. The
+    # return MUST survive the RPC round trip with `raw` intact: the field names
+    # in /iserver/account/trades are doc-sourced rather than observed, so `raw`
+    # is how a caller discovers the true shape. A transport that dropped it
+    # would silently hide the fields the reconciliation needs.
+    ("get_day_executions", (), {"days": 1},
+     [{"conid": 55813670, "side": "SELL", "price": 1.25, "size": 7.0,
+       "commission": 8.05, "net_amount": 875.0, "sec_type": "OPT",
+       "symbol": "SPX", "account": "DUR049068", "trade_time": "20260910-13:45:02",
+       "trade_time_r": 1789045502000.0, "execution_id": "0001",
+       "raw": {"conid": 55813670, "side": "S", "price": "1.25", "size": "7"}}]),
     ("place_and_wait_for_fill", (), {"conid": 55813670, "side": "SELL", "quantity": 1,
                                      "order_type": "LMT", "limit_price": 1.0, "coid": "x"},
      {"order_id": "O1", "status": "filled", "filled_quantity": 1, "avg_fill_price": 1.0, "raw": {}}),
