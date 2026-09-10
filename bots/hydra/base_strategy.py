@@ -4034,6 +4034,30 @@ class MEICStrategy(abc.ABC):
 
         logger.warning(f"Unwinding {len(filled_legs)} partially filled legs")
 
+        # UNWIND-ORDER (2026-09-10): close SHORT legs FIRST.
+        #
+        # The unwind runs because an entry failed part-way, so what is held at
+        # this moment is an arbitrary subset of the four legs — and the
+        # dangerous subset is always the one containing a short without its
+        # protective long. Every close here is a market order that can fail or
+        # be delayed, so the ORDER in which they are attempted decides how long
+        # undefended short exposure survives.
+        #
+        # Closing shorts first means the risk-reducing closes happen while the
+        # protective longs are still in place. Closing longs first does the
+        # opposite: it strips the protection off shorts that are still open,
+        # and if a subsequent short close then fails, the account is left
+        # holding a NAKED short — the exact state _handle_naked_short exists to
+        # clean up after.
+        #
+        # This is ordering only. Every leg in `filled_legs` is still closed, and
+        # a failure on any one of them is handled exactly as before; sorted() is
+        # stable, so legs within each group keep their original relative order.
+        filled_legs = sorted(
+            filled_legs,
+            key=lambda leg: 0 if str(leg[0]).startswith("short") else 1,
+        )
+
         for leg_name, pos_id, uic in filled_legs:
             # P7-audit H1: gate on the conid (`uic`), NOT `pos_id` — IBKR
             # has no per-leg position id so `pos_id` is always None, which

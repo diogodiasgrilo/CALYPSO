@@ -117,6 +117,15 @@ CANONICAL_SLOTS = {
     "11:15": 11 * 60 + 15,
     "11:45": 11 * 60 + 45,
     "12:15": 12 * 60 + 15,
+    # 2026-09-10: 12:45 was MISSING. B has run a 7-slot grid ending at 12:45
+    # since the 2026-07-24 live-seat swap, so every 12:45 entry was silently
+    # bucketed into "other" and excluded from per-slot scoring. That is not a
+    # cosmetic gap: 12:45 is B's BEST slot on the live-era numbers (+$293/trade,
+    # the closest strikes of any slot at 26.5pt, and the only slot the hedge's
+    # 12:30 cutoff made unhedgeable) — so the one slot most worth measuring was
+    # the one being dropped. Any prior slot_edge output that predates this is
+    # missing it entirely.
+    "12:45": 12 * 60 + 45,
     "E6 14:00": 14 * 60,
 }
 _SLOT_ORDER = list(CANONICAL_SLOTS.keys()) + ["other"]

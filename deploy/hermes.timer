@@ -1,9 +1,28 @@
 [Unit]
-Description=Calypso HERMES Daily Analysis Timer (7 PM ET weekdays, post-settlement)
+Description=Calypso HERMES Daily Analysis Timer (11 PM ET weekdays, post-settlement)
 Documentation=https://github.com/calypso-trading/calypso
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 19:00:00 America/New_York
+# 2026-09-10: moved 19:00 -> 23:00 ET. The old schedule fired roughly THREE
+# HOURS BEFORE settlement finished, so HERMES analysed an incomplete day every
+# single day — the description already said "post-settlement"; the schedule just
+# never matched it.
+#
+# Measured SETTLEMENT_COMPLETE times from the bots' own logs (inline timestamps
+# are ET), variants B and C:
+#     2026-09-03 21:45   2026-09-04 22:32/22:37
+#     2026-09-08 22:30   2026-09-09 22:15
+# Worst observed 22:37, spread ~52 min. 23:00 clears the worst case by 23 min
+# and still leaves an hour before midnight, which matters because HOMER (which
+# runs after this) keys its gap-detection off the calendar date.
+#
+# 0DTE SPX options are PM-settled and IBKR's position feed does not clear them
+# until hours after the 16:00 close, which is why "after the close" is nowhere
+# near sufficient here.
+#
+# If settlement ever creeps past ~22:45, push BOTH this and homer.timer later
+# together and keep the 30-minute gap.
+OnCalendar=Mon..Fri *-*-* 23:00:00 America/New_York
 Persistent=false
 AccuracySec=60s
 

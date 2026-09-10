@@ -36,6 +36,45 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-10 (eleventh same-day change) Three verified audit items, shipped
+  together. None changes trading logic.
+  1. UNWIND ORDER — close SHORT legs FIRST. The unwind runs because an entry
+  failed part-way, so what is held is an arbitrary subset of the four legs, and
+  the dangerous subset is always one containing a short without its protective
+  long. Every close here is a market order that can fail or be delayed, so the
+  ORDER decides how long undefended short exposure survives. Closing longs
+  first strips protection off shorts still open; if a later short close then
+  fails, the account holds a NAKED short — exactly the state
+  `_handle_naked_short` exists to clean up after. Ordering only: every leg is
+  still closed, failures handled as before, and sorted() is stable so legs
+  within each group keep their relative order.
+  2. SLOT ANALYZER — `CANONICAL_SLOTS` was MISSING "12:45". B has run a 7-slot
+  grid ending at 12:45 since the 2026-07-24 swap, so every 12:45 entry was
+  silently bucketed as "other" and dropped from per-slot scoring. Not cosmetic:
+  12:45 is B's BEST live-era slot (+$293/trade, the closest strikes of any slot
+  at 26.5pt, and the only slot the hedge's 12:30 cutoff made unhedgeable) — the
+  slot most worth measuring was the one being discarded. Any slot_edge output
+  produced before today is missing it entirely.
+  3. AGENT TIMERS — HERMES (19:00 ET) and HOMER (19:30 ET) both fired roughly
+  THREE HOURS BEFORE settlement completed, every trading day. Measured
+  SETTLEMENT_COMPLETE times from the bots' own logs (variants B and C):
+  09-03 21:45, 09-04 22:32/22:37, 09-08 22:30, 09-09 22:15 — worst 22:37 ET.
+  0DTE SPX is PM-settled and IBKR's position feed clears hours after the 16:00
+  close, so "after the close" was nowhere near sufficient. Consequence: the
+  daily execution analysis AND the trading journal HOMER commits to git were
+  both built on unsettled numbers, indefinitely. Moved to 23:00 / 23:30 ET,
+  preserving the 30-minute ordering and staying before midnight (HOMER detects
+  missing trading days by calendar date, so a next-date run would look like a
+  skipped day). Both files' Description ALREADY said "post-settlement" — the
+  intent was right and the schedule simply never matched it, which is why this
+  went unnoticed: the file documented the behaviour it did not have.
+  FOLLOW-UP worth considering separately: a fixed clock time is still a guess
+  against a variable event. HERMES/HOMER could refuse to run when the state
+  file shows settlement incomplete. That is a code change, deliberately not
+  bundled here.
+  Tests: 28 new. FIVE mutations verified to fail them — removing the sort (2
+  fail), INVERTING it to longs-first (3), removing 12:45 (3), reverting hermes
+  to 19:00 (4), and putting homer before hermes (4). Full suite 3295 passed.
 - 2026-09-10 (tenth same-day change) Entry rung 1 never had a pricing POLICY —
   it had an arithmetic accident. Capability landed, DEFAULT OFF everywhere; no
   variant's behaviour changes until one opts in.
