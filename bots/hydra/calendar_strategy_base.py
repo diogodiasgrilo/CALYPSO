@@ -1100,6 +1100,57 @@ class CalendarStrategyBase(HydraStrategy):
             logger.debug("[CAL-WATCHDOG] alert failed: %s", exc)
         return lost
 
+    def _dc_open_calendar_count(self) -> int:
+        """How many calendars are open, for the concurrency cap — the MAX of
+        in-memory tracking and what the DB believes.
+
+        WHY NOT IN-MEMORY ALONE (the bug this closes). Losing a position from
+        the sidecar dropped it from `daily_state.entries`, which silently FREED
+        THE CONCURRENCY SLOT — D opened a fresh calendar the next session, all
+        three times it happened. In a real-order world that doubles exposure
+        with no alert.
+
+        WHY NOT THE BROKER'S POSITION COUNT. The obvious fix — "count real
+        positions instead" — is WRONG here and would be a serious regression:
+        D and E are dry-run-locked, so `get_positions()` returns nothing for
+        them, the count would be 0 forever, and the cap would stop binding
+        entirely. The DB is the only source that knows about a dry-run
+        calendar. When a real-order path exists, add the broker count as a
+        THIRD term of this max() — do not substitute it.
+
+        An entry with no `dc_outcomes` row is by definition unfinished, so a
+        LOST position keeps occupying its slot until it is resolved (see
+        scripts/backfill_lost_calendars.py). That is deliberate: paired with
+        `_dc_detect_lost_positions`' HIGH alert it forms a closed loop —
+        position lost -> operator alerted -> slot stays blocked -> operator
+        back-fills -> slot frees. Silently carrying on is what got us here.
+
+        Falls back to the in-memory count if the DB is unreadable: degrading to
+        today's behaviour beats blocking entries on a recorder hiccup.
+        """
+        in_memory = sum(1 for e in self.daily_state.entries if self._dc_entry_is_open(e))
+        rec = getattr(self, "_dc_recorder", None)
+        conn = getattr(rec, "_conn", None) if rec else None
+        if conn is None:
+            return in_memory
+        try:
+            db_open = conn.execute(
+                "SELECT COUNT(*) FROM dc_calendar_entries e "
+                "LEFT JOIN dc_outcomes o ON o.strategy_id = e.strategy_id "
+                "WHERE o.strategy_id IS NULL AND e.strategy_id IS NOT NULL"
+            ).fetchone()[0]
+        except Exception as exc:
+            logger.debug("[CAL] open-count DB read failed (%s) — using in-memory", exc)
+            return in_memory
+        if db_open > in_memory:
+            logger.warning(
+                "[CAL] concurrency cap using DB count %d over in-memory %d — the "
+                "difference is calendar(s) the DB has open that tracking does not. "
+                "Slot stays occupied until they are resolved.",
+                db_open, in_memory,
+            )
+        return max(in_memory, db_open)
+
     def _recover_positions_from_saxo(self) -> bool:
         """Base today-only recovery, then re-adopt multi-day calendars from the
         sidecar (the base load drops a prior-day calendar via its date!=today

@@ -38,6 +38,24 @@ they must never be presented as trades that completed.
 Booking them is still the honest choice: excluding a losing position because
 the bookkeeping lost it makes the strategy look better than it was.
 
+METRICS SYNC (added 2026-09-10). Writing `dc_outcomes` alone is NOT enough, and
+the first run of this script proved it: `hydra_metrics.json` is derived from
+`daily_summaries` in a DIFFERENT database (`backtesting.db`), which the
+back-fill never touched. That left D reading -$6,129.05 in metrics while
+`dc_outcomes` summed to -$6,458.40 — two different "lifetime P&L" figures for
+the same strategy.
+
+So this script also adds each lost position's P&L to the `daily_summaries` row
+for the day it was last seen — the day it would have been booked had it closed
+properly. `_reconcile_cumulative_metrics_from_db` then re-derives
+`cumulative_pnl` from `daily_summaries` at the next settlement, so the metrics
+file self-heals with no new machinery.
+
+Idempotency is explicit: every adjustment is recorded in `dc_metrics_adjustments`
+keyed on strategy_id, and an id already present is never applied twice. That
+matters because the `dc_outcomes` insert and the `daily_summaries` adjustment
+can be applied in separate runs (they were, here).
+
 ATTRIBUTION. Historical `dc_calendar_snapshots` rows carry no `strategy_id`
 (added 2026-09-09, schema v3), so a lost entry's marks are attributed by TIME
 WINDOW: from its own entry_time up to the next entry's entry_time. That is
@@ -65,6 +83,123 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 TERMINAL_STATE = "LOST_FROM_TRACKING"
 
 
+def _ensure_adjustments_table(con) -> None:
+    """Idempotency ledger for the daily_summaries side-effect.
+
+    The `dc_outcomes` insert and the `daily_summaries` adjustment can be applied
+    in SEPARATE runs (they were — outcomes on 2026-09-09, metrics on 09-10), so
+    "already in dc_outcomes" cannot serve as the guard for the second half.
+    """
+    con.execute(
+        "CREATE TABLE IF NOT EXISTS dc_metrics_adjustments ("
+        "strategy_id TEXT PRIMARY KEY, close_date TEXT, amount REAL, applied_at TEXT)"
+    )
+
+
+def _phase1_book_outcomes(con, variant, entries, booked, live, apply):
+    """Book lost entries into dc_outcomes from their LAST OBSERVED MARK."""
+    lost = [r for r in entries
+            if r["strategy_id"] not in booked and r["strategy_id"] not in live]
+    if not lost:
+        print(f"  phase 1 (dc_outcomes): nothing to book — {len(entries)} entries, "
+              f"{len(booked)} booked, {len(live)} open")
+        return []
+
+    times = [r["entry_time"] for r in entries if r["entry_time"]]
+    if len(times) != len(set(times)):
+        raise SystemExit("ERROR: duplicate entry_time — time-window attribution "
+                         "is unsafe. Refusing to run.")
+
+    print(f"  phase 1 (dc_outcomes): {len(lost)} calendar(s) never booked")
+    print(f"    {'strategy_id':24} {'entry':11} {'debit':>9} {'last mark':>11} {'ticks':>7}")
+    plan = []
+    for r in lost:
+        start = r["entry_time"]
+        later = [e["entry_time"] for e in entries
+                 if e["entry_time"] and start and e["entry_time"] > start]
+        end = min(later) if later else "9999"
+        snaps = list(con.execute(
+            "SELECT timestamp, unrealized_pnl FROM dc_calendar_snapshots "
+            "WHERE timestamp >= ? AND timestamp < ? ORDER BY timestamp",
+            (str(start)[:19].replace("T", " "), str(end)[:19].replace("T", " "))))
+        if not snaps:
+            print(f"    {r['strategy_id']:24} {str(r['date']):11} "
+                  f"{r['net_debit'] or 0:>9.2f} {'NO SNAPSHOTS':>11} {0:>7}")
+            continue
+        last = snaps[-1]
+        plan.append({"strategy_id": r["strategy_id"], "entry_date": r["date"],
+                     "entry_number": r["entry_number"],
+                     "close_date": str(last["timestamp"])[:10],
+                     "realized_pnl": last["unrealized_pnl"], "net_debit": r["net_debit"]})
+        print(f"    {r['strategy_id']:24} {str(r['date']):11} "
+              f"{r['net_debit'] or 0:>9.2f} {last['unrealized_pnl']:>11.2f} {len(snaps):>7}")
+
+    if apply:
+        for p_ in plan:
+            con.execute(
+                "INSERT INTO dc_outcomes (entry_date, close_date, entry_number, "
+                "strategy_id, terminal_state, realized_pnl, spx_at_close, "
+                "close_commission, transform_credit, net_debit) VALUES (?,?,?,?,?,?,?,?,?,?)",
+                (p_["entry_date"], p_["close_date"], p_["entry_number"], p_["strategy_id"],
+                 TERMINAL_STATE, p_["realized_pnl"], None, 0.0, 0.0, p_["net_debit"]))
+        con.commit()
+        print(f"    -> wrote {len(plan)} dc_outcomes row(s)")
+    return plan
+
+
+def _phase2_sync_metrics(con, variant, apply):
+    """Add each lost position's P&L to the daily_summaries row for the day it
+    was last seen, so hydra_metrics.json self-heals at the next settlement."""
+    _ensure_adjustments_table(con)
+    done = {r[0] for r in con.execute("SELECT strategy_id FROM dc_metrics_adjustments")}
+    rows = [r for r in con.execute(
+        "SELECT strategy_id, close_date, realized_pnl FROM dc_outcomes "
+        "WHERE terminal_state = ?", (TERMINAL_STATE,))
+        if r["strategy_id"] not in done]
+    if not rows:
+        print(f"  phase 2 (daily_summaries): nothing to sync "
+              f"({len(done)} adjustment(s) already applied)")
+        return 0.0
+
+    bt = f"data/variant_{variant}/backtesting.db"
+    if not os.path.exists(bt):
+        print(f"  phase 2: {bt} not found — SKIPPED", file=sys.stderr)
+        return 0.0
+    b = sqlite3.connect(bt)
+    b.row_factory = sqlite3.Row
+
+    print(f"  phase 2 (daily_summaries): {len(rows)} adjustment(s) pending")
+    total = 0.0
+    applied = []
+    for r in rows:
+        cur = b.execute("SELECT net_pnl FROM daily_summaries WHERE date=?",
+                        (r["close_date"],)).fetchone()
+        if cur is None:
+            print(f"    {r['strategy_id']:24} {r['close_date']}  "
+                  f"NO daily_summaries ROW — skipped (will not fabricate one)")
+            continue
+        amt = r["realized_pnl"] or 0.0
+        print(f"    {r['strategy_id']:24} {r['close_date']}  "
+              f"net_pnl {cur['net_pnl']:+.2f} -> {cur['net_pnl'] + amt:+.2f}  ({amt:+.2f})")
+        total += amt
+        applied.append((r["strategy_id"], r["close_date"], amt))
+
+    if apply and applied:
+        stamp = datetime.utcnow().isoformat(timespec="seconds") + "Z"
+        for sid, cd, amt in applied:
+            b.execute("UPDATE daily_summaries SET net_pnl = net_pnl + ? WHERE date = ?",
+                      (amt, cd))
+            con.execute("INSERT OR REPLACE INTO dc_metrics_adjustments "
+                        "(strategy_id, close_date, amount, applied_at) VALUES (?,?,?,?)",
+                        (sid, cd, amt, stamp))
+        b.commit(); con.commit()
+        print(f"    -> adjusted {len(applied)} daily_summaries row(s) by {total:+,.2f}")
+        print(f"    -> hydra_metrics.json self-heals at the next settlement via "
+              f"_reconcile_cumulative_metrics_from_db")
+    b.close()
+    return total
+
+
 def main() -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--variant", default="d")
@@ -77,8 +212,17 @@ def main() -> int:
         print(f"ERROR: {db} not found", file=sys.stderr)
         return 2
 
+    if a.apply:
+        backup = f"{db}.pre_backfill_{datetime.utcnow():%Y%m%dT%H%M%SZ}"
+        shutil.copy2(db, backup)
+        bt = f"data/variant_{a.variant}/backtesting.db"
+        if os.path.exists(bt):
+            shutil.copy2(bt, f"{bt}.pre_backfill_{datetime.utcnow():%Y%m%dT%H%M%SZ}")
+        print(f"backup: {backup} (+ backtesting.db)")
+
     con = sqlite3.connect(db)
     con.row_factory = sqlite3.Row
+    print(f"\n=== variant {a.variant.upper()} ===")
 
     entries = list(con.execute(
         "SELECT strategy_id, date, entry_time, net_debit, entry_number "
@@ -86,7 +230,6 @@ def main() -> int:
     booked = {r[0] for r in con.execute(
         "SELECT strategy_id FROM dc_outcomes WHERE strategy_id IS NOT NULL")}
 
-    # Open positions must NOT be back-filled — they are still live.
     sidecar = f"data/variant_{a.variant}/dc_open_trades.json"
     live = set()
     if os.path.exists(sidecar):
@@ -94,95 +237,20 @@ def main() -> int:
         try:
             live = {r.get("strategy_id") for r in json.load(open(sidecar))}
         except Exception as e:
-            print(f"ERROR: cannot read the sidecar ({e}) — refusing to run, "
-                  f"a live position could be booked as lost", file=sys.stderr)
+            print(f"ERROR: cannot read the sidecar ({e}) — refusing to run, a live "
+                  f"position could be booked as lost", file=sys.stderr)
             return 2
 
-    lost = [r for r in entries if r["strategy_id"] not in booked
-            and r["strategy_id"] not in live]
-    if not lost:
-        print(f"variant {a.variant.upper()}: nothing to back-fill "
-              f"({len(entries)} entries, {len(booked)} booked, {len(live)} open)")
-        return 0
-
-    # Safety: time-window attribution is only valid at max_concurrent = 1.
-    times = [r["entry_time"] for r in entries if r["entry_time"]]
-    if len(times) != len(set(times)):
-        print("ERROR: duplicate entry_time values — cannot attribute snapshots "
-              "by time window. Refusing to run.", file=sys.stderr)
-        return 2
-
-    print(f"\nvariant {a.variant.upper()} — {len(lost)} calendar(s) never booked "
-          f"(of {len(entries)} entries)\n")
-    print(f"{'strategy_id':24} {'entry':11} {'debit':>9} {'last mark':>11} "
-          f"{'last seen':20} {'ticks':>7}")
-    print("-" * 92)
-
-    plan = []
-    for r in lost:
-        sid = r["strategy_id"]
-        start = r["entry_time"]
-        later = [e["entry_time"] for e in entries
-                 if e["entry_time"] and start and e["entry_time"] > start]
-        end = min(later) if later else "9999"
-        snaps = list(con.execute(
-            "SELECT timestamp, unrealized_pnl FROM dc_calendar_snapshots "
-            "WHERE timestamp >= ? AND timestamp < ? "
-            "ORDER BY timestamp",
-            (str(start)[:19].replace("T", " "), str(end)[:19].replace("T", " "))))
-        if not snaps:
-            print(f"{sid:24} {str(r['date']):11} {r['net_debit'] or 0:>9.2f} "
-                  f"{'NO SNAPSHOTS':>11} {'-':20} {0:>7}")
-            continue
-        last = snaps[-1]
-        plan.append({
-            "strategy_id": sid, "entry_date": r["date"],
-            "entry_number": r["entry_number"],
-            "close_date": str(last["timestamp"])[:10],
-            "realized_pnl": last["unrealized_pnl"],
-            "net_debit": r["net_debit"],
-        })
-        print(f"{sid:24} {str(r['date']):11} {r['net_debit'] or 0:>9.2f} "
-              f"{last['unrealized_pnl']:>11.2f} {str(last['timestamp']):20} "
-              f"{len(snaps):>7}")
-
-    print("-" * 92)
-    total = sum(p["realized_pnl"] or 0 for p in plan)
-    cur = con.execute("SELECT COALESCE(SUM(realized_pnl),0) FROM dc_outcomes").fetchone()[0]
-    print(f"\nP&L currently booked in dc_outcomes : {cur:>12,.2f}")
-    print(f"P&L of the lost positions (last mark): {total:>12,.2f}")
-    print(f"Corrected lifetime                   : {cur + total:>12,.2f}\n")
-    print("These are LAST OBSERVED MARKS, not realized closes. The positions")
-    print("were never actually closed. They are booked under terminal_state")
-    print(f"'{TERMINAL_STATE}' so analysis can exclude them — do not present")
-    print("them as completed trades.\n")
-
-    if not a.apply:
-        print("DRY RUN — nothing written. Re-run with --apply to write.\n")
-        con.close()
-        return 0
-
-    backup = f"{db}.pre_backfill_{datetime.utcnow():%Y%m%dT%H%M%SZ}"
-    shutil.copy2(db, backup)
-    print(f"backup: {backup}")
-    n = 0
-    for p in plan:
-        try:
-            con.execute(
-                "INSERT INTO dc_outcomes (entry_date, close_date, entry_number, "
-                "strategy_id, terminal_state, realized_pnl, spx_at_close, "
-                "close_commission, transform_credit, net_debit) "
-                "VALUES (?,?,?,?,?,?,?,?,?,?)",
-                (p["entry_date"], p["close_date"], p["entry_number"],
-                 p["strategy_id"], TERMINAL_STATE, p["realized_pnl"],
-                 None, 0.0, 0.0, p["net_debit"]),
-            )
-            n += 1
-        except Exception as e:
-            print(f"  FAILED {p['strategy_id']}: {e}", file=sys.stderr)
-    con.commit()
+    _phase1_book_outcomes(con, a.variant, entries, booked, live, a.apply)
+    _phase2_sync_metrics(con, a.variant, a.apply)
     con.close()
-    print(f"wrote {n} row(s) with terminal_state='{TERMINAL_STATE}'\n")
+
+    print("\n  NOTE: these are LAST OBSERVED MARKS, not realized closes. The")
+    print("  positions were never actually closed. terminal_state="
+          f"'{TERMINAL_STATE}'")
+    print("  so dc_edge excludes them from the edge verdict.")
+    if not a.apply:
+        print("\n  DRY RUN — nothing written. Re-run with --apply.\n")
     return 0
 
 

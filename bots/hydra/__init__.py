@@ -36,6 +36,46 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-10 (second same-day change) Phase-0 remainder: concurrency source,
+  entry guards, edge era filter, and the metrics sync the back-fill needed.
+  CONCURRENCY SOURCE. Losing a calendar from the sidecar silently FREED the
+  concurrency slot — D opened a fresh calendar the next session, all three
+  times. `_dc_open_calendar_count()` now takes max(in-memory, DB-unfinished).
+  IMPORTANT: the obvious fix — "count real broker positions instead", which is
+  what the original scope item said — would have been a SERIOUS REGRESSION. D
+  and E are dry-run-locked, so `get_positions()` returns nothing for them; the
+  count would read 0 forever and the cap would STOP BINDING ENTIRELY. The DB is
+  the only source that knows about a dry-run calendar. When a real-order path
+  exists, add the broker count as a THIRD term of the max(), never a
+  substitute. A test pins that the broker is not consulted.
+  A lost position now keeps occupying its slot until resolved, which with
+  `_dc_detect_lost_positions`' HIGH alert closes the loop: lost -> alerted ->
+  slot blocked -> operator back-fills -> slot frees.
+  ENTRY GUARDS. `grep -n assert double_calendar_strategy.py` returned NOTHING
+  before today. Added: inverted strikes abort the entry (call at or below put
+  is not a double calendar — reachable when the delta picker degrades on a thin
+  chain, the same failure class as B/C picking ~0.5-delta strikes on
+  2026-07-17); and `_validate_dc_dte_window` rejects short_dte_min < 1 at
+  construction. That second one is a coexistence guard, not hygiene: a 0DTE
+  near leg would put D on the SAME EXPIRY as the 0DTE variants sharing this
+  account, and identical strike + expiry = identical conid, which IBKR MERGES.
+  ERA FILTER. `analyze_calendar_edge(since=...)` / `--since`, defaulting to
+  DEFAULT_MULTIDAY_ERA_START = 2026-07-20, the first multi-day-hold entry.
+  Everything earlier ran under `eod_close_if_no_transform: true` at full-touch
+  fills — 19 trades, 0 wins, -$4,877.40 — and measures a config, not a
+  strategy. The boundary date is INCLUSIVE; a test pins that.
+  METRICS SYNC — closing a loose end the 2026-09-09 back-fill created. Writing
+  dc_outcomes alone was NOT enough: hydra_metrics.json derives from
+  daily_summaries in a DIFFERENT database (backtesting.db), which the back-fill
+  never touched. D read -$6,129.05 in metrics against -$6,458.40 in
+  dc_outcomes — two lifetime figures for one strategy. The back-fill script now
+  also adds each lost position's P&L to the daily_summaries row for the day it
+  was last seen, so _reconcile_cumulative_metrics_from_db self-heals
+  cumulative_pnl at the next settlement with no new machinery. Idempotency is
+  explicit via a `dc_metrics_adjustments` ledger keyed on strategy_id, because
+  the two halves can be (and were) applied in separate runs.
+  Tests: 17 new (tests/test_calendar_phase0_remainder_2026_09_10.py); three
+  mutations verified to fail them.
 - 2026-09-10 IBKR percent-suffixed field parsing — the one-line bug that cost a
   year of a wrong premise.
   `IBClient._parse_quote_row`'s inner `f()` did a bare `float(v)` inside a

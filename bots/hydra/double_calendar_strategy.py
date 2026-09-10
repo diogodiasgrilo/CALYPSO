@@ -98,6 +98,35 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
     # condor phase). Same flag StrangleStrategy uses for the same reason.
     requires_protective_wings = False
 
+    @staticmethod
+    def _validate_dc_dte_window(short_min: int, short_max: int) -> None:
+        """Fail at construction on a DTE window that cannot be a calendar
+        (2026-09-10). There was NO assert anywhere in this file before today.
+
+        short_dte_min < 1 would let D open a 0DTE "calendar", which is not a
+        calendar at all — the near leg expires the same session, so there is no
+        multi-day theta to harvest, which IS the strategy. Worse for
+        coexistence: it would put D on the SAME EXPIRY as the 0DTE variants
+        sharing this account, and identical strike + identical expiry =
+        identical conid, which IBKR MERGES. That is the documented severity-2
+        collision vector against the live seat.
+
+        short_max < short_min is unsatisfiable, so D would silently never enter
+        — a failure mode that looks exactly like "no signal today", forever.
+        """
+        if short_min < 1:
+            raise ConfigError(
+                f"double_calendar.short_dte_min must be >= 1, got {short_min}. "
+                f"A 0DTE near leg is not a calendar, and it would collide with "
+                f"the 0DTE variants' conids on the shared account."
+            )
+        if short_max < short_min:
+            raise ConfigError(
+                f"double_calendar.short_dte_max ({short_max}) is below "
+                f"short_dte_min ({short_min}) — no expiry can satisfy the "
+                f"window, so D would silently never enter."
+            )
+
     def __init__(self, *args, **kwargs):
         """Construct, enforcing the dry-run-only lock (mirrors StrangleStrategy).
 
@@ -146,6 +175,7 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         dc = cfg.get("double_calendar", {}) or {}
         self.dc_short_dte_min = int(dc.get("short_dte_min", 6))
         self.dc_short_dte_max = int(dc.get("short_dte_max", 15))
+        self._validate_dc_dte_window(self.dc_short_dte_min, self.dc_short_dte_max)
         self.dc_long_extra_dte_min = int(dc.get("long_extra_dte_min", 1))
         self.dc_long_extra_dte_max = int(dc.get("long_extra_dte_max", 4))
         self.dc_target_delta = float(dc.get("target_delta", 0.35))
@@ -415,6 +445,20 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
             l_call, l_put = self._read_option_chain(long_exp, combined)
             kc = self._dc_pick_delta_strike("Call", call_base, call_win, s_call, l_call)
             kp = self._dc_pick_delta_strike("Put", put_base, put_win, s_put, l_put)
+            if kc and kp and kc <= kp:
+                # STRIKE-ORDER GUARD (2026-09-10). The call strike must sit
+                # ABOVE the put strike; a double calendar with kc <= kp is an
+                # inverted structure, not this strategy. Reachable if the delta
+                # picker degrades on a thin/garbage chain and both sides
+                # converge on the same region — the same class of degraded-data
+                # failure that made B/C pick ~0.5-delta strikes on 2026-07-17.
+                # There was NO assert anywhere in this file before today.
+                logger.error(
+                    "[CAL] entry ABORTED — inverted strikes: call %.2f <= put %.2f "
+                    "(a double calendar requires call ABOVE put). Likely a "
+                    "degraded chain or a delta-picker failure.", kc, kp,
+                )
+                return False
             if kc and kp:
                 entry.short_call_strike = entry.long_call_strike = kc
                 entry.short_put_strike = entry.long_put_strike = kp
@@ -438,7 +482,12 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         # Concurrent-calendar cap: D holds a multi-day debit position, so opening
         # a fresh daily calendar while one is still open would stack debit + tie
         # up more of the shared account's BP. Default 1 (one calendar at a time).
-        open_cals = sum(1 for e in self.daily_state.entries if self._dc_entry_is_open(e))
+        # 2026-09-10: counts the MAX of in-memory tracking and the DB's view of
+        # unfinished calendars. Losing a position from the sidecar used to
+        # silently free this slot (three times), so D opened a fresh calendar
+        # the next session. See CalendarStrategyBase._dc_open_calendar_count for
+        # why the BROKER's position count would be the wrong source here.
+        open_cals = self._dc_open_calendar_count()
         if open_cals >= getattr(self, "dc_max_concurrent", 1):
             self.daily_state.entries_skipped += 1
             self._next_entry_index += 1

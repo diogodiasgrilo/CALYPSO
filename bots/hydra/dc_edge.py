@@ -370,8 +370,18 @@ def _verdict(mvl: dict, min_preliminary: int, min_confident: int) -> dict:
 # Public API
 # ──────────────────────────────────────────────────────────────────────────────
 
+#: Entry dates strictly BEFORE this ran under `eod_close_if_no_transform: true`,
+#: which force-closed a 6-15 DTE structure the SAME session. Result: 19 trades,
+#: ZERO wins, -$4,877.40 = 80% of D's lifetime loss. They also ran at full-touch
+#: agg=1.0 because a scalar `dry_run_fill_model` under the sub-block was silently
+#: ignored until 2026-07-20. That era measures a config, not a strategy — pass
+#: `since=DEFAULT_MULTIDAY_ERA_START` to exclude it.
+DEFAULT_MULTIDAY_ERA_START = "2026-07-20"
+
+
 def analyze_calendar_edge(db_path: str, *, min_preliminary: int = 10,
-                          min_confident: int = 30) -> dict:
+                          min_confident: int = 30,
+                          since: Optional[str] = None) -> dict:
     """Read a calendar variant's dry-run edge from its dc_calendar.db.
 
     Returns a dict with ``db_status`` ("ok"/"not_found"/"unreadable"),
@@ -382,6 +392,11 @@ def analyze_calendar_edge(db_path: str, *, min_preliminary: int = 10,
     segment only. Never raises.
     """
     rows, status = _load_outcomes(db_path)
+    excluded_by_era = 0
+    if since:
+        before = len(rows)
+        rows = [r for r in rows if (r.get("entry_date") or "") >= since]
+        excluded_by_era = before - len(rows)
     # LOST_FROM_TRACKING rows are back-filled from a position's LAST OBSERVED
     # MARK, not a realized close — the trade was never closed at all (see
     # scripts/backfill_lost_calendars.py). They MUST be excluded from the edge
@@ -416,6 +431,7 @@ def analyze_calendar_edge(db_path: str, *, min_preliminary: int = 10,
         "db_path": db_path,
         "db_status": status,
         "total_outcomes": len(rows),
+        "era_filter": {"since": since, "excluded": excluded_by_era} if since else None,
         "segments": {
             "calendar_mvl": mvl_summary,
             "transformed_untrusted": tr_summary,
@@ -479,6 +495,10 @@ def format_edge_report(result: dict, title: str = "Strategy D — DC Time Machin
         f"  {v['headline']}",
     ]
     lines += [f"  • {r}" for r in v.get("rationale", [])]
+    era = result.get("era_filter")
+    if era:
+        lines += ["", f"ERA FILTER: entry_date >= {era['since']} — "
+                      f"{era['excluded']} earlier outcome(s) excluded."]
     lines += ["", "Segments:",
               *_fmt_segment("calendar (MVL — trustworthy)", result["segments"]["calendar_mvl"])]
     tr = result["segments"]["transformed_untrusted"]

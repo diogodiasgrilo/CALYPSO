@@ -24,7 +24,11 @@ import sys
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-from bots.hydra.dc_edge import analyze_calendar_edge, format_edge_report  # noqa: E402
+from bots.hydra.dc_edge import (
+    DEFAULT_MULTIDAY_ERA_START,
+    analyze_calendar_edge,
+    format_edge_report,
+)  # noqa: E402
 
 _TITLES = {
     "d": "Strategy D — DC Time Machine",
@@ -45,6 +49,13 @@ def main(argv=None) -> int:
                    help="closed-trade floor below which the verdict is INSUFFICIENT_DATA")
     p.add_argument("--min-confident", type=int, default=30,
                    help="closed-trade floor for a CI-backed confident verdict")
+    p.add_argument("--since", nargs="?", const=DEFAULT_MULTIDAY_ERA_START, default=None,
+                   metavar="YYYY-MM-DD",
+                   help="only count outcomes whose ENTRY date is on/after this. "
+                        "Bare --since uses %(const)s, the first multi-day-hold "
+                        "entry: everything earlier ran under the same-day-close "
+                        "config (19 trades, 0 wins) at full-touch fills, so it "
+                        "measures a config rather than the strategy.")
     p.add_argument("--json", action="store_true", help="emit the raw result as JSON")
     args = p.parse_args(argv)
 
@@ -53,6 +64,7 @@ def main(argv=None) -> int:
         db_path,
         min_preliminary=args.min_preliminary,
         min_confident=args.min_confident,
+        since=args.since,
     )
 
     if args.json:
