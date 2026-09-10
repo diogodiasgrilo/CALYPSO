@@ -273,6 +273,74 @@ def round_to_spx_tick(price: float, round_up: bool = False) -> float:
     return round(result, 2)
 
 
+def rung_limit_no_cross(price: float, is_buy: bool) -> float:
+    """Tick for a PASSIVE rung: never cross the spread, deterministically.
+
+    ``round_to_spx_tick`` is the wrong tool for a rung that is supposed to be
+    passive, and in two different ways (both measured on B's live fills,
+    2026-07-24..09-09, 65 entries):
+
+    * BUY uses ``math.ceil``. On a $0.05 book the mid is ALWAYS a half-tick, so
+      the limit lands exactly on the ask — every long leg is a taker, 100% of
+      the time. 31 of 34 rung-1 long limits parsed out of the raw logs were
+      exactly the ask; the 3 exceptions were $0.10 books where ceil(mid)==mid.
+      Cost: $1,575 of a $1,818 total fill gap, ~38% of B's net P&L.
+    * SELL uses ``round``, which on a half-tick is decided by FLOAT NOISE plus
+      banker's rounding — ``0.575/0.05`` is ``11.499999999999998`` (rounds
+      down, lands on the bid, crosses) while ``0.625/0.05`` is exactly ``12.5``
+      (banker's rounds to even, also the bid). Across the 58 one-tick books
+      below $3 the sell limit crosses on 67% and rests on 33%, with no trading
+      intent behind the split whatsoever.
+
+    So rung 1 never had a pricing POLICY; it had an arithmetic accident. This
+    function replaces the accident with a decision:
+
+        BUY  -> the highest tick at or below mid   (floor)
+        SELL -> the lowest  tick at or above mid   (ceil)
+
+    On a one-tick book that is exactly "join the touch" (buy the bid, sell the
+    ask) — passive, resting, never taking. On a WIDER book it lands INSIDE the
+    spread, which is a price improvement over resting at the touch rather than
+    a concession. Both cases are deterministic: the same book always produces
+    the same limit.
+
+    This does NOT make fills free. A resting order may not fill, which is what
+    the escalation rungs (5%, 10%, MARKET) exist for. Trading slippage for MORE
+    failed entries would be a net loss, so this is config-gated and OFF by
+    default — see ``entry_pricing.deliberate_rung_pricing``.
+
+    The epsilon absorbs exactly the float error described above, so a price
+    already sitting on a tick returns itself rather than jumping a tick.
+    """
+    if price <= 0:
+        return 0.0
+    tick = SPX_TICK_SIZE_BELOW_3 if price < SPX_TICK_THRESHOLD else SPX_TICK_SIZE_ABOVE_3
+    n = price / tick
+    eps = 1e-9
+    result = (math.floor(n + eps) if is_buy else math.ceil(n - eps)) * tick
+    return round(result, 2)
+
+
+def deliberate_rung_pricing_enabled(strategy_config: dict) -> bool:
+    """Read the ``entry_pricing.deliberate_rung_pricing`` gate.
+
+    A module-level function rather than an inline ``.get()`` chain inside
+    ``__init__`` specifically so a test can exercise the REAL default. A test
+    that re-implements this read in its own fixture proves nothing about the
+    production default — that mistake let a "defaults to OFF" test pass while
+    the production default had been mutated to True.
+
+    DEFAULT FALSE. Every variant keeps bit-for-bit legacy pricing until it
+    opts in explicitly.
+    """
+    if not isinstance(strategy_config, dict):
+        return False
+    section = strategy_config.get("entry_pricing")
+    if not isinstance(section, dict):
+        return False
+    return bool(section.get("deliberate_rung_pricing", False))
+
+
 # EMERGENCY-001: Spread validation for emergency closes
 EMERGENCY_SPREAD_MAX_PERCENT = 50.0  # Max acceptable spread for emergency close
 EMERGENCY_SPREAD_WAIT_SECONDS = 10  # Wait time for spread normalization
@@ -1244,6 +1312,23 @@ class MEICStrategy(abc.ABC):
         # Order slippage settings (from config or defaults)
         self._max_absolute_slippage = self.strategy_config.get("max_absolute_slippage", MAX_ABSOLUTE_SLIPPAGE)
         self._order_timeout = self.strategy_config.get("order_timeout_seconds", ORDER_TIMEOUT_SECONDS)
+
+        # Entry-pricing policy for the two 0%-slippage rungs (2026-09-10).
+        # DEFAULT OFF so every variant keeps bit-for-bit legacy behaviour until
+        # a variant opts in. Turned on for C first (dry-run, zero risk) to
+        # measure the fill-rate cost before it goes anywhere near the live
+        # seat: the leak is worth ~$79/day, but paying less only helps if the
+        # order still fills, and an entry that fails part-way pays the spread
+        # TWICE on the unwind. See rung_limit_no_cross().
+        self.deliberate_rung_pricing = deliberate_rung_pricing_enabled(
+            self.strategy_config
+        )
+        if self.deliberate_rung_pricing:
+            logger.info(
+                "ENTRY-PRICING: deliberate rung pricing ENABLED — the two "
+                "0%%-slippage rungs will rest (buy at/below mid, sell at/above "
+                "mid) instead of crossing. Escalation rungs unchanged."
+            )
 
         # Daily summary tracking
         self._daily_summary_sent = False
@@ -2930,16 +3015,22 @@ class MEICStrategy(abc.ABC):
                     ambiguous_on_timeout=True,  # L-H1: entry place — abort on transport-timeout
                 )
             else:
+                is_buy = buy_sell == BuySell.BUY
                 if slippage_percent > 0:
-                    if buy_sell == BuySell.BUY:
-                        limit_price = mid_price * (1 + slippage_percent / 100)
-                    else:
-                        limit_price = mid_price * (1 - slippage_percent / 100)
+                    # ESCALATION rungs (5%, 10%). These are MEANT to be
+                    # aggressive — leave the legacy ceil/round alone; crossing
+                    # is the entire point once the passive attempts failed.
+                    limit_price = mid_price * (
+                        1 + slippage_percent / 100 if is_buy
+                        else 1 - slippage_percent / 100
+                    )
+                    limit_price = round_to_spx_tick(limit_price, round_up=is_buy)
+                elif getattr(self, "deliberate_rung_pricing", False):
+                    # PASSIVE rungs (the two 0%-slippage attempts). Never cross.
+                    limit_price = rung_limit_no_cross(mid_price, is_buy=is_buy)
                 else:
-                    limit_price = mid_price
-                limit_price = round_to_spx_tick(
-                    limit_price, round_up=(buy_sell == BuySell.BUY)
-                )
+                    # Legacy: buys ceil onto the ask, sells round by float noise.
+                    limit_price = round_to_spx_tick(mid_price, round_up=is_buy)
                 # GUARD-FLOOR: keep the SELL at/above the net-credit floor so the
                 # vertical stays a credit (the round above may have nudged it down).
                 if sell_floor_ps is not None and limit_price < sell_floor_ps:

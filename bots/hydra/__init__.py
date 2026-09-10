@@ -36,6 +36,59 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-10 (tenth same-day change) Entry rung 1 never had a pricing POLICY —
+  it had an arithmetic accident. Capability landed, DEFAULT OFF everywhere; no
+  variant's behaviour changes until one opts in.
+  MEASURED ON B (2026-07-24..09-09, 65 live entries, 7 contracts): total fill
+  gap $1,817.62, of which the LONG legs are $1,575.07 (86.7%) — long_call
+  $815.01, long_put $760.06. That is ~38% of B's $4,687.65 net, about $79 per
+  trading day.
+  TWO SEPARATE DEFECTS, both in round_to_spx_tick:
+  (1) BUY uses math.ceil. On a $0.05 book the mid is ALWAYS a half-tick, so the
+  limit lands exactly on the ask — every long leg is a taker, deterministically.
+  31 of 34 rung-1 long limits parsed from raw logs were exactly the ask; the 3
+  exceptions were $0.10 books where ceil(mid)==mid.
+  (2) SELL uses round(), and on a half-tick the result is decided by FLOAT NOISE
+  plus banker's rounding: 0.575/0.05 is 11.499999999999998 (rounds down, lands
+  on the bid, CROSSES) while 0.675/0.05 is 13.5 (banker's rounds to 14, lands on
+  the ask, RESTS). Across the 58 one-tick books below $3 the sell limit crosses
+  67% and rests 33%, with no trading intent behind the split at all. This second
+  defect was flagged "unclaimed" by the audit and is confirmed here.
+  So the fix is NOT "flip a rounding mode" — it is replacing an accident with a
+  decision. `rung_limit_no_cross`: BUY -> highest tick at or below mid; SELL ->
+  lowest tick at or above mid. On a one-tick book that is exactly "join the
+  touch"; on a WIDER book it lands INSIDE the spread, a price improvement over
+  resting at the touch rather than a concession. Applied ONLY to the two
+  0%-slippage rungs. The escalation rungs (5%, 10%, MARKET) are MEANT to cross
+  and are untouched.
+  WHY THE DOWNSIDE IS BOUNDED: if a passive rung does not fill, the existing
+  ladder escalates to 5% -> 10% -> MARKET, i.e. to exactly today's behaviour.
+  The cost of being wrong is TIME (up to ~60s more per leg) plus the quote decay
+  and partial-fill exposure that come with it — not a worse price floor. That
+  partial-fill path pays the spread TWICE on the unwind and fired twice on
+  2026-09-09, so the time cost is real, not theoretical.
+  WHY IT IS NOT SHADOWED ON C, contrary to the original plan: a dry-run variant
+  NEVER REACHES the pricing ladder. `_initiate_entry` routes to
+  `_simulate_entry`, and `_place_option_order` has a hard dry-run gate that logs
+  SAFETY-DRY-01 and returns None. Enabling this on C would produce exactly zero
+  data. Only a variant that actually places orders can answer the fill-rate
+  question, so the shadow plan was abandoned rather than run for show.
+  Tests: 404. FIVE mutations verified to fail them — swapping floor/ceil so both
+  sides cross (237 fail), dropping the epsilon (51), ignoring the $3 tick
+  threshold (1), defaulting the gate ON (1), and bypassing the tested config
+  reader with an inline copy (1).
+  TWO OF THOSE MUTATIONS SURVIVED THE FIRST ATTEMPT, and both were real test
+  defects rather than equivalent mutants:
+  * the epsilon test hand-picked 0.05/0.50/1.00/2.95/3.00/4.20/10.00 — every one
+    EXACTLY representable in binary, so it could not detect the epsilon being
+    removed. The prices that actually carry float error are 0.15/0.30/0.60/0.70/
+    1.15/4.30... Now parametrised over EVERY tick from $0.05 to $12.00.
+  * the config test re-implemented the .get() chain in its own fixture, so it
+    passed while the production default was mutated to True — it was testing its
+    own copy, not the shipped code. The read is now a module-level
+    `deliberate_rung_pricing_enabled()` that the test calls directly, plus a
+    wiring guard asserting __init__ uses it rather than a second inline copy.
+  Full suite 3267 passed.
 - 2026-09-10 (ninth same-day change) `get_closed_position_price` must not
   mistake an OPENING execution for a CLOSING one. Ships in the SAME batch as
   the accountId fix, and that pairing is the point.
