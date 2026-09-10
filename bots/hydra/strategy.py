@@ -6433,6 +6433,9 @@ class HydraStrategy(MEICStrategy):
             # row is durable so the DB is complete for today.
             self._reconcile_cumulative_metrics_from_db(date_str)
 
+            # The only check in this codebase that is NOT circular.
+            self._reconcile_pnl_against_broker(date_str)
+
         except Exception as e:
             logger.debug(f"DataRecorder daily summary failed: {e}")
 
@@ -6492,6 +6495,91 @@ class HydraStrategy(MEICStrategy):
                 )
         except Exception as ex:
             logger.debug(f"per-entry realized_pnl record/reconcile failed: {ex}")
+
+    def _reconcile_pnl_against_broker(self, date_str: str) -> Optional[dict]:
+        """INDEPENDENT P&L check — the only one here that is not circular.
+
+        WHY THIS EXISTS. Every other reconciliation compares two numbers that
+        descend from the SAME accumulator: ``_book_realized_pnl`` increments
+        ``daily_state.total_realized_pnl`` and ``entry.realized_pnl`` in one
+        statement pair, and ``daily_summaries.gross_pnl`` derives from that same
+        total. They cannot disagree by construction, so they can only catch a
+        booking site that forgot to pass ``entry=``. The failure classes that
+        have actually bitten this codebase — a WRONG booked amount, a MISSING
+        booking, a DOUBLE booking — are all invisible to them.
+
+        IBKR computes its own realized P&L in the account ledger
+        (``raw_ledger.USD.realizedpnl``). That number shares no code path with
+        anything of ours, so comparing against it can catch all three.
+
+        LIVE SEAT ONLY. A dry-run variant places no orders, so the broker's
+        realized P&L reflects OTHER variants' activity (today, only B trades
+        for real). Comparing a simulated P&L against it would be meaningless
+        and would alarm on every close, so this returns None unless
+        ``dry_run`` is False.
+
+        Executions were the first choice and DO NOT WORK here: probed
+        2026-09-10, ``/iserver/account/trades`` returns ZERO records over a
+        7-day window that contained dozens of real paper fills, with no error.
+        The ledger is what this paper account actually exposes.
+
+        UNVERIFIED SEMANTICS, deliberately reported both ways. It is not
+        established whether IBKR's ``realizedpnl`` is net of commission, nor
+        exactly when it resets. It read 0.0 on a flat pre-market account, which
+        is consistent with a daily/session reset but does not prove one. So the
+        drift is computed against BOTH our gross and our net, and the first real
+        trading day will show which one tracks. Until then this LOGS and does
+        not alert, so an unverified comparison cannot cry wolf on the live seat.
+        Returns the measurement dict, or ``{"skipped": <reason>}`` — the reason
+        is distinguishable on purpose, so "IBKR gave us no field" is never
+        confused with "IBKR says $0". Never raises.
+        """
+        if getattr(self, "dry_run", True):
+            return {"skipped": "dry_run"}
+        try:
+            bal = self.broker.get_balance() or {}
+            ledger = (bal.get("raw_ledger") or {}).get("USD") or {}
+            broker_realized = ledger.get("realizedpnl")
+            if broker_realized is None:
+                # Distinct from an error, and distinct from a real 0.0. Reported
+                # as its own reason so a caller (and a test) can tell "IBKR did
+                # not give us the field" from "IBKR says you made nothing" —
+                # conflating those would report a drift equal to the entire
+                # day's P&L, or hide a genuine flat day.
+                logger.info(
+                    "BROKER-RECONCILE %s: ledger has no realizedpnl — skipped.",
+                    date_str,
+                )
+                return {"skipped": "no_realizedpnl_field"}
+            broker_realized = float(broker_realized)
+            gross = float(self.daily_state.total_realized_pnl or 0.0)
+            commission = float(self.daily_state.total_commission or 0.0)
+            net = gross - commission
+            out = {
+                "date": date_str,
+                "broker_realized_pnl": round(broker_realized, 2),
+                "our_gross": round(gross, 2),
+                "our_net": round(net, 2),
+                "drift_vs_gross": round(gross - broker_realized, 2),
+                "drift_vs_net": round(net - broker_realized, 2),
+                "net_liquidation": ledger.get("netliquidationvalue"),
+            }
+            best = min(abs(out["drift_vs_gross"]), abs(out["drift_vs_net"]))
+            logger.warning(
+                "BROKER-RECONCILE %s: IBKR realized $%.2f | ours gross $%.2f "
+                "(drift $%+.2f) / net $%.2f (drift $%+.2f) | closest $%.2f. "
+                "INDEPENDENT of total_realized_pnl. Semantics of IBKR's "
+                "realizedpnl (net-of-commission? reset cadence?) are still "
+                "UNVERIFIED — compare which drift tracks across sessions before "
+                "trusting either.",
+                date_str, broker_realized, gross, out["drift_vs_gross"],
+                net, out["drift_vs_net"], best,
+            )
+            return out
+        except Exception as e:
+            # Never let a diagnostic disturb settlement.
+            logger.info("BROKER-RECONCILE %s skipped (%s)", date_str, e)
+            return {"skipped": "error", "error": str(e)}
 
     def _reconcile_cumulative_metrics_from_db(self, date_str: str) -> None:
         """SELF-HEAL the cumulative metrics (hydra_metrics.json) from the authoritative

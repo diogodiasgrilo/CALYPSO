@@ -36,6 +36,49 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-10 (sixth same-day change) An INDEPENDENT P&L check — the first one
+  in this codebase that is not circular.
+  THE PROBLEM. Every existing reconciliation compares two numbers descended
+  from the SAME accumulator: `_book_realized_pnl` increments
+  `daily_state.total_realized_pnl` and `entry.realized_pnl` in one statement
+  pair, and `daily_summaries.gross_pnl` derives from that same total. They
+  cannot disagree by construction, so they can only catch a booking site that
+  forgot `entry=`. A WRONG booked amount, a MISSING booking and a DOUBLE
+  booking are ALL invisible to them — and all three have bitten this codebase.
+  EXECUTIONS WERE THE FIRST CHOICE AND DO NOT WORK ON THIS ACCOUNT. Added
+  `IBClient.get_day_executions` (allowlisted) and probed live: IBKR's
+  `/iserver/account/trades` returns ZERO records over a 7-day window that
+  contained dozens of real paper fills — no error, empty list, endpoint called
+  correctly. Recorded here because it also means `get_closed_position_price`,
+  which reads the same endpoint and is documented as the F5 fill-price
+  authority, is very likely returning nothing on paper too. Worth its own
+  investigation. The method is kept: it is read-only, it is the right anchor on
+  a live account, and it returns the raw record so the shape can be discovered
+  when it does start reporting.
+  WHAT WORKS INSTEAD: IBKR publishes its own realized P&L in the account ledger
+  (`get_balance()` -> `raw_ledger.USD.realizedpnl`), and `get_balance` was
+  already allowlisted. That figure shares no code path with ours.
+  `_reconcile_pnl_against_broker` runs at settlement, right after the
+  in-process reconcile, and logs the drift.
+  LIVE SEAT ONLY. A dry-run variant places no orders, so the broker's realized
+  P&L reflects OTHER variants' activity — comparing a simulated P&L against it
+  would alarm on every close. Returns `{"skipped": "dry_run"}`.
+  SEMANTICS DELIBERATELY UNVERIFIED, AND SAID SO. It is not established whether
+  IBKR's `realizedpnl` is net of commission, nor exactly when it resets — it
+  read 0.0 on a flat pre-market account, consistent with a daily reset but not
+  proof of one. So the drift is computed against BOTH our gross and our net and
+  the log says which is closest; the first real trading day will show which
+  tracks. It LOGS and does NOT alert until then, so an unverified comparison
+  cannot cry wolf on the live seat.
+  Skip reasons are returned distinctly (`dry_run` / `no_realizedpnl_field` /
+  `error`) rather than a bare None. That is not cosmetic: a bare None made
+  "IBKR gave us no field" indistinguishable from "the call raised", and a test
+  written against it PASSED while the guard was mutated away — because
+  float(None) raised into the error handler and produced the same None. The
+  distinct reasons are what make the guard testable at all.
+  Tests: 10 new + a broker contract case (the suite enforces one per allowlisted
+  method — a good guard that caught the omission). Three mutations verified to
+  fail them.
 - 2026-09-10 (fifth same-day change) ROOT-CAUSE the overlay attribution gap:
   persist the aggregate-only total instead of re-deriving it.
   The earlier entry called this "attribute by entry_number rather than object
