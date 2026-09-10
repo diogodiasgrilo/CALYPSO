@@ -1,14 +1,185 @@
 # CALYPSO — Next Steps (living doc)
 
-> **This is the single, always-current "what's left" tracker.** Update it whenever work lands or a new
-> item appears. It complements (does not replace) [`docs/migration/PROJECT_STATUS.md`](migration/PROJECT_STATUS.md)
-> (project-wide state) and the per-effort design docs. When an item is done, check it off here and move the
-> detail into the relevant doc/commit. Last updated: **2026-07-24** (B↔C live-paper swap recorded in §0, §5,
-> §6; body otherwise still reflects 2026-07-14).
+> **This is the single, always-current "what's left" tracker — read §A first.** Update it whenever work
+> lands or a new item appears. It complements (does not replace)
+> [`docs/migration/PROJECT_STATUS.md`](migration/PROJECT_STATUS.md) (project-wide state) and the per-effort
+> design docs.
+>
+> **Last updated: 2026-09-10.** §A–§D below are current. **§0–§10 are the older backlog (2026-07-14 /
+> 07-24 era)** — much of it is done or superseded; **verify against the code before acting on anything
+> there.** Real live items still live in §5 (entry-schedule lock, E calendar-stop analyzer) and §6
+> (Brandon fill-quality confirmations), which is why those sections are kept rather than deleted.
 
 ---
 
-## 0. Current snapshot
+# §A. DO NEXT — by priority (2026-09-10)
+
+### P0 — tonight's deploy, after the 16:00 ET close
+
+Ten commits landed today; **eight are still pending deploy** (VM is at `56bb096`, local/origin at
+`8e48235`). Order matters:
+
+1. **Wait for settlement to complete.** Measured 21:45–22:37 ET. NEVER restart with settlement pending
+   (the stale-SPX bug produced a phantom −$6,036).
+2. Confirm the account is flat via direct broker RPC (`get_positions`), not the state file.
+3. **Restart `calypso-broker` FIRST**, verify `/health`. Three commits touch `shared/ib_client.py`, and the
+   strategies forward new kwargs blindly over `/rpc` — an un-restarted broker on old code raises
+   `TypeError` and blinds the bot (the 2026-06-08 modularity deploy bug).
+4. Restart the strategies. **Verify `deliberate_rung_pricing: true` actually landed in B's VM config** —
+   skip-worktree does NOT stop a fast-forward pull, and it does not guarantee one either.
+5. **`cp` the changed unit files to `/etc/systemd/system/` + `daemon-reload`.** A `git pull` does NOT
+   install unit files. After tonight's pull these will differ: `hermes.timer`, `homer.timer`,
+   `hydra_variant_b.service`. Then `systemctl restart hermes.timer homer.timer`.
+6. **Probe `get_day_executions(days=7)`** — the moment of truth on whether the missing `accountId` was
+   really why `/iserver/account/trades` returned nothing. If rows appear, correct the "dead endpoint"
+   language in CLAUDE.md + the F5 docs. If still empty, the paper-limitation theory returns with one
+   variable eliminated.
+7. **Read today's `BROKER-RECONCILE` log line** and settle whether IBKR's `raw_ledger.USD.realizedpnl` is
+   gross or net of commission. Until that is known the check logs and does not alert.
+
+### P1 — tomorrow: VERIFY, do not build
+
+Three things ship tonight that have never run against live data. Spend the day confirming rather than
+stacking more on top.
+
+- [ ] **Entry-failure / unwind rate and rung-2+ escalation rate on B.** This is where the new passive
+      rung-1 pricing would show up as a *cost*. The per-leg fill-vs-mid columns already exist
+      (`short_*_fill_price` / `*_mid_at_fill`), so no new telemetry is needed to measure it.
+- [ ] **Did the executions endpoint come alive?** (see P0.6)
+- [ ] **Gross vs net on the ledger reconcile** (see P0.7)
+- **Rollback lever if anything looks wrong:** `strategy.entry_pricing.deliberate_rung_pricing: false` +
+  a strategy restart. It is the only change that alters order pricing and the only one with no broker
+  dependency.
+
+### P2 — remaining non-go-live work (small)
+
+- [ ] **Stale-comment sweep + unit-file drift** (~30 min, cosmetic but they mislead readers):
+  - `base_strategy.py` MKT-048's "a mid-limit buy fills at ≤ mid, so long_fill ≈ long_mid" — falsified
+    29/34 on legacy pricing, but becomes *conditionally true* for B once deliberate rung pricing is on.
+    Needs precision, not deletion.
+  - `ib_client.py` "EUR for us" — the account is USD (`raw_ledger.USD`, netliq in USD).
+  - `deploy/hydra*.service` "root cause unconfirmed" notes about the shutdown hang — it WAS root-caused
+    (CPython finalization + grpc-core) and fixed 2026-09-05 in `3986cdf`.
+  - **`/etc/systemd/system/entry-window-watch.timer` is OLDER than the repo copy** — pre-existing drift,
+    not caused by today's work. It is missing the 14:05 E6 check that was added but never installed, so
+    that watch has never run. Low impact (E6 is suppressed on B) but fix it during a deploy.
+- [ ] **GEX veto EV, computed properly** (~2–3h, read-only, OPTIONAL). Use `gex_decisions.reference_strike`
+      + the adjuster's log line + `market_ticks.spx_price` over the full 83-abort window. Converts the last
+      deferred question from argument into a number. **Prior evidence favours KEEPING the gate** (43 vetoes
+      vs 38 placed, Fisher p=0.038), so this is confirmation, not a blocker.
+
+### P3 — the real-money combo track (the actual next phase)
+
+Strictly ordered — each step bakes in decisions the later ones depend on.
+
+1. [ ] **Settle the combo side-field semantics (C4).** Read-only `what_if_order` preview on the exact BAG
+       `OrderRequest` that `place_iron_condor` builds; snapshot the legs + BAG first; read `initial.change`
+       and `amount`. Short-IC ⇒ `change` ≈ width×100×qty and `amount` is a credit. **Treat an empty block as
+       INCONCLUSIVE, never a pass.** Do NOT use the "place a 1-contract live combo then cancel" fallback —
+       the repo's own probe records paper combos sticking in phantom `PendingSubmit` with `OrderID doesn't
+       exist` on cancel.
+2. [ ] **Make routing an explicit decision.** IBKR executes a combo as ONE transaction only when routed
+       directly to an exchange; **SmartRouted combos may fill leg by leg.** Nothing in the repo sets
+       `listing_exchange` / `@CBOE`. **Without this the combo delivers no atomicity and the project has no
+       justification** — and `COMBO_ENTRY_LIVE_CUTOVER_PLAN.md` §6 currently claims "inversion impossible by
+       construction" while the research it rests on explicitly chose non-atomic SMART routing. Keep the
+       client-side partial-fill reconcile as a PERMANENT backstop regardless: the guarantee is venue-level,
+       not ticket-level.
+3. [ ] **Partial-fill-by-quantity reconcile — HARD BLOCKER for 10 contracts.** `entry.contracts` is
+       config-sourced and never read back from `filledQuantity`, and worse, the acting A2 stop computes
+       `pct × width × 100 × self.contracts_per_entry` — reading the *config attribute directly*, so fixing
+       `entry.contracts` alone would not fix the stop. At 10c/5pt/0.40 a 6-of-10 fill stops at $2,000
+       against a $3,000 max loss — 67% of max instead of 40%. ibind 0.1.23 has no AON/FOK field.
+4. [ ] **Make the environment a real switch.** `load_credentials("paper")` is a hardcoded literal in
+       `bots/hydra/main.py` and `services/broker/main.py`; `is_paper` is derived from that literal and gates
+       NOTHING. Re-encrypting live creds under the same systemd credential names would connect to a live
+       account while `is_paper` still reports True. Add `CALYPSO_IBKR_ENV` + a startup assertion that the
+       discovered account code matches the declared environment (DU* ⇔ paper, U* ⇔ live).
+5. [ ] **Add combo prompts to `DEFAULT_ORDER_ANSWERS`** before the first live combo — ibind raises on an
+       unmapped prompt and would fail the place.
+6. [ ] **Then the runtime path itself.** `place_iron_condor` / `place_vertical_spread` / the conidex builders
+       have **zero callers under `bots/`**, are absent from `broker_service.ALLOWED_METHODS`, and
+       `place_and_wait_for_fill` is keyword-only `conid: int` with no BAG support.
+
+> **Do NOT wait for combos to fix the fill leak.** Combos are only validatable on a live account by the
+> plan's own probe evidence; the leak is running today and the rung-pricing work is already deployed.
+
+---
+
+# §B. DECIDED — do not re-litigate
+
+- **Entry slots: leave them alone.** A permutation test on B's live era puts the ENTIRE per-slot effect at
+  **p=0.569**. 11:15's whole −$875 was ONE −$1,750 stop on 08-28; excluding it, those 8 entries average
+  **+$109**. Detecting a $200/entry difference at 80% power needs ~72 entries per slot; there are 8–9.
+  **STANDING RULE: no slot is cut or restored again until it has ≥70 live-era hedge-free entries.**
+- **A2 %-of-width stop: keep B at 0.40.** Validated on 63,807 spread snapshots over 58 C sessions; beats
+  credit+buffer 5-for-5 (+$2,450, sign test p=0.031). Costs $0 — B already runs it.
+- **GEX sign convention: do NOT flip.** Direction confirmed but the cost is ~−$535, and the two sampled
+  sessions had zero stop-losses, so the sample can measure the gate's cost and never its benefit. The
+  windowed normalization is measured inert (0/217 predicates changed) and must never be proposed as a
+  remedy for over-vetoing.
+- **`TimeoutStopSec`: do NOT lower it.** The shutdown hang was fixed 2026-09-05; post-fix shutdowns still
+  legitimately reach 71s during a 7-contract entry. A 25s timeout would SIGKILL the live seat mid-order.
+- **Brandon overlay hedges: OFF on B** since 2026-09-04. Hedge debits ($1,925–$2,240) exceeded the IC-side
+  loss they defended (~$1,400, already bounded by the A2 stop). `enabled` stays true on purpose to preserve
+  WATCH telemetry.
+- **A dry-run variant CANNOT test anything in the order path.** `_initiate_entry` routes to
+  `_simulate_entry` and `_place_option_order` hard-gates on `dry_run` (SAFETY-DRY-01). **B is the only
+  variant that can answer any entry-execution question.** Remember this before proposing a "shadow on C".
+
+---
+
+# §C. DONE — 2026-09-10 (ten commits)
+
+**Deployed same day:** `141d267` (07:34) independent P&L check vs IBKR's own ledger — the first
+non-circular reconciliation in the codebase; `56bb096` (09:19) L-M3 double-book guard + flag persistence
++ settlement exclusion + the 7-slot label.
+
+**Pending tonight:** `52d2b5c` accountId (the trades endpoint was never dead) · `f36eda9` close-price
+open/close filter · `2e3dbf6` rung-1 pricing policy (default off) · `b235df5` enable it on B · `14205f2`
+unwind shorts-first + 12:45 in the slot analyzer + agent timers past settlement · `2d912ea` MKT-033
+estimates instead of deleting P&L + stop pinning every IbkrClient · `0fbc22d` agents refuse to run on an
+unsettled day · `8e48235` analyzers stop pooling incomparable eras.
+
+Full detail, including the reasoning and the mutation results, is in `bots/hydra/__init__.py` version
+history. Highlights worth carrying forward:
+
+- **The entry fill leak was ~38% of B's net** ($1,575 of a $1,818 gap across 65 entries, ~$79/day) and was
+  not a bias but an **arithmetic accident**: buys `ceil`'d onto the ask 100% of the time; sells were
+  decided by float noise and crossed on 67% of one-tick books.
+- **`/iserver/account/trades` was never dead** — we never sent `accountId`. Eleven other call sites passed
+  it; the two `trades()` calls did not.
+- **HERMES/HOMER ran ~3 hours before settlement, every day** — so the daily analysis and the journal
+  committed to git were built on unsettled numbers.
+
+---
+
+# §D. OPEN QUESTIONS (carry these; do not paper over)
+
+- Is IBKR's `raw_ledger.USD.realizedpnl` gross or net of commission, and when does it reset? Unverified —
+  the reconcile reports drift against BOTH until a real trading day settles it.
+- Does the `accountId` fix actually make executions appear? Proven by code-read only. **If it does, three
+  currently-masked defects activate at once** — which is why the L-M3 guard and the close-price filter had
+  to ship first.
+- B's 2026-07-24 → 08-14 window has no log coverage (journald ~24d, `bot.log` ~7d). A silently-unbooked
+  L-M3 side leaves NO row in `trade_stops`, so a clean DB over that window is not proof one didn't occur.
+- Realistically recoverable share of the fill leak is an ESTIMATE ($20–34/day at 7c), not a measurement —
+  the passive-fill evidence is n=11.
+- Variant F is 0-for-10; unknowable whether that is the strategy or a mis-calibrated boundary, because
+  nothing records the session's max excursion toward the EM boundary.
+- HOMER's actual DB-mode fallback chain has never been re-verified since the 2026-07-17 migration;
+  CLAUDE.md still documents the legacy Sheets-mode chain.
+
+---
+
+<!-- ────────────────────────────────────────────────────────────────────────
+     Everything below is the 2026-07-14 / 07-24-era backlog. Much is DONE or
+     superseded by §A–§C. Verify against the code before acting on it.
+     Still-live items: §5 (entry-schedule lock, E calendar-stop analyzer) and
+     §6 (Brandon fill-quality confirmations).
+     ──────────────────────────────────────────────────────────────────────── -->
+
+## 0. Current snapshot (2026-07-24 — STALE, see §A above)
 
 - **Branch:** **MERGED** into `hydra-ibkr-standalone` (2026-06-16, at `e5688f0`; latest `741fc66`). The merge
   also reconciled a HOMER auto-commit that had regressed the mainline (see [[homer-vm-autocommit-gotcha]] / §6).
