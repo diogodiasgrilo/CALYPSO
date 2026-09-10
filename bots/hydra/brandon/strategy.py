@@ -234,6 +234,16 @@ class BrandonHydraStrategy(HydraStrategy):
         # cleared on the new-day reset. Initialized BEFORE super().__init__() so it
         # exists if base-class recovery restores it.
         self._brandon_overlay_booked: set[int] = set()
+        # Running total of overlay P&L booked to the day AGGREGATE ONLY — i.e.
+        # hedges whose entry was absent from daily_state at settle. PERSISTED
+        # (2026-09-10) alongside _brandon_overlay_booked, because the value used
+        # to be DERIVED at summary time from _brandon_hedge_settlements, which is
+        # not persisted — so the very restart that CAUSES an aggregate-only
+        # booking was the one that lost the record of it. That is exactly what
+        # happened on 2026-07-07 (B: -$2,532.58 booked to the aggregate, column
+        # written as 0.0, and the day read as an unexplained attribution miss
+        # until a manual back-fill on 2026-09-10).
+        self._brandon_unattributed_overlay: float = 0.0
         self._brandon_hedge_state_path = self._brandon_resolve_hedge_state_path()
         self._brandon_load_hedge_state()
         # Durable hedge-history DB (2026-08-25) — separate from the sidecar
@@ -2662,7 +2672,20 @@ class BrandonHydraStrategy(HydraStrategy):
                 if entry is not None:
                     self._book_realized_pnl(s.total_pnl, entry)
                 else:
+                    # Aggregate-only: no entry object to hang it on. Record the
+                    # amount NOW, while we know it, so the reconciliation does
+                    # not depend on this process surviving to summary time.
                     self._book_realized_pnl(s.total_pnl, None)
+                    # getattr, NOT `+=` on the bare attribute. This sits inside
+                    # the ATOMIC BOOK + GUARD block, whose whole contract is
+                    # that it CANNOT raise partway through — a raise between a
+                    # booking and the guard flip is the reproduced double-count
+                    # of 2026-08-20. A bare `+=` raises AttributeError on any
+                    # object that reached here without the field (caught by
+                    # tests/test_realized_pnl_recording.py's stub).
+                    self._brandon_unattributed_overlay = (
+                        getattr(self, "_brandon_unattributed_overlay", 0.0) or 0.0
+                    ) + s.total_pnl
             if entry is not None:
                 entry.overlay_pnl_booked = True
             self._brandon_overlay_booked.add(entry_number)
@@ -2718,6 +2741,16 @@ class BrandonHydraStrategy(HydraStrategy):
         $392, which is EXPECTED, not drift). Derived from THIS process's settlement
         sweep (runs first, log_daily_summary line ~1831), so a re-run that
         double-books the aggregate still drifts rather than being masked."""
+        # PERSISTED accumulator (2026-09-10), not a re-derivation. The old
+        # version summed THIS process's _brandon_hedge_settlements — which is
+        # not persisted — so a restart between the aggregate-only booking and
+        # the daily summary silently produced 0.0. That is the same restart
+        # that causes the condition, so the scalar failed precisely when it was
+        # needed. Falls back to the old derivation only when the accumulator is
+        # absent (an entry object built before this field existed).
+        stored = getattr(self, "_brandon_unattributed_overlay", None)
+        if stored is not None:
+            return float(stored)
         settlements = getattr(self, "_brandon_hedge_settlements", None)
         if not settlements:
             return 0.0
@@ -3537,6 +3570,11 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_hedge_legs.clear()
         self._brandon_hedge_settlements = []
         self._brandon_overlay_booked.clear()  # reset the overlay double-book guard
+        # Must reset WITH the guard it accompanies (2026-09-10). It is a
+        # PER-DAY total consumed by that day's daily_summaries row — left
+        # running it would carry yesterday's aggregate-only overlay into
+        # today's reconciliation and manufacture drift on a clean day.
+        self._brandon_unattributed_overlay = 0.0
         # Wipe yesterday's hedge sidecar so a new-day restart won't restore it.
         try:
             path = getattr(self, "_brandon_hedge_state_path", None)

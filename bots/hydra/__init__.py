@@ -36,6 +36,48 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-10 (fifth same-day change) ROOT-CAUSE the overlay attribution gap:
+  persist the aggregate-only total instead of re-deriving it.
+  The earlier entry called this "attribute by entry_number rather than object
+  identity". THAT DIAGNOSIS WAS WRONG — `_brandon_settle_hedges` already looks
+  the entry up by entry_number (brandon/strategy.py:2594). The real failure is
+  that the entry is ABSENT from `daily_state.entries` entirely at settle
+  (post-close / cross-day restart), which is a legitimate state, and the
+  aggregate-only booking that follows is correct.
+  THE ACTUAL BUG is one level down: `_unattributed_overlay_pnl()` DERIVED the
+  gap from `_brandon_hedge_settlements`, which is NOT persisted — so the very
+  restart that CAUSES an aggregate-only booking is the one that loses the record
+  of it. The scalar failed in exactly the situation it was built for. That is
+  why 2026-07-07's column read 0.0 against a real -$2,532.58, and why the column
+  had never held a non-zero value in B's entire history.
+  FIX: accumulate `_brandon_unattributed_overlay` at the booking site, where the
+  fact is known, and persist it in hydra_state.json alongside
+  `_brandon_overlay_booked` — the guard it belongs with, written in the SAME
+  save (a guard restored without its amount is the 2026-07-18 failure mode in
+  reverse). Reset it on the new-day reset, immediately after the guard: it is a
+  PER-DAY total, and left running it would carry yesterday's overlay into today
+  and manufacture drift on a clean day. The old derivation is retained as a
+  fallback for objects built before the field existed.
+  Read with `is not None`, NOT truthiness: 0.0 is falsy, and falling through to
+  the derivation on a legitimate zero could resurrect a stale in-process
+  settlement the daily reset had correctly cleared.
+  DEFECT I INTRODUCED AND THE SUITE CAUGHT — recorded because the lesson is
+  more valuable than the fix: the first version accumulated with a bare
+  `self._brandon_unattributed_overlay += s.total_pnl`. That sits INSIDE the
+  ATOMIC BOOK + GUARD block, whose entire documented contract is "pure
+  arithmetic only, no logging/Telegram/I/O of any kind, so nothing here can
+  raise partway through and leave a booked amount without its guard". A bare
+  `+=` raises AttributeError on any object lacking the field — which is exactly
+  a raise between a booking and the guard flip, i.e. the reproduced double-count
+  of 2026-08-20 that this block was restructured to prevent. Two existing tests
+  in test_realized_pnl_recording.py failed on it. Now uses getattr with a
+  default so it cannot raise. When a comment says a block must not raise, adding
+  an attribute access to it is not a small change.
+  Tests: 9 new. Three mutations verified to fail them. Also worth recording: the
+  truthiness mutation initially PASSED, because the test used an empty
+  settlement list so both branches returned 0.0. Rebuilt so the branches
+  disagree — stored 0.0 against a stale -$1,960 settlement — which is the real
+  hazard. A test that passes against the bug is worse than no test.
 - 2026-09-10 (fourth same-day change) ORDER-010 round-trip PRICE P&L on failed
   entries, and the 2026-07-07 overlay residual back-filled.
   UNWIND PRICE P&L. When an entry fails part-way, `_unwind_partial_entry`

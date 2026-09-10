@@ -12084,6 +12084,11 @@ class HydraStrategy(MEICStrategy):
                 # silently lose the overlay (2026-07-18 review). getattr: empty for
                 # non-Brandon variants and during pre-super().__init__ base recovery.
                 "brandon_overlay_booked": sorted(getattr(self, "_brandon_overlay_booked", set()) or set()),
+                # Persisted with the guard it belongs to (2026-09-10): the
+                # aggregate-only overlay total must survive the restart that
+                # produced it, or the day reads as an unexplained drift.
+                "brandon_unattributed_overlay": float(
+                    getattr(self, "_brandon_unattributed_overlay", 0.0) or 0.0),
                 "total_commission": self.daily_state.total_commission,
                 "call_stops_triggered": self.daily_state.call_stops_triggered,
                 "put_stops_triggered": self.daily_state.put_stops_triggered,
@@ -14277,6 +14282,8 @@ class HydraStrategy(MEICStrategy):
             # instances that carry the attr (set in __init__ before recovery runs).
             if hasattr(self, "_brandon_overlay_booked"):
                 self._brandon_overlay_booked = set(saved_state.get("brandon_overlay_booked", []))
+                self._brandon_unattributed_overlay = float(
+                    saved_state.get("brandon_unattributed_overlay", 0.0) or 0.0)
             self.daily_state.put_stops_triggered = saved_state.get("put_stops_triggered", 0)
             self.daily_state.call_stops_triggered = saved_state.get("call_stops_triggered", 0)
             self.daily_state.double_stops = saved_state.get("double_stops", 0)
