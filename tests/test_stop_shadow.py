@@ -154,7 +154,9 @@ class TestRoundTrip:
         return str(p)
 
     def test_analyze_reads_db_and_finds_the_tail_win(self, tmp_path):
-        r = analyze(self._db(tmp_path), pcts=(0.25,))
+        # since="": this fixture pre-dates the 2026-07-24 live-era floor added
+        # 2026-09-10. The test is about the simulation, not era filtering.
+        r = analyze(self._db(tmp_path), pcts=(0.25,), since="")
         assert r["db_status"] == "ok" and r["n_entries"] == 1
         by = r["by_pct"][0]
         assert by["tail_capping_count"] == 1

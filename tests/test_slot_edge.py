@@ -97,7 +97,9 @@ def test_analyze_slots_aggregates_and_scores(tmp_path):
     _seed_db(con)
     con.close()
 
-    res = analyze_slots(str(db), min_preliminary=2, min_confident=10)
+    # since="": these fixtures pre-date the 2026-07-24 live-era floor added
+    # 2026-09-10; this test is about aggregation, not era filtering.
+    res = analyze_slots(str(db), min_preliminary=2, min_confident=10, since="")
     assert res["ok"] is True
     by_slot = {r["slot"]: r for r in res["slots"]}
 
@@ -138,7 +140,9 @@ def test_recorded_realized_pnl_is_preferred_over_reconstruction(tmp_path):
     con.commit()
     con.close()
 
-    res = analyze_slots(str(db), min_preliminary=2, min_confident=10)
+    # since="": these fixtures pre-date the 2026-07-24 live-era floor added
+    # 2026-09-10; this test is about aggregation, not era filtering.
+    res = analyze_slots(str(db), min_preliminary=2, min_confident=10, since="")
     by_slot = {r["slot"]: r for r in res["slots"]}
     s1145 = by_slot["11:45"]
     # Both 11:45 entries now scored via the recorded column; none unscored.
@@ -172,7 +176,7 @@ def test_missing_realized_pnl_column_falls_back(tmp_path):
     con.execute("INSERT INTO daily_summaries VALUES ('2026-07-03', 520, 550)")
     con.commit()
     con.close()
-    res = analyze_slots(str(db), min_preliminary=1, min_confident=5)
+    res = analyze_slots(str(db), min_preliminary=1, min_confident=5, since="")
     assert res["ok"] is True
     s = {r["slot"]: r for r in res["slots"]}["10:45"]
     # NOT scored: no realized_pnl column at all -> unscored, no mean published.

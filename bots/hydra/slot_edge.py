@@ -77,7 +77,11 @@ _SCRATCH_EPS = 0.005  # |pnl| at/below this (after rounding) is a scratch, not w
 # 2026-07-01, effective the first close after → reliable from 2026-07-02. Earlier
 # days carry unbooked 0.0 realized_pnl, so the reconciliation cross-check floors to
 # this date (the per-slot ranking still uses all rows via reconstruction fallback).
-_PER_ENTRY_RELIABLE_SINCE = "2026-07-02"
+from bots.hydra.analysis_eras import (  # noqa: E402
+    LIVE_ERA_SINCE,
+    PER_ENTRY_RELIABLE_SINCE as _PER_ENTRY_RELIABLE_SINCE,
+    era_banner,
+)
 
 
 def _t_crit(df: int) -> float:
@@ -189,8 +193,17 @@ def _connect_ro(db_path: str) -> sqlite3.Connection:
     return con
 
 
-def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int = 25) -> dict:
-    """Aggregate per-entry reconstructed P&L by slot. Returns a result dict."""
+def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int = 25,
+                  since: Optional[str] = LIVE_ERA_SINCE) -> dict:
+    """Aggregate per-entry reconstructed P&L by slot. Returns a result dict.
+
+    `since` floors the rows considered, defaulting to the live-era boundary
+    (2026-07-24, the B<->C seat swap). Before that date B's fills are SIMULATED,
+    at 10 contracts, on a 4-slot grid — pooling them with live 7-contract
+    7-slot rows and ranking slots answers a question nobody asked. The 2026-09-02
+    decision to cut the 11:15 slot was made on pooled data and had to be
+    reversed. Pass since="" to analyse everything deliberately.
+    """
     if not os.path.exists(db_path):
         return {"ok": False, "error": f"no db at {db_path}"}
     con = _connect_ro(db_path)
@@ -202,25 +215,43 @@ def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int
             r[1] == "realized_pnl" for r in con.execute("PRAGMA table_info(trade_entries)")
         )
         rcol = "realized_pnl" if has_realized else "NULL AS realized_pnl"
-        entries = con.execute(
-            f"SELECT date, entry_number, entry_time, call_credit, put_credit, "
-            f"total_credit, contracts, {rcol} FROM trade_entries"
-        ).fetchall()
+        if since:
+            entries = con.execute(
+                f"SELECT date, entry_number, entry_time, call_credit, put_credit, "
+                f"total_credit, contracts, {rcol} FROM trade_entries WHERE date >= ?",
+                (since,),
+            ).fetchall()
+        else:
+            entries = con.execute(
+                f"SELECT date, entry_number, entry_time, call_credit, put_credit, "
+                f"total_credit, contracts, {rcol} FROM trade_entries"
+            ).fetchall()
         # Reconciliation is per-DAY across two tables (trade_entries vs
         # daily_summaries); restrict the cross-check to days present in
         # daily_summaries AND in the reliable window, so a day with entries but no
         # summary row (e.g. the phantom-summary guard returned before writing it)
         # can't produce spurious cross-table drift.
+        #
+        # THE TWO FLOORS MUST COMPOSE (2026-09-10). `since` is a REGIME floor
+        # (which experiment) and _PER_ENTRY_RELIABLE_SINCE is a DATA floor (when
+        # realized_pnl became trustworthy). They answer different questions, so
+        # the cross-check needs the LATER of the two. Flooring the entry set at
+        # 2026-07-24 while still summing day totals from 2026-07-02 would report
+        # a "drift" exactly equal to the P&L in the gap — a fabricated
+        # reconciliation failure caused purely by mismatched windows.
+        xcheck_floor = max(since or "", _PER_ENTRY_RELIABLE_SINCE)
         xcheck_dates = {
             r[0] for r in con.execute(
                 "SELECT date FROM daily_summaries WHERE date >= ?",
-                (_PER_ENTRY_RELIABLE_SINCE,),
+                (xcheck_floor,),
             )
         }
         # stops keyed by (date, entry_number) -> {side: {net_pnl, stop_time}}
         stops_by_entry: dict = {}
         for r in con.execute(
             "SELECT date, entry_number, side, net_pnl, stop_time FROM trade_stops"
+            + (" WHERE date >= ?" if since else ""),
+            (since,) if since else (),
         ):
             stops_by_entry.setdefault((r["date"], r["entry_number"]), {})[r["side"]] = {
                 "net_pnl": r["net_pnl"], "stop_time": r["stop_time"],
@@ -287,7 +318,10 @@ def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int
         # column, guarded for old DBs); (2) floor the cross-check to the per-entry-
         # reliable era (pre-2026-07-02 days carry unbooked 0.0 realized_pnl).
         ds_total = con.execute(
-            "SELECT COALESCE(SUM(gross_pnl), 0) FROM daily_summaries").fetchone()[0]
+            "SELECT COALESCE(SUM(gross_pnl), 0) FROM daily_summaries"
+            + (" WHERE date >= ?" if since else ""),
+            (since,) if since else (),
+        ).fetchone()[0]
         has_overlay_col = any(
             r[1] == "unattributed_overlay_pnl"
             for r in con.execute("PRAGMA table_info(daily_summaries)")
@@ -295,9 +329,13 @@ def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int
         _ov = "- COALESCE(SUM(unattributed_overlay_pnl), 0)" if has_overlay_col else ""
         ds_total_x = con.execute(
             f"SELECT COALESCE(SUM(gross_pnl), 0) {_ov} FROM daily_summaries WHERE date >= ?",
-            (_PER_ENTRY_RELIABLE_SINCE,),
+            (xcheck_floor,),
         ).fetchone()[0]
-        n_days = con.execute("SELECT COUNT(*) FROM daily_summaries").fetchone()[0]
+        n_days = con.execute(
+            "SELECT COUNT(*) FROM daily_summaries"
+            + (" WHERE date >= ?" if since else ""),
+            (since,) if since else (),
+        ).fetchone()[0]
     finally:
         con.close()
 
@@ -415,6 +453,11 @@ def main(argv: Optional[list] = None) -> int:
     p.add_argument("--root", default=".", help="repo root (for the default db path)")
     p.add_argument("--min-preliminary", type=int, default=10)
     p.add_argument("--min-confident", type=int, default=25)
+    p.add_argument("--since", default=LIVE_ERA_SINCE,
+                   help=("floor rows at this date (YYYY-MM-DD). Default is the "
+                         "live-era boundary 2026-07-24 (the B<->C seat swap) — "
+                         "earlier rows are a DIFFERENT REGIME. Pass 'all' to "
+                         "disable the floor deliberately."))
     a = p.parse_args(argv)
     if a.db:
         db = a.db
@@ -422,7 +465,10 @@ def main(argv: Optional[list] = None) -> int:
         db = os.path.join(a.root, "data", "backtesting.db")
     else:
         db = os.path.join(a.root, "data", f"variant_{a.variant}", "backtesting.db")
-    res = analyze_slots(db, min_preliminary=a.min_preliminary, min_confident=a.min_confident)
+    since = None if a.since.lower() in ("all", "none") else a.since
+    res = analyze_slots(db, min_preliminary=a.min_preliminary,
+                        min_confident=a.min_confident, since=since)
+    print(era_banner(since))
     print(format_slot_report(res, title=f"Variant {a.variant.upper()} — per-slot edge"))
     return 0 if res.get("ok") else 1
 

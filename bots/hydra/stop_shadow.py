@@ -32,6 +32,8 @@ import os
 import sqlite3
 from typing import Optional, Tuple
 
+from bots.hydra.analysis_eras import LIVE_ERA_SINCE, era_banner
+
 _SIDES = ("call", "put")
 
 
@@ -39,8 +41,12 @@ _SIDES = ("call", "put")
 # Data access
 # ──────────────────────────────────────────────────────────────────────────────
 
-def _load(db_path: str):
+def _load(db_path: str, since: Optional[str] = None):
     """Return (entries, sv_series, stops, status).
+
+    `since` floors every table at that date. Without it this pooled the
+    pre-2026-07-24 era (B dry-run/10c/4-slot, C live) with the live era — a
+    different experiment on both variants. See bots/hydra/analysis_eras.
 
     entries: {(date, entry_number): {credit/width/contracts per side, entry_type}}
     sv_series: {(date, entry_number): [(call_sv, put_sv), ...] ordered by time}
@@ -53,12 +59,14 @@ def _load(db_path: str):
         con.row_factory = sqlite3.Row
     except sqlite3.Error:
         return {}, {}, {}, "unreadable"
+    _floor = " WHERE date >= ?" if since else ""
+    _args = (since,) if since else ()
     try:
         entries = {}
         for r in con.execute(
             "SELECT date, entry_number, entry_type, contracts, "
             "call_credit, put_credit, call_spread_width, put_spread_width "
-            "FROM trade_entries"
+            "FROM trade_entries" + _floor, _args
         ):
             entries[(r["date"], r["entry_number"])] = {
                 "entry_type": r["entry_type"],
@@ -69,14 +77,14 @@ def _load(db_path: str):
         sv_series = {}
         for r in con.execute(
             "SELECT date, entry_number, call_spread_value, put_spread_value "
-            "FROM spread_snapshots ORDER BY date, entry_number, timestamp"
+            "FROM spread_snapshots" + _floor + " ORDER BY date, entry_number, timestamp", _args
         ):
             sv_series.setdefault((r["date"], r["entry_number"]), []).append(
                 (r["call_spread_value"], r["put_spread_value"])
             )
         stops = {}
         for r in con.execute(
-            "SELECT date, entry_number, side, net_pnl FROM trade_stops"
+            "SELECT date, entry_number, side, net_pnl FROM trade_stops" + _floor, _args
         ):
             stops[(r["date"], r["entry_number"], r["side"])] = r["net_pnl"]
         return entries, sv_series, stops, "ok"
@@ -196,10 +204,11 @@ def analyze_pct(entries, sv_series, stops, pct: float, *,
 
 
 def analyze(db_path: str, *, pcts=(0.25, 0.40, 0.50, 0.65),
-            width_max: Optional[float] = None, confirm_snaps: int = 0) -> dict:
+            width_max: Optional[float] = None, confirm_snaps: int = 0,
+            since: Optional[str] = LIVE_ERA_SINCE) -> dict:
     """Full report: the flip impact at several `pct` thresholds. `confirm_snaps`>0
     evaluates the persistence-confirmed variant (filters whipsaw spikes). Never raises."""
-    entries, sv_series, stops, status = _load(db_path)
+    entries, sv_series, stops, status = _load(db_path, since=since)
     dates = sorted({d for (d, _) in entries})
     results = [analyze_pct(entries, sv_series, stops, p, width_max=width_max,
                            confirm_snaps=confirm_snaps) for p in pcts]
@@ -208,6 +217,7 @@ def analyze(db_path: str, *, pcts=(0.25, 0.40, 0.50, 0.65),
         "n_entries": len(entries), "n_actual_stops": len(stops),
         "date_min": dates[0] if dates else None, "date_max": dates[-1] if dates else None,
         "width_max": width_max, "confirm_snaps": confirm_snaps,
+        "since": since, "era_banner": era_banner(since),
         "by_pct": results,
     }
 

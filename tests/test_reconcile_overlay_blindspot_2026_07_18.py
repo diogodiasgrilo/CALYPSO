@@ -202,7 +202,9 @@ class TestSlotEdgeCrossCheck:
     def _analyze(self, tmp_path):
         p = str(tmp_path / "bt.db")
         con = sqlite3.connect(p); _seed(con); con.close()
-        return analyze_slots(p)
+        # since="": this suite exercises the 2026-07-02 DATA floor, which is a
+        # different boundary from the 2026-07-24 REGIME floor added 2026-09-10.
+        return analyze_slots(p, since="")
 
     def test_overlay_and_prefeature_reconcile_in_xcheck(self, tmp_path):
         r = self._analyze(tmp_path)
@@ -229,6 +231,6 @@ class TestSlotEdgeCrossCheck:
         con.execute("INSERT INTO trade_entries VALUES ('2026-07-14',1,'2026-07-14 10:45:00',0,0,500,10,500.0)")
         con.execute("INSERT INTO daily_summaries VALUES ('2026-07-14', 480.0, 500.0)")
         con.commit(); con.close()
-        r = analyze_slots(p)
+        r = analyze_slots(p, since="")   # see the note above
         assert r["ok"]
         assert r["daily_gross_xcheck"] == pytest.approx(500.0)  # no overlay col -> gross only

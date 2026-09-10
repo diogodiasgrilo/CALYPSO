@@ -36,6 +36,50 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-10 (thirteenth same-day change) Historical analyzers pooled
+  incomparable eras. `slot_edge.analyze_slots` and `stop_shadow.analyze` both
+  read EVERY row with no date floor, so on variant B they mixed two different
+  experiments:
+      before 2026-07-24 : dry-run shadow, 10 contracts, 4-slot, SIMULATED fills
+      after  2026-07-24 : LIVE paper seat, 7 contracts, 7-slot, REAL fills
+  Ranking slots across that boundary produces a confident-looking answer to a
+  question nobody asked. NOT hypothetical — the 2026-09-02 decision to cut B's
+  11:15 slot was taken on pooled data and had to be reversed.
+  New `bots/hydra/analysis_eras.py` holds both boundaries so they cannot drift:
+  a constant copied into two analyzers diverges silently, and the failure mode
+  is a plausible number over incomparable data, not a crash. Both default to
+  the live-era floor; `since=""` (CLI `--since all`) disables it deliberately,
+  because studying the pre-swap era on purpose is legitimate — doing it BY
+  ACCIDENT is not. Every report prints its window: a number without its window
+  is not interpretable.
+  THE SUBTLE PART, and the reason this was not a five-minute change: the two
+  floors must COMPOSE. `since` is a REGIME floor (which experiment);
+  PER_ENTRY_RELIABLE_SINCE (2026-07-02) is a DATA floor (when per-entry
+  realized_pnl became trustworthy). slot_edge's cross-check compares summed
+  per-entry P&L against summed day totals. Flooring the ENTRY set at 07-24
+  while still summing DAY totals from 07-02 reports a "drift" exactly equal to
+  the P&L in the gap — a fabricated reconciliation failure caused purely by
+  mismatched windows. The cross-check now uses max(since, DATA floor), and both
+  the headline totals and the stops query honour the regime floor so every
+  number in a report describes ONE window.
+  Also floors stop_shadow's spread_snapshots and trade_stops, not just entries:
+  a floored entry set with unfloored stops would attribute pre-swap stops to
+  live-era entries.
+  Tests: 19 new, 7 existing updated. The existing ones now pass `since=""`
+  EXPLICITLY with a note, rather than having their fixture dates quietly shifted
+  — the point is that the default changed, and hiding that in a fixture would
+  defeat the purpose.
+  THREE OF MY OWN NEW TESTS WERE VACUOUS on the first pass: they read
+  `res.get("xcheck_drift", res.get("drift"))`, and NEITHER key exists — so they
+  got None, skipped the assertion under `if drift is not None`, and passed while
+  testing nothing. The real keys are `scored_total_xcheck` /
+  `daily_gross_xcheck`. This is the third instance today of a test that passes
+  while exercising nothing; recorded because the pattern keeps recurring.
+  FIVE mutations verified to fail the tests — ignoring the floor (2), reverting
+  the cross-check to the data floor alone (2), dropping the data floor from the
+  composition (1), stop_shadow defaulting to no floor (2), and flooring
+  stop_shadow's entries but not its stops (1).
+  Full suite 3351 passed.
 - 2026-09-10 (twelfth same-day change) Two fixes that both became MORE urgent
   because of changes made earlier today.
   1. ORDER-011 — MKT-033 booked NOTHING when it could not read a closing price.
