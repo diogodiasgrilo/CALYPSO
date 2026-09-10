@@ -2180,7 +2180,8 @@ class HydraStrategy(MEICStrategy):
             return None
 
     def _read_closed_position_price(
-        self, instrument_id, *, buy_or_sell: str
+        self, instrument_id, *, buy_or_sell: str,
+        not_before: Any = None, expect_quantity: Optional[int] = None,
     ) -> Optional[Dict[str, Any]]:
         """Closing execution price of a recently-closed leg, from the
         active broker (F5.3).
@@ -2191,12 +2192,22 @@ class HydraStrategy(MEICStrategy):
 
         ``IBClient.get_closed_position_price`` takes a conid and scans
         `/iserver/account/trades`.
+
+        ``not_before`` / ``expect_quantity`` (2026-09-10) are the
+        opening-vs-closing disambiguation hints. PASS THEM: matching on
+        (conid, side) alone is systematically wrong on a Brandon variant,
+        where the butterfly hedge's long leg sits at the threatened short's
+        own strike by construction, so its OPENING buy is indistinguishable
+        from the short's CLOSING buy. Without the hints the client refuses to
+        report a price whenever more than one execution matches — safe, but it
+        means P&L goes unbooked, so give it what you know.
         """
         if instrument_id is None:
             return None
         try:
             return self.broker.get_closed_position_price(
                 int(instrument_id), buy_or_sell=buy_or_sell,
+                not_before=not_before, expect_quantity=expect_quantity,
             )
         except Exception as e:
             logger.warning(
@@ -8486,7 +8497,9 @@ class HydraStrategy(MEICStrategy):
                 # Look up actual sale price from closed positions (F5.4 —
                 # broker-agnostic).
                 closed = self._read_closed_position_price(
-                    long_uic, buy_or_sell="Sell"
+                    long_uic, buy_or_sell="Sell",
+                    not_before=getattr(entry, "entry_time", None),
+                    expect_quantity=getattr(entry, "contracts", None),
                 )
                 if closed and closed.get("closing_price", 0) > 0:
                     fill_price = closed["closing_price"]
@@ -12706,18 +12719,27 @@ class HydraStrategy(MEICStrategy):
                 # price can't be read, alert for manual review rather than
                 # silently dropping it.
                 if not already_booked:
-                    closed = self._read_closed_position_price(conid, buy_or_sell="Buy")
+                    # Hoisted above the lookup (2026-09-10): the contract count
+                    # is now also a disambiguation hint for which execution
+                    # actually CLOSED this leg, so it must be known before the
+                    # call, not just after it.
+                    contracts = (
+                        getattr(entry, "contracts", None)
+                        or getattr(self, "contracts_per_entry", 1)
+                        or 1
+                    )
+                    closed = self._read_closed_position_price(
+                        conid, buy_or_sell="Buy",
+                        not_before=getattr(entry, "entry_time", None),
+                        expect_quantity=contracts,
+                    )
                     close_px_raw = (closed or {}).get("closing_price")
                     try:
                         close_px = float(close_px_raw) if close_px_raw is not None else None
                     except (TypeError, ValueError):
                         close_px = None
                     side_credit = getattr(entry, f"{side}_spread_credit", 0) or 0
-                    contracts = (
-                        getattr(entry, "contracts", None)
-                        or getattr(self, "contracts_per_entry", 1)
-                        or 1
-                    )
+                    # `contracts` is computed above, before the lookup.
                     if close_px is not None and close_px > 0:
                         close_debit = float(close_px) * 100 * contracts
                         realized = side_credit - close_debit

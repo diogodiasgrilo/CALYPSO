@@ -2070,9 +2070,29 @@ class TestReadClosedPositionPrice:
         s = self._make(broker=fake_broker)
         out = s._read_closed_position_price("12345", buy_or_sell="Sell")
         assert out == {"closing_price": 2.55}
+        # 2026-09-10: the opening-vs-closing disambiguation hints are forwarded
+        # too. They default to None here because this caller passes none — the
+        # REAL call sites (MKT-033 salvage, L-M3 external close) do pass them,
+        # and tests/test_closed_price_open_close_filter_2026_09_10.py covers
+        # what the client does with them.
         fake_broker.get_closed_position_price.assert_called_once_with(
-            12345, buy_or_sell="Sell"
+            12345, buy_or_sell="Sell", not_before=None, expect_quantity=None,
         )
+
+    def test_the_disambiguation_hints_are_forwarded(self):
+        """Guards the wiring itself: the client cannot disambiguate an opening
+        execution from a closing one if the strategy silently drops the hints
+        on the way through."""
+        fake_broker = MagicMock()
+        fake_broker.get_closed_position_price.return_value = {"closing_price": 2.55}
+        s = self._make(broker=fake_broker)
+        s._read_closed_position_price(
+            "12345", buy_or_sell="Buy",
+            not_before="2026-09-04T10:15:00", expect_quantity=7,
+        )
+        kw = fake_broker.get_closed_position_price.call_args.kwargs
+        assert kw["not_before"] == "2026-09-04T10:15:00"
+        assert kw["expect_quantity"] == 7
 
     def test_none_instrument_id_returns_none(self):
         fake_broker = MagicMock()

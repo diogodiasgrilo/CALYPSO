@@ -65,7 +65,7 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
-from datetime import date, datetime
+from datetime import date, datetime, timezone
 from typing import Iterable, Optional
 
 from ibind import IbkrClient, OrderRequest, QuestionType  # module-level so tests can patch cleanly
@@ -223,6 +223,36 @@ _TERMINAL_ORDER_STATUSES = frozenset({
 # `lastTradingDay`, `putOrCall`, `avgCost`, etc.). Strategy code wants a
 # stable schema that doesn't lock in IBKR field naming + handles option
 # metadata uniformly. `_normalize_position_dict` is the single seam.
+
+
+def _to_epoch_ms(value) -> Optional[float]:
+    """Coerce a datetime / ISO string / epoch to epoch MILLISECONDS.
+
+    Used to compare a leg's open time against IBKR's ``trade_time_r``, which
+    is an epoch in milliseconds. Returns None when the value cannot be
+    interpreted — callers must treat None as "no cutoff available" and NOT as
+    "cutoff of zero", or an unparseable timestamp would silently disable the
+    filter it was meant to apply.
+
+    Bare seconds-vs-milliseconds is disambiguated by magnitude: any epoch after
+    ~1973 in milliseconds exceeds 1e11, while seconds-since-epoch stays well
+    below it for any date this software will see.
+    """
+    if value is None or value == "":
+        return None
+    if isinstance(value, datetime):
+        dt = value if value.tzinfo else value.replace(tzinfo=timezone.utc)
+        return dt.timestamp() * 1000.0
+    if isinstance(value, (int, float)):
+        v = float(value)
+        return v if v > 1e11 else v * 1000.0
+    try:
+        dt = datetime.fromisoformat(str(value))
+    except (TypeError, ValueError):
+        return None
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    return dt.timestamp() * 1000.0
 
 
 def _normalize_position_dict(raw_position: dict) -> dict:
@@ -2655,6 +2685,8 @@ class IBClient:
         *,
         buy_or_sell: str,
         days: int = 1,
+        not_before: Optional[Any] = None,
+        expect_quantity: Optional[int] = None,
     ) -> Optional[dict]:
         """Closing execution price for a position at ``conid``.
 
@@ -2754,7 +2786,99 @@ class IBClient:
             except (TypeError, ValueError):
                 return 0.0
 
-        matches.sort(key=_recency, reverse=True)
+        # ------------------------------------------------------------------
+        # OPENING-vs-CLOSING DISAMBIGUATION (2026-09-10).
+        #
+        # Matching on (conid, side) alone is NOT enough to identify a CLOSING
+        # execution. On a Brandon variant it is systematically wrong: the
+        # butterfly hedge's long leg is pinned at the threatened short strike
+        # BY CONSTRUCTION, so its OPENING buy sits at the very same conid and
+        # side as the short's closing buy. On 2026-09-04 that execution (Call
+        # 7740, 7/7 @ $2.00) would have been booked as E#4's close.
+        #
+        # Note what does NOT work: filtering on "after the leg opened". The
+        # hedge is placed LATER than the leg it defends, so it passes that
+        # test cleanly. `not_before` is kept because it is strictly additive
+        # (an execution predating the open definitely is not its close), but
+        # it is not the mechanism that saves us.
+        #
+        # The mechanism is REFUSING TO GUESS. A wrong close price is far worse
+        # than no close price: no price leaves P&L unbooked and logs loudly,
+        # while a wrong one books a plausible number that no downstream check
+        # can catch (the in-process reconcile is circular by construction).
+        # ------------------------------------------------------------------
+        if not_before is not None:
+            cutoff = _to_epoch_ms(not_before)
+            if cutoff is not None:
+                kept = [r for r in matches if _recency(r) >= cutoff]
+                if len(kept) != len(matches):
+                    logger.info(
+                        "get_closed_position_price(%s): dropped %d execution(s) "
+                        "predating the leg's open",
+                        conid, len(matches) - len(kept),
+                    )
+                matches = kept
+                if not matches:
+                    return None
+
+        # Prefer an explicit open/close marker when IBKR supplies one. The
+        # field name is NOT verified against live data (the endpoint returned
+        # nothing on this account until the accountId fix), so probe several
+        # documented spellings and treat absence as "unknown" rather than
+        # inventing a default.
+        def _close_marker(r: dict) -> Optional[bool]:
+            for key in ("open_close", "openClose", "open_close_indicator"):
+                v = r.get(key)
+                if v in (None, ""):
+                    continue
+                s = str(v).strip().upper()
+                if s in ("C", "CLOSE", "CLOSING"):
+                    return True
+                if s in ("O", "OPEN", "OPENING"):
+                    return False
+            return None
+
+        marked = [(r, _close_marker(r)) for r in matches]
+        if any(m is not None for _, m in marked):
+            closing = [r for r, m in marked if m is True]
+            if not closing:
+                logger.warning(
+                    "get_closed_position_price(%s): %d execution(s) matched but "
+                    "IBKR marks every one as OPENING — refusing to report a "
+                    "closing price.",
+                    conid, len(matches),
+                )
+                return None
+            matches = closing
+
+        # Still ambiguous? A quantity hint can break the tie, but only if it
+        # picks out exactly ONE candidate.
+        if len(matches) > 1 and expect_quantity is not None:
+            def _size(r: dict) -> Optional[float]:
+                try:
+                    return abs(float(r.get("size")))
+                except (TypeError, ValueError):
+                    return None
+            exact = [r for r in matches if _size(r) == abs(float(expect_quantity))]
+            if len(exact) == 1:
+                matches = exact
+
+        if len(matches) > 1:
+            # REFUSE. Do not fall back to "most recent" — on the 2026-09-04
+            # shape the hedge's opening buy IS the most recent, so recency
+            # picks precisely the wrong one.
+            logger.critical(
+                "get_closed_position_price(%s): %d indistinguishable %s "
+                "executions (sizes=%s, times=%s) — cannot tell a closing "
+                "execution from an opening one at the same conid+side, so "
+                "reporting NO price rather than guessing. P&L for this leg "
+                "stays unbooked and loud.",
+                conid, len(matches), "Buy" if ibkr_side == "B" else "Sell",
+                [r.get("size") for r in matches],
+                [r.get("trade_time") for r in matches],
+            )
+            return None
+
         best = matches[0]
 
         try:

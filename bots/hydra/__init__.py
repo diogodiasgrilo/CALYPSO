@@ -36,6 +36,50 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-10 (ninth same-day change) `get_closed_position_price` must not
+  mistake an OPENING execution for a CLOSING one. Ships in the SAME batch as
+  the accountId fix, and that pairing is the point.
+  WHY NOW. The function matched on (conid, side) and then took the MOST RECENT
+  match. That was harmless only because /iserver/account/trades returned
+  nothing on this account — which the previous entry fixes. The moment the
+  endpoint answers, this function goes live-fire. Deploying the accountId fix
+  alone would have converted a dormant defect into an active one.
+  WHY (conid, side) IS SYSTEMATICALLY WRONG HERE, not occasionally wrong: on a
+  Brandon variant the butterfly hedge's long leg is pinned at the threatened
+  short's OWN strike BY CONSTRUCTION. Its OPENING buy therefore shares conid
+  AND side with the short's CLOSING buy. 2026-09-04 had exactly that: Call
+  7740, 7/7 @ $2.00.
+  AND "MOST RECENT WINS" IS NOT A TIE-BREAK, IT IS THE TRAP. The hedge is
+  placed LATER than the leg it defends, so recency selects precisely the wrong
+  execution every time. An existing test — `test_most_recent_execution_wins` —
+  asserted that behaviour; it is now skipped with the reasoning recorded, and
+  replaced by one asserting refusal on the same fixture data.
+  WHAT DOES NOT FIX IT, recorded because it is the obvious idea: filtering to
+  "executions after the leg opened". The hedge post-dates the leg it defends,
+  so it passes cleanly. `not_before` is implemented and wired because it is
+  strictly additive (an execution predating the open certainly is not its
+  close), but it is NOT the mechanism.
+  THE MECHANISM IS REFUSING TO GUESS. Prefer an explicit open/close marker
+  when IBKR supplies one (several documented spellings probed; absence treated
+  as UNKNOWN, never as a default — the field is doc-sourced, unverifiable
+  until the endpoint answers). Then a quantity hint, but only when it isolates
+  exactly ONE candidate. Still ambiguous -> return None and log CRITICAL.
+  A wrong close price is far worse than none: no price leaves the P&L unbooked
+  and loud, while a wrong price books a plausible number that NOTHING
+  downstream can catch, because the in-process reconcile is circular by
+  construction.
+  Both call sites now pass the hints — MKT-033 long salvage and the L-M3
+  external close. `contracts` was hoisted above the L-M3 lookup since it is
+  now an input to it, not just an output consumer.
+  Note `_to_epoch_ms` returns None on an unparseable timestamp, and callers
+  must read that as "no cutoff" rather than "cutoff of zero" — otherwise a bad
+  timestamp would silently disable the filter it was meant to apply.
+  Tests: 31 new + 2 rewritten. Mutations verified to fail them: removing the
+  ambiguity refusal (4 fail), ignoring the open/close marker (10), dropping
+  not_before (6), disabling the quantity hint (2). A fifth mutation
+  (`len(exact) == 1` -> `>= 1`) survived and was confirmed EQUIVALENT rather
+  than a test gap — with >= 1 a multi-match still leaves len(matches) > 1 and
+  refuses on the next line, so no path differs. Full suite 2863 passed.
 - 2026-09-10 (eighth same-day change) /iserver/account/trades was never dead —
   we just never told IBKR WHICH ACCOUNT. One missing kwarg, months of wrong
   conclusions.

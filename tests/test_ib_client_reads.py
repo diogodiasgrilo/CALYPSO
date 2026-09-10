@@ -1290,13 +1290,43 @@ class TestGetClosedPositionPrice:
         mock_ibkr.trades.return_value = _mk_result([_trade(side="B")])
         assert client.get_closed_position_price(12345, buy_or_sell="Sell") is None
 
-    def test_most_recent_execution_wins(self, connected_client):
+    def test_several_indistinguishable_executions_now_REFUSE(self):
+        """SUPERSEDED 2026-09-10. This was `test_most_recent_execution_wins`,
+        and it asserted precisely the behaviour that would have booked the
+        wrong number on the live seat.
+
+        "Most recent wins" is not a tie-break, it is a trap: on a Brandon
+        variant the butterfly hedge's long leg is pinned at the threatened
+        short's own strike by construction, so its OPENING buy shares the
+        conid AND the side with the short's CLOSING buy — and being placed
+        later, it is always the MOST RECENT. Recency therefore selects exactly
+        the wrong execution. On 2026-09-04 that was Call 7740, 7/7 @ $2.00.
+
+        The function now refuses to report a price it cannot identify.
+        See tests/test_closed_price_open_close_filter_2026_09_10.py.
+        """
+        pytest.skip(
+            "superseded: recency-wins was the defect — see "
+            "test_closed_price_open_close_filter_2026_09_10.py"
+        )
+
+    def test_ambiguous_executions_report_no_price(self, connected_client):
+        """The replacement assertion, on the same fixture data."""
         client, mock_ibkr = connected_client
         mock_ibkr.receive_brokerage_accounts.return_value = _mk_result({})
         mock_ibkr.trades.return_value = _mk_result([
             _trade(price="2.00", trade_time_r=1779000000000),
             _trade(price="2.99", trade_time_r=1779009999999),  # newer
             _trade(price="2.50", trade_time_r=1779005000000),
+        ])
+        assert client.get_closed_position_price(12345, buy_or_sell="Sell") is None
+
+    def test_a_single_execution_is_still_returned(self, connected_client):
+        """The narrowing must not break the ordinary case."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.receive_brokerage_accounts.return_value = _mk_result({})
+        mock_ibkr.trades.return_value = _mk_result([
+            _trade(price="2.99", trade_time_r=1779009999999),
         ])
         out = client.get_closed_position_price(12345, buy_or_sell="Sell")
         assert out["closing_price"] == 2.99
