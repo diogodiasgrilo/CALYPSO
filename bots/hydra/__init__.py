@@ -36,6 +36,51 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-10 (third same-day change) slot_edge refuses to score the era whose
+  stop records are SIGN-FLIPPED — the analyzer had been publishing -$21,045
+  against an actual +$40,277.
+  ROOT CAUSE, found by tracing rather than guessing: before commit 4ce94e5
+  (2026-07-14), `_record_stop_to_db` guarded on
+  `if actual_close_cost and credit:` — a FALSY test. In dry-run
+  `_close_position_with_retry` returns no fill (SAFETY-DRY-04), so
+  `side_close_cost` is 0.0, which is falsy, so a profitable Brandon
+  take-profit fell through to the placeholder `-(stop_level - credit)` and was
+  persisted as a large PHANTOM LOSS. Variant B was dry-run for its entire
+  pre-swap life and its dominant exit is TP at 80% credit — a PROFIT — so most
+  pre-v12 B rows sit in trade_stops as roughly minus-the-stop-level.
+  strategy.py:6208's own comment names the case: B's 07-13 E3 booked
+  -(2000-500) = -1500 instead of +500.
+  slot_edge's `reconstruct_entry_pnl` trusted `trade_stops.net_pnl` verbatim,
+  so it inherited the phantom losses wholesale. It already had a
+  `_PER_ENTRY_RELIABLE_SINCE = 2026-07-02` constant but used it ONLY for the
+  cross-check, never to gate what it SCORED. Now scoring requires BOTH a
+  non-NULL v12 `realized_pnl` AND a date in the reliable era; everything else
+  counts as `unscored` and is excluded from every mean, CI and verdict.
+  Verified on B's live DB: the headline moves -$21,045 -> +$17,062, exactly the
+  sum of the trustworthy rows, and the reconstruction fallback count drops to 0.
+  NOT REPAIRABLE, deliberately not attempted: the true close cost was never
+  captured in dry-run, so the correct value does not exist in the DB. Marking
+  the era unscored is the honest treatment. `reconstruct_entry_pnl` is retained
+  for its unit tests and for any future non-dry-run backfill.
+  THIS COST A REAL DECISION. A per-slot analysis run on the contaminated
+  full-history output this week produced a conclusion that had to be discarded.
+  With scoring gated, 11:45 reads +$191 rather than negative.
+  ALSO ESTABLISHED, and it corrects something stated earlier: the post-swap
+  "exact 0.00 reconciliation" between sum(trade_entries.realized_pnl) and
+  daily_summaries.gross_pnl is NOT independent validation. `_book_realized_pnl`
+  (base_strategy.py:3960-3962) increments `daily_state.total_realized_pnl` and
+  `entry.realized_pnl` in the SAME statement pair, and gross_pnl derives from
+  that same accumulator — so the two cannot disagree by construction. It can
+  only catch a booking site that forgot to pass `entry=`. Treat it as an
+  internal consistency check, never as proof of correctness. A genuinely
+  independent check would reconcile against broker-side truth (IBKR
+  /iserver/account/trades executions, or the account cash delta), which shares
+  no code path.
+  STILL OPEN (not fixed here — an emergency path on the live seat deserves its
+  own pass): `_handle_naked_short` (base_strategy.py:3646-3742) closes a real
+  position via `_close_leg_order` and books NO realized P&L at all — neither
+  per-entry nor to the day aggregate. It affects both equally, so it produces
+  no drift between them and the consistency check above cannot see it.
 - 2026-09-10 (second same-day change) Phase-0 remainder: concurrency source,
   entry guards, edge era filter, and the metrics sync the back-fill needed.
   CONCURRENCY SOURCE. Losing a calendar from the sidecar silently FREED the

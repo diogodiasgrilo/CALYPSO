@@ -231,12 +231,35 @@ def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int
             if stops:
                 s["stopped"] += 1
             recorded = e["realized_pnl"]
-            if recorded is not None:
-                # v12 reconciled per-entry P&L — trust it directly.
+            if recorded is not None and e["date"] >= _PER_ENTRY_RELIABLE_SINCE:
+                # v12 reconciled per-entry P&L inside the reliable era — trust it.
                 pnl, scored = round(float(recorded), _CENT), True
                 s["recorded"] += 1
             else:
-                pnl, scored = reconstruct_entry_pnl(e["call_credit"], e["put_credit"], stops)
+                # REFUSE TO SCORE (2026-09-10). The trade_stops reconstruction
+                # below is NOT merely noisy on pre-2026-07-14 rows — it is
+                # SIGN-FLIPPED, and this analyzer published a confident wrong
+                # answer because of it (full-history per-entry total read
+                # -$21,045 against an actual +$40,277).
+                #
+                # ROOT CAUSE: before commit 4ce94e5 (2026-07-14),
+                # `_record_stop_to_db` guarded on `if actual_close_cost and
+                # credit:` — a FALSY test. In dry-run `_close_position_with_retry`
+                # returns no fill, so `side_close_cost` is 0.0, which is falsy,
+                # so a profitable Brandon take-profit fell through to the
+                # placeholder `-(stop_level - credit)` and was persisted as a
+                # large PHANTOM LOSS. B was dry-run for its entire pre-swap life
+                # and its dominant exit is TP at 80% credit — a profit — so most
+                # pre-v12 B rows are stored as roughly minus-the-stop-level.
+                # strategy.py:6208's own comment names the case: B's 07-13 E3
+                # booked -(2000-500) = -1500 instead of +500.
+                #
+                # These rows are NOT repairable: the true close cost was never
+                # captured in dry-run, so the correct value does not exist in the
+                # DB. They are counted as `unscored` and excluded from every
+                # mean, CI and verdict. `reconstruct_entry_pnl` is retained only
+                # for its unit tests and for any future non-dry-run backfill.
+                pnl, scored = 0.0, False
             if scored:
                 s["pnls"].append(pnl)
                 scored_total += pnl

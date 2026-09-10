@@ -69,21 +69,24 @@ def _seed_db(con: sqlite3.Connection):
     # commission); net_pnl kept for realism.
     con.execute("CREATE TABLE daily_summaries (date TEXT, net_pnl REAL, gross_pnl REAL)")
     # Two slots: 10:45 (a clean winner) and 11:45 (a loser via a put stop).
+    # realized_pnl is now REQUIRED to score (2026-09-10): the pre-v12
+    # trade_stops reconstruction is sign-flipped and is no longer trusted.
+    # Dates are in the reliable era (>= _PER_ENTRY_RELIABLE_SINCE).
     entries = [
-        ("2026-06-01", 1, "2026-06-01 10:45:30", 300, 250, 550, 10),  # win, kept 550
-        ("2026-06-02", 1, "2026-06-02 10:45:10", 300, 250, 550, 10),  # win, kept 550
-        ("2026-06-01", 2, "2026-06-01 11:45:20", 300, 250, 550, 10),  # put stop -1875
-        ("2026-06-02", 2, "2026-06-02 11:45:40", 300, 250, 550, 10),  # put stop, net_pnl NULL → unscored
+        ("2026-07-03", 1, "2026-07-03 10:45:30", 300, 250, 550, 10, 550.0),   # win
+        ("2026-07-06", 1, "2026-07-06 10:45:10", 300, 250, 550, 10, 550.0),   # win
+        ("2026-07-03", 2, "2026-07-03 11:45:20", 300, 250, 550, 10, -1575.0), # put stop -1875 + call kept +300
+        ("2026-07-06", 2, "2026-07-06 11:45:40", 300, 250, 550, 10, None),    # unbooked -> unscored
     ]
-    con.executemany("INSERT INTO trade_entries VALUES (?,?,?,?,?,?,?,NULL)", entries)
+    con.executemany("INSERT INTO trade_entries VALUES (?,?,?,?,?,?,?,?)", entries)
     con.executemany("INSERT INTO trade_stops VALUES (?,?,?,?,?)", [
-        ("2026-06-01", 2, "put", -1875.0, "2026-06-01 13:00:00"),
-        ("2026-06-02", 2, "put", None, "2026-06-02 13:00:00"),
+        ("2026-07-03", 2, "put", -1875.0, "2026-07-03 13:00:00"),
+        ("2026-07-06", 2, "put", None, "2026-07-06 13:00:00"),
     ])
     con.executemany("INSERT INTO daily_summaries VALUES (?,?,?)", [
         # date, net_pnl, gross_pnl (gross = net + commission; ~$30/day token here)
-        ("2026-06-01", 300.0 + 550.0 - 1875.0, 300.0 + 550.0 - 1875.0 + 30.0),
-        ("2026-06-02", 550.0, 550.0 + 30.0),
+        ("2026-07-03", 300.0 + 550.0 - 1875.0, 300.0 + 550.0 - 1875.0 + 30.0),
+        ("2026-07-06", 550.0, 550.0 + 30.0),
     ])
     con.commit()
 
@@ -127,11 +130,11 @@ def test_recorded_realized_pnl_is_preferred_over_reconstruction(tmp_path):
     # Entry #2 on 2026-06-01 (11:45) reconstructs to 300-1875 = -1575 from stops,
     # but record a DIFFERENT reconciled value (+222) — the analyzer must use +222.
     con.execute("UPDATE trade_entries SET realized_pnl = 222.0 "
-                "WHERE date='2026-06-01' AND entry_number=2")
+                "WHERE date='2026-07-03' AND entry_number=2")
     # The unscored 11:45 entry (NULL net_pnl stop) gets a recorded value too, so it
     # is now SCORED (no longer excluded).
     con.execute("UPDATE trade_entries SET realized_pnl = -99.0 "
-                "WHERE date='2026-06-02' AND entry_number=2")
+                "WHERE date='2026-07-06' AND entry_number=2")
     con.commit()
     con.close()
 
@@ -145,7 +148,18 @@ def test_recorded_realized_pnl_is_preferred_over_reconstruction(tmp_path):
 
 
 def test_missing_realized_pnl_column_falls_back(tmp_path):
-    """A pre-v12 DB with NO realized_pnl column still works (reconstruction)."""
+    """A pre-v12 DB (no realized_pnl column) must now be REFUSED, not
+    reconstructed.
+
+    Changed 2026-09-10. The reconstruction is not merely noisy on pre-2026-07-14
+    rows, it is SIGN-FLIPPED: `_record_stop_to_db` guarded on
+    `if actual_close_cost and credit:` (falsy), and in dry-run side_close_cost is
+    0.0 — so a profitable Brandon take-profit was persisted as
+    `-(stop_level - credit)`, a large phantom LOSS. Scoring those rows made this
+    analyzer report -$21,045 against an actual +$40,277, and a per-slot decision
+    was taken on that number before anyone noticed. Refusing to score is the
+    fix; the rows are unrepairable because the true close cost was never
+    captured."""
     db = tmp_path / "old.db"
     con = sqlite3.connect(db)
     con.execute("CREATE TABLE trade_entries (date TEXT, entry_number INT, entry_time TEXT,"
@@ -154,14 +168,17 @@ def test_missing_realized_pnl_column_falls_back(tmp_path):
                 " net_pnl REAL, stop_time TEXT)")
     con.execute("CREATE TABLE daily_summaries (date TEXT, net_pnl REAL, gross_pnl REAL)")
     con.execute("INSERT INTO trade_entries VALUES "
-                "('2026-06-01',1,'2026-06-01 10:45:00',300,250,550,10)")
-    con.execute("INSERT INTO daily_summaries VALUES ('2026-06-01', 520, 550)")
+                "('2026-07-03',1,'2026-07-03 10:45:00',300,250,550,10)")
+    con.execute("INSERT INTO daily_summaries VALUES ('2026-07-03', 520, 550)")
     con.commit()
     con.close()
     res = analyze_slots(str(db), min_preliminary=1, min_confident=5)
     assert res["ok"] is True
     s = {r["slot"]: r for r in res["slots"]}["10:45"]
-    assert s["recorded"] == 0 and s["avg_pnl"] == 550.0  # reconstruction path
+    # NOT scored: no realized_pnl column at all -> unscored, no mean published.
+    assert s["recorded"] == 0
+    assert s["unscored"] == 1
+    assert s["avg_pnl"] is None, "a pre-reliable row must never produce a mean"
 
 
 def test_missing_db_returns_error():
