@@ -508,6 +508,26 @@ def main():
         logger.error("No config loaded — aborting")
         sys.exit(1)
 
+    # SETTLEMENT GATE (2026-09-10). Until today this ran at 19:30 ET while
+    # settlement completed between 21:45 and 22:37 — so the journal HOMER
+    # COMMITS TO GIT was built from unsettled numbers, every trading day. The
+    # timer now fires at 23:30, but a fixed clock time is still a guess against
+    # a variable event (0DTE SPX is PM-settled and IBKR's feed clears on its
+    # own schedule), so confirm against the bot's own record.
+    #
+    # Placed AFTER the --backfill branch on purpose: backfill deliberately
+    # reprocesses historical days and must not be gated on today settling.
+    # Skipping is recoverable here — detect_missing_days() picks the day up on
+    # a later run — whereas committing wrong numbers to git is not.
+    from shared.market_hours import get_us_market_time
+    from shared.settlement_gate import require_settled
+
+    _today_str = get_us_market_time().strftime("%Y-%m-%d")
+    if not args.dry_run and not require_settled(
+        config, agent="homer", date_str=_today_str
+    ):
+        return
+
     homer_config = config.get("homer", {})
     journal_path = homer_config.get("journal_path", "docs/HYDRA_TRADING_JOURNAL.md")
     backup_dir = homer_config.get("backup_dir", "intel/homer")
