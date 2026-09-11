@@ -128,13 +128,28 @@ Strictly ordered — each step bakes in decisions the later ones depend on.
        INCONCLUSIVE, never a pass.** Do NOT use the "place a 1-contract live combo then cancel" fallback —
        the repo's own probe records paper combos sticking in phantom `PendingSubmit` with `OrderID doesn't
        exist` on cancel.
-2. [ ] **Make routing an explicit decision.** IBKR executes a combo as ONE transaction only when routed
-       directly to an exchange; **SmartRouted combos may fill leg by leg.** Nothing in the repo sets
-       `listing_exchange` / `@CBOE`. **Without this the combo delivers no atomicity and the project has no
-       justification** — and `COMBO_ENTRY_LIVE_CUTOVER_PLAN.md` §6 currently claims "inversion impossible by
-       construction" while the research it rests on explicitly chose non-atomic SMART routing. Keep the
-       client-side partial-fill reconcile as a PERMANENT backstop regardless: the guarantee is venue-level,
-       not ticket-level.
+2. [~] **Routing / atomicity — RESEARCHED 2026-09-11.** Written up as §0-bis of
+       `COMBO_ENTRY_LIVE_CUTOVER_PLAN.md`. **Cannot be CLOSED without a live account.**
+
+       CONFIRMED from IBKR's own docs (two sources): *"For combination orders that are SmartRouted, each
+       leg may be executed separately to ensure best execution."* Their vocabulary is **guaranteed**
+       (direct-to-exchange) vs **non-guaranteed** (SMART), set via `SmartComboRoutingParams`.
+
+       THREE FINDINGS, worst first:
+       1. **ibind 0.1.23 cannot express the choice at all** — 34 `OrderRequest` fields, no
+          `SmartComboRoutingParams`, no `non_guaranteed`, no `leg_in_prio`. Only `listing_exchange`.
+       2. **Nothing in the repo sets any routing** — `listing_exchange` is never assigned (every
+          `exchange=` is contract QUALIFICATION), and the conidex builders emit the bare `28812380;;;`
+          template with no `@CBOE`.
+       3. The plan's §6 "inversion impossible by construction" **contradicted its own §2**. §2 was right;
+          §6 is corrected. The plan was MORE careful than the 09-10 audit implied.
+
+       UNRESOLVABLE BY READING: whether CP API defaults a conidex combo to SMART; whether a USD
+       index-option combo needs `@CBOE`; whether a 4-leg SPX combo is permitted. All need the live
+       account — paper simulates combo order types and cannot validate fills.
+
+       CONSEQUENCE: **the partial-fill reconcile is the PRIMARY defence, not a backstop**, until a
+       routing is chosen AND verified atomic live.
 3. [ ] **Partial-fill-by-quantity reconcile — RE-SCOPED 2026-09-11. Half done; the rest belongs WITH
        step 6, not before it.**
 
@@ -163,8 +178,12 @@ Strictly ordered — each step bakes in decisions the later ones depend on.
        go-live over a mis-set variable). The account prefix was READ from a live position row
        (`DUR`+6), not assumed, and is pinned by a test so a future tidy-up cannot fail every restart.
        Behaviour unchanged today — the var is unset, so both sites resolve to "paper" as the literals did.
-5. [ ] **Add combo prompts to `DEFAULT_ORDER_ANSWERS`** before the first live combo — ibind raises on an
-       unmapped prompt and would fail the place.
+5. [x] ~~**Add combo prompts to `DEFAULT_ORDER_ANSWERS`**~~ — **ALREADY DONE, verified 2026-09-11.**
+       ibind 0.1.23 defines 14 `QuestionType`s; we map all 14 (plus a string key for the size-limit
+       prompt). **Zero unmapped**, so `find_answer` cannot raise "Too many questions" on a combo place.
+       The map is already combo-aware on purpose — `TICK_SIZE_LIMIT` cites "CBOE combo $0.05 rounding"
+       and `TRIGGER_AND_FILL` cites "combos at mid". The audit listed this as ~30 min of outstanding
+       work; it was not outstanding.
 6. [ ] **Then the runtime path itself.** `place_iron_condor` / `place_vertical_spread` / the conidex builders
        have **zero callers under `bots/`**, are absent from `broker_service.ALLOWED_METHODS`, and
        `place_and_wait_for_fill` is keyword-only `conid: int` with no BAG support.
