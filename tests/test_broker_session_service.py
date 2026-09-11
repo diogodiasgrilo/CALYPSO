@@ -96,6 +96,12 @@ CASES = [
     ("what_if_naked_margin",
      ([{"conid": 55813670, "side": "SELL", "quantity": 1},
        {"conid": 55813671, "side": "SELL", "quantity": 1}],), {}, 31250.0),
+    # Non-committal order preview. Takes an OrderRequest-shaped object and
+    # returns IBKR's 5 blocks verbatim, so the dispatcher must not reshape it.
+    ("what_if_order", ({"conidex": "28812380;;;1/-1,2/1", "side": "SELL",
+                        "quantity": 1, "order_type": "LMT", "price": 1.25},), {},
+     {"amount": {"amount": "1.25 USD"},
+      "initial": {"current": "0", "change": "500", "after": "500"}}),
     # operator override — returns seconds that were left on the penalty box
     ("clear_rate_penalty", (), {}, 0.0),
 ]

@@ -47,6 +47,14 @@ ALLOWED_METHODS = frozenset({
     # Reverted; re-add when building the live atomic-combo entry path.
     # margin pre-check (S2 strangle gate — primitive args, RPC-friendly)
     "what_if_naked_margin",
+    # Non-committal order PREVIEW (2026-09-11). Posts to
+    # `/iserver/account/{id}/orders/whatif` — a DISTINCT endpoint from
+    # `/orders`, with no `answers` param and no reply loop, so it cannot place
+    # anything. Allowlisted so the combo routing/atomicity probe can run
+    # THROUGH THE BROKER: a probe script building its own IBClient would open a
+    # second IBKR session and evict the broker's, which is the exact failure
+    # calypso-broker exists to prevent (one brokerage session per username).
+    "what_if_order",
     # operator override — clear the rate-limit penalty box (no restart needed)
     "clear_rate_penalty",
 })
