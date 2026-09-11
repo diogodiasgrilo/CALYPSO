@@ -89,6 +89,71 @@
 
 ---
 
+---
+
+## 0-bis. ROUTING / ATOMICITY — researched 2026-09-11 (combo-track step 2)
+
+**The question:** does a combo actually fill atomically, or can IBKR leg it? This
+decides whether the whole combo project has a justification, since atomicity —
+not margin — is what makes "inversion impossible" true.
+
+**ANSWER, from IBKR's own documentation (two independent sources):**
+
+> *"For combination orders that are SmartRouted, each leg may be executed
+> separately to ensure best execution."*
+
+IBKR's vocabulary is **guaranteed** vs **non-guaranteed** combos:
+* routed **directly to an exchange** → *guaranteed* (fills as one transaction);
+* routed **SMART** → *non-guaranteed*; SmartRouting prices each leg on implied
+  price and **routes each leg separately**.
+In the TWS API this is `SmartComboRoutingParams` (`NonGuaranteed` 0/1), plus a
+`LeginPrio` parameter for 2-leg combos.
+
+**WHAT THAT MEANS FOR US — three findings, in descending order of awkwardness:**
+
+1. **ibind 0.1.23 CANNOT express the guaranteed/non-guaranteed choice.**
+   `OrderRequest` has 34 fields; there is **no** `SmartComboRoutingParams`, no
+   `non_guaranteed`, no `leg_in_prio`. The only routing-adjacent field is
+   `listing_exchange` (serialised as `listingExchange`). So the TWS-API lever for
+   this does not exist on the CP Web API path we use. We can attempt to route,
+   but we cannot *declare* the guarantee.
+
+2. **Nothing in this repo sets any routing at all.** `listing_exchange` is never
+   assigned anywhere (verified repo-wide; every `exchange=` occurrence is contract
+   QUALIFICATION, not order placement). `build_ic_conidex` /
+   `build_vertical_conidex` emit the bare `28812380;;;` universal-USD-template
+   prefix with no `@CBOE` suffix. So today's combo builders would produce a
+   default-routed order whose guarantee status is **unknown and undeclared**.
+
+3. **§6's "inversion impossible by construction" is an OVERCLAIM** relative to
+   §2 of this same document, which already says the atomic-fill guarantee "only
+   exists on a live, CBOE-COB-routed account". Both cannot be true. §2 is the
+   correct one; §6 is corrected below.
+
+**WHAT IS STILL GENUINELY UNRESOLVED** (and cannot be settled by reading):
+whether the CP Web API defaults a `conidex` combo to SMART or to the template's
+own venue; whether a USD **index-option** combo needs the `@CBOE` suffix on the
+conidex (`ib_constants.py:49` hardcodes the bare form and the tests only assert
+self-consistency with it); and whether a **4-leg** SPX combo is permitted at all
+("the number of legs permissible varies by exchange"). All three need the live
+account — the paper account simulates combo order types and cannot validate
+fills at all (§2).
+
+**DECISION:** routing is now an EXPLICIT, named step rather than an assumption.
+Before any real-money combo, the cutover must (a) choose and SET a routing —
+`@CBOE` on the conidex and/or `listing_exchange` — and (b) VERIFY on the live
+account that the resulting fill is atomic. **Until (b) passes, the client-side
+partial-fill reconcile is not a backstop, it is the primary defence**, because a
+non-guaranteed combo can leg exactly like today's ladder and a quantity partial
+(6 of 10 spreads) is possible even on a guaranteed one — there is no AON/FOK to
+prevent it.
+
+Sources: [TWS API — Spreads](https://interactivebrokers.github.io/tws-api/spread_contracts.html) ·
+[IBKR — Advanced Combo Routing](https://ibkrguides.com/traderworkstation/advanced-combo-routing.htm) ·
+[IBKR — Combination Order glossary](https://www.interactivebrokers.com/campus/glossary-terms/combination-order/)
+
+---
+
 ## 1. Why combos are the structural fix
 
 HYDRA places each iron-condor as **four independent single-leg orders** (longs first
@@ -189,6 +254,11 @@ at the live cutover.
 
 ## 6. Layered defense (end state)
 
-1. **Atomic combo** (this plan) — primary entry path on live; inversion impossible by construction; restores 10c.
+1. **Atomic combo** (this plan) — primary entry path on live; restores 10c. **NOT "inversion
+   impossible by construction"** (corrected 2026-09-11, see §0-bis): that holds only for a
+   *guaranteed*, directly-routed combo, and IBKR documents SmartRouted combos as executing each leg
+   separately. Nothing in this repo sets a routing yet, and ibind cannot express the
+   guaranteed/non-guaranteed flag at all. Inversion becomes impossible only once a routing is chosen
+   AND verified atomic on the live account.
 2. **SELL-leg net-credit floor** (shipped 2026-06-10) — prevention on any legged path (strangle, fallbacks); redundant for the combo IC path but retained.
 3. **GUARD-INVERT** (shipped 2026-06-10) — post-fill detect+unwind backstop; permanent.
