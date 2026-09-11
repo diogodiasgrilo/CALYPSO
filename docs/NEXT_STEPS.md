@@ -109,9 +109,11 @@ watching B's FIRST session on the new entry pricing — confirm, do not stack mo
 
 Strictly ordered — each step bakes in decisions the later ones depend on.
 
-1. [ ] **Settle the combo side-field semantics (C4).** Read-only `what_if_order` preview on the exact BAG
-       `OrderRequest` that `place_iron_condor` builds; snapshot the legs + BAG first; read `initial.change`
-       and `amount`. Short-IC ⇒ `change` ≈ width×100×qty and `amount` is a credit. **Treat an empty block as
+1. [~] **Settle the combo side-field semantics (C4).** ✅ TOOL BUILT 2026-09-11 (`edb0cb2`):
+       `scripts/probe_combo_whatif.py`, read-only, runs through the broker (`what_if_order` now
+       allowlisted — a direct IBClient would evict the broker's session). **RUN IT DURING RTH.**
+       Read-only `what_if_order` preview on the exact BAG `OrderRequest` that `place_iron_condor` builds;
+       snapshot the legs + BAG first; read `initial.change` and `amount`. Short-IC ⇒ `change` ≈ width×100×qty and `amount` is a credit. **Treat an empty block as
        INCONCLUSIVE, never a pass.** Do NOT use the "place a 1-contract live combo then cancel" fallback —
        the repo's own probe records paper combos sticking in phantom `PendingSubmit` with `OrderID doesn't
        exist` on cancel.
