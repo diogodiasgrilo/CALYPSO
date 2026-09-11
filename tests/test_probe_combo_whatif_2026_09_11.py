@@ -108,6 +108,13 @@ class TestItCallsTheRealSignatures:
         assert '"sec_type": "BAG"' in SRC
         assert '"order_type": "LMT"' in SRC
 
+    def test_conid_is_OMITTED_not_null(self):
+        """Over JSON, conid=None becomes `null` and ibind reads the key's
+        presence as "provided" -> "Both 'conidex' and 'conid' are provided".
+        The direct Python path gets a genuine absence from the dataclass
+        default; the RPC path must omit the key."""
+        assert '"conid"' not in SRC
+
     def test_the_preview_sends_no_coid(self):
         """A preview needs no server-side dedup key, and reusing one could
         collide with a real order's id."""

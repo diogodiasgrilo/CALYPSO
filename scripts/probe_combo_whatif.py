@@ -106,13 +106,16 @@ def preview(conidex: str, side: str, price: float, qty: int, label: str) -> dict
     print(f"\n--- {label} ---")
     print(f"  conidex: {conidex}")
     print(f"  side={side}  price={price}  qty={qty}")
-    # MIRROR place_iron_condor's OrderRequest EXACTLY. The first live run omitted
+    # MIRROR THE REAL IC PLACEMENT PATH's OrderRequest EXACTLY. The first live run omitted
     # sec_type="BAG" and IBKR answered 400 "Unknown order type" — a combo ticket
     # is not identified by the conidex alone. `coid` is deliberately NOT sent: a
     # preview needs no server-side dedup key, and reusing one could collide with
     # a real order's id.
     order = {
-        "conid": None,
+        # conid is OMITTED, not set to None: over JSON it becomes `null`, and
+        # ibind reads the KEY's presence as "provided" -> "Both 'conidex' and
+        # 'conid' are provided". The direct path passes conid=None in Python,
+        # where the dataclass default makes it genuinely absent.
         "conidex": conidex,
         "sec_type": "BAG",        # <- the field whose absence caused the 400
         "side": side,
