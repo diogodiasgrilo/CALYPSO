@@ -106,26 +106,19 @@ def preview(conidex: str, side: str, price: float, qty: int, label: str) -> dict
     print(f"\n--- {label} ---")
     print(f"  conidex: {conidex}")
     print(f"  side={side}  price={price}  qty={qty}")
-    # ⚠️ CAMEL-CASE ON PURPOSE. ibind's `parse_order_request` maps snake_case to
-    # IBKR's camelCase ONLY for the `OrderRequest` dataclass; handed a plain
-    # dict it passes the keys through UNMAPPED (it even logs "Use 'OrderRequest'
-    # dataclass instead"). Anything crossing the RPC boundary arrives as JSON,
-    # i.e. as a dict — so `order_type` reached IBKR verbatim and came back
-    # 400 "Unknown order type". The direct in-process path is unaffected
-    # because it passes the dataclass.
-    #
-    # This is a real gap in allowlisting what_if_order for RPC: the method's
-    # argument cannot survive JSON. The PROPER fix is for broker_service to
-    # coerce the dict back into an OrderRequest before dispatch — that needs a
-    # broker restart, so it is queued rather than done mid-session. Sending
-    # pre-mapped keys here is the documented workaround, and it mirrors exactly
-    # what the dataclass would have produced.
+    # Mirrors the real IC placement path's OrderRequest. Sent as snake_case:
+    # broker_service rebuilds the ibind OrderRequest at the RPC boundary
+    # (2026-09-11), because JSON cannot carry a dataclass and ibind only maps
+    # snake_case -> IBKR camelCase for the dataclass. Before that fix this had to
+    # send pre-mapped camelCase by hand, or IBKR answered 400 "Unknown order
+    # type". `conid` is omitted, not None: conidex replaces it, and passing both
+    # makes ibind raise. `coid` is omitted too — a preview needs no dedup key.
     order = {
         "conidex": conidex,
-        "secType": "BAG",          # <- sec_type
+        "sec_type": "BAG",
         "side": side,
-        "orderType": "LMT",        # <- order_type; unmapped, this is the 400
-        "price": price,            # POSITIVE = credit received (IBKR convention)
+        "order_type": "LMT",
+        "price": price,           # POSITIVE = credit received (IBKR convention)
         "quantity": float(qty),
         "tif": "DAY",
     }

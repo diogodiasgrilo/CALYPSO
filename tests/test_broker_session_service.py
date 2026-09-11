@@ -23,7 +23,8 @@ import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-from shared.broker_service import ALLOWED_METHODS, BrokerDispatcher, _json_default
+from shared.broker_service import (ALLOWED_METHODS, BrokerDispatcher,
+                                   _DATACLASS_ARG_METHODS, _json_default)
 from shared.broker_client import BrokerClient, BrokerError
 
 
@@ -135,7 +136,23 @@ class TestBrokerContract:
         # a datetime.date arg arrives as its isoformat string on the broker side
         # (the dispatcher does NOT re-hydrate it — see cross-file note).
         wire = _wire_encode({"args": list(args), "kwargs": kwargs})
-        getattr(ib, method).assert_called_once_with(*wire["args"], **wire["kwargs"])
+        if method in _DATACLASS_ARG_METHODS:
+            # 2026-09-11: these take an ibind OrderRequest DATACLASS, which JSON
+            # cannot carry — it always arrives as a dict. ibind maps snake_case
+            # to IBKR's camelCase ONLY for the dataclass, so an uncoerced dict
+            # sent `order_type` verbatim and IBKR answered 400 "Unknown order
+            # type". The dispatcher rebuilds the dataclass, so what the broker
+            # method receives is deliberately NOT byte-identical to the wire —
+            # it is SEMANTICALLY identical, which is the contract that matters.
+            (call_arg,), _ = getattr(ib, method).call_args
+            from ibind import OrderRequest
+            assert isinstance(call_arg, OrderRequest), (
+                f"{method} must receive a rebuilt OrderRequest, not a raw dict"
+            )
+            for k, v in wire["args"][0].items():
+                assert getattr(call_arg, k) == v, f"{k} lost in coercion"
+        else:
+            getattr(ib, method).assert_called_once_with(*wire["args"], **wire["kwargs"])
 
     def test_disallowed_method_raises_attribute_error(self):
         _, client = _make()

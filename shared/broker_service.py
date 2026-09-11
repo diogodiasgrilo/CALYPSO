@@ -129,6 +129,69 @@ def to_jsonable(value: Any, method: Optional[str] = None) -> Any:
 HEALTH_CACHE_S = 5.0
 
 
+#: Methods whose argument is an ibind ``OrderRequest`` DATACLASS rather than a
+#: primitive. JSON has no dataclasses, so anything crossing the RPC boundary
+#: arrives as a plain dict — and ibind's ``parse_order_request`` maps snake_case
+#: to IBKR's camelCase ONLY for the dataclass. Handed a dict it passes the keys
+#: through UNMAPPED, so ``order_type`` reaches IBKR verbatim and comes back
+#: ``400 Bad Request :: {"error":"Unknown order type"}``.
+#:
+#: Found 2026-09-11, the day what_if_order was allowlisted for RPC: the direct
+#: in-process path was never affected (it passes the dataclass), so the gap only
+#: appeared over the wire. Coercing here keeps the RPC and direct paths
+#: semantically identical, which is the whole contract BrokerClient rests on.
+_DATACLASS_ARG_METHODS = {"what_if_order"}
+
+
+def _coerce_order_request(method: str, args: list, kwargs: dict):
+    """Rebuild an ``OrderRequest`` from a dict for the methods that need one.
+
+    Silently passes everything else through. A dict that is ALREADY camelCase,
+    or that carries keys OrderRequest does not define, is left alone rather than
+    guessed at — a wrong coercion would be worse than no coercion, because it
+    would look like it worked.
+    """
+    if method not in _DATACLASS_ARG_METHODS:
+        return args, kwargs
+    try:
+        from ibind import OrderRequest
+        import dataclasses
+        valid = {f.name for f in dataclasses.fields(OrderRequest)}
+    except Exception:  # pragma: no cover - ibind always present in prod
+        return args, kwargs
+
+    # OrderRequest declares conid/side/quantity/order_type/acct_id WITHOUT
+    # defaults, so they are required positionally. A combo payload legitimately
+    # omits two of them: `conid` (conidex replaces it — and passing both makes
+    # ibind raise) and `acct_id` (what_if_order supplies account_id separately).
+    # Fill the absent ones with None, which OrderRequest.to_dict() then filters
+    # out — exactly what the direct path does when it builds the dataclass with
+    # conid=None.
+    required = {f.name for f in dataclasses.fields(OrderRequest)
+                if f.default is dataclasses.MISSING
+                and f.default_factory is dataclasses.MISSING}
+
+    def _fix(v):
+        if not isinstance(v, dict):
+            return v
+        # Only coerce when EVERY key is a real OrderRequest field. A dict with
+        # unknown or already-camelCase keys is passed through untouched.
+        if not v or not set(v) <= valid:
+            return v
+        payload = {k: None for k in required if k not in v}
+        payload.update(v)
+        try:
+            return OrderRequest(**payload)
+        except Exception:
+            # Never let a coercion failure turn a caller error into a 500 —
+            # pass the dict through and let the broker method reject it.
+            return v
+
+    args = [_fix(a) for a in (args or [])]
+    kwargs = {k: _fix(v) for k, v in (kwargs or {}).items()}
+    return args, kwargs
+
+
 class BrokerDispatcher:
     """Framework-agnostic RPC core wrapping the single IBClient."""
 
@@ -153,6 +216,7 @@ class BrokerDispatcher:
         if not callable(fn):
             return {"error": f"broker has no method {method!r}", "type": "MethodNotAllowed"}
         try:
+            args, kwargs = _coerce_order_request(method, args, kwargs)
             result = fn(*(args or []), **(kwargs or {}))
             return {"result": to_jsonable(result, method)}
         except Exception as e:  # noqa: BLE001 — surface any IBClient error to caller
