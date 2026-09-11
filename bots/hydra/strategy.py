@@ -8899,7 +8899,21 @@ class HydraStrategy(MEICStrategy):
         Args:
             entry: HydraIronCondorEntry to calculate stops for
         """
-        n = self.contracts_per_entry
+        # Size from the ENTRY, not from config (2026-09-11). These are
+        # identical today — this is called once, at entry time, immediately
+        # after `entry.contracts = self.contracts_per_entry` — so this is
+        # DEFENSIVE, not a live bug fix. It matters the moment either of two
+        # things becomes true:
+        #   * anything recalculates stops later, after a config change or a
+        #     state restore carrying a different contract count; or
+        #   * the combo/BAG path lands, where IBKR can partially fill the whole
+        #     structure and `entry.contracts` becomes the only truth. The leg
+        #     ladder cannot produce that today — ORDER-010 flattens an
+        #     incompletable leg rather than keeping it — but a BAG order has no
+        #     equivalent guard.
+        # Sizing a stop off config while holding a different quantity gets the
+        # trigger wrong in proportion, silently.
+        n = getattr(entry, "contracts", None) or self.contracts_per_entry
         min_stop_level = 50.0 * n
         call_buf = self.call_stop_buffer * n
         put_buf = self.put_stop_buffer * n
@@ -9009,11 +9023,13 @@ class HydraStrategy(MEICStrategy):
                 else:
                     width = (entry.short_put_strike or 0) - (entry.long_put_strike or 0)
                 if width and width > 0:
-                    new_stop = pct * width * 100 * self.contracts_per_entry
+                    # entry.contracts, not config — see _calculate_stop_levels_hydra.
+                    n = getattr(entry, "contracts", None) or self.contracts_per_entry
+                    new_stop = pct * width * 100 * n
                     setattr(entry, f"{side}_side_stop", new_stop)
                     logger.info(
                         f"A2: Entry #{entry.entry_number} {side} %-of-width stop = "
-                        f"{pct:.0%} × {width:.0f}pt × {self.contracts_per_entry}c = ${new_stop:.2f} "
+                        f"{pct:.0%} × {width:.0f}pt × {n}c = ${new_stop:.2f} "
                         f"(was credit+buffer ${cur:.2f})"
                     )
 

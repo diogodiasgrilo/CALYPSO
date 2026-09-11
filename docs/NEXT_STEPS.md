@@ -122,16 +122,34 @@ Strictly ordered — each step bakes in decisions the later ones depend on.
        construction" while the research it rests on explicitly chose non-atomic SMART routing. Keep the
        client-side partial-fill reconcile as a PERMANENT backstop regardless: the guarantee is venue-level,
        not ticket-level.
-3. [ ] **Partial-fill-by-quantity reconcile — HARD BLOCKER for 10 contracts.** `entry.contracts` is
-       config-sourced and never read back from `filledQuantity`, and worse, the acting A2 stop computes
-       `pct × width × 100 × self.contracts_per_entry` — reading the *config attribute directly*, so fixing
-       `entry.contracts` alone would not fix the stop. At 10c/5pt/0.40 a 6-of-10 fill stops at $2,000
-       against a $3,000 max loss — 67% of max instead of 40%. ibind 0.1.23 has no AON/FOK field.
-4. [ ] **Make the environment a real switch.** `load_credentials("paper")` is a hardcoded literal in
-       `bots/hydra/main.py` and `services/broker/main.py`; `is_paper` is derived from that literal and gates
-       NOTHING. Re-encrypting live creds under the same systemd credential names would connect to a live
-       account while `is_paper` still reports True. Add `CALYPSO_IBKR_ENV` + a startup assertion that the
-       discovered account code matches the declared environment (DU* ⇔ paper, U* ⇔ live).
+3. [ ] **Partial-fill-by-quantity reconcile — RE-SCOPED 2026-09-11. Half done; the rest belongs WITH
+       step 6, not before it.**
+
+       ✅ **Done (`fac138d`+):** both stop-sizing sites now read `entry.contracts` rather than
+       `self.contracts_per_entry`. At 10c/5pt/0.40 a 6-of-10 fill now triggers at $1,200 = 40% of the
+       real $3,000 max loss, instead of $2,000 = 67% of it.
+
+       ⚠️ **The audit's framing was too alarming for TODAY.** Reading the code shows the leg ladder
+       ALREADY handles partial fills: if a leg cannot complete after all rungs, **ORDER-010 flattens the
+       partial** and reports the leg failed (→ entry unwind). A leg is all-or-nothing by construction, so
+       `entry.contracts` cannot drift from a ladder partial. The "6-of-10 survives" scenario needs a
+       **combo/BAG** order, and `place_and_wait_for_fill` is keyword-only `conid: int` with no BAG
+       support — the path does not exist yet.
+
+       ❌ **Still to do, WITH step 6:** when the BAG path is written, it must return the broker's
+       `filledQuantity`, the entry must adopt it into `entry.contracts`, and it must fail CLOSED — if
+       filled != requested and the residual cannot be cancelled, CRITICAL alert and do not enter
+       monitoring at the requested size. ibind 0.1.23 has no AON/FOK field to prevent it. Writing that
+       reconcile now would be building against an interface nobody has designed.
+4. [x] ~~**Make the environment a real switch.**~~ **DONE 2026-09-11 (`fac138d`).**
+       `resolve_environment()` reads `$CALYPSO_IBKR_ENV` (defaults paper; an unrecognised value RAISES
+       rather than falling back), both call sites wired, and — the half that matters —
+       `_assert_account_matches_env()` cross-checks the DISCOVERED account code inside
+       `_discover_account_id`. Asymmetric by design: declared-paper-but-LIVE **raises** (real money under
+       a simulation assumption); declared-live-but-paper only warns (harmless, and refusing would brick a
+       go-live over a mis-set variable). The account prefix was READ from a live position row
+       (`DUR`+6), not assumed, and is pinned by a test so a future tidy-up cannot fail every restart.
+       Behaviour unchanged today — the var is unset, so both sites resolve to "paper" as the literals did.
 5. [ ] **Add combo prompts to `DEFAULT_ORDER_ANSWERS`** before the first live combo — ibind raises on an
        unmapped prompt and would fail the place.
 6. [ ] **Then the runtime path itself.** `place_iron_condor` / `place_vertical_spread` / the conidex builders
