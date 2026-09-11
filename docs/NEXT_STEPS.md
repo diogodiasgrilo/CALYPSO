@@ -46,14 +46,18 @@ Kept for the record, since the sequence is the reusable part:
 7. **Read today's `BROKER-RECONCILE` log line** and settle whether IBKR's `raw_ledger.USD.realizedpnl` is
    gross or net of commission. Until that is known the check logs and does not alert.
 
-### P1 — tomorrow: VERIFY, do not build
+### P1 — TODAY (Fri 2026-09-11): VERIFY, do not build
 
-Three things ship tonight that have never run against live data. Spend the day confirming rather than
-stacking more on top.
+Everything is deployed as of 03:35 ET. Nothing is required before the 09:30 open. The job today is
+watching B's FIRST session on the new entry pricing — confirm, do not stack more changes on top.
 
-- [ ] **Entry-failure / unwind rate and rung-2+ escalation rate on B.** This is where the new passive
-      rung-1 pricing would show up as a *cost*. The per-leg fill-vs-mid columns already exist
-      (`short_*_fill_price` / `*_mid_at_fill`), so no new telemetry is needed to measure it.
+- [ ] **Entry-failure / unwind rate and rung-2+ escalation rate on B.** THE PRIORITY. This is where
+      passive rung-1 pricing shows up as a *cost*: resting instead of taking means sometimes not filling,
+      and a part-filled entry pays the spread TWICE on the unwind. The per-leg fill-vs-mid columns already
+      exist (`short_*_fill_price` / `*_mid_at_fill`), so no new telemetry is needed.
+      Baseline to beat: the leak was ~$79/day, and the expected recovery is $20-34/day at 7c — an
+      ESTIMATE with real error bars (passive-fill evidence is n=11), not a measurement.
+      B's first slot is 09:45; there are 7.
 - [x] ~~**Did the executions endpoint come alive?**~~ **NO — theory refuted, see P0.6.**
 - [ ] **Gross vs net on the ledger reconcile** (see P0.7)
 - **Rollback lever if anything looks wrong:** `strategy.entry_pricing.deliberate_rung_pricing: false` +
@@ -75,10 +79,31 @@ stacking more on top.
   - **`/etc/systemd/system/entry-window-watch.timer` is OLDER than the repo copy** — pre-existing drift,
     not caused by today's work. It is missing the 14:05 E6 check that was added but never installed, so
     that watch has never run. Low impact (E6 is suppressed on B) but fix it during a deploy.
-- [ ] **⬅ THE ONLY REMAINING NON-GO-LIVE ITEM. GEX veto EV, computed properly** (~2–3h, read-only, OPTIONAL). Use `gex_decisions.reference_strike`
-      + the adjuster's log line + `market_ticks.spx_price` over the full 83-abort window. Converts the last
-      deferred question from argument into a number. **Prior evidence favours KEEPING the gate** (43 vetoes
-      vs 38 placed, Fisher p=0.038), so this is confirmation, not a blocker.
+- [ ] **GEX veto EV — DATA-BLOCKED, not merely "optional". Re-scoped 2026-09-11 against the real tables.**
+
+      The 2026-09-10 audit framed this as a ~2-3h read-only analysis over "83 aborts" / "43 vetoes vs 38
+      placed". **Checking the actual database does not support that scoping:**
+
+      ```
+      skipped_entries — GEX accel-zone vetoes:   108 entries   (95 + 13, two reason strings)
+        ...of which have outcome data recorded:    0
+      gex_decisions (schema-v16 telemetry, since 2026-09-05):  40 rows — 37 KEEP, 3 SKIP
+      ```
+
+      Two blockers the audit did not surface:
+      1. **The new telemetry is far too sparse.** Three SKIP events across ~5 sessions decides nothing.
+      2. **The historical record has NO outcomes.** 108 entries were vetoed and not one has a recorded
+         "would it have won?" — because that is exactly what
+         `DataRecorder.update_skipped_entry_backtest` would write, and it has **zero callers repo-wide**
+         (documented in `ea0bd8c`). **These are the same finding, not two.**
+
+      So answering this properly means EITHER waiting months for `gex_decisions` to accumulate, OR
+      reconstructing outcomes for the 108 historical vetoes from `market_ticks` — real work, not a query.
+
+      **RECOMMENDATION: leave it.** The existing evidence (vetoed shorts got breached; placed ones did
+      not) already points toward KEEPING the gate, and nothing downstream depends on resolving it. If it
+      is ever picked up, wiring `update_skipped_entry_backtest` at settlement is the prerequisite, and it
+      makes every FUTURE veto measurable rather than re-litigating the past.
 
 ### P3 — the real-money combo track (the actual next phase)
 
