@@ -105,8 +105,12 @@ class TestItCallsTheRealSignatures:
         real = inspect.getsource(IBClient.place_iron_condor)
         for field in ('sec_type="BAG"', 'order_type="LMT"', 'side="SELL"'):
             assert field in real, f"place_iron_condor no longer sets {field}"
-        assert '"sec_type": "BAG"' in SRC
-        assert '"order_type": "LMT"' in SRC
+        # camelCase over RPC — see the note in the probe. ibind only maps
+        # snake_case for the OrderRequest DATACLASS; a dict crossing the JSON
+        # boundary is passed through unmapped, so `order_type` reached IBKR
+        # verbatim and returned 400 "Unknown order type".
+        assert '"secType": "BAG"' in SRC
+        assert '"orderType": "LMT"' in SRC
 
     def test_conid_is_OMITTED_not_null(self):
         """Over JSON, conid=None becomes `null` and ibind reads the key's

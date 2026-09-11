@@ -106,21 +106,26 @@ def preview(conidex: str, side: str, price: float, qty: int, label: str) -> dict
     print(f"\n--- {label} ---")
     print(f"  conidex: {conidex}")
     print(f"  side={side}  price={price}  qty={qty}")
-    # MIRROR THE REAL IC PLACEMENT PATH's OrderRequest EXACTLY. The first live run omitted
-    # sec_type="BAG" and IBKR answered 400 "Unknown order type" — a combo ticket
-    # is not identified by the conidex alone. `coid` is deliberately NOT sent: a
-    # preview needs no server-side dedup key, and reusing one could collide with
-    # a real order's id.
+    # ⚠️ CAMEL-CASE ON PURPOSE. ibind's `parse_order_request` maps snake_case to
+    # IBKR's camelCase ONLY for the `OrderRequest` dataclass; handed a plain
+    # dict it passes the keys through UNMAPPED (it even logs "Use 'OrderRequest'
+    # dataclass instead"). Anything crossing the RPC boundary arrives as JSON,
+    # i.e. as a dict — so `order_type` reached IBKR verbatim and came back
+    # 400 "Unknown order type". The direct in-process path is unaffected
+    # because it passes the dataclass.
+    #
+    # This is a real gap in allowlisting what_if_order for RPC: the method's
+    # argument cannot survive JSON. The PROPER fix is for broker_service to
+    # coerce the dict back into an OrderRequest before dispatch — that needs a
+    # broker restart, so it is queued rather than done mid-session. Sending
+    # pre-mapped keys here is the documented workaround, and it mirrors exactly
+    # what the dataclass would have produced.
     order = {
-        # conid is OMITTED, not set to None: over JSON it becomes `null`, and
-        # ibind reads the KEY's presence as "provided" -> "Both 'conidex' and
-        # 'conid' are provided". The direct path passes conid=None in Python,
-        # where the dataclass default makes it genuinely absent.
         "conidex": conidex,
-        "sec_type": "BAG",        # <- the field whose absence caused the 400
+        "secType": "BAG",          # <- sec_type
         "side": side,
-        "order_type": "LMT",
-        "price": price,           # POSITIVE = credit received (IBKR convention)
+        "orderType": "LMT",        # <- order_type; unmapped, this is the 400
+        "price": price,            # POSITIVE = credit received (IBKR convention)
         "quantity": float(qty),
         "tif": "DAY",
     }
@@ -201,6 +206,17 @@ def main(argv=None) -> int:
         print(f"\nABORT: unresolved legs: {conids}")
         return 2
     print(f"conids: {conids}")
+
+    # SNAPSHOT THE LEGS FIRST. ibind's own whatif docstring: "Clients must query
+    # /iserver/marketdata/snapshot for the instrument prior to requesting the
+    # /whatif endpoint." Without it IBKR accepts the ticket but returns em-dash
+    # placeholders instead of margin numbers — which is exactly the "empty block
+    # is INCONCLUSIVE, never a pass" case this script refuses to wave through.
+    try:
+        q = rpc("get_quotes_batch", [conids[k] for k in ("sc", "lc", "sp", "lp")])
+        print(f"snapshot: {len(q or {})} legs quoted")
+    except Exception as e:
+        print(f"snapshot WARNING: {e} — whatif may return placeholders")
 
     legs = (f"{conids['sc']}/-1,{conids['lc']}/1,"
             f"{conids['sp']}/-1,{conids['lp']}/1")
