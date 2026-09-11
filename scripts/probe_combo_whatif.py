@@ -52,6 +52,7 @@ USAGE (on the VM, as calypso — the broker must be up)
 from __future__ import annotations
 
 import argparse
+import datetime as _dt
 import json
 import os
 import sys
@@ -135,6 +136,8 @@ def main(argv=None) -> int:
     p.add_argument("--width", type=float, default=5.0, help="wing width in points")
     p.add_argument("--quantity", type=int, default=1)
     p.add_argument("--otm", type=float, default=60.0, help="points OTM for the shorts")
+    p.add_argument("--expiry", default=None,
+                   help="ISO expiry (default: today — the 0DTE the strategy trades)")
     a = p.parse_args(argv)
 
     print("=" * 72)
@@ -158,6 +161,9 @@ def main(argv=None) -> int:
         return 2
     print(f"\nSPX spot: {spot:,.2f}")
 
+    expiry = a.expiry or _dt.date.today().isoformat()
+    print(f"expiry: {expiry}  (0DTE — the contract the strategy actually trades)")
+
     inc = 5
     sc = round((spot + a.otm) / inc) * inc
     sp = round((spot - a.otm) / inc) * inc
@@ -168,8 +174,11 @@ def main(argv=None) -> int:
     for strike, right, name in ((sc, "C", "sc"), (lc, "C", "lc"),
                                 (sp, "P", "sp"), (lp, "P", "lp")):
         try:
+            # qualify_contract REQUIRES expiry+strike+right for an option, and
+            # _coerce_expiry accepts an ISO string over the RPC wire (a date
+            # object would arrive as a str anyway).
             conids[name] = rpc("qualify_contract", a.symbol, sec_type="OPT",
-                               strike=float(strike), right=right,
+                               expiry=expiry, strike=float(strike), right=right,
                                trading_class="SPXW")
         except Exception as e:
             print(f"\nABORT: could not qualify {right}{strike}: {e}")
