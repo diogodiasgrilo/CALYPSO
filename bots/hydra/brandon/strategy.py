@@ -2970,11 +2970,25 @@ class BrandonHydraStrategy(HydraStrategy):
             )
 
             contributed = len(profile.strikes)
-            dropped = chain_total - contributed
+            # UNITS BUG, fixed 2026-09-11. This was `chain_total - contributed`,
+            # subtracting a STRIKE count from a CONTRACT count. On a real chain
+            # (618 contracts, 145 strikes contributed, 221 hydrated) it reported
+            # dropped=473, which is neither the contracts that failed to hydrate
+            # (618-221=397) nor the strikes that did not contribute — it just
+            # looked plausible. That is doubly bad here: this log line exists
+            # SPECIFICALLY to make the hydration coverage gap visible after the
+            # 2026-09-01 cap incident, so a mis-scaled number defeats its whole
+            # purpose and overstates the loss by ~19%.
+            #
+            # Contracts and strikes are now reported separately and labelled.
+            # A chain carries ~2 contracts per strike (a call and a put), so the
+            # two counts are never directly comparable.
+            not_hydrated = chain_total - with_greeks_or_iv
             logger.info(
                 "Brandon GEX profile refreshed (force=%s): spot=%.2f, %d strikes contributed, "
-                "%d positive / %d negative clusters; chain=%d, hydrated_with_greeks_or_iv=%d, "
-                "dropped=%d, candidates_found=%d, hydrate_cap=%d",
+                "%d positive / %d negative clusters; chain=%d contracts, "
+                "hydrated_with_greeks_or_iv=%d, not_hydrated=%d contracts, "
+                "candidates_found=%d, hydrate_cap=%d",
                 force_refresh,
                 profile.spot,
                 contributed,
@@ -2982,7 +2996,7 @@ class BrandonHydraStrategy(HydraStrategy):
                 len(profile.negative_clusters(min_strength_pct=self.brandon_accel_min_pct)),
                 chain_total,
                 with_greeks_or_iv,
-                dropped,
+                not_hydrated,
                 candidates_found,
                 self.brandon_gex_max_contracts_to_hydrate,
             )
