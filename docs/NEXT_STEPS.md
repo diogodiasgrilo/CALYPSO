@@ -5,7 +5,8 @@
 > [`docs/migration/PROJECT_STATUS.md`](migration/PROJECT_STATUS.md) (project-wide state) and the per-effort
 > design docs.
 >
-> **Last updated: 2026-09-10.** §A–§D below are current. **§0–§10 are the older backlog (2026-07-14 /
+> **Last updated: 2026-09-11** (deploy executed 03:25–03:35 ET; the accountId theory was refuted —
+> see §A P0.6). §A–§D below are current. **§0–§10 are the older backlog (2026-07-14 /
 > 07-24 era)** — much of it is done or superseded; **verify against the code before acting on anything
 > there.** Real live items still live in §5 (entry-schedule lock, E calendar-stop analyzer) and §6
 > (Brandon fill-quality confirmations), which is why those sections are kept rather than deleted.
@@ -14,10 +15,13 @@
 
 # §A. DO NEXT — by priority (2026-09-10)
 
-### P0 — tonight's deploy, after the 16:00 ET close
+### P0 — ✅ DEPLOYED 2026-09-11, 03:25–03:35 ET
 
-Ten commits landed today; **eight are still pending deploy** (VM is at `56bb096`, local/origin at
-`8e48235`). Order matters:
+All commits are live. VM at `ea0bd8c`, broker restarted first and healthy (connected/authenticated/not
+competing), all 8 strategy units clean with zero errors, unit files installed + `daemon-reload`, timers
+rescheduled (HERMES Fri 23:00 ET, HOMER Fri 23:30 ET), and `ENTRY-PRICING: deliberate rung pricing
+ENABLED` confirmed in B's log. Account was flat (13 position rows, all qty 0 — expired 09-10 contracts).
+Kept for the record, since the sequence is the reusable part:
 
 1. **Wait for settlement to complete.** Measured 21:45–22:37 ET. NEVER restart with settlement pending
    (the stale-SPX bug produced a phantom −$6,036).
@@ -30,10 +34,15 @@ Ten commits landed today; **eight are still pending deploy** (VM is at `56bb096`
 5. **`cp` the changed unit files to `/etc/systemd/system/` + `daemon-reload`.** A `git pull` does NOT
    install unit files. After tonight's pull these will differ: `hermes.timer`, `homer.timer`,
    `hydra_variant_b.service`. Then `systemctl restart hermes.timer homer.timer`.
-6. **Probe `get_day_executions(days=7)`** — the moment of truth on whether the missing `accountId` was
-   really why `/iserver/account/trades` returned nothing. If rows appear, correct the "dead endpoint"
-   language in CLAUDE.md + the F5 docs. If still empty, the paper-limitation theory returns with one
-   variable eliminated.
+6. ~~**Probe `get_day_executions(days=7)`**~~ — **DONE 2026-09-11, and the accountId theory is REFUTED.**
+   After the fix was deployed and the broker restarted, the endpoint still returns **ZERO** executions over
+   a 7-day window containing ~24 real legs. The code-read was sound (we genuinely were not sending
+   `accountId`, and 11 other call sites do), but it was not the cause. The fix is kept — it is correct and
+   harmless — and the **paper-account-limitation theory now stands with one variable eliminated**.
+   Consequence unchanged and already handled: `get_closed_position_price` returns None on every lookup, which
+   the L-M3 guard, the open/close filter and the MKT-033 quote-estimate fallback all account for. **Do not
+   re-attempt this without a new hypothesis** — next candidates are a different preflight requirement, or
+   PortfolioAnalyst's transactions endpoint as an alternative source.
 7. **Read today's `BROKER-RECONCILE` log line** and settle whether IBKR's `raw_ledger.USD.realizedpnl` is
    gross or net of commission. Until that is known the check logs and does not alert.
 
@@ -45,7 +54,7 @@ stacking more on top.
 - [ ] **Entry-failure / unwind rate and rung-2+ escalation rate on B.** This is where the new passive
       rung-1 pricing would show up as a *cost*. The per-leg fill-vs-mid columns already exist
       (`short_*_fill_price` / `*_mid_at_fill`), so no new telemetry is needed to measure it.
-- [ ] **Did the executions endpoint come alive?** (see P0.6)
+- [x] ~~**Did the executions endpoint come alive?**~~ **NO — theory refuted, see P0.6.**
 - [ ] **Gross vs net on the ledger reconcile** (see P0.7)
 - **Rollback lever if anything looks wrong:** `strategy.entry_pricing.deliberate_rung_pricing: false` +
   a strategy restart. It is the only change that alters order pricing and the only one with no broker
@@ -53,7 +62,10 @@ stacking more on top.
 
 ### P2 — remaining non-go-live work (small)
 
-- [ ] **Stale-comment sweep + unit-file drift** (~30 min, cosmetic but they mislead readers):
+- [x] ~~**Stale-comment sweep + unit-file drift**~~ — **DONE 2026-09-11** (`ea0bd8c` + unit install).
+      All four corrected after VERIFYING each was wrong (the account really is USD — `raw_ledger["BASE"]`
+      is identical to `raw_ledger["USD"]`). `entry-window-watch.timer` reinstalled, so its 14:05 E6 check
+      now actually runs. Original list kept below for the reasoning:
   - `base_strategy.py` MKT-048's "a mid-limit buy fills at ≤ mid, so long_fill ≈ long_mid" — falsified
     29/34 on legacy pricing, but becomes *conditionally true* for B once deliberate rung pricing is on.
     Needs precision, not deletion.
@@ -63,7 +75,7 @@ stacking more on top.
   - **`/etc/systemd/system/entry-window-watch.timer` is OLDER than the repo copy** — pre-existing drift,
     not caused by today's work. It is missing the 14:05 E6 check that was added but never installed, so
     that watch has never run. Low impact (E6 is suppressed on B) but fix it during a deploy.
-- [ ] **GEX veto EV, computed properly** (~2–3h, read-only, OPTIONAL). Use `gex_decisions.reference_strike`
+- [ ] **⬅ THE ONLY REMAINING NON-GO-LIVE ITEM. GEX veto EV, computed properly** (~2–3h, read-only, OPTIONAL). Use `gex_decisions.reference_strike`
       + the adjuster's log line + `market_ticks.spx_price` over the full 83-abort window. Converts the last
       deferred question from argument into a number. **Prior evidence favours KEEPING the gate** (43 vetoes
       vs 38 placed, Fisher p=0.038), so this is confirmation, not a blocker.

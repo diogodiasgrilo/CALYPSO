@@ -1326,7 +1326,7 @@ class MEICStrategy(abc.ABC):
         if self.deliberate_rung_pricing:
             logger.info(
                 "ENTRY-PRICING: deliberate rung pricing ENABLED — the two "
-                "0%%-slippage rungs will rest (buy at/below mid, sell at/above "
+                "0%-slippage rungs will rest (buy at/below mid, sell at/above "
                 "mid) instead of crossing. Escalation rungs unchanged."
             )
 
