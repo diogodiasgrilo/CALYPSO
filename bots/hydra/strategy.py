@@ -6113,6 +6113,17 @@ class HydraStrategy(MEICStrategy):
                 "long_call_mid_at_fill": entry.long_call_mid_at_fill or None,
                 "short_put_mid_at_fill": entry.short_put_mid_at_fill or None,
                 "long_put_mid_at_fill": entry.long_put_mid_at_fill or None,
+                # v17: the mid when the strategy DECIDED to trade, as distinct
+                # from the mid at the moment of fill. fill - mid_at_fill is
+                # spread capture; fill - mid_at_decision is the TOTAL execution
+                # cost, including drift while a passive order rested. Without
+                # this, a passive order that misses and fills later at a worse
+                # price scores "flat" — which is exactly the cost the
+                # passive-rung change introduces.
+                "short_call_mid_at_decision": getattr(entry, "short_call_mid_at_decision", None) or None,
+                "long_call_mid_at_decision": getattr(entry, "long_call_mid_at_decision", None) or None,
+                "short_put_mid_at_decision": getattr(entry, "short_put_mid_at_decision", None) or None,
+                "long_put_mid_at_decision": getattr(entry, "long_put_mid_at_decision", None) or None,
                 # Margin snapshot
                 "margin_available": self._last_margin_snapshot.get("available"),
                 "margin_utilization_pct": self._last_margin_snapshot.get("utilization_pct"),

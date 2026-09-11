@@ -27,6 +27,9 @@ _PROBE = {
     "price": 1.5,
     "fill_price": 1.25,
     "mid_at_fill": 1.30,
+    # v17 (2026-09-11): mid at the FIRST attempt — the price the strategy
+    # DECIDED to trade at, so drift while a passive order rests is measurable.
+    "mid_at_decision": 1.05,
 }
 _ALL_NAMES = [f"{leg}_{prop}" for leg in LEG_NAMES for prop in LEG_PROPS]
 

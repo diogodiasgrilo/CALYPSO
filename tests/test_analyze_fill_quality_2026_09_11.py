@@ -45,7 +45,8 @@ def _db(tmp_path, rows):
              "contracts INT", "total_credit REAL", "time_to_fill_ms REAL",
              "attempts INTEGER"]
             + [f"{s}_fill_price REAL" for s, _ in LEGS]
-            + [f"{s}_mid_at_fill REAL" for s, _ in LEGS])
+            + [f"{s}_mid_at_fill REAL" for s, _ in LEGS]
+            + [f"{s}_mid_at_decision REAL" for s, _ in LEGS])
     con.execute(f"CREATE TABLE trade_entries ({', '.join(cols)})")
     for r in rows:
         keys = list(r)
@@ -165,6 +166,59 @@ class TestAggregation:
         assert after["dates"] == ["2026-09-11"]
 
 
+class TestTotalExecutionCostVsDecisionMid:
+    """v17. The bug this closes: on 2026-09-11 entry #1 a long posted at mid
+    $1.05, did not fill, the market rose, and it filled at $1.15 — where the mid
+    WAS $1.15, so SPREAD CAPTURE scored it FLAT while it cost $0.10/share ($70 at
+    7 contracts). Drift-while-resting is exactly the cost the passive-rung change
+    introduces, so measuring only spread capture left the instrument blind to the
+    thing it exists to detect."""
+
+    def test_the_exact_entry_1_case_scores_flat_on_spread_capture(self):
+        row = {"a_fill_price": 1.15, "a_mid_at_fill": 1.15,
+               "a_mid_at_decision": 1.05, "contracts": 7}
+        assert _leg_gap(row, "a", True) == pytest.approx(0.0)
+
+    def test_and_costs_70_dollars_on_total_execution_cost(self):
+        row = {"a_fill_price": 1.15, "a_mid_at_fill": 1.15,
+               "a_mid_at_decision": 1.05, "contracts": 7}
+        assert _leg_gap(row, "a", True, ref="mid_at_decision") == pytest.approx(70.0)
+
+    def test_a_short_left_behind_by_the_market_also_shows_the_cost(self):
+        """Entry #1's short call: wanted mid $1.475, sold $1.35 after resting."""
+        row = {"a_fill_price": 1.35, "a_mid_at_fill": 1.325,
+               "a_mid_at_decision": 1.475, "contracts": 7}
+        assert _leg_gap(row, "a", False) < 0                      # looks like a GAIN
+        assert _leg_gap(row, "a", False, ref="mid_at_decision") == pytest.approx(87.5)
+
+    def test_an_instant_fill_scores_the_same_on_both(self):
+        """No wait, no drift — the two measures must agree."""
+        row = {"a_fill_price": 0.95, "a_mid_at_fill": 0.975,
+               "a_mid_at_decision": 0.975, "contracts": 7}
+        assert (_leg_gap(row, "a", True)
+                == _leg_gap(row, "a", True, ref="mid_at_decision"))
+
+    def test_a_missing_decision_mid_returns_None_not_zero(self):
+        """Historical rows predate v17. Zero would read as 'no execution cost'."""
+        row = {"a_fill_price": 1.15, "a_mid_at_fill": 1.15, "contracts": 7}
+        assert _leg_gap(row, "a", True, ref="mid_at_decision") is None
+
+    def test_the_report_says_which_number_matters(self, tmp_path):
+        db = _db(tmp_path, [_entry(long_call_fill_price=1.15,
+                                   long_call_mid_at_fill=1.15,
+                                   long_call_mid_at_decision=1.05)])
+        out = render(analyze(db, since=None), "x")
+        assert "TOTAL EXECUTION COST" in out
+        assert "THE number that matters" in out
+
+    def test_it_warns_when_no_decision_mid_exists(self, tmp_path):
+        """Pre-v17 windows must not silently present spread capture as if it
+        were the whole story."""
+        db = _db(tmp_path, [_entry(long_call_fill_price=0.6, long_call_mid_at_fill=0.55)])
+        out = render(analyze(db, since=None), "x")
+        assert "SPREAD CAPTURE ONLY" in out
+
+
 class TestLegInDurationBuckets:
     """NOT rung counts. `_fill_start` is set before the call that places ALL FOUR
     legs, so this is the whole entry's leg-in wall-clock. The first draft of this
@@ -234,3 +288,64 @@ class TestRenderIsHonest:
     def test_it_does_not_divide_by_zero_on_a_single_day(self, tmp_path):
         db = _db(tmp_path, [_entry(long_call_fill_price=0.60, long_call_mid_at_fill=0.55)])
         assert "/day" in render(analyze(db, since=None), "x")
+
+
+class TestTheCaptureSiteItself:
+    """M3 EXPOSED A REAL GAP. Mutating the capture so `decision_mid` is taken at
+    the LAST attempt rather than the FIRST passed every test above — because they
+    all feed hand-built rows and never exercise the code that populates the
+    column. A measurement is only as good as its capture, and that half was
+    untested."""
+
+    def test_decision_mid_is_latched_on_the_FIRST_attempt_only(self):
+        """The guard is `if decision_mid is None`. Without it, each retry
+        overwrites it with a later mid — and the column would then record the
+        price at FILL time, reproducing the exact blind spot v17 removes, while
+        every analysis test still passed."""
+        import inspect
+        from bots.hydra.base_strategy import MEICStrategy
+        src = inspect.getsource(MEICStrategy._place_option_order_ib)
+        assert "if decision_mid is None and mid_price:" in src, (
+            "decision_mid must latch on the first attempt; re-assigning it on "
+            "every retry makes it a second mid_at_fill"
+        )
+
+    def test_it_is_initialised_to_None_not_zero(self):
+        """0.0 would be falsey AND a valid-looking price: the latch would never
+        fire and the analyzer's `mid in (None, 0)` guard would silently drop
+        every leg."""
+        import inspect
+        from bots.hydra.base_strategy import MEICStrategy
+        src = inspect.getsource(MEICStrategy._place_option_order_ib)
+        assert "decision_mid = None" in src
+
+    def test_it_is_returned_to_the_caller(self):
+        import inspect
+        from bots.hydra.base_strategy import MEICStrategy
+        src = inspect.getsource(MEICStrategy._place_option_order_ib)
+        assert '"mid_at_decision": decision_mid,' in src
+
+    def test_all_four_legs_plumb_it_onto_the_entry(self):
+        """A field captured but not plumbed records NULL forever — which is how
+        the theoretical_* strike columns sat empty for 95 GEX vetoes."""
+        import inspect
+        from bots.hydra.base_strategy import MEICStrategy
+        src = inspect.getsource(MEICStrategy)
+        for leg in ("long_call", "long_put", "short_call", "short_put"):
+            assert f"entry.{leg}_mid_at_decision = " in src, leg
+
+    def test_the_recorder_persists_all_four(self):
+        import inspect
+        from bots.hydra.strategy import HydraStrategy
+        src = inspect.getsource(HydraStrategy)
+        for leg in ("long_call", "long_put", "short_call", "short_put"):
+            assert f'"{leg}_mid_at_decision"' in src, leg
+
+    def test_the_schema_migration_exists_and_is_applied(self):
+        import shared.data_recorder as D
+        assert D.SCHEMA_VERSION >= 17
+        cols = " ".join(D.MIGRATION_V17_SQL)
+        for leg in ("long_call", "long_put", "short_call", "short_put"):
+            assert f"{leg}_mid_at_decision" in cols, leg
+        import inspect
+        assert "MIGRATION_V17_SQL" in inspect.getsource(D.DataRecorder.ensure_schema)

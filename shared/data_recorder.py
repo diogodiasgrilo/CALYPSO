@@ -34,7 +34,7 @@ Schema v10 (2026-06-12) adds: a first-class `date` column on spread_snapshots
 backfilled from the timestamp prefix, with an index — so per-day queries and
 per-day maintenance match every other table (date, entry_number).
 
-Current SCHEMA_VERSION = 16 (see the module constant; this docstring intro
+Current SCHEMA_VERSION = 17 (see the module constant; this docstring intro
 describes v10 as an example of the migration pattern, not the current version —
 see the dated comment blocks above each MIGRATION_V{N}_SQL for the full history).
 """
@@ -60,7 +60,7 @@ def _describe_exception(e: Exception) -> str:
 
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 16
+SCHEMA_VERSION = 17
 
 # ============================================================================
 # Schema Migration SQL
@@ -228,6 +228,30 @@ MIGRATION_V14_SQL = [
 # changes. All four columns are NULL except on the specific degraded-data skip
 # path; every other skip reason (credit gate, GEX accel-zone, etc.) leaves
 # them NULL, same additive/nullable pattern as v13's unattributed_overlay_pnl.
+MIGRATION_V17_SQL = [
+    # v17 (2026-09-11): the mid at the FIRST placement attempt — the price the
+    # strategy DECIDED to trade at, as distinct from the mid at the moment of
+    # fill.
+    #
+    # Without it, execution quality is measured against the fill-time mid, which
+    # silently hides drift while a passive order rests. Concrete case, entry #1
+    # on the day the passive-rung change went live: a long posted at mid $1.05,
+    # did not fill, the market rose, and it filled at $1.15 — where the mid WAS
+    # $1.15, so it scored "flat" while costing $0.10/share ($70 at 7 contracts).
+    #
+    #   fill - mid_at_fill      = spread capture
+    #   mid_at_fill - mid_at_decision = drift while resting
+    #   fill - mid_at_decision  = TOTAL execution cost   <- the number that matters
+    #
+    # Drift is exactly the cost the passive-rung change introduces, so measuring
+    # only spread capture left the instrument blind to the thing it exists to
+    # detect.
+    "ALTER TABLE trade_entries ADD COLUMN short_call_mid_at_decision REAL",
+    "ALTER TABLE trade_entries ADD COLUMN long_call_mid_at_decision REAL",
+    "ALTER TABLE trade_entries ADD COLUMN short_put_mid_at_decision REAL",
+    "ALTER TABLE trade_entries ADD COLUMN long_put_mid_at_decision REAL",
+]
+
 MIGRATION_V15_SQL = [
     "ALTER TABLE skipped_entries ADD COLUMN hydration_pct REAL",
     "ALTER TABLE skipped_entries ADD COLUMN achieved_delta REAL",
@@ -548,6 +572,9 @@ class DataRecorder:
                 if current_version < 15:
                     # v15: Brandon delta-target degraded-data guard telemetry
                     migration_sql += MIGRATION_V15_SQL
+                if current_version < 17:
+                    # v17: decision-time mid per leg (drift measurement)
+                    migration_sql += MIGRATION_V17_SQL
 
                 for sql in migration_sql:
                     try:
@@ -702,6 +729,8 @@ class DataRecorder:
                 # v9 ground-truth execution prices
                 "short_call_fill_price", "long_call_fill_price",
                 "short_put_fill_price", "long_put_fill_price",
+                "short_call_mid_at_decision", "long_call_mid_at_decision",
+                "short_put_mid_at_decision", "long_put_mid_at_decision",
                 "short_call_mid_at_fill", "long_call_mid_at_fill",
                 "short_put_mid_at_fill", "long_put_mid_at_fill",
             ]

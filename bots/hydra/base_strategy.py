@@ -2614,6 +2614,7 @@ class MEICStrategy(abc.ABC):
                 long_call_debit = long_call_result.get("debit", 0)  # Track debit for net credit calc
                 entry.long_call_fill_price = long_call_result.get("fill_price", 0)
                 entry.long_call_mid_at_fill = long_call_result.get("mid_at_fill", 0)
+                entry.long_call_mid_at_decision = long_call_result.get("mid_at_decision", 0)
                 filled_legs.append(("long_call", entry.long_call_position_id, entry.long_call_uic))
                 self._register_position(entry, "long_call")
 
@@ -2634,6 +2635,7 @@ class MEICStrategy(abc.ABC):
                 long_put_debit = long_put_result.get("debit", 0)  # Track debit for net credit calc
                 entry.long_put_fill_price = long_put_result.get("fill_price", 0)
                 entry.long_put_mid_at_fill = long_put_result.get("mid_at_fill", 0)
+                entry.long_put_mid_at_decision = long_put_result.get("mid_at_decision", 0)
                 filled_legs.append(("long_put", entry.long_put_position_id, entry.long_put_uic))
                 self._register_position(entry, "long_put")
 
@@ -2655,6 +2657,7 @@ class MEICStrategy(abc.ABC):
                 entry.short_call_uic = short_call_result.get("uic")
                 entry.short_call_fill_price = short_call_result.get("fill_price", 0)
                 entry.short_call_mid_at_fill = short_call_result.get("mid_at_fill", 0)
+                entry.short_call_mid_at_decision = short_call_result.get("mid_at_decision", 0)
                 # FIX (2026-02-04): Net credit = short credit - long debit (was only tracking short credit!)
                 short_call_credit = short_call_result.get("credit", 0)
                 entry.call_spread_credit = short_call_credit - long_call_debit
@@ -2680,6 +2683,7 @@ class MEICStrategy(abc.ABC):
                 entry.short_put_uic = short_put_result.get("uic")
                 entry.short_put_fill_price = short_put_result.get("fill_price", 0)
                 entry.short_put_mid_at_fill = short_put_result.get("mid_at_fill", 0)
+                entry.short_put_mid_at_decision = short_put_result.get("mid_at_decision", 0)
                 # FIX (2026-02-04): Net credit = short credit - long debit (was only tracking short credit!)
                 short_put_credit = short_put_result.get("credit", 0)
                 entry.put_spread_credit = short_put_credit - long_put_debit
@@ -2932,6 +2936,16 @@ class MEICStrategy(abc.ABC):
         filled_so_far = 0
         weighted_fill_sum = 0.0  # Σ (chunk fill_price × chunk qty) → blended avg
         first_fill_mid = None    # mid of the first filling chunk (slippage ref)
+        # DECISION-time mid — the mid at the FIRST attempt, i.e. the price the
+        # strategy decided to trade at (2026-09-11). Without it, execution
+        # quality is measured against the mid AT FILL, which silently hides
+        # drift-during-wait: on 2026-09-11 entry #1 a long rested at mid $1.05,
+        # did not fill, the market rose, and it filled at $1.15 — where the mid
+        # WAS $1.15, so it scored "flat" while costing $0.10/share ($70 at 7c).
+        # That blind spot is precisely the cost the passive-rung change
+        # introduces, so the instrument was blind to the thing it exists to
+        # detect.
+        decision_mid = None
         bid = ask = spread = 0.0  # ORDER-DIAG: always defined for the failure log
 
         # Progressive retry sequence (same as the Saxo path).
@@ -2983,6 +2997,8 @@ class MEICStrategy(abc.ABC):
                     )
 
             mid_price = (bid + ask) / 2 if bid and ask else (ask or bid)
+            if decision_mid is None and mid_price:
+                decision_mid = mid_price
 
             # ORDER-DIAG (2026-06-25): the exact conid + the quote this attempt is
             # priced against, so a fill failure on a LIQUID book is diagnosable
@@ -3177,6 +3193,11 @@ class MEICStrategy(abc.ABC):
                         # Real entry slippage = fill - mid; persisted per leg so
                         # the DB shows live execution quality.
                         "mid_at_fill": first_fill_mid,
+                        # Mid at the FIRST attempt. fill - mid_at_fill is spread
+                        # capture; mid_at_fill - mid_at_decision is drift while
+                        # the order rested; fill - mid_at_decision is the TOTAL
+                        # execution cost, which is the number that matters.
+                        "mid_at_decision": decision_mid,
                     }
 
                 logger.warning(

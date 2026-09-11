@@ -28,7 +28,8 @@ LEG_NAMES = ("short_call", "long_call", "short_put", "long_put")
 # The six leg-scoped properties that live on a Leg (everything else on
 # IronCondorEntry is side- or entry-scoped). The bridge maps each
 # ``{leg}_{prop}`` flat attribute to ``legs[leg].{prop}`` for these names.
-LEG_PROPS = ("strike", "position_id", "uic", "price", "fill_price", "mid_at_fill")
+LEG_PROPS = ("strike", "position_id", "uic", "price", "fill_price",
+             "mid_at_fill", "mid_at_decision")
 
 
 @dataclass
@@ -44,6 +45,11 @@ class Leg:
     - ``price``        — current option price, refreshed every heartbeat (transient)
     - ``fill_price``   — execution price at entry (option points; ×100 for dollars)
     - ``mid_at_fill``  — (bid+ask)/2 at the filling attempt; slippage reference (transient)
+    - ``mid_at_decision`` — (bid+ask)/2 at the FIRST attempt, i.e. the price the
+      strategy decided to trade at. `fill - mid_at_fill` is spread capture;
+      `fill - mid_at_decision` is the TOTAL execution cost including drift while
+      a passive order rested. Measuring only the former hides exactly the cost
+      the 2026-09-11 passive-rung change introduces.
     - ``expiry``       — option expiry (ISO ``YYYY-MM-DD``). ``None`` for the 0DTE
       iron-condor family (all legs share the single 0DTE expiry, resolved
       externally at qualify time). ADDITIVE for the multi-day calendar family
@@ -61,6 +67,7 @@ class Leg:
     price: float = 0.0
     fill_price: float = 0.0
     mid_at_fill: float = 0.0
+    mid_at_decision: float = 0.0
     expiry: Optional[str] = None
 
     @property
@@ -85,7 +92,7 @@ def _new_legset() -> Dict[str, Leg]:
 
 def bind_leg_bridge(cls):
     """Class decorator: install ``{leg}_{prop}`` property/setter pairs that
-    delegate to ``self.legs[leg].{prop}`` for the 4 legs × 6 leg-scoped props.
+    delegate to ``self.legs[leg].{prop}`` for the 4 legs × 7 leg-scoped props.
 
     This is the backward-compat bridge for the Leg/LegSet refactor: the ~1,011
     flat ``short_call_strike`` / ``long_put_uic`` / … references across the

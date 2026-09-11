@@ -62,8 +62,13 @@ class TestLegConstants:
         for prop in LEG_PROPS:
             assert hasattr(leg, prop), prop
             setattr(leg, prop, 1)  # settable
+        # Pinned deliberately: LEG_PROPS drives ~1,011 flat-field references via
+        # the bridge, so adding one is a real interface change and should have to
+        # be stated here. mid_at_decision added 2026-09-11 (v17) so drift while a
+        # passive order rests is measurable — see Leg's docstring.
         assert set(LEG_PROPS) == {
-            "strike", "position_id", "uic", "price", "fill_price", "mid_at_fill"
+            "strike", "position_id", "uic", "price", "fill_price",
+            "mid_at_fill", "mid_at_decision",
         }
 
 

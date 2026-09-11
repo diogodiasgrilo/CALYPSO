@@ -84,6 +84,7 @@ def _rows(db: str, since: str | None, until: str | None = None):
          "total_credit", "time_to_fill_ms", "attempts"]
         + [f"{s}_fill_price" for s, _ in LEGS]
         + [f"{s}_mid_at_fill" for s, _ in LEGS]
+        + [f"{s}_mid_at_decision" for s, _ in LEGS]
     )
     q = f"SELECT {cols} FROM trade_entries"
     where, args = [], []
@@ -99,13 +100,26 @@ def _rows(db: str, since: str | None, until: str | None = None):
         con.close()
 
 
-def _leg_gap(row, stem: str, is_long: bool):
-    """Dollars lost to the spread on this leg, or None if not quotable.
+def _leg_gap(row, stem: str, is_long: bool, ref: str = "mid_at_fill"):
+    """Dollars lost on this leg against `ref`, or None if not quotable.
 
     Positive = adverse (we paid up / sold down). Negative = price improvement.
+
+    `ref` selects WHAT the fill is judged against, and the two answer different
+    questions:
+      mid_at_fill     — SPREAD CAPTURE. Did we beat the touch at the moment we
+                        traded? Blind to drift while a passive order rested.
+      mid_at_decision — TOTAL EXECUTION COST (v17). Judged against the price the
+                        strategy decided to trade at. This is the number that
+                        matters, because drift-during-wait is precisely the cost
+                        the passive-rung change introduces.
+
+    Worked example from 2026-09-11 entry #1: a long posted at mid $1.05, did not
+    fill, the market rose, and it filled at $1.15 where the mid WAS $1.15. Spread
+    capture scores it FLAT; total execution cost scores it -$0.10/share.
     """
     fill = row.get(f"{stem}_fill_price")
-    mid = row.get(f"{stem}_mid_at_fill")
+    mid = row.get(f"{stem}_{ref}")
     if fill in (None, 0) or mid in (None, 0):
         return None
     per_share = (fill - mid) if is_long else (mid - fill)
@@ -120,6 +134,8 @@ def analyze(db: str, since: str | None, until: str | None = None):
         "legs": {s: {"n": 0, "total": 0.0, "adverse": 0, "improved": 0, "flat": 0}
                  for s, _ in LEGS},
         "total_gap": 0.0,
+        "total_gap_vs_decision": 0.0,
+        "n_decision": 0,
         "fill_ms": [],
         "attempts": [],
     }
@@ -138,6 +154,10 @@ def analyze(db: str, since: str | None, until: str | None = None):
             else:
                 L["flat"] += 1
             out["total_gap"] += g
+            d = _leg_gap(r, stem, is_long, ref="mid_at_decision")
+            if d is not None:
+                out["total_gap_vs_decision"] += d
+                out["n_decision"] += 1
         t = r.get("time_to_fill_ms")
         if t:
             out["fill_ms"].append(float(t))
@@ -186,6 +206,19 @@ def render(res, title: str) -> str:
     L.append(f"  TOTAL GAP: ${res['total_gap']:,.2f}   (${per_day:,.2f}/day, "
              f"${res['total_gap']/res['n_entries']:,.2f}/entry)")
     L.append("  positive = money lost to the spread; negative = price improvement")
+    if res.get("n_decision"):
+        gd = res["total_gap_vs_decision"]
+        L.append("")
+        L.append(f"  TOTAL EXECUTION COST vs the DECISION-time mid (v17, {res['n_decision']} legs):")
+        L.append(f"    ${gd:,.2f}   (${gd/max(1,len(d)):,.2f}/day, "
+                 f"${gd/res['n_entries']:,.2f}/entry)")
+        L.append(f"    ^ THE number that matters — includes drift while a passive")
+        L.append(f"      order rested. The gap above is spread capture only and is")
+        L.append(f"      BLIND to it (a leg that missed and filled later at a worse")
+        L.append(f"      price scores 'flat' there).")
+    else:
+        L.append("  (no mid_at_decision yet — v17 records it from 2026-09-11; the")
+        L.append("   figure above is SPREAD CAPTURE ONLY and hides drift-while-resting)")
     if res["fill_ms"]:
         b = _buckets(res["fill_ms"])
         tot = sum(b.values())
