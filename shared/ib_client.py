@@ -114,6 +114,8 @@ from shared.ib_retry import (  # noqa: E402
 # calculated greek fields) can take "a few moments" to populate after
 # priming — 2s was too thin. 0.5s spacing also keeps the snapshot call
 # rate (~2/s, even batched) well under IBKR's 10 req/s global limit.
+from shared.ib_oauth import ENV_VAR as _ENV_VAR  # noqa: E402
+
 _SNAPSHOT_MAX_WARMUP_POLLS = 12
 _SNAPSHOT_POLL_INTERVAL_S = 0.5
 # Keys IBKR returns in the snapshot row that are routing/availability
@@ -1209,12 +1211,76 @@ class IBClient:
         # practice: IBKR's portfolio_accounts always returns rows shaped
         # `{accountId, accountVan, accountTitle, ...}`. Defense in depth.)
         try:
-            return data[0]["accountId"]
+            account_id = data[0]["accountId"]
         except KeyError as exc:
             raise IBAuthError(
                 f"IBKR portfolio_accounts returned a row without 'accountId': "
                 f"{data[0]!r}"
             ) from exc
+        self._assert_account_matches_env(account_id)
+        return account_id
+
+    def _assert_account_matches_env(self, account_id: str) -> None:
+        """Cross-check the DISCOVERED account against the DECLARED environment.
+
+        Until 2026-09-11 the environment was a hardcoded ``"paper"`` literal at
+        both call sites, and ``is_paper`` was derived from that literal — so it
+        was a SELF-DECLARATION, not a fact, and it gated nothing. Re-encrypting
+        live credentials under the same systemd credential IDs would have
+        connected to a live account while ``is_paper`` still reported True.
+        This is the check that makes the declaration mean something.
+
+        IBKR's convention: PAPER account codes start with ``D`` (DU, DUR, DF…);
+        LIVE codes do not (``U########`` for individuals, F/I prefixes for
+        advisor structures). Verified against this account, which is ``DUR``+6.
+
+        ASYMMETRIC ON PURPOSE — the two mismatches are not equally dangerous:
+
+        * Declared PAPER but the account looks LIVE  -> **RAISE**. This is the
+          direction that loses real money: the operator believes they are
+          simulating and they are not. Nothing downstream can recover from it,
+          so the session must not be handed out at all.
+        * Declared LIVE but the account looks PAPER  -> **WARN ONLY**. Annoying
+          (orders go nowhere real) but harmless, and refusing here would brick a
+          go-live on a mis-set variable rather than just flagging it.
+
+        Unrecognised shapes warn rather than raise: a future IBKR prefix we have
+        not seen must not take the bot down, and the paper-side guard above
+        already covers the case that actually costs money.
+        """
+        declared = getattr(self.cfg.credentials, "environment", None)
+        code = (account_id or "").strip().upper()
+        if not code or declared not in ("paper", "live"):
+            logger.warning(
+                "ENV-ASSERT: cannot verify account/environment "
+                "(account=%r, declared=%r) — proceeding unverified",
+                account_id, declared,
+            )
+            return
+
+        looks_paper = code.startswith("D")
+        if declared == "paper" and not looks_paper:
+            raise IBAuthError(
+                f"ENV-ASSERT FAILED: credentials declare environment='paper' but "
+                f"IBKR returned account {code!r}, which is NOT a paper account "
+                f"(paper codes start with 'D'). This is the dangerous direction — "
+                f"real money under a simulation assumption — so the session is "
+                f"being refused. If this IS intended, set "
+                f"{_ENV_VAR}=live so the declaration matches the account."
+            )
+        if declared == "live" and looks_paper:
+            logger.warning(
+                "ENV-ASSERT: %s=live but IBKR returned account %s, which looks "
+                "like a PAPER account. Orders will not reach a real market. "
+                "Not refusing — this direction is harmless — but the "
+                "declaration and the account disagree.",
+                _ENV_VAR, code,
+            )
+            return
+        logger.info(
+            "ENV-ASSERT ok: declared %s, account %s%s",
+            declared, code[:3], "*" * max(0, len(code) - 3),
+        )
 
     def disconnect(self) -> None:
         """Tear down the brokerage session cleanly.

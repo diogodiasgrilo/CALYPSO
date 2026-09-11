@@ -28,7 +28,7 @@ from shared import ib_retry
 from shared.alert_service import AlertService
 from shared.broker_service import BrokerDispatcher, create_app
 from shared.ib_client import IBClient, IBConfig
-from shared.ib_oauth import load_credentials
+from shared.ib_oauth import load_credentials, resolve_environment
 from shared.market_hours import get_us_market_time, is_market_open
 
 try:
@@ -149,7 +149,7 @@ def main() -> None:
     logger.info("calypso-broker starting — paper account, single shared session")
     # connect() raises on failure → systemd Restart=always retries (matches the
     # bots' fail-closed behavior; we never serve on a dead session).
-    ib = IBClient(IBConfig(credentials=load_credentials("paper")))
+    ib = IBClient(IBConfig(credentials=load_credentials(resolve_environment())))
     ib.connect()
 
     # P5a: breaker + warmup ALERTING lives HERE now (the breakers live in this

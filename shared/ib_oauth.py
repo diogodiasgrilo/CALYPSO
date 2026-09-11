@@ -178,6 +178,51 @@ def assert_safe_crypto_backend() -> None:
         )
 
 
+#: Environment variable that selects paper vs live. Deliberately CALYPSO-prefixed
+#: rather than reusing an IBIND_* name, so it cannot collide with anything ibind
+#: reads, and grep finds every reference.
+ENV_VAR = "CALYPSO_IBKR_ENV"
+
+VALID_ENVIRONMENTS = ("paper", "live")
+
+
+def resolve_environment(default: str = "paper") -> str:
+    """Which IBKR environment this process should connect to.
+
+    Reads ``$CALYPSO_IBKR_ENV``, defaulting to ``paper``. Exists because the
+    environment used to be a HARDCODED LITERAL at two call sites
+    (``bots/hydra/main.py`` and ``services/broker/main.py``), which meant:
+
+      * there was no way to run live without editing source, and
+      * ``IBClient.is_paper`` — derived from that literal — was a
+        SELF-DECLARATION rather than a fact. Re-encrypting live credentials
+        under the same systemd credential IDs would have connected to a live
+        account while ``is_paper`` still cheerfully reported True.
+
+    Defaults to paper on purpose: an unset or malformed value must never
+    silently select live. Anything not in VALID_ENVIRONMENTS raises rather than
+    falling back, because a typo'd "LIVE " that quietly became "paper" would be
+    just as bad in the other direction — the operator would think they were
+    live and not be.
+
+    The declaration is only half of it; ``IBClient`` cross-checks the
+    DISCOVERED account code against this (see ``_assert_account_matches_env``),
+    which is what turns it from a claim into a verified fact.
+    """
+    raw = os.environ.get(ENV_VAR)
+    if raw is None or not raw.strip():
+        return default
+    env = raw.strip().lower()
+    if env not in VALID_ENVIRONMENTS:
+        raise ValueError(
+            f"{ENV_VAR}={raw!r} is not a valid IBKR environment. "
+            f"Expected one of {VALID_ENVIRONMENTS}. Refusing to guess — an "
+            f"unrecognised value must not silently fall back to either "
+            f"environment."
+        )
+    return env
+
+
 def _keys_dir(environment: str) -> Path:
     """Return the per-environment key directory (paper or live)."""
     if environment not in ("paper", "live"):

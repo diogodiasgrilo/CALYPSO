@@ -53,7 +53,7 @@ if _project_root not in sys.path:
 from shared.ib_client import (
     IBClient, IBConfig, IBClientError, IBAuthError, IBConnectionError,
 )
-from shared.ib_oauth import load_credentials
+from shared.ib_oauth import load_credentials, resolve_environment
 from shared.broker_client import BrokerClient, BrokerError
 from shared.logger_service import setup_logging
 from shared.market_hours import (
@@ -312,7 +312,7 @@ def _build_broker():
     broker_url = os.environ.get("CALYPSO_BROKER_URL")
     if broker_url:
         return BrokerClient(broker_url)
-    return IBClient(IBConfig(credentials=load_credentials("paper")))
+    return IBClient(IBConfig(credentials=load_credentials(resolve_environment())))
 
 
 def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config_path: str = "bots/hydra/config/config.json"):
