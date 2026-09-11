@@ -100,10 +100,21 @@ watching B's FIRST session on the new entry pricing — confirm, do not stack mo
       So answering this properly means EITHER waiting months for `gex_decisions` to accumulate, OR
       reconstructing outcomes for the 108 historical vetoes from `market_ticks` — real work, not a query.
 
-      **RECOMMENDATION: leave it.** The existing evidence (vetoed shorts got breached; placed ones did
-      not) already points toward KEEPING the gate, and nothing downstream depends on resolving it. If it
-      is ever picked up, wiring `update_skipped_entry_backtest` at settlement is the prerequisite, and it
-      makes every FUTURE veto measurable rather than re-litigating the past.
+      **UNBLOCKED GOING FORWARD, 2026-09-11.** Root cause of the blockage found and fixed: the
+      `theoretical_short_call/long_call/short_put/long_put` columns have existed since schema v8 and
+      **nothing ever populated them** — 95 live-era GEX vetoes, 0 with strikes. It was never an analysis
+      problem; the inputs were never written down. `_record_skipped_entry` now takes the proposed entry
+      and records the strikes, wired at both clean-skip sites that hold one (require-both-sides — which
+      is the GEX veto — and the degraded-data abort). A vetoed side records None, not 0: the adjuster
+      zeroes the side it drops, and a 0 would pass a `strike > 0` filter as if present.
+
+      **REMAINING, in order:** (a) wire `DataRecorder.update_skipped_entry_backtest` at settlement to
+      compute `would_have_stopped` / `theoretical_pnl` from the day's `market_ticks` range — it still has
+      zero callers; (b) THEN the EV is a query rather than a project. The historical 95 stay
+      unmeasurable — their strikes were never recorded and cannot be recovered.
+
+      **Still recommended: do not block on it.** Existing evidence (vetoed shorts got breached; placed
+      ones did not) already favours KEEPING the gate, and nothing downstream depends on the number.
 
 ### P3 — the real-money combo track (the actual next phase)
 

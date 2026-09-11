@@ -5622,7 +5622,8 @@ class HydraStrategy(MEICStrategy):
                               hydration_pct: Optional[float] = None,
                               achieved_delta: Optional[float] = None,
                               target_delta: Optional[float] = None,
-                              delta_floor: Optional[float] = None):
+                              delta_floor: Optional[float] = None,
+                              proposed_entry=None):
         """
         Record a skipped entry in daily_state.entries and optionally send Telegram alert.
 
@@ -5656,7 +5657,26 @@ class HydraStrategy(MEICStrategy):
         # Record skip to SQLite (before alert guard — must run even when send_alert=False)
         if self._data_recorder:
             try:
+                # THE STRIKES WE WOULD HAVE USED (2026-09-11). `skipped_entries`
+                # has carried theoretical_short_call/long_call/short_put/long_put
+                # since v8, and NOTHING has ever populated them: variant B holds
+                # 95 live-era GEX vetoes with 0 strikes recorded. Without them the
+                # counterfactual this table exists for — "would the entries the
+                # GEX adjuster vetoed have won?" — is not computable at all, which
+                # is why that question has stayed open through three audits.
+                #
+                # A VETOED SIDE MAY BE ABSENT: the adjuster zeroes the side it
+                # drops, so on a GEX skip typically only the SURVIVING side has a
+                # strike. That is still the useful half — it is the side that
+                # WOULD have been placed — and the analysis must filter on
+                # presence rather than assume both.
+                _pe = proposed_entry
+                _strike = (lambda name: (getattr(_pe, name, None) or None) if _pe else None)
                 self._data_recorder.record_skipped_entry({
+                    "theoretical_short_call": _strike("short_call_strike"),
+                    "theoretical_long_call": _strike("long_call_strike"),
+                    "theoretical_short_put": _strike("short_put_strike"),
+                    "theoretical_long_put": _strike("long_put_strike"),
                     "date": now.strftime('%Y-%m-%d'),
                     "entry_number": entry_num,
                     "skip_time": now.strftime('%Y-%m-%d %H:%M:%S'),
@@ -6734,6 +6754,7 @@ class HydraStrategy(MEICStrategy):
             f"a full iron condor (both a call spread AND a put spread). Single-sided "
             f"entries have negative expectancy and a naked-short tail risk, so we "
             f"don't take them (require-both-sides). Cause: {_src_expl}.",
+            proposed_entry=entry,
         )
         return f"Entry #{entry_num} skipped - require both sides ({source})"
 
@@ -6762,7 +6783,7 @@ class HydraStrategy(MEICStrategy):
         # net-credit-floor honesty check), which is the correct "not
         # applicable" value for those columns.
         self._record_skipped_entry(
-            entry_num, reason,
+            entry_num, reason, proposed_entry=entry,
             hydration_pct=getattr(entry, "abort_entry_hydration_pct", None),
             achieved_delta=getattr(entry, "abort_entry_achieved_delta", None),
             target_delta=getattr(entry, "abort_entry_target_delta", None),
