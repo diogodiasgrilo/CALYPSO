@@ -95,6 +95,24 @@ class TestItCallsTheRealSignatures:
     def test_the_index_is_qualified_before_it_is_quoted(self):
         assert SRC.index("qualify_contract") < SRC.index("get_quote")
 
+    def test_the_preview_order_mirrors_place_iron_condor(self):
+        """The probe's whole purpose is previewing the EXACT ticket the real
+        path builds. The first live run omitted sec_type='BAG' and IBKR answered
+        400 'Unknown order type' — a combo is not identified by its conidex
+        alone."""
+        import inspect
+        from shared.ib_client import IBClient
+        real = inspect.getsource(IBClient.place_iron_condor)
+        for field in ('sec_type="BAG"', 'order_type="LMT"', 'side="SELL"'):
+            assert field in real, f"place_iron_condor no longer sets {field}"
+        assert '"sec_type": "BAG"' in SRC
+        assert '"order_type": "LMT"' in SRC
+
+    def test_the_preview_sends_no_coid(self):
+        """A preview needs no server-side dedup key, and reusing one could
+        collide with a real order's id."""
+        assert '"coid"' not in SRC
+
 
 class TestEmptyIsInconclusiveNeverAPass:
     def test_an_empty_block_is_not_ok(self, monkeypatch):
