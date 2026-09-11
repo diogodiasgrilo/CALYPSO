@@ -193,6 +193,48 @@ Strictly ordered — each step bakes in decisions the later ones depend on.
 
 ---
 
+# §A-bis. WHERE B ACTUALLY STANDS (measured 2026-09-11) + THE TOOLS
+
+**These are the go-live decision inputs.** Every figure is from
+`scripts/variant_performance.py` over B's live-paper era (2026-07-24 → 09-10).
+
+```
+35 sessions   24 traded · 9 gated · 1 no-attempt (FOMC) · 1 closed (holiday)
+  NET $6,492.25      per SESSION $185.49   per TRADED day $270.51
+ON TRADED DAYS (n=24):
+  win rate 17/24 = 71%      avg win $833 / avg loss -$1,096
+  payoff ratio 0.76  (losses BIGGER than wins — premium-selling shape)
+  Sharpe (ann.) 3.99 — on 24 days, PROVISIONAL
+  max drawdown -$1,960.70   71 entries / 8 stops
+```
+
+**Read the shape, not the headline.** It wins often and loses bigger. That works
+while 71% × $833 beats 29% × $1,096, and it is the profile that breaks worst in a
+tail event. 24 traded days has not seen a bad day.
+
+⚠️ **A "49% win rate" figure was produced on 2026-09-11 by an ad-hoc query and is
+WRONG.** It counted the 11 no-trade days as non-wins. Use the tool, which cannot
+make that error (mutation-tested).
+
+**THREE NUMBERS FRAME THE GO-LIVE DECISION, none of them settled:**
+
+| Unknown | Size | Resolves |
+|---|---|---|
+| Entry execution drag | **~$79/day vs ~$185/day net — ~30% of the edge** | today's passive-pricing result |
+| Is the gating stack right? | **~$2,434 = ~38% of traded-day P&L** rides on 9 gated days | ~1 week of recorded vetoes |
+| Is 71% / 0.76 stable? | unknown | more sessions |
+
+## The tools (all read-only; run on the VM as `calypso`)
+
+| Tool | Answers | When |
+|---|---|---|
+| `scripts/variant_performance.py` | the record, traded days separated from gated | any time |
+| `scripts/analyze_fill_quality.py` | paid-vs-mid per leg + leg-in duration. Baseline **$1,905 / $79.38 a day / $26.83 an entry**, longs = 91% | after a close; `--compare 2026-09-11` for the pricing change |
+| `scripts/analyze_skipped_entry_outcomes.py` | would the vetoed entries have been breached | needs ≥20 recorded vetoes (~1 week from 2026-09-11) |
+| `scripts/probe_combo_whatif.py` | is a 4-leg combo accepted; does `@CBOE` change margin | **during RTH only** — needs live quotes |
+
+---
+
 # §B. DECIDED — do not re-litigate
 
 - **Entry slots: leave them alone.** A permutation test on B's live era puts the ENTIRE per-slot effect at
