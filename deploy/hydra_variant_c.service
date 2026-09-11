@@ -65,7 +65,14 @@ RestartSec=30
 # 100s (was 30s, bumped 75s on 2026-08-03, bumped again 2026-08-04 when the
 # direct-Telegram bypass alert channel added new worst-case blocking time
 # to the same failure tail): safety margin while a same-day shutdown-delay
-# finding on this process family is still open (root cause unconfirmed
+# finding on this process family was ROOT-CAUSED AND FIXED on 2026-09-05
+# (commit 3986cdf): CPython's Py_FinalizeEx blocked on grpc-core's
+# process-global native threads; _hard_exit()/os._exit() under the __main__
+# guard bypasses it. Verified: zero "stop-sigterm timed out" across 9 clean
+# B stops since. TimeoutStopSec STAYS AT 100s anyway — do NOT lower it. The
+# APP-phase shutdown legitimately reaches 71s observed / 88s worst case, so a
+# shorter timeout would SIGKILL the live seat mid-order-placement. The margin
+# is for the in-flight work below, not for the (now fixed) hang.
 # — see bots/hydra/__init__.py version history and hydra.service's
 # TimeoutStopSec comment for the exact worst-case math this must exceed:
 # 55s order-fill HTTP call + 11s Pub/Sub alert retry + 2s dead-letter flock

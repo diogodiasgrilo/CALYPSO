@@ -1064,7 +1064,27 @@ class DataRecorder:
         would_have_stopped: bool,
         theoretical_pnl: float,
     ) -> bool:
-        """Update skipped_entries with hindsight P&L data (post-settlement)."""
+        """Update skipped_entries with hindsight P&L data (post-settlement).
+
+        ⚠️ NEVER CALLED (verified 2026-09-10: zero callers repo-wide, including
+        tests, scripts and the dashboard). The consequence is concrete and worth
+        knowing before you query this table: on variant B, `skipped_entries` holds
+        198 rows and **0** of them have `would_have_stopped` or `theoretical_pnl`
+        populated. Those columns are not sparse — they are structurally empty,
+        and always have been.
+
+        So any analysis of "how did skipped entries turn out" is currently
+        impossible from this table, and a reader who does not know that could
+        easily read the NULLs as "no stop" rather than "never computed".
+
+        KEPT, not deleted, deliberately: this is the write half of the
+        counterfactual the open GEX-veto question actually needs — "would the
+        entries the adjuster vetoed have won?" (43 vetoes vs 38 placed, Fisher
+        p=0.038 favouring the gate, but the dollar EV has never been computed).
+        Wiring it up means computing a theoretical outcome for each skipped
+        entry at settlement and calling this; that is a feature, not a cleanup,
+        so it is not being bolted onto a deploy batch.
+        """
         def _write():
             with self._connect() as conn:
                 conn.execute(

@@ -2512,11 +2512,18 @@ class IBClient:
     def get_balance(self, currency: str = "USD") -> dict:
         """Live tradable amount in `currency`, plus diagnostics.
 
-        For EUR-base + USD-trade (CALYPSO's case):
-          USD_tradable = EUR_availablefunds × ExchangeRate(USD per EUR)
+        CORRECTED 2026-09-10: this account's BASE CURRENCY IS USD, not EUR.
+        Verified against the live ledger — raw_ledger["BASE"] is identical to
+        raw_ledger["USD"] (netliq 1,011,315.70 in both), so no FX conversion is
+        involved for a USD-traded product. The EUR arithmetic below is retained
+        because it is the GENERAL case the code still handles (a non-USD base
+        with a USD sub-ledger), NOT because it describes this account.
+
+        General case (non-USD base, e.g. EUR, trading USD products):
+          USD_tradable = BASE_availablefunds × ExchangeRate(USD per BASE)
                        + USD_CashBalance
         Per research_scratch/11_cpapi_margin_account.md:
-          - portfolio_summary returns base-currency values (EUR)
+          - portfolio_summary returns base-currency values
           - get_ledger returns per-currency cash + exchangerate
           - NO 3-minute throttle on CP API (unlike TWS) — can poll at 1Hz,
             but the underlying risk engine still updates at ~3s so polling
@@ -3900,9 +3907,12 @@ class IBClient:
 
         Returns IBKR's 5 blocks: amount, equity, initial, maintenance,
         position — each with current/change/after keys. All values are in
-        the account's base currency (EUR for us). Caller parses strings
-        like "+4,500.00" and converts to USD via get_balance("USD") if
-        needed.
+        the account's base currency, which for THIS account is USD (verified
+        2026-09-10: raw_ledger["BASE"] == raw_ledger["USD"]) — an earlier
+        version of this docstring said EUR, which was wrong and would have sent
+        a reader looking for an FX conversion that does not happen here. Caller
+        parses strings like "+4,500.00"; convert via get_balance("USD") only if
+        the base currency is ever something other than USD.
 
         Used as our pre-trade BP gate (replaces SaxoClient's ORDER-004
         check with broker-authoritative numbers).

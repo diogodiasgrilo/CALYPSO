@@ -2383,8 +2383,26 @@ class MEICStrategy(abc.ABC):
             # placement net-credit floor (_sell_credit_floor_price) fills the
             # short only when its bid clears (long_FILL + min_net_credit). The
             # long is a BUY whose limit STARTS at mid (PROGRESSIVE_RETRY_SEQUENCE
-            # attempt 1 = 0% slippage) and a mid-limit buy fills at ≤ mid, so
-            # long_fill ≈ long_mid (≤ mid in the common case). Predicting with
+            # attempt 1 = 0% slippage).
+            #
+            # CORRECTED 2026-09-10. The claim here used to be "a mid-limit buy
+            # fills at <= mid, so long_fill ~= long_mid". That was FALSE under
+            # legacy pricing and measurably so: round_to_spx_tick(mid,
+            # round_up=True) is math.ceil, and on a $0.05 book the mid is always
+            # a half-tick, so the limit landed exactly ON THE ASK — 29 of 34
+            # sampled rung-1 long limits. long_fill was therefore ~= long_ASK,
+            # and this gate was systematically optimistic by ~$0.025/share per
+            # long leg.
+            #
+            # It becomes TRUE only where `entry_pricing.deliberate_rung_pricing`
+            # is on (see rung_limit_no_cross), which buys at the highest tick
+            # at-or-BELOW mid. That is enabled on B and OFF everywhere else, so
+            # long_mid is now the right estimate on B and still optimistic on
+            # the other variants. Left as long_mid deliberately: predicting with
+            # long_ASK over-states the long's cost and false-vetoes fillable
+            # spreads (adversarial review F1, 2026-06-22). Revisit if the
+            # deliberate-pricing flag is ever turned off on the live seat.
+            # Predicting with
             # long_ASK over-states the long's cost and false-vetoes fillable
             # spreads (adversarial review F1, 2026-06-22); long_mid is the
             # unbiased estimate. Penny-rounded so a float-subtraction artefact
