@@ -26,14 +26,26 @@ SIGN CONVENTION — the thing most likely to be got backwards
 A POSITIVE gap always means money lost to the spread, on both sides. Dollars are
 gap x 100 x contracts.
 
-ESCALATION IS INFERRED, NOT LOGGED
-----------------------------------
-`time_to_fill_ms` is a proxy. PROGRESSIVE_RETRY_SEQUENCE gives each rung a 30s
-timeout (ORDER_TIMEOUT_SECONDS) plus a 1.2s inter-rung delay
-(ORDER_RETRY_DELAY_SECONDS), so a fill much past ~31s means rung 1 did not take
-it. The buckets below are labelled as the ESTIMATES they are — the column records
-the whole leg-in, not a per-rung breakdown, so treat a shift in the distribution
-as directional evidence rather than an exact rung count.
+WHAT THE COST SIDE CAN AND CANNOT BE MEASURED FROM
+--------------------------------------------------
+CORRECTED 2026-09-11, before this tool was ever used in anger. The first draft
+bucketed `time_to_fill_ms` into "rung 1 / rung 2 / rung 3+" on the theory that a
+fill past ~31s (ORDER_TIMEOUT_SECONDS + ORDER_RETRY_DELAY_SECONDS) meant rung 1
+had not taken it. **That is wrong.** `_fill_start` is set immediately before the
+call that places ALL FOUR LEGS, so the column is the WHOLE ENTRY's leg-in
+duration. Four legs at ~13s each is ~52s with every leg filling instantly — and
+B's pre-change median was 52.9s, which the draft would have reported as "93% of
+entries escalated past rung 1" while it was crossing the spread on every one.
+
+So neither column gives per-leg rung counts:
+  * `time_to_fill_ms` — total leg-in wall-clock for the entry.
+  * `attempts`        — ENTRY-level retries (B: 67 x 1, 4 x 2 in the live era).
+True per-rung data exists only in the logs ("Attempt N: LIMIT @ $X").
+
+What is reported instead is honest and still answers the question: total leg-in
+duration, where the SIGNAL IS A SHIFT, not an absolute. Passive rungs that fail
+to fill make the entry take longer, so the distribution moving right is the cost
+showing up. Entry-level retries are reported alongside as the failure proxy.
 
 USAGE (on the VM, as calypso)
   .venv/bin/python -m scripts.analyze_fill_quality --variant b
@@ -69,7 +81,7 @@ def _rows(db: str, since: str | None, until: str | None = None):
     con.row_factory = sqlite3.Row
     cols = ", ".join(
         ["date", "entry_number", "entry_time", "entry_type", "contracts",
-         "total_credit", "time_to_fill_ms"]
+         "total_credit", "time_to_fill_ms", "attempts"]
         + [f"{s}_fill_price" for s, _ in LEGS]
         + [f"{s}_mid_at_fill" for s, _ in LEGS]
     )
@@ -109,6 +121,7 @@ def analyze(db: str, since: str | None, until: str | None = None):
                  for s, _ in LEGS},
         "total_gap": 0.0,
         "fill_ms": [],
+        "attempts": [],
     }
     for r in rows:
         for stem, is_long in LEGS:
@@ -128,20 +141,28 @@ def analyze(db: str, since: str | None, until: str | None = None):
         t = r.get("time_to_fill_ms")
         if t:
             out["fill_ms"].append(float(t))
+        out["attempts"].append(int(r.get("attempts") or 1))
     return out
 
 
 def _buckets(ms_list):
-    """Escalation ESTIMATE from leg-in duration. See the module docstring."""
-    b = {"rung1 (<31s)": 0, "rung2 (31-62s)": 0, "rung3+ (>62s)": 0}
+    """Total leg-in duration for the WHOLE entry (all four legs), bucketed.
+
+    NOT a rung count — see the module docstring. The signal is a SHIFT in this
+    distribution between two windows, because passive rungs that fail to fill
+    make the entry take longer.
+    """
+    b = {"<30s": 0, "30-60s": 0, "60-90s": 0, ">90s": 0}
     for ms in ms_list:
         s = ms / 1000.0
-        if s <= _RUNG_S:
-            b["rung1 (<31s)"] += 1
-        elif s <= _RUNG_S * 2:
-            b["rung2 (31-62s)"] += 1
+        if s < 30:
+            b["<30s"] += 1
+        elif s < 60:
+            b["30-60s"] += 1
+        elif s < 90:
+            b["60-90s"] += 1
         else:
-            b["rung3+ (>62s)"] += 1
+            b[">90s"] += 1
     return b
 
 
@@ -169,11 +190,17 @@ def render(res, title: str) -> str:
         b = _buckets(res["fill_ms"])
         tot = sum(b.values())
         L.append("")
-        L.append("  leg-in duration (ESTIMATED rung escalation — see docstring):")
+        L.append("  total leg-in duration, WHOLE entry / 4 legs (NOT a rung count —")
+        L.append("  the signal is a SHIFT between windows, not the absolute value):")
         for k, v in b.items():
             L.append(f"    {k:<16} {v:>4}  ({v/tot*100:>5.1f}%)")
         med = sorted(res["fill_ms"])[len(res["fill_ms"]) // 2] / 1000.0
         L.append(f"    median {med:,.1f}s")
+    if res.get("attempts"):
+        retried = sum(1 for a in res["attempts"] if a > 1)
+        L.append("")
+        L.append(f"  entry-level retries: {retried}/{len(res['attempts'])} entries "
+                 f"needed >1 attempt  ({retried/len(res['attempts'])*100:.1f}%)")
     return "\n".join(L)
 
 
