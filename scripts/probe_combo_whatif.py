@@ -141,7 +141,17 @@ def main(argv=None) -> int:
     print("COMBO WHAT-IF PROBE — READ-ONLY (whatif endpoint; cannot place)")
     print("=" * 72)
 
-    spot = _money((rpc("get_quote", a.symbol, sec_type="IND") or {}).get("last"))
+    # get_quote takes a CONID, not a symbol — qualify the index first.
+    # (The first draft passed sec_type= to get_quote, which does not accept it;
+    # caught on the first live run rather than by reading the signature. The
+    # signatures are now mirrored in the tests so this cannot recur silently.)
+    try:
+        spx_conid = rpc("qualify_contract", a.symbol, sec_type="IND", exchange="CBOE")
+    except Exception as e:
+        print(f"\nABORT: could not qualify {a.symbol}: {e}")
+        return 2
+    q = rpc("get_quote", spx_conid) or {}
+    spot = _money(q.get("last") or q.get("mid") or q.get("close"))
     if not spot:
         print("\nABORT: no live SPX quote. Run this during market hours — a margin "
               "preview off a stale quote is not evidence.")
@@ -159,7 +169,8 @@ def main(argv=None) -> int:
                                 (sp, "P", "sp"), (lp, "P", "lp")):
         try:
             conids[name] = rpc("qualify_contract", a.symbol, sec_type="OPT",
-                               strike=strike, right=right)
+                               strike=float(strike), right=right,
+                               trading_class="SPXW")
         except Exception as e:
             print(f"\nABORT: could not qualify {right}{strike}: {e}")
             return 2

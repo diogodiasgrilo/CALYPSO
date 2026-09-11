@@ -72,6 +72,30 @@ class TestItCannotPlaceAnOrder:
         assert "what_if_order" in ALLOWED_METHODS
 
 
+class TestItCallsTheRealSignatures:
+    """The first live run failed because the probe passed `sec_type=` to
+    get_quote, which does not accept it — and get_quote takes a CONID, not a
+    symbol. Reading the signature would have caught it; so will this."""
+
+    def test_get_quote_is_called_with_a_conid_only(self):
+        import inspect
+        from shared.ib_client import IBClient
+        params = set(inspect.signature(IBClient.get_quote).parameters)
+        assert "sec_type" not in params, "get_quote has no sec_type"
+        assert "conid" in params
+        assert "sec_type=\"IND\"" not in SRC.split("get_quote")[1][:80]
+
+    def test_qualify_contract_accepts_what_the_probe_passes(self):
+        import inspect
+        from shared.ib_client import IBClient
+        params = set(inspect.signature(IBClient.qualify_contract).parameters)
+        for kw in ("sec_type", "exchange", "strike", "right", "trading_class"):
+            assert kw in params, f"qualify_contract has no {kw}"
+
+    def test_the_index_is_qualified_before_it_is_quoted(self):
+        assert SRC.index("qualify_contract") < SRC.index("get_quote")
+
+
 class TestEmptyIsInconclusiveNeverAPass:
     def test_an_empty_block_is_not_ok(self, monkeypatch):
         monkeypatch.setattr(P, "rpc", lambda *a, **k: {})
