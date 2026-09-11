@@ -7305,8 +7305,16 @@ class HydraStrategy(MEICStrategy):
                         skip_reason, skip_details = self._build_credit_gate_skip_message(
                             nonviable_side, est_call, est_put
                         )
+                        # proposed_entry (2026-09-11): keep the strikes this entry
+                        # WOULD have used. `entry` is still in scope here even
+                        # though self._current_entry was cleared above, so no
+                        # reordering is needed. Found because today's entry #3
+                        # was a credit-gate skip and recorded SC=None/SP=None —
+                        # the morning's change wired only the GEX/require-both-
+                        # sides and degraded-data paths, not this one.
                         self._record_skipped_entry(entry_num, skip_reason, skip_details,
-                                                    est_call=est_call, est_put=est_put)
+                                                    est_call=est_call, est_put=est_put,
+                                                    proposed_entry=entry)
                         return f"Entry #{entry_num} skipped - credit gate (MKT-011/MKT-032)"
                     elif gate_result == "call_only":
                         # MKT-011 retry: Before converting to call-only, try tightening

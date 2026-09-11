@@ -131,6 +131,30 @@ class TestTheVetoSitesActuallyPassTheEntry:
         src = inspect.getsource(HydraStrategy._skip_degraded_entry)
         assert "proposed_entry=entry" in src
 
+    def test_the_credit_gate_skip_forwards_the_entry(self):
+        """Found live: 2026-09-11 entry #3 was a credit-gate skip (call $0.07 <
+        $0.10 minimum) and recorded SC=None/SP=None, because the morning's change
+        wired only the GEX/require-both-sides and degraded-data paths. The credit
+        gate is a SEPARATE site and is ~15 of the 64 skips on B's zero-entry
+        days."""
+        import inspect
+        src = inspect.getsource(HydraStrategy)
+        i = src.index("skipped - credit gate (MKT-011/MKT-032)")
+        assert "proposed_entry=entry" in src[i-700:i], (
+            "the credit-gate skip must record the strikes it would have used"
+        )
+
+    def test_pre_strike_skips_are_deliberately_NOT_wired(self):
+        """Margin / whipsaw / FOMC / pivot skips fire BEFORE strikes are chosen,
+        so there is nothing to record. Not an oversight — wiring them would
+        record None and imply the data was attempted."""
+        import inspect
+        for fn, marker in ((HydraStrategy._initiate_entry, "Insufficient margin"),
+                           (HydraStrategy._initiate_entry, "FOMC T+1 blackout")):
+            src = inspect.getsource(fn)
+            i = src.index(marker)
+            assert "proposed_entry" not in src[i:i+400]
+
     def test_the_recorder_accepts_the_parameter(self):
         import inspect
         sig = inspect.signature(HydraStrategy._record_skipped_entry)
