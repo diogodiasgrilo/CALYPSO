@@ -43,12 +43,13 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import sqlite3
 import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from shared.db_backup import safe_db_backup  # noqa: E402
 
 #: Below this, per-entry realized_pnl was not booked at all, so a "drift" there
 #: is expected and must NOT be back-filled as overlay residual.
@@ -116,8 +117,9 @@ def main() -> int:
         con.close()
         return 0
 
-    backup = f"{db}.pre_overlay_backfill_{datetime.utcnow():%Y%m%dT%H%M%SZ}"
-    shutil.copy2(db, backup)
+    # WAL-safe + never-overwrite; shutil.copy2 on a WAL DB can silently drop
+    # committed rows still resident in the -wal sidecar. See shared/db_backup.py.
+    backup = safe_db_backup(db, "pre_overlay_backfill")
     print(f"  backup: {backup}")
     for p in todo:
         con.execute(

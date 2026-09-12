@@ -73,12 +73,13 @@ from __future__ import annotations
 
 import argparse
 import os
-import shutil
 import sqlite3
 import sys
 from datetime import datetime
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from shared.db_backup import safe_db_backup  # noqa: E402
 
 TERMINAL_STATE = "LOST_FROM_TRACKING"
 
@@ -213,11 +214,12 @@ def main() -> int:
         return 2
 
     if a.apply:
-        backup = f"{db}.pre_backfill_{datetime.utcnow():%Y%m%dT%H%M%SZ}"
-        shutil.copy2(db, backup)
+        # WAL-safe + never-overwrite; both of these DBs run in WAL mode, where a
+        # plain file copy can silently omit committed rows. See shared/db_backup.py.
+        backup = safe_db_backup(db, "pre_backfill")
         bt = f"data/variant_{a.variant}/backtesting.db"
         if os.path.exists(bt):
-            shutil.copy2(bt, f"{bt}.pre_backfill_{datetime.utcnow():%Y%m%dT%H%M%SZ}")
+            safe_db_backup(bt, "pre_backfill")
         print(f"backup: {backup} (+ backtesting.db)")
 
     con = sqlite3.connect(db)

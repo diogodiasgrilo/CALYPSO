@@ -36,6 +36,54 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-12 The counterfactual writer finally has a caller, and the backup that
+  guards it was wrong in three ways. `DataRecorder.update_skipped_entry_backtest`
+  writes `would_have_stopped` / `theoretical_pnl` onto a skipped entry and had
+  ZERO callers repo-wide since it was added — 198 rows, 0 populated — so the GEX
+  veto question ("were the entries the adjuster vetoed worth skipping?") had no
+  data behind it no matter how much analysis was thrown at it.
+  `scripts/analyze_skipped_entry_outcomes.py --apply` is now that caller.
+
+  THE CALLER IS THE SCRIPT, NOT SETTLEMENT — a deliberate reversal of what
+  docs/NEXT_STEPS.md had planned. Both inputs (the proposed strikes, the day's
+  market_ticks) are persisted, so the computation is not time-sensitive; putting
+  it in the settlement path would add a failure mode to the LIVE trading process
+  to compute a number nobody needs before the next morning. No bot code changed
+  here, and no strategy or broker restart is required.
+
+  WHAT IT WRITES IS MODELLED AND MUST BE READ THAT WAY. The breach is measured
+  (did SPX cross the proposed short AFTER the skip time — bounded below by the
+  skip, since a pre-skip move cannot breach a position opened later). The dollars
+  assume B's acting A2 %-of-width stop, so every run prints the model it used. A
+  row with no modellable outcome is left NULL, never 0 — a 0 reads as a breakeven
+  breach, which is strictly better than reality and would flatter the veto.
+
+  THE BACKUP HAD THREE DEFECTS, each found by testing rather than by reading:
+    1. `shutil.copy2` is NOT safe on a WAL database. `DataRecorder` and
+       `dc_recorder` both set `PRAGMA journal_mode=WAL` (persistent on the file),
+       so committed rows can sit in the `-wal` sidecar. Copying the `.db` alone
+       silently drops them — in test, the copy was not merely short, it was
+       unreadable. sqlite3's online backup API checkpoints into one consistent
+       file and works while another connection holds the DB open, which
+       backfill_overlay_residual.py does.
+    2. An UN-timestamped name meant a second `--apply` overwrote the good backup
+       with a copy of the already-modified database — destroying the original at
+       exactly the moment it is wanted.
+    3. A SECOND-granularity timestamp still collides: two runs in the same second
+       share a filename and clobber each other anyway. Milliseconds plus a
+       never-overwrite guard closes it.
+  All three lived in two OTHER scripts too (backfill_overlay_residual.py,
+  backfill_lost_calendars.py), which had been backing up WAL databases with
+  copy2. One correct implementation now serves all three: `shared/db_backup.py`
+  (operator tooling — NOT imported by HYDRA or calypso-broker).
+
+  TEST NOTE, worth remembering: the first version of these tests was source-text
+  assertions, and two mutants survived it — swapping the writer's arguments (which
+  would put the breach flag in the P&L column) and deleting the "unmodellable"
+  filter (whose substring happened to appear elsewhere in the file, so the
+  assertion passed for the wrong reason). Both were killed only by rewriting the
+  tests to run the script against a real database and read the rows back.
+
 - 2026-09-10 (thirteenth same-day change) Historical analyzers pooled
   incomparable eras. `slot_edge.analyze_slots` and `stop_shadow.analyze` both
   read EVERY row with no date floor, so on variant B they mixed two different

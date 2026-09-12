@@ -136,10 +136,25 @@ now records its strikes.
       is the GEX veto — and the degraded-data abort). A vetoed side records None, not 0: the adjuster
       zeroes the side it drops, and a 0 would pass a `strike > 0` filter as if present.
 
-      **REMAINING, in order:** (a) wire `DataRecorder.update_skipped_entry_backtest` at settlement to
-      compute `would_have_stopped` / `theoretical_pnl` from the day's `market_ticks` range — it still has
-      zero callers; (b) THEN the EV is a query rather than a project. The historical 95 stay
-      unmeasurable — their strikes were never recorded and cannot be recovered.
+      **DONE 2026-09-12 — the writer has its caller.** `update_skipped_entry_backtest` is no longer
+      dead: `scripts/analyze_skipped_entry_outcomes.py --apply` computes `would_have_stopped` /
+      `theoretical_pnl` from the day's `market_ticks` range and writes them back, so results land in the
+      data HOMER and the dashboard read instead of only in a script's stdout.
+
+      **The caller is the SCRIPT, not settlement** — a deliberate reversal of the plan above. Both
+      inputs are persisted, so the computation is not time-sensitive, and putting it in the trading
+      process would add a failure mode to the live path for no benefit. Dry-run by default; `--apply`
+      takes a WAL-safe, timestamped backup first.
+
+      **What it writes is MODELLED, and callers must treat it that way.** The breach is measured (did
+      SPX cross the proposed short after the skip time); the dollars assume B's acting A2 stop, so the
+      run prints the `--pct-of-width`/`--contracts` model it used. A row with no modellable outcome is
+      left NULL rather than 0 — a 0 would read as a breakeven breach and silently flatter the veto.
+
+      **REMAINING:** (a) run `--apply` once a few forward-recorded vetoes exist, then the EV is a query;
+      (b) the historical 95 stay unmeasurable — their strikes were never recorded and cannot be
+      recovered; (c) 8 other skip sites still do not record strikes (pre-strike skips deliberately
+      never will — there is nothing to record).
 
       **Still recommended: do not block on it.** Existing evidence (vetoed shorts got breached; placed
       ones did not) already favours KEEPING the gate, and nothing downstream depends on the number.

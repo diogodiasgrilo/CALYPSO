@@ -6,6 +6,23 @@ Primarily this answers the long-open GEX question — *the strike adjuster vetoe
 more entries than it placed; was that veto worth it?* — but it works for any skip
 reason that recorded its strikes.
 
+PERSISTING THE RESULT (--apply)
+------------------------------
+`DataRecorder.update_skipped_entry_backtest` writes `would_have_stopped` /
+`theoretical_pnl` back onto the row, and until now it had ZERO callers repo-wide
+— so those columns were structurally empty (198 rows, 0 populated) and any
+outcome computed here lived only in stdout. `--apply` gives it its caller.
+
+It is given that caller from HERE, not from the bot's settlement path,
+deliberately: the computation is not time-sensitive (both inputs are persisted),
+so putting it in the trading process would add risk for no benefit. DRY-RUN BY
+DEFAULT, and `--apply` backs the database up first, matching
+scripts/backfill_overlay_residual.py.
+
+⚠️ IT WRITES A MODELLED NUMBER. `theoretical_pnl` is not measured — see below.
+Anything reading that column must treat it as an estimate on a stated stop model,
+which is why `--pct-of-width` and `--contracts` are recorded in the run output.
+
 WHY THIS IS AN OFFLINE SCRIPT, NOT A SETTLEMENT HOOK
 ----------------------------------------------------
 Both inputs are already persisted: the proposed strikes (from 2026-09-11) and the
@@ -140,6 +157,9 @@ def main(argv=None) -> int:
     p.add_argument("--pct-of-width", type=float, default=0.40,
                    help="B's acting A2 stop fraction (loss MODEL)")
     p.add_argument("--contracts", type=int, default=7)
+    p.add_argument("--apply", action="store_true",
+                   help="WRITE would_have_stopped/theoretical_pnl back to the DB "
+                        "(default is a dry run). Backs the DB up first.")
     a = p.parse_args(argv)
 
     db = a.db or (os.path.join(a.root, "data", "backtesting.db") if a.variant == "a"
@@ -203,6 +223,33 @@ def main(argv=None) -> int:
           f"settle back inside.")
     if n < 20:
         print(f"\n  ⚠️  n={n}. Directional at best. Do not act on this yet.")
+
+    writable = [m for m in measurable if m["modelled_pnl"] is not None]
+    print(f"\n  {len(writable)} of {n} row(s) have a modellable outcome to persist.")
+    if not a.apply:
+        print("  DRY RUN — nothing written. Re-run with --apply.")
+        return 0
+    if not writable:
+        print("  Nothing to write.")
+        return 0
+
+    from shared.db_backup import safe_db_backup
+    backup = safe_db_backup(db, "pre_skip_backfill")
+    print(f"  backup: {backup}")
+
+    from shared.data_recorder import DataRecorder
+    rec = DataRecorder(db)
+    ok = 0
+    for m in writable:
+        if rec.update_skipped_entry_backtest(
+            m["date"], m["entry"], bool(m["breached"]), float(m["modelled_pnl"])
+        ):
+            ok += 1
+    print(f"  wrote {ok}/{len(writable)} row(s) "
+          f"(model: {a.pct_of_width:.0%}-of-width stop at {a.contracts}c).")
+    if ok != len(writable):
+        print(f"  ⚠️  {len(writable)-ok} write(s) FAILED — DataRecorder swallows write")
+        print(f"      errors by design so the trading loop is never affected.")
     return 0
 
 
