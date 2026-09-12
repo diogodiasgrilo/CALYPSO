@@ -27,36 +27,96 @@
 > apply ONLY when `CALYPSO_BROKER_URL` is unset (standalone, non-broker mode).
 
 ### Symptom
-- Telegram alert: `API_ERROR` — "IBKR session lost mid-day — bot exiting for systemd restart — likely competing session or LST expiry" (this is the alert from Polish Item 1's `ensure_connected()` site)
-- OR `journalctl -u hydra` shows: `Auth status: authenticated=true connected=false` repeatedly
-- OR `IBClient.ensure_connected()` is returning False and the bot is in an `inactive (auto-restart)` state
+- Telegram alert: `API_ERROR` — "IBKR session lost mid-day"
+- `curl -s http://127.0.0.1:8788/health` returns `"connected": false` / `"competing": true`
+- `journalctl -u calypso-broker` shows `authenticated=true connected=false`, or repeated
+  `ensure_connected: session stale … reconnecting`
+- The `hydra*` units log `calypso-broker not holding a session yet … waiting 15s + retrying`
 
-### Triage
-1. **Confirm the bot's current state:**
+---
+
+## ⚠️ DO NOT RUN A MANUAL `IBClient.connect()` WHILE THE BROKER IS UP
+
+This runbook used to open with "run the auth flow manually to surface the real error", and that
+snippet constructs its own `IBClient` and calls `connect()`. **IBKR OAuth 1.0a permits ONE brokerage
+session per username**, so on the deployed topology that opens a SECOND session, evicts
+`calypso-broker`, and makes the incident you are diagnosing worse — while looking like a diagnostic.
+It is preserved in §Legacy below, fenced, for non-broker mode only.
+
+**In an incident: touch `calypso-broker`, not `hydra`.** Restarting a `hydra*` unit cannot repair a
+session it does not own — `BrokerClient.ensure_connected()` is only a `GET /health` probe.
+
+---
+
+### Triage (broker mode — the deployed path)
+
+1. **Ask the broker, not the bot:**
    ```bash
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status hydra --no-pager"
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="curl -s http://127.0.0.1:8788/health"
    ```
-   Expected: `active (running)` after the auto-restart kicks in. If `failed`, see RB-5.
+   - `"connected": true` → the session is fine; the problem is elsewhere (RB-2 orders, RB-3 data).
+   - `"competing": true` → another client holds the session → §Competing session below.
+   - `"connected": false` → continue.
 
-2. **Read the last 100 lines of journal for the auth flow:**
+2. **Read the broker's own re-auth loop** (it retries every `CALYPSO_BROKER_SESSION_CHECK_S`, default 900s):
    ```bash
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -n 100 --no-pager | grep -E 'auth|ensure_connected|IBAuthError|IBConnectionError|stage [123]'"
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u calypso-broker -n 60 --no-pager | grep -iE 'stage [0-9]/3|session stale|re-auth|competing|410|Gone'"
    ```
-   Look for: `stage 1/3` (LST handshake), `stage 2/3` (brokerage session), `stage 3/3` (auth status). Identify which stage failed.
+   - `stage 1/3 ok … stage 3/3 authenticated=True` then stale again within seconds, plus **410 Gone**
+     on `ssodh/init` → **IBKR-side outage or weekend maintenance, not our fault.** The breakers and
+     the wait-loop are behaving correctly; wait it out. Confirmed benign on 2026-09-12.
+   - Never reaching `stage 1/3` → credentials/activation → step 4.
 
-3. **Check for competing sessions:**
+3. **Restart the broker** (the only action that re-establishes a session):
    ```bash
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra -n 100 --no-pager | grep -i competing"
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart calypso-broker && sleep 20 && curl -s http://127.0.0.1:8788/health"
    ```
-   If `competing=true` appears → another client is logged into the IBKR account (TWS, SaxoTraderGO, another `IBClient` process somewhere, the IBKR mobile app). Skip to **Root cause: competing session** below.
+   The `hydra*` units degrade gracefully through this and pick the session back up on their own —
+   **do not restart them to "help"**; that only re-probes `/health`.
 
-### Root cause: brokerage session expired (most common)
+4. **If it still will not authenticate:** credentials issue → `LIVE_READINESS_CHECKLIST.md` Gate 5 /
+   `deploy/IBKR_CREDENTIALS_SETUP.md`. If IBKR is rejecting the connection outright
+   (`IBConnectionError`), check IBKR's status page and wait; record the wait in the journal.
 
-IBKR's brokerage session (`/iserver/auth/status` `connected=true`) is shorter-lived than the LST. It can drop without invalidating the LST — so `authenticated=true` but `connected=false`.
+5. **If positions are open and the session cannot be restored during RTH** → this is halt criterion
+   **H8** in [`LIVE_HALT_CRITERIA.md`](LIVE_HALT_CRITERIA.md): positions are unmanaged. Stop the
+   strategy units and decide explicitly whether to flatten.
 
-### Resolution: brokerage session expired
+### Root cause: competing session
 
-The bot's `ensure_connected()` SHOULD handle this automatically (calls `disconnect()` + `connect()`). If it's failing repeatedly:
+Another client (TWS, the IBKR mobile app, an orphaned `IBClient` python process, or a runbook step
+like the legacy one above) holds the one allowed session.
+
+1. Find an orphan process on the VM:
+   ```bash
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="ps aux | grep -i ibind | grep -v grep"
+   ```
+2. Sign the other client out — for the IBKR portal: log in → your name (top right) → Sign Out.
+   There is no API for this; it is a browser action.
+3. Restart the broker (step 3 above) and watch for `competing=false`.
+
+### Verification
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="curl -s http://127.0.0.1:8788/health; echo; sudo journalctl -u calypso-broker --since '5 minutes ago' --no-pager | grep -E 'stage 3/3|connected successfully'"
+# Expected: {"status":"ok","connected":true,"authenticated":true,"competing":false}
+```
+Then confirm the strategies came back:
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra_variant_b --since '5 minutes ago' --no-pager | grep -c 'not holding a session'"
+# Expected: 0 (they stop waiting once /health reports connected)
+```
+
+### Post-mortem trigger
+More than once a week → `calypso-broker`'s `_maintain()` re-auth loop is not recovering as designed.
+File as P0. (Repeated **410 Gone** during a weekend maintenance window is NOT this.)
+
+---
+
+### §Legacy — non-broker mode ONLY (`CALYPSO_BROKER_URL` unset)
+
+> 🔴 **These steps OPEN AN IBKR SESSION.** Run them only if no `calypso-broker` is running — verify
+> with `systemctl is-active calypso-broker` first. On the deployed topology they will evict the
+> broker and take all strategy processes offline.
 
 1. Stop the bot to interrupt the restart loop:
    ```bash
@@ -66,46 +126,30 @@ The bot's `ensure_connected()` SHOULD handle this automatically (calls `disconne
    ```bash
    gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -c \"
    from shared.ib_client import IBClient, IBConfig
-   from shared.ib_oauth import load_credentials
-   c = IBClient(IBConfig(credentials=load_credentials(\\\"paper\\\")))
+   from shared.ib_oauth import load_credentials, resolve_environment
+   c = IBClient(IBConfig(credentials=load_credentials(resolve_environment())))
    try: c.connect(); print(\\\"OK\\\", c.account_id)
    finally: c.disconnect()
    \"'"
    ```
-3. If `IBAuthError`: credentials issue — see Gate 5 of `LIVE_READINESS_CHECKLIST.md` or rotate per `deploy/IBKR_CREDENTIALS_SETUP.md`.
-4. If `IBConnectionError`: IBKR is rejecting the connection (IBKR status page, network); wait + retry. Document the wait in the journal.
-
-### Root cause: competing session
-
-Another client (TWS, IBKR mobile app, SaxoTraderGO from the Saxo era, another orphaned `IBClient` Python process) is logged in.
-
-### Resolution: competing session
-
-1. Identify the other client:
-   ```bash
-   # Check for orphan Python processes
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="ps aux | grep ibind | grep -v grep"
-   # Check IBKR Client Portal web session (operator must check the IBKR account portal in a browser — there's no API)
-   ```
-2. Sign out the other client. For the IBKR portal: log in, click your name (top right) → Sign Out.
-3. Re-start HYDRA:
-   ```bash
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start hydra"
-   ```
-4. Watch the journal for `stage 3/3` showing `competing=false`.
-
-### Verification
-```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra --since '5 minutes ago' --no-pager | grep -E 'connected successfully|stage 3/3'"
-# Expected: "IBClient connected successfully — account=DU..."
-```
-
-### Post-mortem trigger
-If this fires more than once per week: HYDRA's `ensure_connected()` is not detecting + recovering as designed. File as a P0 bug.
+3. `IBAuthError` → credentials. `IBConnectionError` → IBKR-side; wait and retry.
+4. Restart: `sudo systemctl start hydra`.
 
 ---
 
 ## RB-2 — All orders timing out
+
+> **BROKER MODE (deployed): the `orders` circuit breaker lives in `calypso-broker`, not in the
+> strategy.** `BrokerClient.circuit_breakers` is an empty dict on the strategy side, so
+> `journalctl -u hydra*` will NOT show the breaker transition that caused this — look at
+> `calypso-broker`. Restarting a `hydra*` unit does not reset it; the breaker's own 30s half-open
+> probe does, or a broker restart.
+> ```bash
+> gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u calypso-broker --since '15 minutes ago' --no-pager | grep -E 'CircuitBreaker\[ib.orders\]|HALF_OPEN|OPEN'"
+> ```
+> ⚠️ **If positions are open and the breaker stays OPEN >5 min during RTH, that is halt criterion
+> H7** ([`LIVE_HALT_CRITERIA.md`](LIVE_HALT_CRITERIA.md)) — you cannot exit a position you cannot
+> send orders for. Stop the strategy units and decide whether to flatten by other means.
 
 ### Symptom
 - Telegram alert: `CIRCUIT_BREAKER` — "Cannot place orders — orders breaker tripped — manual intervention required" (Polish Item 1)
@@ -188,6 +232,17 @@ ANY orders-breaker trip is a P1. Document in journal + investigate root cause.
 ---
 
 ## RB-3 — SPX/VIX returns None mid-session
+
+> **BROKER MODE (deployed): quotes come from `calypso-broker`, so a data fault is usually the
+> broker's, not the strategy's.** Check the broker's `market` / `history` breakers before anything
+> else — a strategy restart cannot fix either.
+> ```bash
+> gcloud compute ssh calypso-bot --zone=us-east1-b --command="curl -s http://127.0.0.1:8788/health; echo; sudo journalctl -u calypso-broker --since '15 minutes ago' --no-pager | grep -E 'CircuitBreaker\[ib\.(market|history)\]'"
+> ```
+> **Known-benign:** `CircuitBreaker[ib.history] OPEN` **outside market hours** is correct behaviour —
+> IBKR returns `500 "Chart data unavailable"` when closed, so each half-open probe fails and the
+> breaker re-opens rather than hammering a dead endpoint. It feeds only the EMA trend signal, which
+> is informational and does not drive entry type. **Still OPEN during RTH is the real fault.**
 
 ### Symptom
 - Telegram alert: `DATA_QUALITY` — "First snapshot warmup exhaustion of the day on conid {conid}" (Polish Item 1) OR `DATA_QUALITY` — "25+ snapshot exhaustions today — data flow severely degraded"
@@ -312,6 +367,20 @@ If the competing client wasn't run by the operator (you, the operator, ran nothi
 
 ## RB-5 — VM deploy broken — rollback
 
+> **BROKER MODE (deployed): restart order is `calypso-broker` FIRST, then the strategies.**
+> ⚠️ **If the bad deploy touched `shared/` code the broker imports** (`ib_client.py`,
+> `broker_service.py`, `ib_retry.py`, `ib_oauth.py`, `alert_hooks.py`), the broker is holding LOADED
+> BYTECODE — a `git pull` does not update a running process. The strategies forward new kwargs
+> blindly over `/rpc`, so an un-restarted broker on old code raises
+> `TypeError: unexpected keyword argument …` → `BrokerError` → **the bot goes blind and skips every
+> entry**. This is the 2026-06-08 modularity deploy bug. Roll back, then restart the broker BEFORE
+> the strategies, and prove the signature is live:
+> ```bash
+> gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart calypso-broker && sleep 15 && curl -s http://127.0.0.1:8788/health"
+> ```
+> ⚠️ **A branch switch or revert can also overwrite `config_variant_*.json`** despite `skip-worktree`
+> — re-verify every live variant's `dry_run`, `contracts_per_entry` and `alerts.email` afterwards.
+
 ### Symptom
 - `systemctl status hydra` shows `failed` (not `active` or `inactive`)
 - OR HYDRA crash-loops past `StartLimitBurst=5` and systemd refuses further restarts
@@ -407,6 +476,14 @@ Any rollback is automatic P0 — file the underlying cause, add a regression tes
 ---
 
 ## RB-6 — Naked short detected, bot still running
+
+> **BROKER MODE (deployed): the close goes through `calypso-broker`.** If the handler reports
+> `FAILED to close naked short`, check the broker's `orders` breaker before assuming a strategy bug —
+> a manual close will fail the same way (see RB-2).
+> ⚠️ **A naked short is halt criterion H6** ([`LIVE_HALT_CRITERIA.md`](LIVE_HALT_CRITERIA.md)):
+> undefined risk. Halt first, diagnose second.
+> ⚠️ **Verify flatness by QUANTITY, never by row count** — IBKR returns rows with `quantity 0` for
+> expired contracts, so `len(positions)` is not flatness and has misled this project before.
 
 ### Symptom
 - Telegram alert: **CRITICAL** `NAKED_POSITION` — "NAKED SHORT: {leg_name} (position {uic}) - closing immediately"

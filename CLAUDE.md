@@ -376,7 +376,7 @@ hydra_variant_c   ┘  (CALYPSO_BROKER_URL=          (owns the 1 IBClient:
 | A single strategy misbehaving (entry logic, config) | restart that `hydra*` unit |
 | Emergency stop of trading | stop the `hydra*` units (the broker is a passive session holder; stop it too only if you intend to drop the IBKR session entirely — see Emergency stop below) |
 
-RUNBOOKS RB-1 / RB-4 still describe the legacy `ensure_connected()` self-reconnect and tell you to restart `hydra` for a session fault; **in broker mode those steps target the wrong unit** — resolve session faults at `calypso-broker`.
+**FIXED 2026-09-12.** RUNBOOKS RB-1…RB-6 now lead with the broker-mode procedure; the legacy direct-`IBClient` steps are fenced in an appendix. RB-1's old top triage step told you to run a manual `IBClient.connect()`, which **opens a second session and evicts `calypso-broker`** — i.e. it made the very incident it was diagnosing worse. Session faults are resolved at `calypso-broker`, never by restarting a `hydra*` unit.
 
 ---
 
