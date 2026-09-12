@@ -68,8 +68,8 @@ rather than asserted**. Several decay (test state, backups, VM state) — re-mea
 | **6** VM state | ⚪ | Not gradeable today — the strategies are in a restart loop while IBKR weekend maintenance denies the brokerage session. | Measure at cutover. |
 | **7** Backup verified | 🟢 | **RB-7 rehearsal RUN 2026-09-12 — PASS** (logged in `RUNBOOKS.md` RB-7). It first exposed that the **live seat had no DB/metrics backup at all** — only variant A (a dry-run shadow) and state files were covered; fixed in `ab63407`, now seat-agnostic and gating. RB-7 also rewritten to separate a non-destructive rehearsal from the destructive restore. | Re-run by **2026-10-12** (30-day clock). |
 | **8** Position sizing | 🔴 | B runs **7 contracts**; the gate mandates **1** for week 1. | Set at cutover; tighten the daily-loss bounds with it. |
-| **9** Approval + halt criteria | 🔴 | **No approval document committed** anywhere in the repo. | Write + commit the halt criteria and the written approval. |
-| **10** Week-1 monitoring | 🔴 | Not written. | Write the plan; confirm operator availability for the first session. |
+| **9** Approval + halt criteria | 🟡 | **Halt criteria DRAFTED 2026-09-12** — [`LIVE_HALT_CRITERIA.md`](migration/LIVE_HALT_CRITERIA.md), thresholds derived from B's measured loss distribution and stated **per contract** (H1–H10). **The approval commit is still missing** and is the operator's to make. | Operator reviews the thresholds, then makes the `--allow-empty` approval commit. |
+| **10** Week-1 monitoring | 🟡 | **DRAFTED 2026-09-12** in [`LIVE_HALT_CRITERIA.md`](migration/LIVE_HALT_CRITERIA.md) §5 — day-by-day commitment, EOD artefacts, and a four-condition Friday scale-up rule (scale on *process*, not profit). | Operator confirms availability for day 1 (09:30–16:15 ET). |
 
 ### Why the VM is still on the feature branch after the merge
 
