@@ -71,16 +71,35 @@
 
 - [ ] Full test suite passes (**3608 passed / 16 skipped**, 0 failed — baseline as of 2026-09-12; the count grows every week, so the gate is **0 failed at the then-current baseline**, never the literal number)
   ```bash
-  gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m pytest tests/ -q --ignore=tests/test_dashboard 2>&1 | tail -3'"
+  # RUN LOCALLY, against the deployed commit — NOT on the VM.
+  # pytest / pip-audit / coverage are DELIBERATELY excluded from the production venv
+  # (requirements.txt lines ~54-55 are commented out; requirements-lock.txt documents the
+  # exclude-list rationale) to keep the trading box's dependency + CVE surface small.
+  # So: confirm the VM's SHA, check it out locally, and test that.
+  gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso git -C /opt/calypso rev-parse HEAD"
+  git checkout <that-sha> && .venv/bin/python -m pytest tests/ -q
   ```
-- [ ] **Integration smoke** (`tests/integration/test_ib_paper_smoke.py`, the 15 currently-skipped tests) passes against the **paper** account at least once in the last 7 days
-  ```bash
-  gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && IBIND_INTEGRATION=paper .venv/bin/python -m pytest tests/integration/ -v'"
-  # MUST output: ≥ 15 passed
-  ```
+- [ ] **Integration smoke** (`tests/integration/test_ib_paper_smoke.py`) passes against the **paper** account
+  > 🔴 **DO NOT RUN THIS AS WRITTEN — IT WILL TAKE THE FLEET DOWN.** The test constructs its own
+  > `IBClient` and calls `connect()` (lines ~128 and ~171). IBKR OAuth 1.0a permits **one brokerage
+  > session per username**, so a second session **evicts `calypso-broker`** and all seven strategies
+  > lose data access. The file is a Phase-A.10 artifact (May 2026) that predates the broker
+  > architecture. Attempted 2026-09-12 and stopped before execution.
+  >
+  > Two ways to make this runnable, neither done yet:
+  > **(a)** a maintenance window with `calypso-broker` stopped — outside RTH, account flat; or
+  > **(b)** rewrite it to proxy through `BrokerClient`, as `scripts/probe_combo_whatif.py` already
+  > does for exactly this reason.
+  >
+  > ⚠️ Also note `pytest` is **deliberately absent** from the VM venv (see below), so the old command
+  > could not have run there anyway.
 - [ ] `pip-audit` returns zero **High** or **Critical** CVEs in the IBKR stack
   ```bash
-  gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/pip-audit -r requirements.txt 2>&1 | grep -E \"high|critical\" | wc -l'"
+  # LOCALLY (pip-audit is deliberately not on the VM — see the note above).
+  .venv/bin/pip-audit -r requirements.txt
+  # And audit what is ACTUALLY INSTALLED on the VM, which the line above cannot see:
+  gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso /opt/calypso/.venv/bin/pip freeze" > /tmp/vm_installed.txt
+  .venv/bin/pip-audit -r /tmp/vm_installed.txt
   # MUST output: 0
   ```
   > ✅ **RESOLVED 2026-09-12.** Was RED: `cryptography==48.0.0` carried four advisories — CVE-2026-69248
@@ -263,12 +282,14 @@ So Gate 5 is now purely operational.
   Live-readiness checklist (docs/migration/LIVE_READINESS_CHECKLIST.md) all
   gates GREEN as of HEAD."
   ```
-- [ ] **Halt criteria** explicitly documented (in this same commit message or a linked doc):
-  - If realized loss > $X, halt and notify
-  - If consecutive stop losses > N, halt
-  - If CRITICAL_INTERVENTION alert fires, halt
-  - If broker breaker `orders` family OPEN for > 5 minutes, halt
-  - If ARGUS shows FAIL for 3 consecutive cycles, halt
+- [~] **Halt criteria** explicitly documented — **DRAFTED 2026-09-12:
+  [`LIVE_HALT_CRITERIA.md`](LIVE_HALT_CRITERIA.md)**. The `$X`/`N` placeholders below are now real
+  numbers derived from B's measured live-paper loss distribution (25 traded sessions), set at
+  ~1.5–2× the worst observed event and stated **per contract** so they scale correctly:
+  H1 session loss ≤ −$400 · H2 week-1 cumulative ≤ −$600 · H3 ≥3 stops in a day · H4 ≥4 consecutive
+  days with a stop · H5 CRITICAL_INTERVENTION · H6 naked short · H7 `orders` breaker >5min in RTH ·
+  H8 broker down >15min in RTH · H9 ARGUS FAIL ×3 · H10 any unreconciled position gap.
+  **Operator must adopt them** — the doc is a draft until the approval commit exists.
 - [ ] **Halt procedure** rehearsed (operator can `systemctl stop hydra` in < 30 seconds from any location)
 - [ ] **Telegram alerts working** — fire a `BOT_STARTED` test alert and confirm receipt within 1 minute
   ```bash
