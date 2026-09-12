@@ -212,6 +212,44 @@ make the flip defensible.
 
 ---
 
+### P2-ter — 🔴 OPEN RISK: two entries sharing a strike make POS-003 ambiguous, and the bot loses track of a real position
+
+**Found 2026-09-12** by the new `scripts/check_clean_sessions.py` — nobody had looked at these alerts.
+
+```
+2026-09-11 10:31  POS-003: 1 conid(s) mismatch the broker's quantity
+                    conid 911460104: expected 0, broker shows 7
+                  POS-003: conid 911460104 maps to 2 tracked legs — ambiguous,
+                           leaving for manual review
+```
+
+**What happens.** IBKR merges positions at the same `(conid, side)`. B runs **7 slots/day** with
+delta-targeted strikes on a 5pt grid, so two entries picking the same strike is structurally likely,
+not exotic. When they do, one broker position backs two tracked legs, POS-003 cannot attribute
+quantity to either, and it explicitly **declines to auto-resolve**. On 09-11 the bot believed it held
+**0** contracts at that conid while the broker held **7**.
+
+**Frequency (live seat, full 24-day journal retention):** 2 of ~17 sessions —
+**2026-08-20** (14 ambiguous) and **2026-09-11** (6 ambiguous + 6 quantity mismatches). Variant C:
+zero. It fired 6 CRITICAL-class `critical_intervention` alerts on 09-11 and was never investigated.
+
+**Why it matters more on real money.** An untracked position is one the bot will not stop out — the
+naked-risk shape. Both occurrences cleaned themselves up at 0DTE expiry, which is **expiry doing the
+work, not the bot managing risk**. This is exactly halt criterion **H10** in
+[`LIVE_HALT_CRITERIA.md`](migration/LIVE_HALT_CRITERIA.md) ("any unreconciled position gap"), and
+under Gate 4's own definition it makes the day NOT clean.
+
+**Not fixed — it needs design, not a patch.** Options, none chosen:
+1. **Prevent the collision:** make strike selection avoid strikes already held by an open entry.
+   Cheapest, but perturbs the delta-target logic that is the point of the Brandon stack.
+2. **Disambiguate by proportion:** attribute merged quantity across tracked legs pro-rata. Works for
+   reporting; still cannot tell you *which* entry a partial close belonged to.
+3. **Track at (conid, entry) with our own ledger** rather than inferring from broker quantity — the
+   most correct, the most work, and it re-opens the F4 conid-quantity model.
+
+**Decide before real money.** At 1 contract the exposure is small, but the bot being wrong about what
+it holds is a correctness problem, not a sizing one.
+
 ### P3 — the real-money combo track (the actual next phase)
 
 Strictly ordered — each step bakes in decisions the later ones depend on.
