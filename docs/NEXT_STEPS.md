@@ -171,12 +171,21 @@ market-data subscriptions (a live account inherits **zero** entitlements from pa
 wait. Start that chain first; the repo work proceeds underneath it.
 
 **The three repo blockers, in dependency order:**
-1. **`main` merge — 610 commits ahead**, and `MERGE_PLAN.md` is frozen against a 97-commit snapshot. Needs
-   rewriting before it can run. Gate 1 forbids going live from a feature branch.
+1. ~~**`main` merge plan needs rewriting**~~ — **DONE 2026-09-12** (`c864cde`). Rewritten for **613
+   ahead / 7 behind** and **dry-run verified end-to-end** in a throwaway clone. Decision reversed:
+   **`--no-ff`, do NOT squash** — 186 SHA citations in this repo's own docs exist only on this branch
+   and a squash strands every one. One predictable conflict (`HYDRA_TRADING_JOURNAL.md`), resolution
+   verified lossless. **Executing the merge still needs approval**; Gate 1 forbids going live from a
+   feature branch.
 2. ~~**`pip-audit` is RED**~~ — **DONE 2026-09-12.** `cryptography` 48.0.0 → **50.0.0** clears all four
    advisories; `pip-audit` now reports no known vulnerabilities. Needed `msal` 1.36 → 1.38 to lift a
    `cryptography<49` ceiling. **Correction:** it is *not* under the OAuth path — ibind signs with
    pycryptodome — it backs google-auth/PyJWT, i.e. Secret Manager / Sheets / Pub/Sub.
+2-bis. **Dashboard dependency CVEs remain** (12 vulns / 3 packages: `starlette` 0.52→1.3,
+   `click` 8.3.1→8.3.3, `pydantic-settings` 2.13.1→2.14.2). **Not in the trading path** and none are
+   locked. `starlette` crosses a major version with real FastAPI breaking-change risk, so it needs
+   its own change + dashboard validation — deliberately NOT bundled into the trading-stack patch.
+   Found only by auditing the VM's *installed* set; `pip-audit -r requirements.txt` cannot see it.
 3. **A change freeze**, then Gate 4's 5 clean sessions + the **chaos test** and Gate 7's **RB-7 restore
    rehearsal** — neither has *ever* been run (0 journal records each). These cannot overlap with (1)'s deploys.
 
