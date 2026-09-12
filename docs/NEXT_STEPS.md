@@ -182,11 +182,14 @@ wait. Start that chain first; the repo work proceeds underneath it.
    advisories; `pip-audit` now reports no known vulnerabilities. Needed `msal` 1.36 → 1.38 to lift a
    `cryptography<49` ceiling. **Correction:** it is *not* under the OAuth path — ibind signs with
    pycryptodome — it backs google-auth/PyJWT, i.e. Secret Manager / Sheets / Pub/Sub.
-2-bis. **Dashboard dependency CVEs remain** (12 vulns / 3 packages: `starlette` 0.52→1.3,
-   `click` 8.3.1→8.3.3, `pydantic-settings` 2.13.1→2.14.2). **Not in the trading path** and none are
-   locked. `starlette` crosses a major version with real FastAPI breaking-change risk, so it needs
-   its own change + dashboard validation — deliberately NOT bundled into the trading-stack patch.
-   Found only by auditing the VM's *installed* set; `pip-audit -r requirements.txt` cannot see it.
+2-bis. ~~**Dashboard dependency CVEs**~~ — **DONE 2026-09-12 (`cf37e48`). The VM is now at ZERO known
+   vulnerabilities**, from 44 across 9 packages this morning. Root cause was structural: the dashboard
+   stack was never pinned (requirements.txt said so), and `pip-audit -r requirements.txt` can only see
+   what the file lists — so the CVEs were invisible. Now pinned: `starlette` 0.52→**1.3.1** (5
+   advisories), `fastapi`→0.137.1, `pydantic`→2.13.4, `pydantic-settings`→2.14.2, `click`→8.3.3,
+   `msgpack`→1.2.1. The major-version starlette jump was safe because FastAPI sets no upper bound;
+   validated by 142 dashboard tests plus a live check (REST 200/401, WS 403-by-auth, login 422/401,
+   `domytrade.com` 200). Dashboard-only restart — verified the trading path imports none of them.
 3. **A change freeze**, then Gate 4's 5 clean sessions + the **chaos test** and Gate 7's **RB-7 restore
    rehearsal** — neither has *ever* been run (0 journal records each). These cannot overlap with (1)'s deploys.
 
