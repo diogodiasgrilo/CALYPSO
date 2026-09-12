@@ -16,6 +16,17 @@
 >   units — read Gates 5 & 6 in that light (this file predates the broker; the live-cred swap happens at
 >   `calypso-broker`, and a session fault is fixed by restarting `calypso-broker`, not `hydra`).
 > - This file lives at `docs/migration/` (not `docs/`).
+>
+> **Currency refresh 2026-09-12.** Two things this file used to get wrong:
+> - **It was written A-centric.** The live seat is **variant B** (since 2026-07-24, RB-9) — apply every gate
+>   to whichever variant `variant_readers.live_seat_id()` reports, and read `hydra.service` /
+>   `config.json` below as *"the live variant's unit / config"*. Today that is `hydra_variant_b.service` and
+>   `config_variant_b.json`.
+> - **Gate 3's "~1918 passed" baseline is long stale** — the suite is at **3608 passed / 16 skipped** as of
+>   2026-09-12. The rule was always *0 failed at the current baseline*, never the literal number.
+>
+> **A measured, gate-by-gate status snapshot lives in [`GO_LIVE_MASTER.md` §2-bis](../GO_LIVE_MASTER.md).**
+> Fill this checklist in at cutover; read §2-bis to know what is already red.
 
 ---
 
@@ -58,7 +69,7 @@
 
 ## Gate 3 — Test state
 
-- [ ] Full test suite passes (**~1918 passed / 15 skipped**, 0 failed — as of 2026-07-14; the count grows, so require the current baseline with **0 failed**)
+- [ ] Full test suite passes (**3608 passed / 16 skipped**, 0 failed — baseline as of 2026-09-12; the count grows every week, so the gate is **0 failed at the then-current baseline**, never the literal number)
   ```bash
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m pytest tests/ -q --ignore=tests/test_dashboard 2>&1 | tail -3'"
   ```
@@ -72,6 +83,14 @@
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/pip-audit -r requirements.txt 2>&1 | grep -E \"high|critical\" | wc -l'"
   # MUST output: 0
   ```
+  > ⚠️ **KNOWN RED as of 2026-09-12 — do not tick this from memory.** `requirements.txt` pins
+  > `cryptography==48.0.0` (line 20) and the **VM runs the same version**. Four distinct advisories:
+  > CVE-2026-69248 (X.509 name-constraint bypass), CVE-2026-69249 (cert-chain recursion DoS),
+  > CVE-2026-69247 (PKCS7 decrypt oracle — likely unreachable, we do not call `pkcs7_decrypt_*`), and
+  > GHSA-537c-gmf6-5ccf (statically-linked OpenSSL in the wheel). **Bumping to `50.0.0` clears all four.**
+  > Treat it as a real deploy, not a pin edit: `cryptography` sits under ibind's RSA signing for OAuth 1.0a
+  > **and** every outbound TLS call, so it needs the full suite plus a `calypso-broker` restart to validate —
+  > never during RTH.
 
 ## Gate 4 — Paper history
 
@@ -86,8 +105,38 @@
   # MUST output: 0 (or close to 0 — any non-zero needs investigation)
   ```
 - [ ] **Chaos test passed** (per `RUNBOOKS.md` and Polish Item 11): `kill -9` mid-trade-attempt on paper → state file intact JSON, systemd restart < 30s, no duplicate orders, no untracked positions. Document the test run + outcome in the journal.
+  > ⚠️ **NEVER RUN** — 0 records in `docs/HYDRA_TRADING_JOURNAL.md` as of 2026-09-12. This is a *build* item
+  > with real prep, not a box to tick on cutover day. It also deliberately violates the standing
+  > "never `kill`/`pkill` a bot" rule, so schedule it: live seat flat, outside RTH, with a state snapshot taken
+  > first (`scripts/pre_start_snapshot.sh` runs on every start anyway).
 
 ## Gate 5 — Live credentials
+
+> **Gate 5 used to start too late.** It opened at "request a keypair", but **four things precede that**, each
+> with its own IBKR turnaround, and they are **strictly ordered** — none can be parallelised. This is the
+> project's actual critical path; the engineering can proceed underneath it.
+>
+> **Status 2026-09-12: step 1 done, steps 2–5 not started.**
+
+- [x] **5.0.1 — Live account CREATED.** ✅ done (2026-09-12).
+- [ ] **5.0.2 — Live account FUNDED.** Nothing downstream is approved or testable until it is.
+- [ ] **5.0.3 — Options-trading permissions granted.** SPX defined-risk spreads need spread-level options
+  approval and a matching margin type. A separate IBKR review with its own turnaround — **do not assume the
+  paper account's permissions carry over; they do not.**
+- [ ] **5.0.4 — Live market-data subscriptions active.** A live account starts at **zero** entitlements and
+  inherits nothing from paper. Required: CBOE index real-time (SPX **and** VIX) plus the options feed the
+  0DTE chain reads. Note the paper account has index real-time but **not** US equity, so "it worked on paper"
+  proves nothing here. Verify with `scripts/probe_ibkr_market_data.py` — field `6509` first char must be `R`,
+  not `D`/`Z`. Precedent for how long this takes: `e_spy_realtime_entitlement`.
+- [ ] **5.0.5 — Then** the keypair below. Activation is a wait (precedent: ~2 weeks for the read-only scanner
+  keypair), so request it the moment 5.0.2–5.0.4 allow.
+
+**Code-side status (already DONE — 2026-09-11, `fac138d`):** paper-vs-live is a real switch, not a literal.
+`load_credentials(resolve_environment())` at both call sites (`services/broker/main.py`,
+`bots/hydra/main.py`); `$CALYPSO_IBKR_ENV` defaults to `paper` and **raises** on an unrecognised value rather
+than guessing; `_assert_account_matches_env()` cross-checks the *discovered* account code and **raises** on
+declared-paper-but-actually-LIVE (the asymmetry that matters — real money under a simulation assumption).
+So Gate 5 is now purely operational.
 
 - [ ] **NEW** live OAuth keypair issued by IBKR (NOT the paper keypair re-purposed)
   - 9-char A-Z `consumer_key`
@@ -146,14 +195,22 @@
   # MUST include yesterday's date in filename
   ```
 - [ ] Restore procedure tested in the last 30 days (see `RUNBOOKS.md` RB-7)
+  > ⚠️ **NEVER RUN** — 0 RB-7 records in the journal as of 2026-09-12. The 30-day clock cannot be satisfied
+  > retroactively, so this has to happen inside the month before cutover. Use `shared/db_backup.py` for any
+  > DB copy in the rehearsal — a `shutil.copy2`/`cp` of a WAL database silently drops committed rows and the
+  > restore is exactly where you would discover it.
 
 ## Gate 8 — Position sizing
 
 - [ ] Config `contracts_per_entry` = **1** for week 1 of live trading, regardless of paper sizing
   ```bash
-  gcloud compute ssh calypso-bot --zone=us-east1-b --command="grep 'contracts_per_entry' /opt/calypso/bots/hydra/config/config.json"
+  # NOTE: the LIVE VARIANT's config, not A's. Today that is config_variant_b.json.
+  gcloud compute ssh calypso-bot --zone=us-east1-b --command="grep 'contracts_per_entry' /opt/calypso/bots/hydra/config/config_variant_b.json"
   # MUST show: "contracts_per_entry": 1
   ```
+  > ⚠️ **Currently 7 on B.** This is a deliberate cutover-time change, not a standing config — and remember
+  > `config_variant_*.json` carries `skip-worktree` on the VM yet is **still overwritten by a `git pull`**
+  > that advances the tracked file. Re-verify the value *after* the final pre-flip deploy, not before.
 - [ ] `min_buying_power_per_ic` configured for live margin (verify with `what_if_order` once before first entry)
 - [ ] Daily loss limit / max position count safety bounds tightened for live (recommend: 50% tighter than paper for week 1)
 

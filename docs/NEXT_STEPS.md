@@ -159,6 +159,34 @@ now records its strikes.
       **Still recommended: do not block on it.** Existing evidence (vetoed shorts got breached; placed
       ones did not) already favours KEEPING the gate, and nothing downstream depends on the number.
 
+### P2-bis — the REAL-MONEY track (measured 2026-09-12)
+
+**Gate-by-gate status now lives in [`GO_LIVE_MASTER.md` §2-bis](GO_LIVE_MASTER.md)**, measured rather than
+asserted, with `LIVE_READINESS_CHECKLIST.md` refreshed to match (its "~1918 tests" baseline and its A-centric
+framing were both stale; the live seat is B).
+
+**The critical path is external, not engineering.** The live IBKR account is **created but NOT funded**, and
+four strictly-ordered steps precede the keypair Gate 5 opens on: fund → options-spread permissions → live
+market-data subscriptions (a live account inherits **zero** entitlements from paper) → keypair → activation
+wait. Start that chain first; the repo work proceeds underneath it.
+
+**The three repo blockers, in dependency order:**
+1. **`main` merge — 610 commits ahead**, and `MERGE_PLAN.md` is frozen against a 97-commit snapshot. Needs
+   rewriting before it can run. Gate 1 forbids going live from a feature branch.
+2. **`pip-audit` is RED** — `cryptography==48.0.0` (pinned, and live on the VM) carries 4 advisories;
+   `50.0.0` clears all four. It sits under OAuth RSA signing *and* all outbound TLS, so it needs the full
+   suite + a broker restart — never during RTH.
+3. **A change freeze**, then Gate 4's 5 clean sessions + the **chaos test** and Gate 7's **RB-7 restore
+   rehearsal** — neither has *ever* been run (0 journal records each). These cannot overlap with (1)'s deploys.
+
+**Not yet on the evidence, either.** B is 71% wins at a **0.76 payoff ratio** over **24 traded days that have
+never contained a bad day** — the profile that looks best right up to a tail event. Sharpe 3.99 is flagged
+provisional and will regress. ~38% of traded-day P&L rides on 9 gated days whose counterfactual only started
+being recorded on 2026-09-11. Steps 1–3 take weeks anyway; running them buys exactly the sessions that would
+make the flip defensible.
+
+---
+
 ### P3 — the real-money combo track (the actual next phase)
 
 Strictly ordered — each step bakes in decisions the later ones depend on.

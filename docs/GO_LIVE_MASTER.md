@@ -2,7 +2,10 @@
 
 > **Start here for anything about taking a strategy live.** This is the single umbrella that maps the whole
 > go-live path across **all strategies** and **both go-live levels**, and links out to the detailed runbooks,
-> scripts, and gates (it does **not** duplicate them). Last updated: **2026-07-24**.
+> scripts, and gates (it does **not** duplicate them). Last updated: **2026-09-12**.
+>
+> **For the real-money question specifically, go straight to [§2-bis](#2-bis-level-ii-real-money-gate-status--measured-2026-09-12)** — the ten Level-II gates measured, plus the external
+> account/funding/permissions/market-data chain that is the actual critical path.
 >
 > **Reality check:** this branch (`hydra-ibkr-standalone`) trades the **IBKR paper account only**. There is
 > **no live-money path wired** on this branch — real money is a deliberate, approval-gated build (see Level II).
@@ -41,10 +44,62 @@ is each variant's `config_variant_*.json` `dry_run` on the VM; this table is the
 | **D** | DC Time Machine — multi-day SPX calendar (`calendar_multiday`) | dry-run-**LOCKED** | Level I = **a BUILD**, not a flip (DG-1..DG-11) | `flip_d_live.sh` **(NOT BUILT)** | `broker_dc_smoke.py` **(NOT BUILT)** | **NO-GO** ([`D_GOLIVE_SCOPE_AND_AUDIT.md`](migration/D_GOLIVE_SCOPE_AND_AUDIT.md)) — no real-order path; edge **INSUFFICIENT_DATA**. See [`D_GOLIVE_RUNBOOK.md`](migration/D_GOLIVE_RUNBOOK.md). |
 | **E** | SPY Double Calendar — multi-day (`calendar_multiday`) | dry-run-**LOCKED** | Level I = a BUILD ([NEXT_STEPS §2b](NEXT_STEPS.md)) | `flip_e_live.sh` **(NOT BUILT)** | `broker_dc_smoke.py` **(NOT BUILT)** | Edge **INSUFFICIENT_DATA** (n=0); least-documented; SPY assignment/dividend + IV-rank gate unbuilt. E go-live runbook to be modeled on D's. |
 
+**Level-II (real-money) status for B is measured gate-by-gate in [§2-bis](#2-bis-level-ii-real-money-gate-status--measured-2026-09-12) below.**
+
 **Key takeaways:** B is the only live variant (live seat swapped from C on 2026-07-24 —
 [RUNBOOKS.md RB-9](migration/RUNBOOKS.md)); A/C are dry-run; **D and E are BUILDS, not flips** (they have no
 real-order path yet) and are calendar-shaped, so the 0DTE readiness checklist (§5) does not transfer to them —
 they need their own gate.
+
+---
+
+## 2-bis. Level II (real-money) gate status — MEASURED 2026-09-12
+
+Snapshot of the ten [`LIVE_READINESS_CHECKLIST.md`](migration/LIVE_READINESS_CHECKLIST.md) gates, **measured
+rather than asserted**. Several decay (test state, backups, VM state) — re-measure before any cutover.
+
+| Gate | Status | Measured evidence | What closes it |
+|---|---|---|---|
+| **1** Branch state | 🔴 | VM + local both on `hydra-ibkr-standalone`; **610 commits ahead of `main`**. [`MERGE_PLAN.md`](migration/MERGE_PLAN.md) is FROZEN and was written against a **97-commit** snapshot. | Rewrite the merge plan for 610 commits, execute it, redeploy the VM from `main`. |
+| **2** Audit state | 🟢 | `P7_AUDIT_FINDINGS.md` **0 OPEN**; **0** `TODO`/`FIXME`/`XXX` under `bots/hydra/` + `shared/ib_*.py`. | — (re-check at cutover) |
+| **3** Test state | 🟡 | Suite **3608 passed / 16 skipped / 0 failed**. **`pip-audit` FAILS** — `cryptography==48.0.0` carries 4 distinct advisories (CVE-2026-69248 name-constraint bypass, CVE-2026-69249 cert-chain recursion DoS, CVE-2026-69247 PKCS7 decrypt oracle, GHSA-537c-gmf6-5ccf static OpenSSL); **the VM runs the same version**. Integration paper-smoke not run in the last 7 days. | Bump `cryptography` to **50.0.0** (clears all four) → full suite → broker restart; run the integration smoke. |
+| **4** Paper history | 🔴 | 5 consecutive sessions with **no manual intervention** is unattainable at the current cadence — **25 commits in the last 14 days**, most deployed. **Chaos test: never run** (0 journal records). | A deliberate change freeze, then 5 clean sessions + the chaos test, both recorded in the journal. |
+| **5** Live credentials | 🟡 | **Code side DONE**: `load_credentials(resolve_environment())` at both call sites; `_assert_account_matches_env` raises on declared-paper-but-actually-LIVE. **Operational side absent**: live account **created but NOT funded**; no live keypair; `/etc/calypso/ibkr-live/` does not exist (**0 repo references**); `calypso-broker.service` still loads `/etc/calypso/ibkr/`. | The external chain below. |
+| **6** VM state | ⚪ | Not gradeable today — the strategies are in a restart loop while IBKR weekend maintenance denies the brokerage session. | Measure at cutover. |
+| **7** Backup verified | 🟡 | Daily GCS backups running. **RB-7 restore rehearsal: never recorded** (0 journal records); the gate wants one inside 30 days. | Run RB-7, record it in the journal. |
+| **8** Position sizing | 🔴 | B runs **7 contracts**; the gate mandates **1** for week 1. | Set at cutover; tighten the daily-loss bounds with it. |
+| **9** Approval + halt criteria | 🔴 | **No approval document committed** anywhere in the repo. | Write + commit the halt criteria and the written approval. |
+| **10** Week-1 monitoring | 🔴 | Not written. | Write the plan; confirm operator availability for the first session. |
+
+### The external prerequisite chain (the checklist's Gate 5 starts too late)
+
+Gate 5 opens at "request a live OAuth keypair". **Four things precede it**, each with its own lead time, and
+they are **strictly ordered** — none can be parallelised:
+
+1. **Live account created** — ✅ done.
+2. **Funded** — ❌. Nothing downstream is approved or testable without it.
+3. **Options-trading permissions** — ❌. SPX defined-risk spreads need spread-level options approval and a
+   matching margin type. A separate IBKR review with its own turnaround.
+4. **Live market-data subscriptions** — ❌. A live account starts at **zero** entitlements and inherits
+   nothing from paper. Note the paper account carries CBOE index real-time (SPX/VIX) but **not** US equity —
+   so "it works on paper" says nothing here. Precedent: variant E's SPY entitlement needed an operator
+   subscription plus a next-day verification cycle (`e_spy_realtime_entitlement`).
+5. **THEN** the live OAuth keypair → activation wait (precedent: ~2 weeks for the read-only scanner keypair).
+
+**This chain, not the code, is the critical path**, and steps 2–5 are calendar rather than engineering. Start
+it before the repo work, because the repo work can proceed underneath it.
+
+### Two things that are only learnable with real money
+
+Both are currently blocking analysis, and neither can be closed on paper — which is the argument for a first
+live deployment sized so its **purpose is learning, not earning**:
+
+- **Combo routing / atomicity.** IBKR SmartRoutes combos leg-by-leg unless routed direct; ibind 0.1.23 cannot
+  express the choice; paper *simulates* combo order types and our own probe recorded phantom `PendingSubmit`
+  with `OrderID doesn't exist` on cancel. See [NEXT_STEPS §A P3](NEXT_STEPS.md).
+- **`/iserver/account/trades` returns ZERO rows on paper** (probed over a 7-day window containing dozens of
+  real fills; the `accountId` theory was tested and **refuted**). It is the documented F5 fill-price
+  authority, so a live account that revives it would activate three currently-masked defects at once.
 
 ---
 
