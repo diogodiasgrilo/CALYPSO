@@ -59,7 +59,20 @@ watching B's FIRST session on the new entry pricing — confirm, do not stack mo
       ESTIMATE with real error bars (passive-fill evidence is n=11), not a measurement.
       B's first slot is 09:45; there are 7.
 - [x] ~~**Did the executions endpoint come alive?**~~ **NO — theory refuted, see P0.6.**
-- [ ] **Gross vs net on the ledger reconcile** (see P0.7)
+- [x] ~~**Gross vs net on the ledger reconcile**~~ — **RESOLVED 2026-09-12: it is SETTLEMENT TIMING,
+      not a P&L error.** IBKR's `realizedpnl` LAGS 0DTE expiry settlement, so the daily
+      `BROKER-RECONCILE` gap measures timing, not correctness (09-11 read IBKR $245.41 vs our
+      $883.40 — a 72% gap that looked alarming). Our figure reconstructs EXACTLY from the broker's
+      own fill prices, and all six shorts closed 28–78pt OTM.
+      **The decisive test was cumulative**, via the new `scripts/verify_pnl_vs_account.py`:
+      ```
+      09-08 -> 09-09   account  +618.31   claimed  +623.15   drift   -4.84
+      09-09 -> 09-10   account  +853.44   claimed +1133.50   drift -280.06
+      09-10 -> 09-11   account +1789.12   claimed +1804.60   drift  -15.48
+      ```
+      Two of three agree within $15 — that rules out systematic overstatement. Keep
+      `_reconcile_pnl_against_broker` on LOGS, not alerts: a single-day comparison will keep
+      showing large gaps that are timing. Use the cumulative tool to judge correctness.
 - **Rollback lever if anything looks wrong:** `strategy.entry_pricing.deliberate_rung_pricing: false` +
   a strategy restart. It is the only change that alters order pricing and the only one with no broker
   dependency.
