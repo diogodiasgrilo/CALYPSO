@@ -60,7 +60,7 @@ rather than asserted**. Several decay (test state, backups, VM state) — re-mea
 
 | Gate | Status | Measured evidence | What closes it |
 |---|---|---|---|
-| **1** Branch state | 🟡 | VM + local on `hydra-ibkr-standalone`; **613 ahead / 7 behind `main`** (not a fast-forward). [`MERGE_PLAN.md`](migration/MERGE_PLAN.md) **rewritten + dry-run verified 2026-09-12** — `--no-ff`, no squash, one predictable journal conflict. | Execute the merge (needs approval), then move the VM to `main` per MERGE_PLAN §7. |
+| **1** Branch state | 🟡 | **MERGED 2026-09-12** — `main` is at `59a1fc7`, carrying all 613 commits (`--no-ff`, history preserved; every cited SHA still resolves). Suite green *on the merge result*; the branch-vs-merge diff outside the journal was empty. **The VM is still checked out on `hydra-ibkr-standalone`** — deliberately, see below. | Move the VM to `main` (MERGE_PLAN §7) as part of the go-live sequence, not before. |
 | **2** Audit state | 🟢 | `P7_AUDIT_FINDINGS.md` **0 OPEN**; **0** `TODO`/`FIXME`/`XXX` under `bots/hydra/` + `shared/ib_*.py`. | — (re-check at cutover) |
 | **3** Test state | 🟡 | Suite **3608 passed / 16 skipped / 0 failed**. **`pip-audit -r requirements.txt` CLEAN.** Auditing the VM's *installed* set (which the gate command never did) found **44 vulns in 9 packages**; enforcing the lock + 3 bumps took it to **12 in 3**, and all remaining are dashboard/CLI (`starlette`, `click`, `pydantic-settings`), none in the trading path. Integration paper-smoke still not run in the last 7 days. | (a) run the integration paper-smoke; (b) `starlette` 0.52→1.3 is a major-version jump needing its own dashboard validation. |
 | **4** Paper history | 🔴 | 5 consecutive sessions with **no manual intervention** is unattainable at the current cadence — **25 commits in the last 14 days**, most deployed. **Chaos test: never run** (0 journal records). | A deliberate change freeze, then 5 clean sessions + the chaos test, both recorded in the journal. |
@@ -70,6 +70,21 @@ rather than asserted**. Several decay (test state, backups, VM state) — re-mea
 | **8** Position sizing | 🔴 | B runs **7 contracts**; the gate mandates **1** for week 1. | Set at cutover; tighten the daily-loss bounds with it. |
 | **9** Approval + halt criteria | 🔴 | **No approval document committed** anywhere in the repo. | Write + commit the halt criteria and the written approval. |
 | **10** Week-1 monitoring | 🔴 | Not written. | Write the plan; confirm operator availability for the first session. |
+
+### Why the VM is still on the feature branch after the merge
+
+The merge landed on `main`, but `/opt/calypso` was **deliberately left on `hydra-ibkr-standalone`**.
+Moving it now would buy nothing and cost two things:
+
+- **HOMER pushes nightly to whatever branch the VM tracks.** On `main` that means an automated
+  agent committing to the protected production branch every night — exactly what Gate 1 exists to
+  prevent. Day-to-day work should keep landing on the feature branch and be merged deliberately.
+- **`config_variant_*.json` carries `skip-worktree` but a branch switch still overwrites it.** Every
+  live variant's `dry_run`, `contracts_per_entry` and `alerts.email` would need re-verifying, during
+  a period when nothing requires the move.
+
+Gate 1 is checked **at cutover**, not continuously. The right sequence is: keep working on the
+branch → merge again when the go-live window opens → move the VM to `main` then, per MERGE_PLAN §7.
 
 ### The external prerequisite chain (the checklist's Gate 5 starts too late)
 

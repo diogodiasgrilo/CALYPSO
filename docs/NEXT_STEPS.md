@@ -175,8 +175,9 @@ wait. Start that chain first; the repo work proceeds underneath it.
    ahead / 7 behind** and **dry-run verified end-to-end** in a throwaway clone. Decision reversed:
    **`--no-ff`, do NOT squash** — 186 SHA citations in this repo's own docs exist only on this branch
    and a squash strands every one. One predictable conflict (`HYDRA_TRADING_JOURNAL.md`), resolution
-   verified lossless. **Executing the merge still needs approval**; Gate 1 forbids going live from a
-   feature branch.
+   verified lossless. **MERGED + PUSHED 2026-09-12** — `main` is at `59a1fc7` with all 613 commits and
+   full history; suite green on the merge result. The VM stays on the feature branch until the
+   go-live window (HOMER would otherwise auto-commit to `main` nightly) — see GO_LIVE_MASTER §2-bis.
 2. ~~**`pip-audit` is RED**~~ — **DONE 2026-09-12.** `cryptography` 48.0.0 → **50.0.0** clears all four
    advisories; `pip-audit` now reports no known vulnerabilities. Needed `msal` 1.36 → 1.38 to lift a
    `cryptography<49` ceiling. **Correction:** it is *not* under the OAuth path — ibind signs with
