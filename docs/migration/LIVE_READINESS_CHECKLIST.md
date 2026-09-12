@@ -79,20 +79,28 @@
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso git -C /opt/calypso rev-parse HEAD"
   git checkout <that-sha> && .venv/bin/python -m pytest tests/ -q
   ```
-- [ ] **Integration smoke** (`tests/integration/test_ib_paper_smoke.py`) passes against the **paper** account
-  > 🔴 **DO NOT RUN THIS AS WRITTEN — IT WILL TAKE THE FLEET DOWN.** The test constructs its own
-  > `IBClient` and calls `connect()` (lines ~128 and ~171). IBKR OAuth 1.0a permits **one brokerage
-  > session per username**, so a second session **evicts `calypso-broker`** and all seven strategies
-  > lose data access. The file is a Phase-A.10 artifact (May 2026) that predates the broker
-  > architecture. Attempted 2026-09-12 and stopped before execution.
+- [ ] **Paper order-path smoke** passes against the **paper** account in the last 7 days —
+  **use [`scripts/broker_paper_smoke.py`](../../scripts/broker_paper_smoke.py)**, which drives the real
+  production path (BrokerClient → broker → IBClient) and causes no session contention.
+  ```bash
+  # CHECK-ONLY (safe any time; SKIPS with exit 75 when the market is closed)
+  gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python scripts/broker_paper_smoke.py'"
+  # ARMED — real 1-contract round trip. RTH ONLY. This is the Gate-3 evidence.
+  gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start broker-paper-smoke"
+  ```
+  **Exit codes:** `0` PASS · `75` skipped because the market was closed (NOT a pass — re-run during
+  RTH) · anything else is a real failure. A check-only run on a weekend proves the safety gate and
+  broker reads only; **Gate-3 evidence requires an RTH run.**
+
+  > 🔴 **Do NOT use `tests/integration/test_ib_paper_smoke.py` for this.** It constructs its own
+  > `IBClient` and calls `connect()`; IBKR OAuth 1.0a allows **one brokerage session per username**, so
+  > it would **evict `calypso-broker`** and take all seven strategies offline. It is a Phase-A.10
+  > artifact (May 2026) predating the broker.
   >
-  > Two ways to make this runnable, neither done yet:
-  > **(a)** a maintenance window with `calypso-broker` stopped — outside RTH, account flat; or
-  > **(b)** rewrite it to proxy through `BrokerClient`, as `scripts/probe_combo_whatif.py` already
-  > does for exactly this reason.
-  >
-  > ⚠️ Also note `pytest` is **deliberately absent** from the VM venv (see below), so the old command
-  > could not have run there anyway.
+  > **As of 2026-09-12 it physically refuses to run** when anything is holding (or could hold) a
+  > session — verified against a stub broker in all four states. Override for a genuine maintenance
+  > window only, with `calypso-broker` **stopped**: `ALLOW_SESSION_EVICTION=1`.
+
 - [ ] `pip-audit` returns zero **High** or **Critical** CVEs in the IBKR stack
   ```bash
   # LOCALLY (pip-audit is deliberately not on the VM — see the note above).
