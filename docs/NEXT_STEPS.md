@@ -173,9 +173,10 @@ wait. Start that chain first; the repo work proceeds underneath it.
 **The three repo blockers, in dependency order:**
 1. **`main` merge — 610 commits ahead**, and `MERGE_PLAN.md` is frozen against a 97-commit snapshot. Needs
    rewriting before it can run. Gate 1 forbids going live from a feature branch.
-2. **`pip-audit` is RED** — `cryptography==48.0.0` (pinned, and live on the VM) carries 4 advisories;
-   `50.0.0` clears all four. It sits under OAuth RSA signing *and* all outbound TLS, so it needs the full
-   suite + a broker restart — never during RTH.
+2. ~~**`pip-audit` is RED**~~ — **DONE 2026-09-12.** `cryptography` 48.0.0 → **50.0.0** clears all four
+   advisories; `pip-audit` now reports no known vulnerabilities. Needed `msal` 1.36 → 1.38 to lift a
+   `cryptography<49` ceiling. **Correction:** it is *not* under the OAuth path — ibind signs with
+   pycryptodome — it backs google-auth/PyJWT, i.e. Secret Manager / Sheets / Pub/Sub.
 3. **A change freeze**, then Gate 4's 5 clean sessions + the **chaos test** and Gate 7's **RB-7 restore
    rehearsal** — neither has *ever* been run (0 journal records each). These cannot overlap with (1)'s deploys.
 

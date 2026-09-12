@@ -17,7 +17,13 @@
 ibind==0.1.23                     # IBKR Client Portal Web API client (OAuth 1.0a)
 pycryptodome==3.23.0              # RSA signing for OAuth (NOT pycrypto — see ib_oauth.py
                                   # assert_safe_crypto_backend())
-cryptography==48.0.0              # TLS + cert handling (transitive via requests but pinned here)
+cryptography==50.0.0              # NOT the OAuth signer — that is pycryptodome above. This is pulled
+                                  # in by google-auth / PyJWT / oauthlib[rsa] / msal (service-account
+                                  # JWT signing for Secret Manager, Sheets, Pub/Sub). requests does TLS
+                                  # through urllib3/ssl, not through this. Pinned so pip-audit's Gate-3
+                                  # result is reproducible. 48.0.0 carried 4 advisories (CVE-2026-69247/
+                                  # 69248/69249 + GHSA-537c-gmf6-5ccf); 50.0.0 clears all four, and needs
+                                  # msal>=1.38 in the lock file — 1.36 caps it at cryptography<49.
 requests-oauthlib==2.0.0          # OAuth 1.0a wrapper (transitive via ibind, pinned)
 
 # ─── HTTP + WebSocket (HYDRA's REST polling + ibind's WS client) ───────────

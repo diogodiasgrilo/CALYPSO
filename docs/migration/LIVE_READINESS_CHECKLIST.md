@@ -83,14 +83,21 @@
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/pip-audit -r requirements.txt 2>&1 | grep -E \"high|critical\" | wc -l'"
   # MUST output: 0
   ```
-  > ⚠️ **KNOWN RED as of 2026-09-12 — do not tick this from memory.** `requirements.txt` pins
-  > `cryptography==48.0.0` (line 20) and the **VM runs the same version**. Four distinct advisories:
-  > CVE-2026-69248 (X.509 name-constraint bypass), CVE-2026-69249 (cert-chain recursion DoS),
-  > CVE-2026-69247 (PKCS7 decrypt oracle — likely unreachable, we do not call `pkcs7_decrypt_*`), and
-  > GHSA-537c-gmf6-5ccf (statically-linked OpenSSL in the wheel). **Bumping to `50.0.0` clears all four.**
-  > Treat it as a real deploy, not a pin edit: `cryptography` sits under ibind's RSA signing for OAuth 1.0a
-  > **and** every outbound TLS call, so it needs the full suite plus a `calypso-broker` restart to validate —
-  > never during RTH.
+  > ✅ **RESOLVED 2026-09-12.** Was RED: `cryptography==48.0.0` carried four advisories — CVE-2026-69248
+  > (X.509 name-constraint bypass), CVE-2026-69249 (cert-chain recursion DoS), CVE-2026-69247 (PKCS7
+  > decrypt oracle), GHSA-537c-gmf6-5ccf (statically-linked OpenSSL in the wheel). Now pinned at
+  > **50.0.0**, which clears all four; `pip-audit -r requirements.txt` reports *No known vulnerabilities*.
+  >
+  > **Getting there needed `msal` 1.36 → 1.38.** msal 1.36 caps `cryptography<49`, so 48.0.1 was the
+  > ceiling until msal moved to `<51`. msal is not a direct dependency — it arrives via
+  > `Office365-REST-Python-Client`, which backs the dormant SharePoint/Excel logging path in
+  > `shared/logger_service.py`. Do not "clean up" that package without checking this constraint again.
+  >
+  > **Correcting an earlier claim in this file:** `cryptography` is **NOT** under the IBKR OAuth path.
+  > ibind signs OAuth 1.0a with **pycryptodome** (`from Crypto.*`), and `requests` does TLS through
+  > `urllib3`/`ssl`. `cryptography` is pulled in by **google-auth / PyJWT / oauthlib[rsa] / msal** — i.e.
+  > service-account JWT signing for **Secret Manager, Google Sheets and Pub/Sub**. That is the blast
+  > radius to validate after any bump here, not the broker handshake.
 
 ## Gate 4 — Paper history
 
