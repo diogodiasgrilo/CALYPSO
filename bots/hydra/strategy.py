@@ -6730,11 +6730,20 @@ class HydraStrategy(MEICStrategy):
                 best_price = price
         return best_price if best_diff < minutes * 60 * 2 else 0.0  # reject if too far off
 
-    def _skip_require_both_sides(self, entry, entry_num: int, source: str) -> str:
+    def _skip_require_both_sides(self, entry, entry_num: int, source: str,
+                                 est_call: float = 0.0, est_put: float = 0.0) -> str:
         """require-both-sides (one_sided_entries_enabled=false): skip an entry that
         would be placed one-sided, from ANY source (credit-gate / E6 conditional /
         the Brandon GEX strike-adjuster). Mirrors the MKT-010 clean-skip pattern so
-        the entry is recorded as a SKIP (not a failed retry). Returns the skip msg."""
+        the entry is recorded as a SKIP (not a failed retry). Returns the skip msg.
+
+        `est_call`/`est_put` are the MKT-011 credit estimates **in cents**, and they
+        matter more than they look: this site records the GEX vetoes, and the
+        counterfactual in `scripts/analyze_skipped_entry_outcomes.py` values an
+        UNBREACHED veto at the credit it would have kept. Without them every
+        unbreached row models as exactly $0.00 — which reads as "vetoing cost us
+        nothing" rather than "we don't know", and silently flatters the gate.
+        Measured 2026-09-12: the first 3 GEX vetoes with strikes all modelled $0."""
         logger.warning(
             f"REQUIRE-BOTH-SIDES: Entry #{entry_num} would be one-sided ({source}) — "
             f"SKIPPING (one_sided_entries_enabled=false)"
@@ -6766,6 +6775,8 @@ class HydraStrategy(MEICStrategy):
             f"entries have negative expectancy and a naked-short tail risk, so we "
             f"don't take them (require-both-sides). Cause: {_src_expl}.",
             proposed_entry=entry,
+            est_call=est_call,
+            est_put=est_put,
         )
         return f"Entry #{entry_num} skipped - require both sides ({source})"
 
@@ -7506,8 +7517,14 @@ class HydraStrategy(MEICStrategy):
                 # REQUIRE-BOTH-SIDES (B/C): when one-sided entries are disabled, skip
                 # any credit-gate / E6 / conditional one-sided routing before placement.
                 if not getattr(self, "one_sided_entries_enabled", True) and (place_put_only or place_call_only):
+                    # locals().get, not a bare reference: est_call/est_put are
+                    # assigned on six different branches above, so a bare name
+                    # could raise UnboundLocalError on a path that took none of
+                    # them — which would turn a clean skip into a crash.
                     return self._skip_require_both_sides(
-                        entry, entry_num, "call-only" if place_call_only else "put-only"
+                        entry, entry_num, "call-only" if place_call_only else "put-only",
+                        est_call=locals().get("est_call") or 0.0,
+                        est_put=locals().get("est_put") or 0.0,
                     )
 
                 import time as _time
@@ -7533,7 +7550,11 @@ class HydraStrategy(MEICStrategy):
                 # _execute/_simulate_entry and, when one-sided is disabled, sets
                 # require_both_abort + returns without placing. Convert to a clean skip.
                 if getattr(entry, "require_both_abort", False):
-                    return self._skip_require_both_sides(entry, entry_num, "GEX-skip")
+                    return self._skip_require_both_sides(
+                        entry, entry_num, "GEX-skip",
+                        est_call=locals().get("est_call") or 0.0,
+                        est_put=locals().get("est_put") or 0.0,
+                    )
 
                 # DEGRADED-DATA: the dry-run net-credit-floor honesty check in
                 # _simulate_entry sets abort_entry_reason when the simulated credit

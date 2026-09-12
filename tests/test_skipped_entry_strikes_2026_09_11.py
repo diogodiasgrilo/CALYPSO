@@ -176,3 +176,66 @@ class TestItNeverBreaksTheSkipItself:
     @pytest.mark.parametrize("bad", ["", 0, False, []])
     def test_falsey_non_entries_are_tolerated(self, bad):
         assert _call(_strat(), proposed_entry=bad)["theoretical_long_put"] is None
+
+
+class TestTheVetoAlsoRecordsItsCREDIT:
+    """Strikes alone make a veto *measurable*; the credit makes it *valuable*.
+
+    Measured 2026-09-12 on the live seat: the first three GEX vetoes to carry
+    strikes all modelled **$0.00**, because `_skip_require_both_sides` recorded
+    the strikes and not the MKT-011 credit estimates. An unbreached veto is
+    worth the credit it would have kept, so a missing credit reads as "vetoing
+    cost us nothing" rather than "we don't know" — which silently flatters the
+    gate in exactly the direction the analysis is trying to test.
+
+    The two halves were being written by DIFFERENT skip sites and never
+    together: the credit-gate skip recorded credits but no strikes; the
+    require-both-sides skip (which is where GEX vetoes land) recorded strikes
+    but no credits.
+    """
+
+    def test_the_skip_helper_accepts_the_credit_estimates(self):
+        import inspect
+        sig = inspect.signature(HydraStrategy._skip_require_both_sides)
+        assert "est_call" in sig.parameters
+        assert "est_put" in sig.parameters
+        assert sig.parameters["est_call"].default == 0.0
+        assert sig.parameters["est_put"].default == 0.0
+
+    def test_it_forwards_them_to_the_recorder(self):
+        """A parameter the helper accepts but never passes on records nothing."""
+        import inspect
+        src = inspect.getsource(HydraStrategy._skip_require_both_sides)
+        assert "est_call=est_call" in src
+        assert "est_put=est_put" in src
+
+    def test_both_call_sites_supply_them(self):
+        """Including the GEX-skip site — the one that produces the vetoed rows
+        the counterfactual exists to evaluate."""
+        import inspect
+        src = inspect.getsource(HydraStrategy._initiate_entry)
+        i = src.index('"GEX-skip"')
+        assert 'est_call=locals().get("est_call")' in src[i - 200:i + 300]
+        j = src.index('"call-only" if place_call_only else "put-only"')
+        assert 'est_call=locals().get("est_call")' in src[j - 300:j + 300]
+
+    def test_it_reads_them_defensively_not_by_bare_name(self):
+        """est_call/est_put are assigned on six different branches of
+        _initiate_entry. A bare reference would raise UnboundLocalError on a path
+        that took none of them, turning a clean skip into a crash — strictly
+        worse than the missing telemetry it fixes."""
+        import inspect
+        src = inspect.getsource(HydraStrategy._initiate_entry)
+        for call in ('"GEX-skip"', '"call-only" if place_call_only else "put-only"'):
+            i = src.index(call)
+            window = src[i - 300:i + 300]
+            assert 'locals().get("est_call")' in window
+            assert "est_call=est_call" not in window, "bare reference — can UnboundLocalError"
+
+    def test_the_recorder_converts_cents_to_dollars(self):
+        """est_call/est_put are CENTS; the DB column is dollars. Passing cents
+        straight through would inflate every recorded credit 100x."""
+        import inspect
+        src = inspect.getsource(HydraStrategy._record_skipped_entry)
+        assert "est_call / 100" in src
+        assert "est_put / 100" in src
