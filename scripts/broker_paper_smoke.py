@@ -21,7 +21,8 @@ Modes:
   • --place: full 1-contract round trip (buy-to-open marketable → confirm fill
     → sell-to-close). RTH only. Use for the armed Monday-open run.
 
-Exit 0 on success, non-zero on any failure. Sends ONE Telegram summary via
+Exit 0 on success, 75 (EX_TEMPFAIL) when CHECK-ONLY is skipped because the
+market is closed, non-zero otherwise on failure. Sends ONE Telegram summary via
 AlertService either way. Self-contained (no Claude session).
 """
 
@@ -56,6 +57,27 @@ def _acct_code(bal: dict) -> str:
         return str(((bal.get("raw_ledger", {}) or {}).get("USD", {}) or {}).get("acctcode", ""))
     except Exception:
         return ""
+
+
+def _alert_skip(lines: list) -> None:
+    """A market-closed skip is not a failure — say so quietly.
+
+    Deliberately LOW priority and a neutral title: a HIGH "❌ FAIL" for running
+    the check on a Saturday is exactly the kind of alert that trains an operator
+    to ignore alerts.
+    """
+    if os.environ.get("SMOKE_NO_ALERT") == "1":
+        return
+    try:
+        from shared.alert_service import AlertService, AlertType, AlertPriority
+        AlertService({"alerts": {"enabled": True}}, "HYDRA").send_alert(
+            alert_type=AlertType.API_ERROR,
+            title="Paper smoke — SKIPPED (market closed)",
+            message="\n".join(lines),
+            priority=AlertPriority.LOW,
+        )
+    except Exception as e:
+        print(f"smoke: alert send failed: {e}", file=sys.stderr)
 
 
 def _alert(ok: bool, lines: list) -> None:
@@ -99,6 +121,23 @@ def main() -> int:
     log(f"safety gate OK — paper account {acct}, tradable={bal.get('tradable')}")
 
     # ── live data + chain/strike resolution over the broker RPC (#4/#5) ─────
+    # MARKET-CLOSED SKIP (added 2026-09-12). Everything below needs a LIVE quote:
+    # with the market shut, SPX returns spot=None, the ATM strike falls back to
+    # the chain midpoint (which can be ~600pt off spot), and qualify_contract
+    # then legitimately finds no match — reported as "FAIL: chain/quote
+    # resolution" plus a HIGH Telegram alert. That is a false alarm, and it made
+    # a weekend run look like a broken broker. The docstring's "safe to run any
+    # time (incl. weekends)" is true (it places nothing) but was being read as
+    # "will pass any time", which it never could.
+    # Exit 75 (EX_TEMPFAIL) so a cron/CI caller cannot mistake a skip for a PASS.
+    if not PLACE:
+        from shared.market_hours import is_market_open
+        if not is_market_open():
+            log("SKIPPED: market closed — chain/quote resolution needs a live quote. "
+                "Safety gate + broker reads above PASSED. Re-run during RTH for Gate-3 evidence.")
+            _alert_skip(out)
+            return 75
+
     exp = _next_weekday(date.today())
     try:
         spx = bc.get_quote(bc.qualify_contract("SPX", sec_type="IND"))

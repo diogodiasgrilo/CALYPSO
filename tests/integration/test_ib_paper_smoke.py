@@ -151,6 +151,58 @@ pytestmark = pytest.mark.skipif(
 )
 
 
+# ─── SESSION-CONTENTION GUARD (added 2026-09-12) ────────────────────────────
+#
+# THIS FILE OPENS ITS OWN IBKR SESSION AND WILL EVICT A RUNNING calypso-broker.
+#
+# IBKR OAuth 1.0a permits exactly ONE brokerage session per username. Every
+# fixture below constructs `IBClient(cfg)` and calls `connect()`. On the
+# broker-era VM that is a SECOND session on the same paper username, so it wins
+# the one-session war, `calypso-broker` loses its session, and all seven
+# strategy processes go blind — no quotes, no chains, no stops. This file was
+# written in Phase A.10 (May 2026), BEFORE the broker existed.
+#
+# The safe equivalent already exists: `scripts/broker_paper_smoke.py` drives the
+# same path through BrokerClient → broker → IBClient, causes no contention, and
+# is what LIVE_READINESS_CHECKLIST Gate 3 now points at.
+#
+# So: refuse to run whenever a broker is reachable. Override only inside a
+# deliberate maintenance window with `calypso-broker` STOPPED.
+
+def _broker_is_holding_a_session() -> str:
+    """Non-empty reason string if running here would evict a live broker."""
+    import json
+    import os
+    import urllib.request
+
+    if os.environ.get("ALLOW_SESSION_EVICTION") == "1":
+        return ""  # operator asserts the broker is stopped
+
+    url = os.environ.get("CALYPSO_BROKER_URL", "http://127.0.0.1:8788")
+    try:
+        with urllib.request.urlopen(f"{url}/health", timeout=3) as r:
+            health = json.loads(r.read().decode())
+    except Exception:
+        return ""  # nothing answering — no broker to evict
+
+    if health.get("connected") or health.get("authenticated"):
+        return (
+            f"calypso-broker at {url} is holding an IBKR session ({health}). "
+            "Running this file would open a SECOND session on the same username "
+            "and EVICT it, taking all strategy processes offline. Use "
+            "scripts/broker_paper_smoke.py instead. To run anyway, stop "
+            "calypso-broker and set ALLOW_SESSION_EVICTION=1."
+        )
+    return f"a broker is reachable at {url} but not holding a session ({health}); refusing anyway"
+
+
+_EVICTION_REASON = _broker_is_holding_a_session()
+pytestmark = pytest.mark.skipif(
+    bool(_EVICTION_REASON),
+    reason=f"WOULD EVICT THE BROKER SESSION — {_EVICTION_REASON}",
+)
+
+
 # ─── Session-scope fixtures ─────────────────────────────────────────────────
 
 
