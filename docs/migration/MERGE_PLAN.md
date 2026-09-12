@@ -1,20 +1,272 @@
 # Merge Plan — `hydra-ibkr-standalone` → `main`
 
-**Status:** FROZEN PLAN — squash design approved 2026-05-24 (audited by the polish-pass 3-agent + senior overseer + AUD2 re-audit). The branch tip has advanced since the plan was written (more polish commits and AUD2 fixes); the chunk groupings below cover the original 97 commits + a "Chunk 8 — World-class polish + AUD2 cleanup" group for everything since.
+**Status:** ACTIVE PLAN, rewritten **2026-09-12**. Supersedes the frozen 2026-05-24 squash design,
+which was written when the branch was **97 commits ahead** and is now off by a factor of six. The
+original 8-chunk design is preserved as [Appendix A](#appendix-a--superseded-8-chunk-squash-design-2026-05-24)
+for its audit trail.
 
-**Do NOT execute** any squash, rebase, or merge command without explicit user approval AND a fresh `git push origin hydra-ibkr-standalone:hydra-ibkr-standalone-backup-YYYYMMDD` first.
-
-**Branch tip at planning time:** `5fdf850` (97 commits ahead of `main`). **Current branch tip is ahead** of that snapshot — count via `git log --oneline main..HEAD | wc -l` at squash time.
+**Do NOT execute** any merge, rebase, or force-push without explicit user approval AND a fresh
+`git push origin hydra-ibkr-standalone:hydra-ibkr-standalone-backup-YYYYMMDD` first.
 
 ---
 
-## Why squash before merge
+## 1. What changed since the frozen plan
 
-97 commits on a feature branch is a lot to land on `main`'s `git log`. Many are intermediate (probe iterations, audit remediation passes, doc-only tweaks). A squash pass reduces the noise to ~8-10 logical phases that match the design docs (`HYDRA_STANDALONE_REWRITE_PLAN.md`), making `git log main` navigable for future maintainers.
+Measured 2026-09-12 at branch tip `6e0c121`, merge-base `ce2549e`:
 
-The alternative — merge-commit preserving all 97 — keeps the full audit trail but pollutes `main`'s history. **Recommendation: squash by phase.** The full audit trail is preserved on the `hydra-ibkr-standalone-backup-*` branch and in the design docs.
+| | Frozen plan (2026-05-24) | Now |
+|---|---|---|
+| Commits ahead of `main` | 97 | **613** (591 non-merge + 22 merges) |
+| Commits `main` has that the branch does NOT | assumed 0 (fast-forward) | **7** — it is no longer a fast-forward |
+| Doc/journal-only commits | not measured | **136** of 589 non-merge |
+| Code-touching commits | not measured | **453** |
+| SHA citations in repo docs pointing at branch-only commits | not a practice yet | **186** |
 
-## Chunks (8 logical phases)
+**The three facts that change the plan:**
+
+1. **`main` has moved.** Seven commits exist on `main` and not here — all HOMER journal
+   auto-updates from 2026-05-19…05-28, all touching **only** `docs/HYDRA_TRADING_JOURNAL.md`.
+   A merge is required; a fast-forward is impossible. See §4.
+2. **The repo now depends on commit archaeology.** 201 SHA citations across `docs/`, `CLAUDE.md`
+   and the `bots/hydra/__init__.py` version history resolve to real commits — **186 of them exist
+   only on this branch.** Squashing strands every one: `git show <sha>` on `main` would fail for
+   all 186. This practice did not exist in May.
+3. **Scale.** 613 commits cannot be hand-chunked into 8 squashes with any confidence, and doing so
+   would destroy `git bisect` over the entire IBKR era — the one tool that reliably localises a
+   behavioural regression in a trading bot.
+
+---
+
+## 2. THE DECISION — merge with `--no-ff`, do NOT squash
+
+**Recommendation: a true merge commit preserving all 613 commits.** This reverses the frozen plan's
+"squash by phase", and the reversal is driven by evidence, not preference.
+
+The frozen plan's rationale was *"97 commits is a lot to land on `main`'s git log"*. That concern is
+fully addressed by `git log --first-parent`, which shows the merge as **one** commit. Nothing is
+gained by destroying history that `--first-parent` does not already give you.
+
+What squashing would cost, concretely:
+
+- **186 documented SHAs stop resolving on `main`.** The version history says things like "found in
+  commit `fd53cef`" and "documented in `ea0bd8c`"; `CLAUDE.md` and the migration docs cite SHAs as
+  primary evidence. Those become dangling references to a backup branch nobody will keep forever.
+- **`git bisect` dies** across 453 code-touching commits. For a bot that trades real money, the
+  ability to bisect a P&L regression to a single commit is not a nicety.
+- **`git blame` collapses** — every line in `bots/hydra/` would attribute to one of ~8 mega-commits
+  dated the merge day, losing the *why* that the per-commit messages carry.
+
+Keep the history. Use `--first-parent` when you want the clean view:
+
+```bash
+git log --first-parent main          # one line for the whole IBKR era
+git log main                         # full detail, bisectable
+```
+
+> If the user still prefers a squash after reading this, the mechanics in §6 remain valid — but
+> **the backup branch must then be treated as permanent infrastructure, not a temporary safety net**,
+> because 186 documented references would depend on it.
+
+---
+
+## 3. Pre-flight (all must pass before the merge command)
+
+```bash
+# a. Backup branch — permanent record of the pre-merge tip
+git push origin hydra-ibkr-standalone:hydra-ibkr-standalone-backup-$(date +%Y%m%d)
+
+# b. Clean tree, in sync
+git status --porcelain                                   # must be empty
+git rev-list --left-right --count origin/hydra-ibkr-standalone...HEAD   # must be "0  0"
+
+# c. Full suite green (baseline 2026-09-12: 3608 passed / 16 skipped / 0 failed)
+.venv/bin/python -m pytest tests/ -q
+
+# d. Dependency audit clean for the TRADING path
+.venv/bin/pip-audit -r requirements.txt                  # must be "No known vulnerabilities found"
+
+# e. Confirm the 7 main-only commits are still journal-only (if main moved again, re-check §4)
+git log --format='%h %s' origin/main --not HEAD
+git show --name-only --format='' $(git log --format='%H' origin/main --not HEAD) | sort -u
+```
+
+---
+
+## 4. The one conflict, and its verified resolution
+
+`git merge-tree` predicts **14 conflict hunks, all in `docs/HYDRA_TRADING_JOURNAL.md`** and nowhere
+else. Cause: HOMER wrote that file on `main` (May 19–28) while HOMER also wrote it on this branch.
+
+**Resolution: take the BRANCH version. Verified, not assumed** — checked 2026-09-12:
+
+- Entries for May 19, 20, 21, 22, 25, 26, 27 are present on **both** sides.
+- `main`'s extra "May 28" matches are header/TOC lines only (`Last Updated: May 28`,
+  `Trading Period: Feb 10 - May 28`), which the branch has legitimately moved forward to Sep 11.
+- The branch journal is **9,951 lines vs main's 6,147** and contains the full May 28 entry plus
+  every session through 2026-09-11. It is a strict content superset.
+
+```bash
+git merge --no-ff hydra-ibkr-standalone        # from main
+git checkout --theirs docs/HYDRA_TRADING_JOURNAL.md   # "theirs" = the branch being merged in
+git add docs/HYDRA_TRADING_JOURNAL.md
+```
+
+**Re-verify before committing the merge** — do not trust this section if `main` has advanced again:
+
+```bash
+grep -c "May 28" docs/HYDRA_TRADING_JOURNAL.md         # expect the branch's count
+git show origin/main:docs/HYDRA_TRADING_JOURNAL.md | grep -n "May 2[0-8]"   # nothing unique
+```
+
+---
+
+## 5. What this merge changes on `main`
+
+**It deletes the 4 sibling bots.** `62 files changed, 24,946 insertions(+), 33,146 deletions(-)`
+under `bots/` — `iron_fly_0dte/`, `delta_neutral/`, `rolling_put_diagonal/`, `meic/` are removed
+(P5a/P5b). They exist on `main` today as kill-switched modules (`DISABLED_FOR_SAFETY=True`, added in
+v1.24.0). **This is the intended end state**, and the deletion is recoverable from history — but it
+is the single most consequential thing the merge does, and it must be stated in the PR body rather
+than discovered in a diff.
+
+Post-merge `bots/` contains only `__init__.py` and `hydra/`.
+
+---
+
+## 6. Merge procedure
+
+```bash
+# 1-2. Pre-flight per §3 (backup branch + green suite + clean audit)
+
+# 3. Merge into main, preserving history
+git checkout main && git pull --ff-only
+git merge --no-ff hydra-ibkr-standalone -m "merge: HYDRA on Interactive Brokers (v2.0.0)"
+#    -> resolve the ONE journal conflict per §4, then:
+git commit
+
+# 4. Verify the merge result is byte-identical to the branch tip, EXCEPT the journal
+git diff hydra-ibkr-standalone main -- . ':!docs/HYDRA_TRADING_JOURNAL.md'
+#    Expected: EMPTY. Anything here means the merge dropped or altered code — abort.
+
+# 5. Re-run the suite ON THE MERGE RESULT (not on the branch)
+.venv/bin/python -m pytest tests/ -q      # must match the §3 baseline
+
+# 6. Push
+git push origin main
+```
+
+### 6-bis. This procedure was DRY-RUN VERIFIED on 2026-09-12
+
+Executed end-to-end in a throwaway clone (`git clone --no-hardlinks`, zero risk to the real repo)
+against branch tip `6e0c121` and `main` at `a77027f`. Every claim above is measured, not predicted:
+
+| Check | Result |
+|---|---|
+| Conflicts | **exactly one file** — `docs/HYDRA_TRADING_JOURNAL.md`, as §4 predicts |
+| `--theirs` resolution | journal = **9,951 lines** (the branch superset); May 19/25/28 **and** Sep 11 all present |
+| §6 step-4 safety-net diff | **0 lines** — the merge result is byte-identical to the branch tip outside the journal |
+| `git log --first-parent main` | the whole era reads as **one commit**, which is §2's entire argument |
+| History retained | **1,641 commits** on `main` post-merge |
+| Cited SHAs still resolve | `fd53cef`, `ea0bd8c`, `3cb63cd`, `56bb096` → all **reachable from `main`** ✓ |
+
+That last row is the decision in §2 made concrete: under `--no-ff` the 186 documented SHAs keep
+working. Under a squash they would not.
+
+> **The §6 step-4 diff is the safety net.** A `--no-ff` merge of a branch that is 613 ahead and 7
+> behind should produce a tree identical to the branch tip everywhere except the one conflicted
+> file. If it does not, something was silently resolved wrong.
+
+---
+
+## 7. Post-merge — the VM cutover
+
+The live-money gate (`LIVE_READINESS_CHECKLIST.md` Gate 1) requires the VM to run from `main`:
+
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && git fetch origin && git checkout main && git pull --ff-only && find bots shared services scripts -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null'"
+# then, IN ORDER: broker first, confirm /health, then the strategies
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart calypso-broker && sleep 20 && curl -s http://127.0.0.1:8788/health"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g dashboard"
+```
+
+⚠️ **Never during RTH, and never with settlement pending.** ⚠️ `config_variant_*.json` carries
+`skip-worktree` on the VM but a branch switch **will** overwrite it — re-verify every live variant's
+`dry_run`, `contracts_per_entry` and `alerts.email` after the checkout.
+
+---
+
+## 8. Rollback
+
+```bash
+# Before the push: just reset
+git checkout main && git reset --hard origin/main
+
+# After the push (main is not force-pushable under the §10 protections — revert instead)
+git revert -m 1 <merge-sha>     # -m 1 keeps main's side as the mainline
+
+# Branch recovery, any time
+git push --force-with-lease origin hydra-ibkr-standalone-backup-YYYYMMDD:hydra-ibkr-standalone
+```
+
+---
+
+
+---
+
+## 9. Post-merge cleanup
+
+```bash
+# Tag the merge as v2.0.0
+git tag -a v2.0.0 -m "HYDRA on Interactive Brokers — paper-only initial release"
+git push origin v2.0.0
+
+# Verify main + tag
+git log --first-parent main -3      # the merge should read as ONE commit here
+git log main --oneline | wc -l      # full history retained
+git tag --list v2.*
+```
+
+**Do NOT delete `hydra-ibkr-standalone` immediately.** Two reasons specific to this merge:
+
+1. **The VM tracks it.** `/opt/calypso` is checked out on this branch and HOMER commits+pushes to it
+   nightly. Deleting it before the VM is moved to `main` (§7) breaks HOMER's push and leaves the VM
+   on a dangling remote.
+2. **Ongoing work.** Keep it until `main` has been running on the VM for at least one clean session.
+
+When it is finally deleted, the backup branch from §3 stays — under the `--no-ff` decision (§2) the
+history also lives on `main`, so the backup is a convenience rather than the sole record. **If a
+squash was chosen instead, the backup branch becomes permanent infrastructure** — 186 documented
+SHAs would depend on it.
+
+---
+
+## 10. Branch protection (recommended GitHub settings for `main`)
+
+After the merge lands:
+
+- **Require pull request reviews** (1 reviewer, no self-review)
+- **Require status checks pass** before merging: `pytest` (full suite — baseline 3608 passed / 16 skipped as of 2026-09-12), `pip-audit -r requirements.txt` (must report *No known vulnerabilities*), `systemd-analyze verify` (for any deploy/*.service change)
+- **Require branches to be up to date** before merging
+- **Restrict who can push to matching branches** — main is protected; admins only
+- **Disallow force pushes** to `main`
+- **Disallow deletions** of `main`
+- **Require signed commits** (optional but recommended for production-trading code)
+
+---
+
+## Appendix A — SUPERSEDED 8-chunk squash design (2026-05-24)
+
+> **Historical only — do not execute.** This was the approved design when the branch was **97
+> commits** ahead of `main` and a fast-forward. It is retained because its chunk groupings and the
+> per-chunk SHA lists are the audit trail for the F1–F7 / P1–P7 migration phases, and several
+> migration docs refer to them. §2 above explains why squashing is no longer the recommendation.
+>
+> Note the commit ranges below cover only the first 97 commits; **516 further commits** have landed
+> since (broker session service, variants B/C/D/E/F/G, the dashboard and its auth, the agent suite,
+> and the 2026-09 execution-quality work). They were never chunked, and chunking them now is exactly
+> the work §2 argues against.
+
+### A.1 The 8 chunks
 
 Each chunk below produces ONE squashed commit on `main` post-merge, with a commit message that summarizes the phase + lists every original commit SHA + author for the audit trail.
 
@@ -323,7 +575,7 @@ This polish pass: alerts, runbooks, observability, docs. Currently in flight.
 
 ---
 
-## Squash mechanics
+### A.2 Squash mechanics (superseded)
 
 After user approval, execute in this exact order:
 
@@ -333,7 +585,7 @@ git push origin hydra-ibkr-standalone:hydra-ibkr-standalone-backup-$(date +%Y%m%
 
 # 2. Verify clean working tree, tests pass.
 git status                          # must be clean
-python -m pytest tests/ -q --ignore=tests/test_dashboard  # must be 885+ passed
+.venv/bin/python -m pytest tests/ -q   # baseline 3608 passed / 16 skipped (2026-09-12)
 
 # 3. Identify the merge-base.
 MERGE_BASE=$(git merge-base hydra-ibkr-standalone main)
@@ -373,36 +625,9 @@ gh pr create --base main --head hydra-ibkr-standalone \
   --body "$(cat docs/migration/MERGE_PLAN.md | head -200)"
 ```
 
-**Failure recovery:** If anything goes wrong, the backup branch from step 1 holds the full 97-commit history. `git push --force-with-lease origin hydra-ibkr-standalone-backup-$(date +%Y%m%d):hydra-ibkr-standalone` restores it.
+**Failure recovery:** If anything goes wrong, the backup branch from step 1 holds the full 613-commit history. `git push --force-with-lease origin hydra-ibkr-standalone-backup-$(date +%Y%m%d):hydra-ibkr-standalone` restores it.
 
-## Branch protection (recommended GitHub settings for `main`)
-
-After the merge lands:
-
-- **Require pull request reviews** (1 reviewer, no self-review)
-- **Require status checks pass** before merging: `pytest` (full suite), `pip-audit` (no high-severity CVEs), `systemd-analyze verify` (for any deploy/*.service change)
-- **Require branches to be up to date** before merging
-- **Restrict who can push to matching branches** — main is protected; admins only
-- **Disallow force pushes** to `main`
-- **Disallow deletions** of `main`
-- **Require signed commits** (optional but recommended for production-trading code)
-
-## Post-merge cleanup
-
-```bash
-# Tag the merge as v2.0.0
-git tag -a v2.0.0 -m "HYDRA on Interactive Brokers — paper-only initial release"
-git push origin v2.0.0
-
-# Delete the feature branch (kept on backup branch per step 1)
-git push origin --delete hydra-ibkr-standalone
-
-# Verify main + tag
-git log main -1
-git tag --list v2.*
-```
-
-## Pre-squash verification (resolved 2026-05-24)
+### A.3 P5a/P5b delete verification (resolved 2026-05-24 — still valid, see §5)
 
 **Chunk 4 P5a/P5b deletes — verified clean.** `git ls-tree HEAD bots/` on
 the branch tip shows ONLY `bots/__init__.py` + `bots/hydra/`. The 4
