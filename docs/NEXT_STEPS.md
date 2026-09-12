@@ -151,7 +151,18 @@ now records its strikes.
       run prints the `--pct-of-width`/`--contracts` model it used. A row with no modellable outcome is
       left NULL rather than 0 — a 0 would read as a breakeven breach and silently flatter the veto.
 
-      **REMAINING:** (a) run `--apply` once a few forward-recorded vetoes exist, then the EV is a query;
+      **UPDATE 2026-09-12 — ran it on real rows for the first time; found a second missing half.**
+      3 GEX vetoes now carry strikes (2026-09-11 onward) and the pipeline works end-to-end — but all
+      three modelled **$0.00**, because the *credit* was never recorded at that site. The two halves
+      were written by different skip sites and never together: the credit-gate skip recorded credits
+      with NULL strikes; the require-both-sides skip (where GEX vetoes land) recorded strikes with
+      NULL credits. An unbreached veto is worth the credit it would have kept, so a missing credit
+      reads as "vetoing cost us nothing" instead of "unknown" — flattering the gate in exactly the
+      direction being tested. Fixed in `9be763e`; vetoes from 2026-09-12 onward carry both.
+
+      **REMAINING:** (a) wait for ~20 vetoes recorded WITH BOTH strikes and credit (n=3 today, and
+      those 3 have no credit — they stay $0-modelled forever), then run `--apply` and the EV is a
+      query;
       (b) the historical 95 stay unmeasurable — their strikes were never recorded and cannot be
       recovered; (c) 8 other skip sites still do not record strikes (pre-strike skips deliberately
       never will — there is nothing to record).
