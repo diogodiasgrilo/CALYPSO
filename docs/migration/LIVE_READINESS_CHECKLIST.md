@@ -201,11 +201,23 @@ So Gate 5 is now purely operational.
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso gsutil ls gs://calypso-backups/ | tail -3"
   # MUST include yesterday's date in filename
   ```
-- [ ] Restore procedure tested in the last 30 days (see `RUNBOOKS.md` RB-7)
-  > ⚠️ **NEVER RUN** — 0 RB-7 records in the journal as of 2026-09-12. The 30-day clock cannot be satisfied
-  > retroactively, so this has to happen inside the month before cutover. Use `shared/db_backup.py` for any
-  > DB copy in the rehearsal — a `shutil.copy2`/`cp` of a WAL database silently drops committed rows and the
-  > restore is exactly where you would discover it.
+- [x] Restore procedure tested in the last 30 days (see `RUNBOOKS.md` RB-7)
+  > ✅ **RUN 2026-09-12 — PASS.** First rehearsal ever performed; logged in `RUNBOOKS.md` RB-7
+  > "Rehearsal log". Restored the live seat's DB + state + metrics from GCS to scratch:
+  > `integrity_check ok`, schema v17, 287 trade_entries / 113 trade_stops / 91 daily_summaries,
+  > `DataRecorder.ensure_schema()` True, counts matched live exactly, live data untouched.
+  > **Re-run by 2026-10-12** — the 30-day clock cannot be satisfied retroactively.
+  >
+  > ⚠️ **It found a real gap before it could pass.** The live seat had NO database or metrics backup
+  > at all — `db_backup.sh` protected variant A (a dry-run shadow) and every variant's *state* file,
+  > but no variant's DB. Fixed in `ab63407`; the rehearsal then ran against the first backup the
+  > fixed script produced. **RB-7 itself was also wrong** — it documented only the destructive
+  > restore and called it the rehearsal; running it as a drill would have overwritten a healthy live
+  > state file with a days-old copy. It now separates §A (non-destructive rehearsal) from §B (real
+  > restore).
+  >
+  > For any DB copy, use `shared/db_backup.py:safe_db_backup()` — a `cp`/`shutil.copy2` of a
+  > WAL-mode database silently drops committed rows, and a restore is exactly where you'd find out.
 
 ## Gate 8 — Position sizing
 

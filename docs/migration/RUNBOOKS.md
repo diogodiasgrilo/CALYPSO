@@ -509,41 +509,111 @@ This is the C1 family of bugs — exactly the failure mode the P7 audit closed. 
 
 Not a failure mode by itself — but referenced by `LIVE_READINESS_CHECKLIST.md` Gate 7 as a test that must be rehearsed in the last 30 days.
 
-### When to run
+> **Two different procedures live here. Do not confuse them.**
+> **A. REHEARSAL** (§A) is NON-DESTRUCTIVE — it restores to a scratch directory and proves the
+> artefacts are usable. This is what Gate 7 asks for, and what you should run every 30 days.
+> **B. REAL RESTORE** (§B) OVERWRITES live data and is only for an actual incident.
+> The old version of this runbook documented only B and called it the rehearsal. Running it as a
+> drill would overwrite a healthy live state file with a days-old copy — causing the incident it is
+> meant to prepare for.
+
+### When to run a REAL restore (§B)
 - State file is corrupted and snapshots from Polish Item 5 don't go back far enough
 - `backtesting.db` corrupted and you want yesterday's data back
 - VM rebuild
 
-### Steps
+---
+
+### §A — REHEARSAL (non-destructive, Gate 7)
+
+Restores into `/tmp/rb7_rehearsal` and never touches `/opt/calypso/data`. Substitute the live
+variant (`variant_readers.live_seat_id()` — **B** today) and a recent date.
+
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --command='sudo -u calypso bash -s' <<'EOF'
+set -uo pipefail
+R=/tmp/rb7_rehearsal; rm -rf $R; mkdir -p $R
+B=gs://calypso-backups; D=$(date -u +%Y%m%d); PY=/opt/calypso/.venv/bin/python
+
+# 1. restore to SCRATCH
+gsutil -q cp $B/variant_b_backtesting_$D.db     $R/backtesting.db
+gsutil -q cp $B/variant_b_hydra_state_$D.json   $R/hydra_state.json
+gsutil -q cp $B/variant_b_hydra_metrics_$D.json $R/hydra_metrics.json
+
+# 2. is it sound? integrity + schema + row counts
+$PY - "$R/backtesting.db" <<'PYEOF'
+import sqlite3, sys
+c = sqlite3.connect(f"file:{sys.argv[1]}?mode=ro", uri=True)
+print("integrity:", c.execute("PRAGMA integrity_check").fetchone()[0])
+print("schema  :", c.execute("SELECT value FROM schema_info WHERE key='version'").fetchone()[0])
+for t in ("trade_entries","trade_stops","daily_summaries"):
+    print(f"{t:<16}", c.execute(f"SELECT COUNT(*) FROM {t}").fetchone()[0])
+PYEOF
+
+# 3. would the BOT accept it? (the check that actually matters)
+cd /opt/calypso && $PY -c "
+import sys; sys.path.insert(0,'/opt/calypso')
+from shared.data_recorder import DataRecorder, SCHEMA_VERSION
+print('ensure_schema:', DataRecorder('$R/backtesting.db').ensure_schema(), 'expects v%d' % SCHEMA_VERSION)"
+
+# 4. JSON artefacts parse
+$PY -c "
+import json; [json.load(open(f)) for f in ('$R/hydra_state.json','$R/hydra_metrics.json')]
+print('state + metrics JSON: OK')"
+EOF
+```
+
+**PASS criteria:** `integrity_check` = `ok`; schema version equals the code's `SCHEMA_VERSION`;
+row counts are non-zero and close to live; `ensure_schema()` returns `True`; both JSON files parse.
+**Record the run below.**
+
+---
+
+### §B — REAL RESTORE (destructive — incident only)
 
 1. **List available GCS backups:**
    ```bash
    gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso gsutil ls gs://calypso-backups/ | tail -10"
    ```
-2. **Stop the bot:**
+2. **Stop the affected unit** (the LIVE variant, not `hydra`, unless A is the one broken):
    ```bash
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b"
    ```
-3. **Restore the file:**
+3. **Snapshot what you are about to overwrite** — you may need it if the backup is worse:
    ```bash
-   # Example for state file
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso gsutil cp gs://calypso-backups/hydra_state_20260520.json /opt/calypso/data/hydra_state.json"
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso cp /opt/calypso/data/variant_b/hydra_state.json /opt/calypso/data/variant_b/hydra_state.json.pre_restore_\$(date -u +%Y%m%dT%H%M%SZ)"
    ```
-4. **Validate JSON:**
+   For a **database**, never `cp` — it is WAL-mode and a file copy can drop committed rows. Use
+   `shared/db_backup.py:safe_db_backup()`.
+4. **Restore the file:**
    ```bash
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -c \"import json; json.load(open(\\\"data/hydra_state.json\\\"))\" && echo OK'"
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso gsutil cp gs://calypso-backups/variant_b_hydra_state_20260911.json /opt/calypso/data/variant_b/hydra_state.json"
    ```
-5. **Restart bot:**
+5. **Validate JSON:**
    ```bash
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start hydra"
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -c \"import json; json.load(open(\\\"data/variant_b/hydra_state.json\\\"))\" && echo OK'"
+   ```
+6. **Restart:**
+   ```bash
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start hydra_variant_b"
    ```
 
 ### Rehearsal cadence
-- Initial: once during VM setup
 - Repeat: every 30 days (per LIVE_READINESS_CHECKLIST Gate 7)
 - After any GCS bucket policy change
 
----
+### Rehearsal log
+
+| Date | By | Result | Notes |
+|---|---|---|---|
+| 2026-09-12 | Claude (operator-approved) | **PASS** | First rehearsal ever run. Restored `variant_b_backtesting_20260912.db` (32 MB) + state + metrics to scratch: `integrity_check ok`, schema **v17** (4/4 v17 columns), 287 trade_entries / 113 trade_stops / 91 daily_summaries / 77,875 market_ticks, latest trade 2026-09-11; `DataRecorder.ensure_schema()` **True**; both JSON artefacts parsed; counts **matched live exactly** (no drift); live data untouched. **The rehearsal found a real gap first — see below.** |
+
+> **What the first rehearsal found (2026-09-12):** there was **nothing to restore for the live
+> seat**. `db_backup.sh` copied variant A's `backtesting.db`/`hydra_metrics.json` plus every
+> variant's *state* file, but no variant's **database or metrics** — so B, the live paper seat, had
+> its entire trading record and lifetime P&L on one VM disk with no off-box copy, while the *gating*
+> backup protected a dry-run shadow. Fixed in `ab63407` (seat-agnostic; every `backtesting.db` is now
+> gating). The restore above was performed against the first backup produced by the fixed script.
 
 ## RB-8 — Flip a variant from dry-run to LIVE paper trading
 
