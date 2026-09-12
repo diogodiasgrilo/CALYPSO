@@ -111,11 +111,27 @@
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sqlite3 /opt/calypso/data/backtesting.db \"SELECT COUNT(*) FROM market_ticks WHERE timestamp >= date('now', '-7 days') AND timestamp NOT LIKE '%T0[09]:%' AND vix_level IS NULL\""
   # MUST output: 0 (or close to 0 — any non-zero needs investigation)
   ```
-- [ ] **Chaos test passed** (per `RUNBOOKS.md` and Polish Item 11): `kill -9` mid-trade-attempt on paper → state file intact JSON, systemd restart < 30s, no duplicate orders, no untracked positions. Document the test run + outcome in the journal.
-  > ⚠️ **NEVER RUN** — 0 records in `docs/HYDRA_TRADING_JOURNAL.md` as of 2026-09-12. This is a *build* item
-  > with real prep, not a box to tick on cutover day. It also deliberately violates the standing
-  > "never `kill`/`pkill` a bot" rule, so schedule it: live seat flat, outside RTH, with a state snapshot taken
-  > first (`scripts/pre_start_snapshot.sh` runs on every start anyway).
+- [ ] **Chaos test passed**: `kill -9` on the live seat → state file intact JSON, automatic restart, no
+  duplicate orders, no untracked positions. Document the run + outcome.
+  > **RUN IT WITH `scripts/chaos_test.sh`** (added 2026-09-12) — never by hand. It is the project's ONE
+  > sanctioned `kill -9`, and it hard-refuses unless: outside RTH (13:30–20:00 UTC), broker `connected:true`,
+  > and the account **flat by QUANTITY** (IBKR returns qty-0 rows for expired contracts; `len(positions)` is
+  > not flatness). Then it measures restart time, re-validates the state JSON, checks the `ExecStartPre`
+  > snapshot fired, looks for atomic-write `.tmp` residue, greps the recovery log, and re-checks for orphans.
+  >
+  > ⚠️ **Gate 4's original "systemd restart < 30s" is UNMEETABLE BY DESIGN** — the units set `RestartSec=30`,
+  > so a correct restart is *≥* 30s. Criterion corrected to "restarts automatically"; don't fail a good run
+  > against an impossible number.
+  >
+  > **Scope honesty:** Gate 4 says "mid-trade-attempt". That needs an in-flight order, which only exists
+  > during RTH — and the script refuses to run then. So it covers crash/restart/recovery/reconciliation, NOT
+  > a crash between placing a leg and recording it. That case is protected by cOID dedup (`_ensure_coid`,
+  > IBKR dedupes server-side), which is unit-tested. A true mid-order test needs a deliberate RTH window with
+  > an operator watching — a separate, riskier exercise, and a decision rather than a task.
+  >
+  > Safe to run because state and metrics are written **atomically** (temp + fsync + `os.replace`), so
+  > SIGKILL cannot truncate them — the worst case is losing the most recent write. The test confirms that
+  > rather than assuming it.
 
 ## Gate 5 — Live credentials
 
