@@ -111,8 +111,9 @@
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sqlite3 /opt/calypso/data/backtesting.db \"SELECT COUNT(*) FROM market_ticks WHERE timestamp >= date('now', '-7 days') AND timestamp NOT LIKE '%T0[09]:%' AND vix_level IS NULL\""
   # MUST output: 0 (or close to 0 — any non-zero needs investigation)
   ```
-- [ ] **Chaos test passed**: `kill -9` on the live seat → state file intact JSON, automatic restart, no
-  duplicate orders, no untracked positions. Document the run + outcome.
+- [x] **Chaos test passed**: `kill -9` on the live seat → state file intact JSON, automatic restart, no
+  duplicate orders, no untracked positions. **RUN 2026-09-12 — PASS** (log: `RUNBOOKS.md` **RB-10**).
+  Restarted in 33s, state JSON valid, snapshot fired, 0 `.tmp` residue, recovery clean, account flat.
   > **RUN IT WITH `scripts/chaos_test.sh`** (added 2026-09-12) — never by hand. It is the project's ONE
   > sanctioned `kill -9`, and it hard-refuses unless: outside RTH (13:30–20:00 UTC), broker `connected:true`,
   > and the account **flat by QUANTITY** (IBKR returns qty-0 rows for expired contracts; `len(positions)` is

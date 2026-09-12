@@ -615,6 +615,43 @@ row counts are non-zero and close to live; `ensure_schema()` returns `True`; bot
 > backup protected a dry-run shadow. Fixed in `ab63407` (seat-agnostic; every `backtesting.db` is now
 > gating). The restore above was performed against the first backup produced by the fixed script.
 
+## RB-10 — Chaos test (LIVE_READINESS_CHECKLIST Gate 4)
+
+Crash the live seat with SIGKILL and prove it comes back correctly. **Run it only via
+`scripts/chaos_test.sh`** — that script is the project's ONE sanctioned `kill -9`, and it carries the
+guards that make it defensible (refuses inside RTH, refuses unless the broker is connected, refuses
+unless the account is flat **by quantity** — IBKR returns qty-0 rows for expired contracts).
+
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --project=calypso-trading-bot \
+  --command="sudo bash /opt/calypso/scripts/chaos_test.sh"     # default: hydra_variant_b
+```
+
+**PASS criteria:** unit restarts automatically; state file still parses as JSON; no leftover `.tmp`
+atomic-write residue; recovery log shows POSITION RECOVERY; account still flat afterwards.
+
+**Two criteria corrections** (the original Gate-4 wording was unachievable):
+- **NOT "restart < 30s".** The units set `RestartSec=30`, so a correct restart is **≥30s**. Do not
+  fail a good run on this.
+- **NOT "mid-trade-attempt".** That needs an in-flight order, i.e. RTH, which the script refuses.
+  This covers crash → restart → recovery → reconciliation. The crash-between-placing-and-recording
+  case rests on cOID dedup (`_ensure_coid`; IBKR dedupes server-side), which is unit-tested. A true
+  mid-order test is a separate, riskier exercise and an operator decision.
+
+### Chaos test log
+
+| Date | Unit | Result | Detail |
+|---|---|---|---|
+| 2026-09-12 | `hydra_variant_b` (live seat) | **PASS** | First chaos test ever run. Guards passed (Sat 13:44Z, broker connected, account flat). SIGKILL pid 1577074 → restarted in **33s** as pid 1591335. State JSON **still valid** (43 keys). `ExecStartPre` snapshot fired (`pre_restart_20260912_134513Z.json`; count stayed 50 because 50 is the retention cap — `retention: removed 1 snapshot(s)`). **0** leftover `.tmp` residue, confirming the atomic-write path. Recovery log: `POSITION RECOVERY: reconstructing today's session from the state file… no prior session for today — starting fresh`, then `DataRecorder initialized`. Account **still flat** — no orphan, no duplicate. |
+
+> **Benign noise seen during the run:** `CircuitBreaker[ib.history] is OPEN` warnings. Not a fault —
+> IBKR returns `500 "Chart data unavailable"` outside market hours, so each half-open probe fails and
+> the breaker correctly re-opens rather than hammering a dead endpoint. Chart data feeds only the EMA
+> trend signal, which is informational and does not drive entry type. Expect it to clear when the
+> market reopens; if it is still open during RTH, that IS worth chasing.
+
+---
+
 ## RB-8 — Flip a variant from dry-run to LIVE paper trading
 
 > **Historical example — see RB-9 below for the current live-seat-swap procedure.**
