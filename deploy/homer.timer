@@ -1,9 +1,21 @@
 [Unit]
-Description=Calypso HOMER Daily Journal Update Timer (7:30 PM ET weekdays, post-settlement)
+Description=Calypso HOMER Daily Journal Update Timer (11:30 PM ET weekdays, post-settlement)
 Documentation=https://github.com/calypso-trading/calypso
 
 [Timer]
-OnCalendar=Mon..Fri *-*-* 19:30:00 America/New_York
+# 2026-09-10: moved 19:30 -> 23:30 ET. See deploy/hermes.timer for the measured
+# settlement times this is derived from (worst observed 22:37 ET; 0DTE SPX is
+# PM-settled and IBKR's position feed clears hours after the 16:00 close).
+#
+# The old 19:30 fired ~3 hours before settlement completed, so the trading
+# journal was written against an unsettled day EVERY day — the numbers HOMER
+# committed to git were not the day's final numbers.
+#
+# Keeps the original 30-minute gap after HERMES so the ordering is unchanged.
+# Deliberately still before midnight: HOMER detects missing trading days by
+# comparing journal dates against the data source, so a run that lands on the
+# NEXT calendar date would look like it had skipped a day.
+OnCalendar=Mon..Fri *-*-* 23:30:00 America/New_York
 Persistent=false
 AccuracySec=60s
 

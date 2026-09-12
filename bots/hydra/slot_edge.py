@@ -1,0 +1,477 @@
+"""Per-SLOT edge analyzer for the 0DTE iron-condor variants (A/B/C).
+
+Variant B ("Brandon Narrow (4-slot)") is the uncapped "take everything" tester:
+it fires at every slot (09:45 / 10:45 / 11:15 / 11:45 + the E6 conditional), so
+its forward dry-run record is the dataset that tells us which SLOTS are the best
+winners — i.e. which entries the live variant C should keep, drop, or add. This
+module reads that edge off a variant's ``backtesting.db`` and aggregates it by
+entry SLOT, with the honesty properties dc_edge.py makes load-bearing.
+
+PER-ENTRY P&L RECONSTRUCTION (per side, summed) — the dry-run path does not store
+a single per-entry realized-P&L field, so we reconstruct it from the parts:
+
+  • side did NOT stop           → kept its full credit (expired worthless): +credit
+  • side stopped, net_pnl set    → use trade_stops.net_pnl (the side's realized P&L,
+       already = side_credit − close_debit, contract-scaled)
+  • side stopped, net_pnl NULL   → reconstruct from the spread_snapshots value
+       nearest the stop time (the debit to close): side_credit − spread_value
+  • side stopped, no snapshot     → the entry is UNSCORED: counted, but EXCLUDED
+       from the P&L means so a data gap never silently biases a slot.
+
+Reconstructed totals are sanity-checked against ``daily_summaries.net_pnl`` and the
+discrepancy is disclosed in the report.
+
+METRIC: per-entry NET P&L in account dollars (already contract-scaled — credit and
+net_pnl are both totals; B holds contracts constant so dollars are comparable
+across its slots). Each slot's verdict gates on a one-sample Student-t 95% CI on
+mean P&L/entry (t, not z) AND a sample-size floor, so a thin slot is reported
+INSUFFICIENT rather than ranked on noise. The CI assumes independent entries.
+
+Pure stdlib (sqlite3 + statistics), read-only (``mode=ro``), importable without the
+broker stack — same contract as dc_edge.py / dc_status.py.
+
+DATA SOURCE — as of schema v12 (2026-06-30) each settled entry records a
+RECONCILED per-entry realized P&L in ``trade_entries.realized_pnl`` (the strategy
+accumulates it via ``_book_realized_pnl``, mirroring the exact amount booked to
+the day aggregate ``daily_state.total_realized_pnl``, so per-entry sums equal that
+GROSS day total by construction — commission accrues separately, so this and the
+``daily_summaries.gross_pnl`` cross-check are both gross of commission; a slot's
+gross P&L ranks winners fine since commission is ~uniform per entry). This
+analyzer PREFERS that column whenever present and only falls back to the older
+trade_stops reconstruction for pre-v12 rows (NULL realized_pnl).
+
+Why the fallback is untrustworthy for the Brandon variants (B, C): they close via
+take-profit / GEX-breach / overlay / expiry, but the credit+buffer HYDRA stop
+also ACTS as a backstop and — on dry-run B — "fires" with SIMULATED fills that
+still land in ``trade_stops`` with a real-looking ``net_pnl``. So reconstruction
+saw phantom losses: e.g. 2026-06-12 booked a PROFITABLE ``net_pnl=+1732`` yet
+trade_stops showed 8 sides "stopped" at ~-1760 (-13.4k). The report discloses how
+many rows use the trustworthy recorded value vs the reconstruction, so a B/C
+history dominated by reconstructed rows is visibly flagged (and its drift shown);
+once v12 rows accumulate, B/C become fully rankable.
+"""
+
+from __future__ import annotations
+
+import os
+import sqlite3
+from statistics import mean, stdev
+from typing import Optional
+
+# 95% two-sided Student-t critical values by df (mirrors dc_edge.py). t (not z)
+# keeps the CI honest at the sample-size gate; >120 -> z; untabulated df uses the
+# largest tabulated df <= ours (slightly WIDER = conservative).
+_T95 = {
+    1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447, 7: 2.365,
+    8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179, 13: 2.160, 14: 2.145,
+    15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101, 19: 2.093, 20: 2.086, 21: 2.080,
+    22: 2.074, 23: 2.069, 24: 2.064, 25: 2.060, 26: 2.056, 27: 2.052, 28: 2.048,
+    29: 2.045, 30: 2.042, 40: 2.021, 50: 2.009, 60: 2.000, 80: 1.990, 100: 1.984,
+    120: 1.980,
+}
+_Z95 = 1.960
+_CENT = 2
+_SCRATCH_EPS = 0.005  # |pnl| at/below this (after rounding) is a scratch, not win/loss
+
+# Per-entry realized_pnl booking (schema v12 + the Brandon overlay-fold) shipped
+# 2026-07-01, effective the first close after → reliable from 2026-07-02. Earlier
+# days carry unbooked 0.0 realized_pnl, so the reconciliation cross-check floors to
+# this date (the per-slot ranking still uses all rows via reconstruction fallback).
+from bots.hydra.analysis_eras import (  # noqa: E402
+    LIVE_ERA_SINCE,
+    PER_ENTRY_RELIABLE_SINCE as _PER_ENTRY_RELIABLE_SINCE,
+    era_banner,
+)
+
+
+def _t_crit(df: int) -> float:
+    """95% two-sided t critical value for df, conservative for untabulated df."""
+    if df <= 0:
+        return float("inf")
+    if df in _T95:
+        return _T95[df]
+    if df > 120:
+        return _Z95
+    lower = max(k for k in _T95 if k <= df)
+    return _T95[lower]
+
+
+def _mean_ci(xs: list) -> Optional[list]:
+    """[mean, lo, hi] 95% Student-t CI on the mean; None if < 2 samples."""
+    n = len(xs)
+    if n < 2:
+        return None
+    m = mean(xs)
+    sd = stdev(xs)
+    half = _t_crit(n - 1) * sd / (n ** 0.5)
+    return [m, m - half, m + half]
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Slot bucketing
+# ──────────────────────────────────────────────────────────────────────────────
+
+# Canonical 0DTE entry slots across A/B/C (minutes from ET midnight). E6 is the
+# 14:00 conditional. An entry is mapped to the nearest slot within _SLOT_TOL_MIN;
+# anything further (off-schedule / manual) buckets to "other".
+CANONICAL_SLOTS = {
+    "09:45": 9 * 60 + 45,
+    "10:15": 10 * 60 + 15,
+    "10:45": 10 * 60 + 45,
+    "11:15": 11 * 60 + 15,
+    "11:45": 11 * 60 + 45,
+    "12:15": 12 * 60 + 15,
+    # 2026-09-10: 12:45 was MISSING. B has run a 7-slot grid ending at 12:45
+    # since the 2026-07-24 live-seat swap, so every 12:45 entry was silently
+    # bucketed into "other" and excluded from per-slot scoring. That is not a
+    # cosmetic gap: 12:45 is B's BEST slot on the live-era numbers (+$293/trade,
+    # the closest strikes of any slot at 26.5pt, and the only slot the hedge's
+    # 12:30 cutoff made unhedgeable) — so the one slot most worth measuring was
+    # the one being dropped. Any prior slot_edge output that predates this is
+    # missing it entirely.
+    "12:45": 12 * 60 + 45,
+    "E6 14:00": 14 * 60,
+}
+_SLOT_ORDER = list(CANONICAL_SLOTS.keys()) + ["other"]
+_SLOT_TOL_MIN = 12
+
+
+def slot_for(entry_time: Optional[str]) -> str:
+    """Map an entry_time ('YYYY-MM-DD HH:MM:SS' or 'HH:MM[:SS]') to a canonical slot."""
+    if not entry_time:
+        return "other"
+    hm = entry_time[11:16] if len(entry_time) >= 16 and entry_time[10] == " " else entry_time[:5]
+    try:
+        h, m = hm.split(":")[:2]
+        mins = int(h) * 60 + int(m)
+    except (ValueError, IndexError):
+        return "other"
+    best, best_d = "other", _SLOT_TOL_MIN + 1
+    for label, smin in CANONICAL_SLOTS.items():
+        d = abs(mins - smin)
+        if d < best_d:
+            best, best_d = label, d
+    return best
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Per-entry P&L reconstruction
+# ──────────────────────────────────────────────────────────────────────────────
+
+def reconstruct_entry_pnl(call_credit: float, put_credit: float, stops: dict) -> tuple:
+    """Reconstruct one entry's realized net P&L from its credits + stop outcomes.
+
+    ``stops`` maps side ('call'/'put') -> {'net_pnl': float|None}.
+
+    Returns ``(pnl, scored)``: ``scored`` is False when a stopped side has no
+    recorded net_pnl — then ``pnl`` is None and the caller EXCLUDES the entry from
+    P&L means (but still counts it). We deliberately do NOT reconstruct a missing
+    debit from spread_snapshots: its value column has ambiguous per-contract-vs-
+    total units, and silently mis-scaling a loss would bias a slot far worse than
+    honestly dropping it (the report discloses the unscored count per slot).
+    """
+    pnl = 0.0
+    for side, credit in (("call", call_credit or 0.0), ("put", put_credit or 0.0)):
+        st = stops.get(side)
+        if st is None:
+            pnl += credit  # side expired worthless → kept full credit
+            continue
+        npnl = st.get("net_pnl")
+        if npnl is None:
+            return None, False
+        pnl += float(npnl)
+    return round(pnl, _CENT), True
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Data access + analysis
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _connect_ro(db_path: str) -> sqlite3.Connection:
+    con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=5)
+    con.row_factory = sqlite3.Row
+    return con
+
+
+def analyze_slots(db_path: str, *, min_preliminary: int = 10, min_confident: int = 25,
+                  since: Optional[str] = LIVE_ERA_SINCE) -> dict:
+    """Aggregate per-entry reconstructed P&L by slot. Returns a result dict.
+
+    `since` floors the rows considered, defaulting to the live-era boundary
+    (2026-07-24, the B<->C seat swap). Before that date B's fills are SIMULATED,
+    at 10 contracts, on a 4-slot grid — pooling them with live 7-contract
+    7-slot rows and ranking slots answers a question nobody asked. The 2026-09-02
+    decision to cut the 11:15 slot was made on pooled data and had to be
+    reversed. Pass since="" to analyse everything deliberately.
+    """
+    if not os.path.exists(db_path):
+        return {"ok": False, "error": f"no db at {db_path}"}
+    con = _connect_ro(db_path)
+    try:
+        # realized_pnl (schema v12) is the RECONCILED per-entry net P&L — prefer it
+        # whenever present; only historical (pre-v12) rows are NULL and fall back to
+        # the trade_stops reconstruction below. Guard the column for old DBs.
+        has_realized = any(
+            r[1] == "realized_pnl" for r in con.execute("PRAGMA table_info(trade_entries)")
+        )
+        rcol = "realized_pnl" if has_realized else "NULL AS realized_pnl"
+        if since:
+            entries = con.execute(
+                f"SELECT date, entry_number, entry_time, call_credit, put_credit, "
+                f"total_credit, contracts, {rcol} FROM trade_entries WHERE date >= ?",
+                (since,),
+            ).fetchall()
+        else:
+            entries = con.execute(
+                f"SELECT date, entry_number, entry_time, call_credit, put_credit, "
+                f"total_credit, contracts, {rcol} FROM trade_entries"
+            ).fetchall()
+        # Reconciliation is per-DAY across two tables (trade_entries vs
+        # daily_summaries); restrict the cross-check to days present in
+        # daily_summaries AND in the reliable window, so a day with entries but no
+        # summary row (e.g. the phantom-summary guard returned before writing it)
+        # can't produce spurious cross-table drift.
+        #
+        # THE TWO FLOORS MUST COMPOSE (2026-09-10). `since` is a REGIME floor
+        # (which experiment) and _PER_ENTRY_RELIABLE_SINCE is a DATA floor (when
+        # realized_pnl became trustworthy). They answer different questions, so
+        # the cross-check needs the LATER of the two. Flooring the entry set at
+        # 2026-07-24 while still summing day totals from 2026-07-02 would report
+        # a "drift" exactly equal to the P&L in the gap — a fabricated
+        # reconciliation failure caused purely by mismatched windows.
+        xcheck_floor = max(since or "", _PER_ENTRY_RELIABLE_SINCE)
+        xcheck_dates = {
+            r[0] for r in con.execute(
+                "SELECT date FROM daily_summaries WHERE date >= ?",
+                (xcheck_floor,),
+            )
+        }
+        # stops keyed by (date, entry_number) -> {side: {net_pnl, stop_time}}
+        stops_by_entry: dict = {}
+        for r in con.execute(
+            "SELECT date, entry_number, side, net_pnl, stop_time FROM trade_stops"
+            + (" WHERE date >= ?" if since else ""),
+            (since,) if since else (),
+        ):
+            stops_by_entry.setdefault((r["date"], r["entry_number"]), {})[r["side"]] = {
+                "net_pnl": r["net_pnl"], "stop_time": r["stop_time"],
+            }
+
+        slots: dict = {s: {"pnls": [], "credits": [], "n": 0, "unscored": 0,
+                           "stopped": 0, "recorded": 0} for s in _SLOT_ORDER}
+        scored_total = 0.0
+        scored_total_x = 0.0  # reliable-window (>= _PER_ENTRY_RELIABLE_SINCE) for the cross-check
+        for e in entries:
+            key = (e["date"], e["entry_number"])
+            stops = stops_by_entry.get(key, {})
+            slabel = slot_for(e["entry_time"])
+            s = slots[slabel]
+            s["n"] += 1
+            s["credits"].append(e["total_credit"] or 0.0)
+            if stops:
+                s["stopped"] += 1
+            recorded = e["realized_pnl"]
+            if recorded is not None and e["date"] >= _PER_ENTRY_RELIABLE_SINCE:
+                # v12 reconciled per-entry P&L inside the reliable era — trust it.
+                pnl, scored = round(float(recorded), _CENT), True
+                s["recorded"] += 1
+            else:
+                # REFUSE TO SCORE (2026-09-10). The trade_stops reconstruction
+                # below is NOT merely noisy on pre-2026-07-14 rows — it is
+                # SIGN-FLIPPED, and this analyzer published a confident wrong
+                # answer because of it (full-history per-entry total read
+                # -$21,045 against an actual +$40,277).
+                #
+                # ROOT CAUSE: before commit 4ce94e5 (2026-07-14),
+                # `_record_stop_to_db` guarded on `if actual_close_cost and
+                # credit:` — a FALSY test. In dry-run `_close_position_with_retry`
+                # returns no fill, so `side_close_cost` is 0.0, which is falsy,
+                # so a profitable Brandon take-profit fell through to the
+                # placeholder `-(stop_level - credit)` and was persisted as a
+                # large PHANTOM LOSS. B was dry-run for its entire pre-swap life
+                # and its dominant exit is TP at 80% credit — a profit — so most
+                # pre-v12 B rows are stored as roughly minus-the-stop-level.
+                # strategy.py:6208's own comment names the case: B's 07-13 E3
+                # booked -(2000-500) = -1500 instead of +500.
+                #
+                # These rows are NOT repairable: the true close cost was never
+                # captured in dry-run, so the correct value does not exist in the
+                # DB. They are counted as `unscored` and excluded from every
+                # mean, CI and verdict. `reconstruct_entry_pnl` is retained only
+                # for its unit tests and for any future non-dry-run backfill.
+                pnl, scored = 0.0, False
+            if scored:
+                s["pnls"].append(pnl)
+                scored_total += pnl
+                if e["date"] in xcheck_dates:  # reliable window AND has a summary row
+                    scored_total_x += pnl
+            else:
+                s["unscored"] += 1
+
+        # daily-total cross-check. Per-entry realized_pnl mirrors the GROSS day
+        # aggregate (daily_state.total_realized_pnl) — commission accrues
+        # separately and is NOT in it — so we reconcile against daily_summaries.
+        # GROSS_pnl, not net_pnl. Comparing to net would show a spurious
+        # commission-sized "drift" every day (it is NOT reconstruction error).
+        # Two blind spots removed (2026-07-18): (1) subtract unattributed_overlay_pnl
+        # (Brandon aggregate-only hedge P&L lives in gross but on no entry — v13
+        # column, guarded for old DBs); (2) floor the cross-check to the per-entry-
+        # reliable era (pre-2026-07-02 days carry unbooked 0.0 realized_pnl).
+        ds_total = con.execute(
+            "SELECT COALESCE(SUM(gross_pnl), 0) FROM daily_summaries"
+            + (" WHERE date >= ?" if since else ""),
+            (since,) if since else (),
+        ).fetchone()[0]
+        has_overlay_col = any(
+            r[1] == "unattributed_overlay_pnl"
+            for r in con.execute("PRAGMA table_info(daily_summaries)")
+        )
+        _ov = "- COALESCE(SUM(unattributed_overlay_pnl), 0)" if has_overlay_col else ""
+        ds_total_x = con.execute(
+            f"SELECT COALESCE(SUM(gross_pnl), 0) {_ov} FROM daily_summaries WHERE date >= ?",
+            (xcheck_floor,),
+        ).fetchone()[0]
+        n_days = con.execute(
+            "SELECT COUNT(*) FROM daily_summaries"
+            + (" WHERE date >= ?" if since else ""),
+            (since,) if since else (),
+        ).fetchone()[0]
+    finally:
+        con.close()
+
+    rows = []
+    for label in _SLOT_ORDER:
+        s = slots[label]
+        if s["n"] == 0:
+            continue
+        pnls = s["pnls"]
+        ci = _mean_ci(pnls)
+        n_scored = len(pnls)
+        wins = sum(1 for p in pnls if p > _SCRATCH_EPS)
+        avg_pnl = (sum(pnls) / n_scored) if n_scored else None
+        rows.append({
+            "slot": label,
+            "n": s["n"],
+            "n_scored": n_scored,
+            "unscored": s["unscored"],
+            "recorded": s["recorded"],
+            "stop_rate": s["stopped"] / s["n"],
+            "avg_credit": sum(s["credits"]) / s["n"] if s["n"] else None,
+            "win_rate": (wins / n_scored) if n_scored else None,
+            "avg_pnl": avg_pnl,
+            "total_pnl": sum(pnls) if pnls else 0.0,
+            "ci": ci,
+            "verdict": _slot_verdict(n_scored, ci, min_preliminary, min_confident),
+        })
+    rows.sort(key=lambda r: (r["avg_pnl"] is not None, r["avg_pnl"] or 0.0), reverse=True)
+    return {
+        "ok": True,
+        "db_path": db_path,
+        "n_entries": sum(r["n"] for r in rows),
+        "scored_total": round(scored_total, _CENT),
+        "daily_gross_total": round(ds_total or 0.0, _CENT),
+        # reliable-window, overlay-adjusted totals for the reconciliation cross-check
+        "scored_total_xcheck": round(scored_total_x, _CENT),
+        "daily_gross_xcheck": round(ds_total_x or 0.0, _CENT),
+        "n_days": n_days,
+        "slots": rows,
+        "min_preliminary": min_preliminary,
+        "min_confident": min_confident,
+    }
+
+
+def _slot_verdict(n_scored: int, ci: Optional[list],
+                  min_preliminary: int, min_confident: int) -> str:
+    if n_scored < min_preliminary:
+        return "INSUFFICIENT"
+    if ci is None:
+        return "INSUFFICIENT"
+    _, lo, hi = ci
+    tag = "" if n_scored >= min_confident else " (preliminary)"
+    if lo > 0:
+        return "POSITIVE" + tag
+    if hi < 0:
+        return "NEGATIVE" + tag
+    return "INCONCLUSIVE" + tag
+
+
+# ──────────────────────────────────────────────────────────────────────────────
+# Report
+# ──────────────────────────────────────────────────────────────────────────────
+
+def _d(v: Optional[float]) -> str:
+    return "    n/a" if v is None else f"{v:+8.0f}"
+
+
+def format_slot_report(result: dict, title: str = "Variant B — per-slot edge") -> str:
+    if not result.get("ok"):
+        return f"{title}\n  ERROR: {result.get('error')}"
+    L = [title, "=" * len(title)]
+    n_recorded = sum(r["recorded"] for r in result["slots"])
+    n_reconstructed = result["n_entries"] - n_recorded - sum(r["unscored"] for r in result["slots"])
+    L.append(f"{result['n_entries']} entries over {result['n_days']} days.  "
+             f"Per-entry GROSS P&L ${result['scored_total']:,.0f} vs daily gross "
+             f"${result['daily_gross_total']:,.0f} (both gross of commission).")
+    L.append(f"Per-entry source: {n_recorded} rows use the reconciled v12 realized_pnl "
+             f"(trustworthy); {n_reconstructed} fall back to trade_stops reconstruction "
+             f"(pre-v12).")
+    # Reconciliation cross-check over the per-entry-reliable window (>= 2026-07-02),
+    # overlay-adjusted (aggregate-only Brandon hedge P&L subtracted): per-entry sum
+    # should equal (gross - unattributed_overlay). A residual here IS a genuine
+    # per-entry attribution miss — the two documented blind spots (pre-feature 0s
+    # and aggregate-only overlays) are already removed from both sides.
+    drift = result["scored_total_xcheck"] - result["daily_gross_xcheck"]
+    if abs(drift) > 0.01 * max(1.0, abs(result["daily_gross_xcheck"])):
+        L.append(f"  ⚠ reliable-window gross drifts ${drift:,.0f} (overlay-adjusted, "
+                 f"since {_PER_ENTRY_RELIABLE_SINCE}) — a genuine per-entry attribution "
+                 f"miss; investigate _book_realized_pnl.")
+    L.append("")
+    L.append("slot        n  scored  stop%   win%   avgCred   avgP&L/entry   95% CI (P&L/entry)        verdict")
+    for r in result["slots"]:
+        ci = r["ci"]
+        ci_s = "—" if ci is None else f"[{ci[1]:+7.0f}, {ci[2]:+7.0f}]"
+        unsc = f" (+{r['unscored']} unscored)" if r["unscored"] else ""
+        L.append(
+            f"{r['slot']:<9} {r['n']:3d}  {r['n_scored']:5d}  "
+            f"{100*r['stop_rate']:4.0f}%  "
+            f"{(100*r['win_rate']) if r['win_rate'] is not None else 0:4.0f}%  "
+            f"{(r['avg_credit'] or 0):8.0f}  {_d(r['avg_pnl'])}      "
+            f"{ci_s:<24} {r['verdict']}{unsc}"
+        )
+    L.append("")
+    L.append("Verdict gates: POSITIVE/NEGATIVE = 95% t-CI on mean P&L/entry clears zero; "
+             "INCONCLUSIVE = straddles zero; INSUFFICIENT = < min samples. "
+             "P&L is account dollars (contract-scaled); CI assumes independent entries.")
+    return "\n".join(L)
+
+
+def main(argv: Optional[list] = None) -> int:
+    import argparse
+    p = argparse.ArgumentParser(description="Per-slot edge analyzer for IC variants A/B/C.")
+    p.add_argument("--variant", default="b", help="variant id (a/b/c) → data/variant_<id>/backtesting.db; 'a' → data/backtesting.db")
+    p.add_argument("--db", default=None, help="explicit backtesting.db path (overrides --variant)")
+    p.add_argument("--root", default=".", help="repo root (for the default db path)")
+    p.add_argument("--min-preliminary", type=int, default=10)
+    p.add_argument("--min-confident", type=int, default=25)
+    p.add_argument("--since", default=LIVE_ERA_SINCE,
+                   help=("floor rows at this date (YYYY-MM-DD). Default is the "
+                         "live-era boundary 2026-07-24 (the B<->C seat swap) — "
+                         "earlier rows are a DIFFERENT REGIME. Pass 'all' to "
+                         "disable the floor deliberately."))
+    a = p.parse_args(argv)
+    if a.db:
+        db = a.db
+    elif a.variant == "a":
+        db = os.path.join(a.root, "data", "backtesting.db")
+    else:
+        db = os.path.join(a.root, "data", f"variant_{a.variant}", "backtesting.db")
+    since = None if a.since.lower() in ("all", "none") else a.since
+    res = analyze_slots(db, min_preliminary=a.min_preliminary,
+                        min_confident=a.min_confident, since=since)
+    print(era_banner(since))
+    print(format_slot_report(res, title=f"Variant {a.variant.upper()} — per-slot edge"))
+    return 0 if res.get("ok") else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

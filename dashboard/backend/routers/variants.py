@@ -1,9 +1,11 @@
 """N-way head-to-head variant comparison endpoints.
 
-Variant A is the live HYDRA bot (current spread width, current config).
-Variants B, C, ... are parallel HYDRA processes running in dry mode with
-different configs (typically a different spread width), each writing to
-data/variant_<id>/* and logs/hydra_variant_<id>/.
+Each variant is a parallel HYDRA process with its own config + data tree
+(data/variant_<id>/* and logs/hydra_variant_<id>/). As of 2026-06-02, variant
+**C** is the LIVE canonical strategy and **A** is a dry-run shadow; both are
+listed here from their own variant_<id>_* settings. The main dashboard page
+reads the canonical hydra_* paths (pointed at the LIVE seat, resolved dynamically
+by variant_readers.live_seat_id() — B as of 2026-07-24).
 
 The variant set is built at import time from ``settings`` — to add a new
 variant you only need to (1) add 5 ``variant_<id>_*`` fields to
@@ -28,7 +30,8 @@ from dashboard.backend.config import settings
 from dashboard.backend.services.state_reader import StateFileReader
 from dashboard.backend.services.metrics_reader import MetricsFileReader
 from dashboard.backend.services.db_reader import BacktestingDBReader
-from dashboard.backend.services.market_status import get_today_et
+from dashboard.backend.services.market_status import get_today_et, is_after_market_close
+from dashboard.backend.services.brandon_hedge_reader import read_overlays_by_entry
 
 logger = logging.getLogger("dashboard.variants")
 
@@ -43,10 +46,19 @@ router = APIRouter(prefix="/api/variants", tags=["variants"])
 # variant means adding a new ``variant_<id>_*`` group to settings + appending
 # its id to ``_VARIANT_IDS`` below.
 #
-# Variant A is special-cased: it points at the canonical hydra_* paths
-# (so the live bot's data IS variant A's data without any duplication).
-# All other variants point at their parallel ``data/variant_<id>/*`` tree.
+# Every variant (including A) resolves from its own explicit ``variant_<id>_*``
+# settings fields, so /comparison shows A, B, C from their separate data trees.
+# The dashboard's MAIN page reads the canonical ``hydra_*`` paths separately
+# (currently variant C — the live one); A's real data lives under the
+# variant_a_* fields. (Pre-2026-06-02, A was special-cased to the main paths
+# because the live bot WAS variant A; C is now primary.)
 
+# NOTE: the calendar group — variant "d" (Strategy D — DC Time Machine) and "e"
+# (Strategy E — SPY Double Calendar) — is intentionally EXCLUDED from this legacy
+# IC-only list. They are multi-day net-DEBIT double calendars that the IC-shaped
+# comparison/aggregate math here would mis-render (debit shown as credit).
+# Group-scoped comparison for the calendar group is served by /api/strategies via
+# the taxonomy (shared/strategy_taxonomy.py), not by this legacy endpoint.
 _VARIANT_IDS: list[str] = ["a", "b", "c"]
 
 
@@ -57,15 +69,6 @@ def _variant_paths(vid: str) -> dict:
     isn't defined — that lets us list a variant id even if its settings
     haven't been added yet (defensive against typos in _VARIANT_IDS).
     """
-    if vid == "a":
-        return {
-            "label": settings.variant_a_label,
-            "state_file": settings.hydra_state_file,
-            "metrics_file": settings.hydra_metrics_file,
-            "backtesting_db": settings.backtesting_db,
-            "log_file": settings.hydra_log_file,
-            "config_file": settings.calypso_root / "bots/hydra/config/config.json",
-        }
     return {
         "label": getattr(settings, f"variant_{vid}_label", f"Variant {vid.upper()}"),
         "state_file": getattr(settings, f"variant_{vid}_state_file", None),
@@ -100,7 +103,7 @@ _db_readers: dict[str, BacktestingDBReader] = {
 # Visualization accent colors per variant — lifted from the frontend palette
 # so backend-side aggregations could carry them through if ever needed. The
 # frontend currently picks its own accents but we keep the mapping centralized.
-_VARIANT_ACCENT = {"a": "info", "b": "warning", "c": "profit"}
+_VARIANT_ACCENT = {"a": "info", "b": "warning", "c": "profit", "d": "loss"}
 
 
 def _check_enabled() -> None:
@@ -284,19 +287,26 @@ def _summary_from_state(state: dict) -> dict:
     }
 
 
-def _compute_buffer_utilization(entry: dict) -> dict:
-    """For a single entry, return per-side buffer utilization based on the
-    most recent cost-to-close vs the trigger level.
+def _compute_buffer_margin(entry: dict) -> dict:
+    """For a single entry, return per-side buffer MARGIN (cushion) remaining —
+    how far the cost-to-close is from the stop trigger, as a percentage.
+
+    This matches the MAIN dashboard's convention exactly (EntryCard.tsx:
+    ``cushion = (stop_level - spread_value) / stop_level * 100``), where
+    **100% = full cushion / safe** and **0% = at the stop (a loss/stop)**. The
+    comparison page previously showed the INVERSE (utilization: cost/stop, high =
+    near stop), which read backwards vs the live cards — fixed 2026-06-12.
 
     Cost-to-close for a side is the ``call_spread_value`` / ``put_spread_value``
     fields, written by the bot during heartbeat. ``call_side_stop`` /
-    ``put_side_stop`` is the trigger threshold. Utilization = cost / stop.
+    ``put_side_stop`` is the trigger threshold. ``*_value`` keeps the raw
+    cost-to-close (dollars) for the "$cost / stop $X" caption.
 
     Per-side gating uses the actual side-status flags (stopped/expired/skipped),
     NOT entry.is_complete — the latter goes True immediately after placement
     (meic/strategy.py:1808) and would suppress the bar for monitoring entries.
     A done side returns None so the UI renders a placeholder instead of a
-    misleading 0%.
+    misleading value.
     """
     out = {"call_pct": None, "put_pct": None, "call_value": None, "put_value": None}
 
@@ -306,7 +316,7 @@ def _compute_buffer_utilization(entry: dict) -> dict:
             out["call_value"] = csv
             css = entry.get("call_side_stop")
             if css and css > 0:
-                out["call_pct"] = round(min(100.0, max(0.0, csv / css * 100)), 1)
+                out["call_pct"] = round(min(100.0, max(0.0, (css - csv) / css * 100)), 1)
 
     if _side_active(entry, "put"):
         psv = entry.get("put_spread_value")
@@ -314,15 +324,21 @@ def _compute_buffer_utilization(entry: dict) -> dict:
             out["put_value"] = psv
             pss = entry.get("put_side_stop")
             if pss and pss > 0:
-                out["put_pct"] = round(min(100.0, max(0.0, psv / pss * 100)), 1)
+                out["put_pct"] = round(min(100.0, max(0.0, (pss - psv) / pss * 100)), 1)
 
     return out
 
 
-def _entry_disposition(entry: dict) -> str:
+def _entry_disposition(entry: dict, after_close: bool = False) -> str:
     """Compute a human-readable disposition tag for an entry.
 
-    Returns one of: TP, BREACH, STOP, EXPIRED, SKIPPED, LIVE.
+    Returns one of: TP, BREACH, STOP, EXPIRED, FAILED, SKIPPED, SETTLING, LIVE.
+
+    ``after_close`` (market is past the 4 PM / early-close cash settlement):
+    an entry whose placed sides aren't finalized is shown as SETTLING rather
+    than LIVE — the 0DTE options have expired and the bot is awaiting IBKR's
+    (often hours-late) settlement confirmation, so "LIVE" read wrong post-close
+    (it's not a monitorable position anymore). During the session it stays LIVE.
 
     Prefers the explicit `close_reason` field set at close time. Falls back
     to flag-based inference for entries closed before close_reason was
@@ -333,7 +349,16 @@ def _entry_disposition(entry: dict) -> str:
 
     is_complete is intentionally ignored — it's True from the moment of
     placement, not from lifecycle end.
+
+    2026-07-31: `execution_failed` distinguishes a genuine order-placement
+    FAILURE (broker accepted the order but it never filled after exhausting
+    retries) from a deliberate strategic SKIP. Both set call_side_skipped/
+    put_side_skipped=True (so a failed entry still resolves placed_sides_done
+    correctly below), so this must be checked BEFORE the generic SKIPPED
+    branch — otherwise a failure would silently render as a routine skip.
     """
+    if entry.get("execution_failed"):
+        return "FAILED"
     explicit = entry.get("close_reason")
     if explicit:
         return explicit
@@ -358,7 +383,8 @@ def _entry_disposition(entry: dict) -> str:
         and (not put_placed or put_done)
     )
     if not placed_sides_done:
-        return "LIVE"
+        # 0DTE after the close = expired & awaiting (late) settlement, not LIVE.
+        return "SETTLING" if after_close else "LIVE"
     # All placed sides resolved. Pick a label.
     if call_stopped or put_stopped:
         return "STOP"  # legacy — Brandon TP also lands here without close_reason
@@ -392,12 +418,19 @@ def _entry_realized_pnl(entry: dict) -> float:
     call_expired = entry.get("call_side_expired") and not call_stopped
     put_expired = entry.get("put_side_expired") and not put_stopped
 
+    # A managed early-close (Brandon TP/breach, MKT-047 EOD flatten) records its
+    # close cost in actual_*_stop_debit but may reuse *_side_expired (not
+    # *_side_stopped). So a side that closed for a COST is credit − debit even when
+    # only the expired flag is set — NOT "full credit kept" (which over-counted the
+    # EOD-flatten realized by the close cost, e.g. $210 vs the true $175 on
+    # 2026-06-25 C E#2). Only a TRUE worthless expiry (no debit) keeps full credit.
+    early = entry.get("early_closed")
     realized = 0.0
-    if call_stopped:
+    if call_stopped or (early and cd):
         realized += cc - cd
     elif call_expired:
         realized += cc  # expired worthless = full credit kept
-    if put_stopped:
+    if put_stopped or (early and pd):
         realized += pc - pd
     elif put_expired:
         realized += pc
@@ -405,17 +438,25 @@ def _entry_realized_pnl(entry: dict) -> float:
     return realized
 
 
-def _enrich_entries(entries: list[dict]) -> list[dict]:
-    """Add buffer-utilization, disposition tag, and per-entry realized P&L
-    so the comparison panel can show what actually happened to each entry
-    instead of a bare "DONE" badge.
+def _enrich_entries(entries: list[dict], overlays_by_entry: dict | None = None) -> list[dict]:
+    """Add buffer-utilization, disposition tag, per-entry realized P&L, and any
+    Brandon defensive overlays so the panel shows what actually happened to each
+    entry instead of a bare "DONE" badge.
+
+    ``overlays_by_entry`` (from brandon_hedge_reader) maps entry_number(str) →
+    list of overlay summaries; injected as ``entry["overlays"]`` so the entry
+    card can render the hedge structure(s) + their P&L that were otherwise
+    invisible. Empty list on entries with no overlay / non-Brandon variants.
     """
+    after_close = is_after_market_close()
+    overlays_by_entry = overlays_by_entry or {}
     out = []
     for e in entries:
         copy = dict(e)
-        copy["buffer"] = _compute_buffer_utilization(e)
-        copy["disposition"] = _entry_disposition(e)
+        copy["buffer"] = _compute_buffer_margin(e)
+        copy["disposition"] = _entry_disposition(e, after_close)
         copy["entry_realized_pnl"] = round(_entry_realized_pnl(e), 2)
+        copy["overlays"] = overlays_by_entry.get(str(e.get("entry_number")), [])
         out.append(copy)
     return out
 
@@ -457,10 +498,84 @@ def _query_peak_spread_values(db_path, today: str) -> dict:
         return {}
 
 
-def _peak_buffer_pct(entries: list[dict], db_path=None) -> dict:
-    """Largest call/put buffer utilization across today's entries.
+def _latest_spx_from_db(db_path) -> float | None:
+    """Most-recent SPX spot from the variant's market_ticks table (the bot
+    writes a row ~every 11s). The state file only persists daily OHLC, not a
+    live spot, so this is the freshest SPX available — used for the comparison
+    card's distance-to-stop in index points. Read-only, 2s timeout; returns
+    None on any error / empty table.
+    """
+    import sqlite3
+    try:
+        if db_path is None or not db_path.exists():
+            return None
+        conn = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True, timeout=2)
+        try:
+            row = conn.execute(
+                "SELECT spx_price FROM market_ticks ORDER BY timestamp DESC LIMIT 1"
+            ).fetchone()
+        finally:
+            conn.close()
+        return float(row[0]) if row and row[0] is not None else None
+    except Exception as e:
+        logger.debug(f"Could not read latest spx: {e}")
+        return None
 
-    Per side, takes the MAX of two signals (whichever is highest):
+
+def _overlay_valuation_spx(db_path, state: dict) -> Optional[float]:
+    """The SPX to value Brandon overlays at, for display.
+
+    Once settlement has written the daily summary, use its ``spx_close`` — that is
+    exactly the value the overlays SETTLED against and the bot booked their P&L at,
+    so the displayed overlay P&L matches the record. Intraday (no summary yet) use
+    the latest live tick; the state's ``last_spx_price`` can be stale post-close (it
+    froze at 7488.06 on 07-21 while the real close was 7507.44), so it's a last
+    resort only.
+
+    (Moved here from routers/strategies.py 2026-08-15 so ws/broadcaster.py can
+    reuse it too without strategies.py <-> variants.py becoming a two-way import
+    cycle — strategies.py already imports this module as ``variants_router``.)
+    """
+    date = state.get("date")
+    if db_path and date:
+        try:
+            import sqlite3
+
+            con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+            try:
+                row = con.execute(
+                    "SELECT spx_close FROM daily_summaries WHERE date=?", (date,)
+                ).fetchone()
+            finally:
+                con.close()
+            if row and row[0]:
+                return float(row[0])
+        except Exception:
+            pass
+    return _latest_spx_from_db(db_path) or state.get("last_spx_price")
+
+
+def _hedge_sidecar_path(state_file) -> Optional[Path]:
+    """The Brandon defensive-overlay hedge sidecar for a variant, derived from
+    its state file's directory (data/variant_<id>/brandon_hedge_legs.json).
+    None when no state file is configured. Safe to pass to
+    read_overlays_by_entry() even for non-Brandon variants — it tolerates a
+    missing file and returns {}."""
+    if state_file is None:
+        return None
+    return Path(state_file).parent / "brandon_hedge_legs.json"
+
+
+def _min_buffer_margin_pct(entries: list[dict], db_path=None) -> dict:
+    """SMALLEST call/put buffer MARGIN (cushion) reached across today's entries —
+    the tightest the day got, in the SAME convention as the live cards
+    (100% = full cushion, 0% = at the stop). Returned as ``{call_pct, put_pct}``
+    margins (= 100 − peak utilization). Renamed + inverted 2026-06-12: the panel
+    used to show peak UTILIZATION (high = near stop), which read backwards
+    vs the main dashboard.
+
+    Per side, the peak utilization takes the MAX of two signals (whichever is
+    highest), then the margin is 100 − that:
       1. **Historical peak from spread_snapshots** — the bot writes
          a snapshot every ~10s; MAX(call_spread_value)/stop_level is
          the true peak observed today even if it has since recovered.
@@ -527,7 +642,11 @@ def _peak_buffer_pct(entries: list[dict], db_path=None) -> dict:
                     pct = min(120.0, psv / pss * 100)
                     peak_put = max(peak_put, pct)
 
-    return {"call_pct": round(peak_call, 1), "put_pct": round(peak_put, 1)}
+    # Convert peak utilization → minimum margin (cushion) remaining, clamped
+    # to [0, 100]. 0% = the side reached its stop; 100% = never threatened.
+    call_margin = round(min(100.0, max(0.0, 100.0 - peak_call)), 1)
+    put_margin = round(min(100.0, max(0.0, 100.0 - peak_put)), 1)
+    return {"call_pct": call_margin, "put_pct": put_margin}
 
 
 def _variant_payload(vid: str) -> dict:
@@ -552,6 +671,13 @@ def _variant_payload(vid: str) -> dict:
 
     state = _state_readers[vid].read_latest() or {}
     entries = state.get("entries", [])
+    # Brandon defensive overlays — same enrichment strategies.py:_ic_snapshot
+    # already does; this path (comparison + /{id}/state) was previously
+    # omitting it, so every entry here always got overlays: [] (2026-08-15 fix).
+    overlays_by_entry = read_overlays_by_entry(
+        str(_hedge_sidecar_path(state_file)) if state_file else None,
+        _overlay_valuation_spx(paths["backtesting_db"], state),
+    )
 
     return {
         "id": vid.upper(),
@@ -560,9 +686,12 @@ def _variant_payload(vid: str) -> dict:
         "state_file_age_seconds": round(state_age, 1),
         "config": _read_variant_config(paths["config_file"]),
         "summary": _summary_from_state(state),
-        "entries": _enrich_entries(entries),
+        "entries": _enrich_entries(entries, overlays_by_entry),
         "pnl_history": state.get("pnl_history", []),
-        "peak_buffer": _peak_buffer_pct(entries, db_path=paths["backtesting_db"]),
+        "min_buffer_margin": _min_buffer_margin_pct(entries, db_path=paths["backtesting_db"]),
+        # Live SPX from market_ticks (the state file only persists daily OHLC) —
+        # lets the comparison card show distance-to-stop in SPX points.
+        "spx_price": _latest_spx_from_db(paths["backtesting_db"]),
         "spx_open": (state.get("market_data_ohlc") or {}).get("spx_open"),
         "vix_open": (state.get("market_data_ohlc") or {}).get("vix_open"),
         "spx_high": (state.get("market_data_ohlc") or {}).get("spx_high"),
@@ -637,32 +766,32 @@ async def get_variant_summary(variant_id: str):
     return {
         "id": variant_id.upper(),
         "summary": _summary_from_state(state),
-        "peak_buffer": _peak_buffer_pct(state.get("entries", []), db_path=db_path),
+        "min_buffer_margin": _min_buffer_margin_pct(state.get("entries", []), db_path=db_path),
     }
 
 
-@router.get("/comparison")
-async def get_comparison():
-    """All variants + leaderboard delta computed server-side.
+def build_comparison(member_ids: list[str], baseline_id: str = "a") -> dict:
+    """Compute the live head-to-head comparison payload for a set of variants.
 
-    Frontend polls this every ~2s. Returns enough data to render the entire
-    Comparison page without further round-trips: leaderboard, strikes table,
-    buffer bars, P&L line chart series.
+    Member-scoped core of ``/comparison`` (and the group-scoped
+    ``/api/strategies/groups/{gid}/comparison`` adapter). ``member_ids`` are the
+    lowercase variant letters to include (only those with a state reader are
+    rendered); ``baseline_id`` is the lowercase letter the ``deltas_vs_*`` are
+    measured against (was hardcoded "a" — now passed by the caller so a group
+    can pick its own baseline from group metadata).
 
-    The leaderboard's ``winner`` field is the variant id with the highest
-    NET P&L (realized + unrealized − commission) among AVAILABLE variants.
-    Tie returns ``"tie"``. ``deltas`` exposes per-variant deltas vs the
-    canonical variant A so multi-way leaderboards can show "B is +$50 vs A,
-    C is −$120 vs A" without re-deriving on the client.
+    The leaderboard's ``winner`` field is the variant id with the highest NET
+    P&L (realized + unrealized − commission) among AVAILABLE members. Tie
+    returns ``"tie"``. ``deltas_vs_baseline`` exposes per-variant deltas vs the
+    baseline so multi-way leaderboards can show "B is +$50 vs A" client-side.
 
-    Backwards compat: ``a_net_pnl`` / ``b_net_pnl`` / ``delta_net_pnl`` are
-    kept so older frontend builds don't 500 mid-deploy. New frontend code
-    should read ``leaderboard.scores`` (a dict of id→net_pnl) and
-    ``leaderboard.deltas_vs_a`` instead.
+    Backwards compat: ``deltas_vs_a`` / ``a_net_pnl`` / ``b_net_pnl`` /
+    ``delta_net_pnl`` are kept (baseline=A) so older frontend builds don't 500
+    mid-deploy. New frontend code should read ``leaderboard.scores`` +
+    ``leaderboard.deltas_vs_baseline`` + ``leaderboard.baseline_id`` instead.
     """
-    _check_enabled()
-
-    payloads = {vid.upper(): _variant_payload(vid) for vid in _VARIANT_IDS if vid in _state_readers}
+    ids = [vid for vid in member_ids if vid in _state_readers]
+    payloads = {vid.upper(): _variant_payload(vid) for vid in ids}
 
     # Score table: only count available variants in the winner determination.
     scores: dict[str, float] = {}
@@ -677,22 +806,45 @@ async def get_comparison():
         leaders = [vid for vid, s in scores.items() if abs(s - best) < 0.01]
         winner = leaders[0] if len(leaders) == 1 else "tie"
 
+    baseline_upper = baseline_id.upper()
+    baseline_score = scores.get(baseline_upper, 0)
+    deltas_vs_baseline = {
+        vid: round(score - baseline_score, 2)
+        for vid, score in scores.items()
+        if vid != baseline_upper
+    }
+    # Legacy alias when the baseline IS A (the only case older builds expect).
     a_score = scores.get("A", 0)
-    deltas_vs_a = {vid: round(score - a_score, 2) for vid, score in scores.items() if vid != "A"}
 
     return {
         "date": get_today_et(),
         "leaderboard": {
             "winner": winner,
-            "scores": scores,           # {id: net_pnl} — only available variants
-            "deltas_vs_a": deltas_vs_a,  # signed: + = beats A, − = behind A
-            # Legacy fields (kept for in-flight frontend builds):
+            "scores": scores,                   # {id: net_pnl} — only available variants
+            "baseline_id": baseline_upper,      # which id the deltas are measured against
+            "deltas_vs_baseline": deltas_vs_baseline,
+            # Legacy fields (kept for in-flight frontend builds — baseline=A):
+            "deltas_vs_a": {vid: round(score - a_score, 2) for vid, score in scores.items() if vid != "A"},
             "a_net_pnl": scores.get("A", 0),
             "b_net_pnl": scores.get("B", 0),
             "delta_net_pnl": scores.get("A", 0) - scores.get("B", 0),
         },
         "variants": payloads,
     }
+
+
+@router.get("/comparison")
+async def get_comparison():
+    """All IC variants + leaderboard delta computed server-side.
+
+    Frontend polls this every ~2s. Returns enough data to render the entire
+    Comparison page without further round-trips: leaderboard, strikes table,
+    buffer bars, P&L line chart series. Thin wrapper over :func:`build_comparison`
+    scoped to the full IC variant set with baseline A — byte-identical to the
+    pre-refactor behaviour.
+    """
+    _check_enabled()
+    return build_comparison(list(_VARIANT_IDS), baseline_id="a")
 
 
 @router.get("/{variant_id}/daily")
@@ -721,6 +873,9 @@ def _per_variant_lifetime_stats(metrics: Optional[dict]) -> dict:
             "total_stops": 0,
             "total_entries": 0,
             "daily_returns_count": 0,
+            "capital_deployed": 0.0,
+            "avg_capital_per_day": 0.0,
+            "roi_pct": 0.0,
         }
     return {
         "cumulative_pnl": metrics.get("cumulative_pnl", 0.0),
@@ -730,6 +885,10 @@ def _per_variant_lifetime_stats(metrics: Optional[dict]) -> dict:
         "total_stops": metrics.get("total_stops", 0),
         "total_entries": metrics.get("total_entries", 0),
         "daily_returns_count": len(metrics.get("daily_returns", []) or []),
+        # Capital deployed (max-risk notional) + ROI on it, for the comparison.
+        "capital_deployed": metrics.get("capital_deployed", 0.0),
+        "avg_capital_per_day": metrics.get("avg_capital_per_day", 0.0),
+        "roi_pct": metrics.get("roi_pct", 0.0),
     }
 
 
@@ -785,9 +944,12 @@ def _cumulative_series(summaries: list[dict]) -> list[dict]:
     return out
 
 
-@router.get("/aggregate")
-async def get_aggregate():
-    """Cross-variant lifetime + per-day aggregate for the cross-day view.
+async def build_aggregate(member_ids: list[str]) -> dict:
+    """Cross-variant lifetime + per-day aggregate for a set of variants.
+
+    Member-scoped core of ``/aggregate`` (and the group-scoped
+    ``/api/strategies/groups/{gid}/aggregate`` adapter). ``member_ids`` are the
+    lowercase variant letters to include (only those with a DB reader render).
 
     Returns:
       - per-variant lifetime stats (cumulative_pnl, win_rate, sharpe, drawdown)
@@ -809,9 +971,7 @@ async def get_aggregate():
     legacy ``a_net_pnl``/``b_net_pnl``/``cumulative_a``/``cumulative_b`` are
     kept on each per_day row so older frontend builds don't 500 mid-deploy.
     """
-    _check_enabled()
-
-    available_ids_lower = [vid for vid in _VARIANT_IDS if vid in _state_readers]
+    available_ids_lower = [vid for vid in member_ids if vid in _db_readers]
     available_ids_upper = [vid.upper() for vid in available_ids_lower]
 
     # ---- Lifetime metrics + per-variant DB summaries ----
@@ -819,13 +979,25 @@ async def get_aggregate():
     cumulative_curves: dict[str, list] = {}
     summaries_by_variant: dict[str, list[dict]] = {}
 
+    # Per-variant cumulative rebase baseline (empty = full history). Filtering
+    # get_all_summaries here rebases BOTH the lifetime cumulative_curve AND —
+    # because by_date_per_variant / common_dates / the H2H running totals are all
+    # built from these same `summaries` — the head-to-head window, so every curve
+    # family agrees. get_cumulative_overrides(baseline) rebases the lifetime card.
+    baselines: dict[str, str] = {}
     for vid in available_ids_lower:
         vid_upper = vid.upper()
-        metrics = _metrics_readers[vid].read_latest()
-        lifetimes[vid_upper] = _per_variant_lifetime_stats(metrics)
-        summaries = await _db_readers[vid].get_all_summaries()
+        baseline = getattr(settings, f"variant_{vid}_baseline_date", "") or ""
+        baselines[vid_upper] = baseline
+        summaries = await _db_readers[vid].get_all_summaries(baseline)
         summaries_by_variant[vid_upper] = summaries
         cumulative_curves[vid_upper] = _cumulative_series(summaries)
+        # DB-canonical lifetime stats (cumulative_pnl / win-loss / credit / stops)
+        # so the cross-day table matches the main dashboard + Analytics + History,
+        # rather than the bot-maintained metrics file which can drift.
+        overrides = await _db_readers[vid].get_cumulative_overrides(baseline)
+        lifetimes[vid_upper] = _per_variant_lifetime_stats(overrides)
+        lifetimes[vid_upper]["daily_returns_count"] = len(summaries)
 
     # ---- Date-keyed lookups for alignment ----
     by_date_per_variant: dict[str, dict[str, dict]] = {
@@ -891,6 +1063,9 @@ async def get_aggregate():
             "lifetime": {**lifetimes[vid_upper], "win_rate": round(win_rate, 4), **advanced},
             "cumulative_curve": cumulative_curves[vid_upper],
             "total_days": len(summaries),
+            # Rebase baseline (empty = full history) so the UI can caption
+            # "cumulative since <date>" on the lifetime total + curve.
+            "baseline_date": baselines.get(vid_upper, ""),
         }
 
     # ---- H2H summary block (N-way) ----
@@ -911,3 +1086,14 @@ async def get_aggregate():
         "variants": variants_payload,
         "head_to_head": head_to_head,
     }
+
+
+@router.get("/aggregate")
+async def get_aggregate():
+    """Cross-variant lifetime + per-day aggregate (full IC variant set).
+
+    Thin wrapper over :func:`build_aggregate` scoped to the full IC variant set
+    — byte-identical to the pre-refactor behaviour.
+    """
+    _check_enabled()
+    return await build_aggregate(list(_VARIANT_IDS))

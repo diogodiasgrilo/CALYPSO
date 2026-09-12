@@ -6,11 +6,57 @@ from dashboard.backend.config import settings
 from dashboard.backend.services.state_reader import StateFileReader
 from dashboard.backend.services.metrics_reader import MetricsFileReader
 from dashboard.backend.services.market_status import get_current_status
+from dashboard.backend.services.variant_readers import (
+    live_state_file, live_metrics_file,
+)
 
 router = APIRouter(tags=["widget"])
 
-state_reader = StateFileReader(settings.hydra_state_file)
-metrics_reader = MetricsFileReader(settings.hydra_metrics_file)
+# Readers for the CURRENT live seat, cached per resolved path so the iOS widget
+# follows a C<->B swap with no restart.
+_state_readers: dict[str, StateFileReader] = {}
+_metrics_readers: dict[str, MetricsFileReader] = {}
+
+
+def _live_state_reader() -> StateFileReader:
+    key = str(live_state_file())
+    if key not in _state_readers:
+        _state_readers[key] = StateFileReader(live_state_file())
+    return _state_readers[key]
+
+
+def _live_metrics_reader() -> MetricsFileReader:
+    key = str(live_metrics_file())
+    if key not in _metrics_readers:
+        _metrics_readers[key] = MetricsFileReader(live_metrics_file())
+    return _metrics_readers[key]
+
+
+def _entry_dot(e: dict) -> str:
+    """Classify one entry into a widget status dot.
+
+    A SKIPPED entry (no trade placed) gets its OWN 'skipped' dot rather than
+    falling through to 'expired' — 'expired' reads as a kept-credit win, so a
+    no-trade day of skips would otherwise look like a day of winners (dashboard
+    audit 2026-07-22).
+
+    2026-07-31: a genuine order-EXECUTION FAILURE also sets both *_side_skipped
+    flags (see dashboard/backend/routers/variants.py _entry_disposition's
+    docstring for the full incident) — must be checked before the generic
+    'skipped' branch, else it renders identically to a routine strategic skip
+    on the widget too, the same blind spot this fix closes everywhere else.
+    """
+    if e.get("is_complete"):
+        if e.get("execution_failed"):
+            return "failed"
+        if e.get("call_side_stopped") or e.get("put_side_stopped"):
+            return "stopped"
+        if e.get("call_side_skipped") and e.get("put_side_skipped"):
+            return "skipped"
+        return "expired"
+    if e.get("entry_time"):
+        return "active"
+    return "pending"
 
 
 @router.get("/api/widget")
@@ -19,8 +65,8 @@ async def get_widget_data():
 
     Returns a simplified view optimized for small displays.
     """
-    state = state_reader.get_cached() or state_reader.read_latest()
-    metrics = metrics_reader.get_cached() or metrics_reader.read_latest()
+    state = _live_state_reader().get_cached() or _live_state_reader().read_latest()
+    metrics = _live_metrics_reader().get_cached() or _live_metrics_reader().read_latest()
     market = get_current_status()
 
     if not state:
@@ -46,17 +92,7 @@ async def get_widget_data():
     )
 
     # Entry status dots for medium widget
-    entry_dots = []
-    for e in entries:
-        if e.get("is_complete"):
-            if e.get("call_side_stopped") or e.get("put_side_stopped"):
-                entry_dots.append("stopped")
-            else:
-                entry_dots.append("expired")
-        elif e.get("entry_time"):
-            entry_dots.append("active")
-        else:
-            entry_dots.append("pending")
+    entry_dots = [_entry_dot(e) for e in entries]
 
     # Pad to scheduled entry count (base + conditional, read from state)
     schedule = state.get("entry_schedule", {})
@@ -65,7 +101,22 @@ async def get_widget_data():
     while len(entry_dots) < pad_to:
         entry_dots.append("pending")
 
-    cumulative_pnl = metrics.get("cumulative_pnl", 0) if metrics else 0
+    # Lifetime P&L must match the web dashboard's /api/metrics/cumulative card:
+    # apply the SAME DB-canonical override + baseline rebase, else the widget
+    # shows the raw metrics-file value (which still includes pre-baseline legacy
+    # history the rest of the dashboard excludes) — the iOS widget and the web
+    # card disagreed by ~$1,966 (dashboard audit 2026-07-22).
+    from dashboard.backend.services.db_reader import apply_db_cumulative
+    from dashboard.backend.services.variant_readers import canonical_db_reader, live_baseline_date
+
+    cumulative_pnl = 0
+    if metrics:
+        try:
+            overrides = await canonical_db_reader().get_cumulative_overrides(live_baseline_date())
+            rebased = apply_db_cumulative(dict(metrics), overrides) or {}
+            cumulative_pnl = rebased.get("cumulative_pnl", metrics.get("cumulative_pnl", 0))
+        except Exception:
+            cumulative_pnl = metrics.get("cumulative_pnl", 0)
 
     # Phase 2 X-1: expose contract count so iOS widget can show a [Nc] badge
     # next to P&L. Prefer state file's explicit field, fall back to max across

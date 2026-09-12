@@ -6,14 +6,31 @@ from fastapi import APIRouter, Query
 
 from dashboard.backend.config import settings
 from dashboard.backend.services.metrics_reader import MetricsFileReader
-from dashboard.backend.services.db_reader import BacktestingDBReader
+from dashboard.backend.services.db_reader import apply_db_cumulative
+from dashboard.backend.services.variant_readers import (
+    canonical_db_reader, reader_for, live_metrics_file, live_baseline_date,
+)
 from dashboard.backend.services.live_state import LiveStateProvider
 from dashboard.backend.services.market_status import get_today_et, is_after_market_close
 
 router = APIRouter(prefix="/api/metrics", tags=["metrics"])
 
-metrics_reader = MetricsFileReader(settings.hydra_metrics_file)
-db_reader = BacktestingDBReader(settings.backtesting_db)
+# Metrics reader for the CURRENT live seat, cached per resolved path so a
+# C<->B swap re-points the cumulative card to the new live seat with no restart.
+_metrics_readers: dict[str, MetricsFileReader] = {}
+
+
+def _live_metrics_reader() -> MetricsFileReader:
+    key = str(live_metrics_file())
+    if key not in _metrics_readers:
+        _metrics_readers[key] = MetricsFileReader(live_metrics_file())
+    return _metrics_readers[key]
+
+# The canonical reader (settings.backtesting_db) IS the live primary's DB, and
+# `_live_state` tracks that same variant's state file — so today-from-live-state
+# augmentation is only valid for the canonical id. Per-strategy resolution lives
+# in services/variant_readers.reader_for() (shared with /api/hydra/entries and
+# /api/market/replay_pnl so the History day-detail header + tables never diverge).
 
 # Set by main.py at startup
 _live_state: LiveStateProvider | None = None
@@ -47,10 +64,19 @@ def _append_today_summary(summaries: list[dict]) -> list[dict]:
 
 @router.get("/cumulative")
 async def get_cumulative():
-    """Lifetime cumulative metrics."""
-    data = metrics_reader.read_latest()
+    """Lifetime cumulative metrics (DB-canonical — see apply_db_cumulative).
+
+    Rebased to settings.baseline_date when set (sums only days >= baseline);
+    the resolved baseline is echoed back so the UI can caption "since <date>".
+    """
+    data = _live_metrics_reader().read_latest()
+    _baseline = live_baseline_date()
+    overrides = await canonical_db_reader().get_cumulative_overrides(_baseline)
+    data = apply_db_cumulative(data, overrides)
     if data is None:
-        return {"error": "Metrics file not available"}
+        data = {}
+    # Echo the rebase baseline (empty string = full history) for the UI caption.
+    data["cumulative_baseline_date"] = _baseline
     return data
 
 
@@ -58,26 +84,30 @@ async def get_cumulative():
 async def get_daily(
     days: int = Query(default=0, ge=0, le=9999),
     year: int = Query(default=0, ge=0, le=2099),
+    strategy_id: str = Query(default=""),
 ):
-    """Daily summaries for calendar heat map."""
+    """Daily summaries for calendar heat map (per-strategy)."""
+    reader, is_canonical = reader_for(strategy_id)
     if year >= 2020:
-        summaries = await db_reader.get_daily_summaries_by_year(year)
+        summaries = await reader.get_daily_summaries_by_year(year)
     elif days > 0:
-        summaries = await db_reader.get_daily_summaries(limit=days)
+        summaries = await reader.get_daily_summaries(limit=days)
     else:
-        summaries = await db_reader.get_daily_summaries(limit=365)
+        summaries = await reader.get_daily_summaries(limit=365)
 
-    summaries = _append_today_summary(summaries)
+    if is_canonical:
+        summaries = _append_today_summary(summaries)
     return {"days": len(summaries), "summaries": summaries}
 
 
 @router.get("/entries")
-async def get_all_entries():
-    """All historical entries for analytics."""
-    entries = await db_reader.get_all_entries()
+async def get_all_entries(strategy_id: str = Query(default="")):
+    """All historical entries for analytics (per-strategy)."""
+    reader, is_canonical = reader_for(strategy_id)
+    entries = await reader.get_all_entries()
 
-    # Append today's entries from state file only after market close
-    if _live_state and is_after_market_close():
+    # Append today's entries from state file only after market close (canonical only)
+    if is_canonical and _live_state and is_after_market_close():
         today = get_today_et()
         has_today = any(e.get("date") == today for e in entries)
         if not has_today:
@@ -89,12 +119,13 @@ async def get_all_entries():
 
 
 @router.get("/stops")
-async def get_all_stops():
-    """All historical stops for analytics."""
-    stops = await db_reader.get_all_stops()
+async def get_all_stops(strategy_id: str = Query(default="")):
+    """All historical stops for analytics (per-strategy)."""
+    reader, is_canonical = reader_for(strategy_id)
+    stops = await reader.get_all_stops()
 
-    # Append today's stops from state file only after market close
-    if _live_state and is_after_market_close():
+    # Append today's stops from state file only after market close (canonical only)
+    if is_canonical and _live_state and is_after_market_close():
         today = get_today_et()
         has_today = any(s.get("date") == today for s in stops)
         if not has_today:
@@ -106,12 +137,13 @@ async def get_all_stops():
 
 
 @router.get("/comparisons")
-async def get_comparisons():
-    """Comparison statistics (averages across all trading days)."""
-    data = await db_reader.get_comparison_stats()
+async def get_comparisons(strategy_id: str = Query(default="")):
+    """Comparison statistics (averages across all trading days, per-strategy)."""
+    reader, is_canonical = reader_for(strategy_id)
+    data = await reader.get_comparison_stats()
 
-    # If we have DB data, augment with today's values only after market close
-    if data and _live_state and is_after_market_close():
+    # If we have DB data, augment with today's values only after market close (canonical only)
+    if data and is_canonical and _live_state and is_after_market_close():
         today_summary = _live_state.get_today_summary()
         today_entries = _live_state.get_today_entries()
         if today_summary:
@@ -139,17 +171,29 @@ async def get_comparisons():
 
 
 @router.get("/performance")
-async def get_performance():
-    """Daily P&L values for client-side performance metric calculations."""
-    pnls = await db_reader.get_daily_pnls()
+async def get_performance(strategy_id: str = Query(default="")):
+    """Daily P&L values for client-side performance metric calculations
+    (per-strategy).
 
-    # Append today's net P&L only after market close
-    if _live_state and is_after_market_close():
+    Rebased to the strategy's OWN baseline_date so Sharpe/drawdown match that
+    strategy's rebased card — NOT the primary's baseline for every id (dashboard
+    audit 2026-07-22; the per-strategy snapshot already resolves per-variant).
+    """
+    reader, is_canonical = reader_for(strategy_id)
+    _sid = (strategy_id or "").strip().lower()
+    baseline = (
+        settings.baseline_date if (is_canonical or not _sid)
+        else getattr(settings, f"variant_{_sid}_baseline_date", settings.baseline_date)
+    )
+    pnls = await reader.get_daily_pnls(baseline)
+
+    # Append today's net P&L only after market close (canonical only)
+    if is_canonical and _live_state and is_after_market_close():
         today_pnl = _live_state.get_today_net_pnl()
         if today_pnl is not None:
             # Check if today is already in DB by comparing count
             # (DB returns ordered by date, today would be last)
-            summaries = await db_reader.get_daily_summaries(limit=1)
+            summaries = await reader.get_daily_summaries(limit=1)
             today = get_today_et()
             if not summaries or summaries[0].get("date") != today:
                 pnls = list(pnls) + [today_pnl]
@@ -160,5 +204,5 @@ async def get_performance():
 @router.get("/range")
 async def get_date_range():
     """Available date range in database."""
-    info = await db_reader.get_date_range()
+    info = await canonical_db_reader().get_date_range()
     return info or {"first_date": None, "last_date": None, "total_days": 0}

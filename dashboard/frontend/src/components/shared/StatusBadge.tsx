@@ -3,9 +3,13 @@ import { statusColor } from "../../lib/tradingColors";
 export type EntryStatus =
   | "active"
   | "expired"
+  | "flattened"
+  | "take_profit"
+  | "breach"
   | "stopped"
   | "stopped_single"
   | "skipped"
+  | "failed"
   | "pending"
   | "placing";
 
@@ -20,6 +24,10 @@ function getLabel(status: EntryStatus, stoppedSide?: "call" | "put"): string {
     return stoppedSide === "call" ? "Call Stopped" : "Put Stopped";
   }
   if (status === "stopped") return "Double Stop";
+  if (status === "take_profit") return "Take Profit";
+  if (status === "breach") return "Breach Exit";
+  if (status === "flattened") return "Flattened";
+  if (status === "failed") return "Execution Failed";
   return status;
 }
 

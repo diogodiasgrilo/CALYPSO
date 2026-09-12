@@ -169,8 +169,16 @@ def git_commit_and_push(journal_path: str, date_labels: list) -> bool:
         dates_str = ", ".join(date_labels)
         commit_msg = f"journal: HOMER auto-update ({dates_str})"
 
+        # Path-SCOPE the commit to the journal ONLY (2026-06-16 hardening). A bare
+        # `git commit -m` commits everything currently STAGED — so any unrelated
+        # change left in the VM index (e.g. a deploy overlay applied with
+        # `git checkout <ref> -- <paths>`, which stages) would be swept into this
+        # "journal" commit and pushed to the shared branch. That happened once and
+        # regressed the mainline (see the homer-autocommit memo / docs/NEXT_STEPS).
+        # The explicit pathspec commits ONLY the journal's working-tree change,
+        # ignoring anything else staged.
         result = subprocess.run(
-            ["git", "commit", "-m", commit_msg],
+            ["git", "commit", "-m", commit_msg, "--", journal_path],
             cwd=_project_root,
             capture_output=True,
             text=True,
@@ -186,9 +194,24 @@ def git_commit_and_push(journal_path: str, date_labels: list) -> bool:
                 logger.error(f"git commit failed: {result.stderr}")
                 return False
 
+        # I-H2: resolve the CHECKED-OUT branch and fetch/rebase/push against IT,
+        # not a hardcoded 'main'. The VM runs on a feature branch
+        # (hydra-ibkr-standalone); the old hardcoded 'origin main' would pull new
+        # main commits into the running tree as a side effect of the nightly
+        # journal write (no cache-clear/restart → source/bytecode divergence) and
+        # a push would target the wrong branch.
+        branch_proc = subprocess.run(
+            ["git", "rev-parse", "--abbrev-ref", "HEAD"],
+            cwd=_project_root, capture_output=True, text=True, timeout=10,
+        )
+        branch = (branch_proc.stdout or "").strip() or "main"
+        if branch == "HEAD":
+            logger.warning("HOMER: detached HEAD — skipping fetch/rebase/push")
+            return True
+
         # Fetch remote to check if we're behind
         subprocess.run(
-            ["git", "fetch", "origin", "main"],
+            ["git", "fetch", "origin", branch],
             cwd=_project_root,
             capture_output=True,
             timeout=30,
@@ -196,7 +219,7 @@ def git_commit_and_push(journal_path: str, date_labels: list) -> bool:
 
         # Rebase our commit on top of any new remote commits
         rebase_result = subprocess.run(
-            ["git", "rebase", "origin/main"],
+            ["git", "rebase", f"origin/{branch}"],
             cwd=_project_root,
             capture_output=True,
             text=True,
@@ -212,9 +235,9 @@ def git_commit_and_push(journal_path: str, date_labels: list) -> bool:
             )
             return False
 
-        # Push
+        # Push (to the same branch we are on — see I-H2 above)
         result = subprocess.run(
-            ["git", "push", "origin", "main"],
+            ["git", "push", "origin", branch],
             cwd=_project_root,
             capture_output=True,
             text=True,
@@ -485,6 +508,26 @@ def main():
         logger.error("No config loaded — aborting")
         sys.exit(1)
 
+    # SETTLEMENT GATE (2026-09-10). Until today this ran at 19:30 ET while
+    # settlement completed between 21:45 and 22:37 — so the journal HOMER
+    # COMMITS TO GIT was built from unsettled numbers, every trading day. The
+    # timer now fires at 23:30, but a fixed clock time is still a guess against
+    # a variable event (0DTE SPX is PM-settled and IBKR's feed clears on its
+    # own schedule), so confirm against the bot's own record.
+    #
+    # Placed AFTER the --backfill branch on purpose: backfill deliberately
+    # reprocesses historical days and must not be gated on today settling.
+    # Skipping is recoverable here — detect_missing_days() picks the day up on
+    # a later run — whereas committing wrong numbers to git is not.
+    from shared.market_hours import get_us_market_time
+    from shared.settlement_gate import require_settled
+
+    _today_str = get_us_market_time().strftime("%Y-%m-%d")
+    if not args.dry_run and not require_settled(
+        config, agent="homer", date_str=_today_str
+    ):
+        return
+
     homer_config = config.get("homer", {})
     journal_path = homer_config.get("journal_path", "docs/HYDRA_TRADING_JOURNAL.md")
     backup_dir = homer_config.get("backup_dir", "intel/homer")
@@ -511,11 +554,27 @@ def main():
     # and during a dry-run experiment those will all be dry-run too).
     dry_run_active = False
     try:
-        state_path = os.path.join(_project_root, "data", "hydra_state.json")
+        # I-M10: the [DRY-RUN] marker must reflect the variant whose trades are
+        # actually journaled. Reading A's (sim, dry_run=true) state would mislabel a
+        # LIVE variant's REAL trades as [DRY-RUN]. In db mode HOMER reads a specific
+        # variant's backtesting.db (homer.read_db), so DERIVE that same variant's
+        # state file (e.g. data/variant_b/backtesting.db -> data/variant_b/hydra_state.json,
+        # B is live since the 2026-07-24 swap -> no marker; was C before). This is
+        # derived dynamically from read_db, so it needs no code change on a future swap.
+        # HOMER_DRY_RUN_STATE_FILE still overrides; the sheets/legacy default remains variant A
+        # (no regression).
+        default_state = os.path.join(_project_root, "data", "hydra_state.json")
+        _read_db = homer_config.get("read_db")
+        if _read_db and str(homer_config.get("data_source", "")).lower() == "db":
+            default_state = os.path.join(
+                _project_root, os.path.dirname(_read_db), "hydra_state.json"
+            )
+        state_path = os.environ.get("HOMER_DRY_RUN_STATE_FILE", default_state)
         if os.path.exists(state_path):
             with open(state_path) as f:
                 state_blob = json.load(f)
             dry_run_active = bool(state_blob.get("dry_run", False))
+            logger.info(f"HOMER dry_run detection: {state_path} → dry_run={dry_run_active}")
     except Exception as e:
         logger.warning(f"Could not read state file for dry_run detection: {e}")
     if dry_run_active:
@@ -536,6 +595,20 @@ def main():
 
     # 3. Detect missing days
     missing_days = detect_missing_days(journal_dates, sheets_dates)
+
+    # Forward-only cutoff. In DB mode the source (backtesting.db) has MORE history
+    # than the Sheet-era journal, so without this HOMER would back-fill pre-journal
+    # days (early dry-run data). Ignore any date earlier than homer.min_journal_date
+    # (set when migrating to data_source=db). No-op in sheets mode / when unset.
+    min_journal_date = homer_config.get("min_journal_date")
+    if min_journal_date:
+        _before = len(missing_days)
+        missing_days = [d for d in missing_days if d >= min_journal_date]
+        if _before != len(missing_days):
+            logger.info(
+                f"min_journal_date={min_journal_date}: ignoring "
+                f"{_before - len(missing_days)} pre-cutoff day(s)"
+            )
 
     if not missing_days:
         logger.info("Journal is up to date — no missing days")
@@ -699,22 +772,30 @@ def main():
         # 11. Git commit + push
         git_ok = git_commit_and_push(journal_path, date_labels)
 
-        # 12. Populate backtesting database (non-blocking — errors don't abort)
-        # Retry once on transient "unable to open database file" errors
-        for db_attempt in range(2):
-            try:
-                db = _get_db(config)
-                for date_str in missing_days:
-                    _populate_db_for_date(db, all_data, date_str, config)
-                break  # Success
-            except Exception as e:
-                if db_attempt == 0 and "unable to open" in str(e).lower():
-                    logger.warning(f"Backtesting DB attempt 1 failed ({e}), retrying in 3s...")
-                    import time as _time
-                    _time.sleep(3)
-                else:
-                    logger.warning(f"Backtesting DB population failed (non-critical): {e}")
-                    break
+        # 12. Populate backtesting database (non-blocking — errors don't abort).
+        # SKIPPED in DB mode: when HOMER reads the DB, the DB is the SOURCE (written
+        # live by DataRecorder), so backfilling it is redundant AND it is exactly the
+        # write that contaminated variant A (HOMER wrote C's data into A's DB). Only
+        # the legacy Sheets->DB path still backfills. Retry once on transient opens.
+        from shared.sheets_db_shim import resolve_agent_source
+        _homer_source, _ = resolve_agent_source(config, "homer")
+        if _homer_source == "db":
+            logger.info("Backfill skipped — data_source=db (DB is the source, not a sink; avoids variant-A contamination)")
+        else:
+            for db_attempt in range(2):
+                try:
+                    db = _get_db(config)
+                    for date_str in missing_days:
+                        _populate_db_for_date(db, all_data, date_str, config)
+                    break  # Success
+                except Exception as e:
+                    if db_attempt == 0 and "unable to open" in str(e).lower():
+                        logger.warning(f"Backtesting DB attempt 1 failed ({e}), retrying in 3s...")
+                        import time as _time
+                        _time.sleep(3)
+                    else:
+                        logger.warning(f"Backtesting DB population failed (non-critical): {e}")
+                        break
 
         # 13. Telegram alert (reflects git status)
         if homer_config.get("telegram_alert", True):

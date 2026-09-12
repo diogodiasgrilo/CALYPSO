@@ -28,11 +28,16 @@ def collect_all_data(config: Dict[str, Any]) -> Dict[str, Any]:
         Dict with keys: daily_summary_rows, positions_rows, trades_rows,
         metrics, version_history.
     """
+    from shared.sheets_db_shim import resolve_agent_source
+    data_source, _ = resolve_agent_source(config, "homer")
+
     data = {}
 
     data["daily_summary_rows"] = _read_sheets_daily_summary_all(config)
-    data["positions_rows"] = _read_sheets_positions_all(config)
-    data["trades_rows"] = _read_sheets_trades_all(config)
+    # The Trades/Positions tabs are Sheets-only; in DB mode the entries builder
+    # reads structured trade_entries/trade_stops directly (see collect_day_data).
+    data["positions_rows"] = None if data_source == "db" else _read_sheets_positions_all(config)
+    data["trades_rows"] = None if data_source == "db" else _read_sheets_trades_all(config)
     data["metrics"] = _read_metrics_file(config)
     data["version_history"] = _read_version_history()
 
@@ -75,12 +80,21 @@ def collect_day_data(
         logger.warning("No Daily Summary data available")
         return None
 
-    # Build per-entry data from Trades tab (primary, historical) + Positions tab (supplementary)
-    day["entries"] = _build_entries_for_day(
-        all_data.get("trades_rows"),
-        all_data.get("positions_rows"),
-        date_str,
-    )
+    # Build per-entry data. DB mode reads structured trade_entries/trade_stops
+    # (no Sheet-string parsing, no gaps); Sheets mode parses the Trades/Positions tabs.
+    from shared.sheets_db_shim import resolve_agent_source, DbSheetsReader
+    data_source, db_path = resolve_agent_source(config or {}, "homer")
+    if data_source == "db":
+        r = DbSheetsReader(db_path)
+        day["entries"] = _build_entries_for_day_from_db(
+            r.entries_for_day(date_str), r.stops_for_day(date_str), date_str
+        )
+    else:
+        day["entries"] = _build_entries_for_day(
+            all_data.get("trades_rows"),
+            all_data.get("positions_rows"),
+            date_str,
+        )
 
     # Pass trades_rows through for stop record building (Positions tab is cleared daily)
     day["trades_rows"] = all_data.get("trades_rows")
@@ -91,8 +105,9 @@ def collect_day_data(
     # Include version history
     day["version_history"] = all_data.get("version_history", [])
 
-    # Fill missing stop data from fallback sources (logs, P&L identity)
-    if day["entries"] and day.get("summary"):
+    # Fill missing stop data from fallback sources (logs, P&L identity). DB rows
+    # already carry stop_time / net_pnl / exit_reason, so there are no gaps to fill.
+    if data_source != "db" and day["entries"] and day.get("summary"):
         _fill_missing_stop_data(day["entries"], day["summary"], date_str)
 
     # Context chaining: include HERMES daily report if available
@@ -420,33 +435,42 @@ def _build_entries_for_day(
             if call_credit or put_credit:
                 entry["Total Credit"] = str(call_credit + put_credit)
 
-        # Determine outcome from accumulated stop data (from Trades tab stop rows)
-        # This catches entries whose Positions tab data was overwritten by bot restart
+        # Determine outcome. A Brandon take-profit / GEX-breach / MKT-018 close is
+        # an EARLY CLOSE, not a stop — but the early-close path reuses stop logging
+        # (writes "Stop #N" Trades rows + per-side stop times AND sets the per-side
+        # *_stopped flags), so naive stop inference mislabels a profitable
+        # take-profit as a "Double Stop" (the 2026-06-09 journal bug). Two
+        # authoritative signals override that:
+        #   (a) Positions Status == "EARLY_CLOSED" — the bot writes this for ANY
+        #       early close (TP / breach / MKT-018). This is the primary signal.
+        #   (b) A "both sides stopped" outcome whose net P&L is POSITIVE is
+        #       logically impossible for a real stop (stops cut losses) — it was a
+        #       take-profit whose Positions row was overwritten before HOMER read it.
+        # TP vs defensive-close is classified by P&L sign.
         if not entry.get("Outcome"):
-            has_call_stop = bool(entry.get("Call Stop Time"))
-            has_put_stop = bool(entry.get("Put Stop Time"))
-            if has_call_stop and has_put_stop:
-                entry["Outcome"] = "Double Stop"
+            call_status = str(entry.get("Call Status", "")).upper()
+            put_status = str(entry.get("Put Status", "")).upper()
+            early_closed = "EARLY_CLOSED" in call_status or "EARLY_CLOSED" in put_status
+
+            has_call_stop = bool(entry.get("Call Stop Time")) or \
+                str(entry.get("Call Stop Triggered", "No")).strip().lower() == "yes"
+            has_put_stop = bool(entry.get("Put Stop Time")) or \
+                str(entry.get("Put Stop Triggered", "No")).strip().lower() == "yes"
+            net = _safe_float(entry.get("P&L Impact", 0))
+
+            if early_closed:
+                # Authoritative early-close marker. Positive net = take-profit;
+                # negative net = a defensive (GEX-breach / loss-cut) early close.
+                entry["Outcome"] = "Take Profit" if net >= 0 else "Early Closed (Defensive)"
+            elif has_call_stop and has_put_stop:
+                # Both sides "stopped". A real double-stop is a loss; a positive
+                # net here means the EARLY_CLOSED status was lost (overwritten) and
+                # this was actually a take-profit.
+                entry["Outcome"] = "Double Stop" if net < 0 else "Take Profit"
             elif has_call_stop:
                 entry["Outcome"] = "Call Stopped"
             elif has_put_stop:
                 entry["Outcome"] = "Put Stopped"
-
-        # Determine outcome from Positions tab status (overwrites if available)
-        if not entry.get("Outcome"):
-            call_stopped = str(entry.get("Call Stop Triggered", "No")).strip().lower() == "yes"
-            put_stopped = str(entry.get("Put Stop Triggered", "No")).strip().lower() == "yes"
-            call_status = entry.get("Call Status", "")
-            put_status = entry.get("Put Status", "")
-
-            if call_stopped and put_stopped:
-                entry["Outcome"] = "Double Stop"
-            elif call_stopped:
-                entry["Outcome"] = "Call Stopped"
-            elif put_stopped:
-                entry["Outcome"] = "Put Stopped"
-            elif "EARLY_CLOSED" in call_status or "EARLY_CLOSED" in put_status:
-                entry["Outcome"] = "Early Closed"
             elif "EXPIRED" in call_status or "EXPIRED" in put_status:
                 entry["Outcome"] = "Expired"
 
@@ -456,6 +480,121 @@ def _build_entries_for_day(
         key=lambda e: int(e.get("Entry #", 0) or 0),
     )
     return result
+
+
+# DB entry_type vocabulary -> the journal's "Entry Type" labels.
+_ENTRY_TYPE_DB_TO_SHEET = {
+    "full_ic": "Full IC", "ic": "Full IC", "Iron Condor": "Full IC",
+    "call_only": "Call Only", "Call Spread": "Call Only",
+    "put_only": "Put Only", "Put Spread": "Put Only",
+}
+
+
+def _fmt_ts(ts) -> str:
+    """DB entry_time/stop_time -> the Sheet's '%I:%M:%S %p ET' format (leading zero kept)."""
+    if not ts:
+        return ""
+    s = str(ts).strip()
+    part = s.split(" ")[-1] if " " in s else s  # 'YYYY-MM-DD HH:MM:SS' or 'HH:MM:SS'
+    try:
+        from datetime import datetime
+        return datetime.strptime(part[:8], "%H:%M:%S").strftime("%I:%M:%S %p ET")
+    except (ValueError, TypeError):
+        return s
+
+
+def _num(v):
+    """Render a DB numeric like the Sheet did: round off float noise (e.g. the DB's
+    244.9999999999999 -> 245), then whole -> int (no trailing .0), else 2dp float."""
+    try:
+        f = round(float(v), 2)
+        return int(f) if f.is_integer() else f
+    except (TypeError, ValueError):
+        return v
+
+
+def _build_entries_for_day_from_db(
+    entries_rows: Optional[List[Dict]], stops_rows: Optional[List[Dict]], date_str: str
+) -> List[Dict[str, Any]]:
+    """Build the Section-3 per-entry structure from STRUCTURED trade_entries /
+    trade_stops rows (the Sheets→DB migration path), matching the dict shape of
+    ``_build_entries_for_day`` field-for-field. Outcome is derived from
+    ``exit_reason`` (cleaner than the Sheets P&L-sign heuristic — no EARLY_CLOSED
+    status to lose). Only genuine stops (stop_loss/gex_breach) count as "stopped";
+    ``early_close`` is an EOD flatten, ``take_profit`` a TP.
+    """
+    entries_rows = entries_rows or []
+    stops_rows = stops_rows or []
+    stops_by_entry: Dict[Any, List[Dict]] = {}
+    for s in stops_rows:
+        stops_by_entry.setdefault(s.get("entry_number"), []).append(s)
+
+    out: List[Dict[str, Any]] = []
+    for e in entries_rows:
+        en = e.get("entry_number")
+        estops = stops_by_entry.get(en, [])
+        net = _safe_float(e.get("realized_pnl"))
+
+        def _side_stopped(side):
+            return any(
+                st.get("side") == side and st.get("exit_reason") in ("stop_loss", "gex_breach")
+                for st in estops
+            )
+        call_stopped, put_stopped = _side_stopped("call"), _side_stopped("put")
+        has_tp = any(st.get("exit_reason") == "take_profit" for st in estops)
+        has_early = any(st.get("exit_reason") == "early_close" for st in estops)
+
+        # STOPS take priority over take_profit: a side that stopped must surface as
+        # "*Stopped" so it appears in the Stop Timing Log AND agrees with the Section-2
+        # Call/Put Stops counts, even when the other leg later hit an 80%-capture TP
+        # (audit 2026-07-17: a mixed TP+stop IC must not be mislabeled "Take Profit").
+        if call_stopped and put_stopped:
+            outcome = "Double Stop" if net < 0 else "Take Profit"
+        elif call_stopped:
+            outcome = "Call Stopped"
+        elif put_stopped:
+            outcome = "Put Stopped"
+        elif has_tp:
+            outcome = "Take Profit"
+        elif has_early:
+            # matches the legacy Sheets classifier (net >= 0 -> Take Profit)
+            outcome = "Take Profit" if net >= 0 else "Early Closed (Defensive)"
+        else:
+            outcome = "Expired"
+
+        def _side_salvage(side):
+            return round(sum(_safe_float(st.get("salvage_revenue")) for st in estops if st.get("side") == side), 2)
+
+        def _side_stop_time(side):
+            times = [st.get("stop_time") for st in estops if st.get("side") == side and st.get("stop_time")]
+            return _fmt_ts(min(times)) if times else ""
+
+        all_stop_times = [st.get("stop_time") for st in estops if st.get("stop_time")]
+        sc, sp = e.get("short_call_strike") or 0, e.get("short_put_strike") or 0
+        lc, lp = e.get("long_call_strike") or 0, e.get("long_put_strike") or 0
+        out.append({
+            "Entry #": en,
+            "Entry Time": _fmt_ts(e.get("entry_time")),
+            "Trend Signal": str(e.get("trend_signal") or "neutral").upper(),
+            "Entry Type": _ENTRY_TYPE_DB_TO_SHEET.get(e.get("entry_type"), e.get("entry_type") or ""),
+            "Override Reason": e.get("override_reason") or "",
+            "Short Call Strike": _num(sc) if sc else "",
+            "Short Put Strike": _num(sp) if sp else "",
+            "Long Call Strike": _num(lc) if lc else "",
+            "Long Put Strike": _num(lp) if lp else "",
+            "Call Credit": _num(e.get("call_credit") or 0),
+            "Put Credit": _num(e.get("put_credit") or 0),
+            "Total Credit": _num(e.get("total_credit") or 0),
+            "P&L Impact": round(net, 2),
+            "Outcome": outcome,
+            "Stop Time": _fmt_ts(min(all_stop_times)) if all_stop_times else "",
+            "Call Stop Time": _side_stop_time("call"),
+            "Put Stop Time": _side_stop_time("put"),
+            "Call Long Salvage Proceeds": _side_salvage("call"),
+            "Put Long Salvage Proceeds": _side_salvage("put"),
+        })
+    out.sort(key=lambda x: int(x.get("Entry #", 0) or 0))
+    return out
 
 
 def _fill_missing_stop_data(
@@ -761,20 +900,21 @@ def get_all_trading_dates(all_data: Dict[str, Any]) -> List[str]:
 
 
 def _read_sheets_daily_summary_all(config: Dict[str, Any]) -> Optional[List[Dict[str, str]]]:
-    """Read ALL daily summary rows from Google Sheets."""
+    """Read ALL daily summary rows — from the DB (migration) or Google Sheets,
+    per config["homer"]["data_source"] via make_agent_reader (default sheets)."""
     try:
-        from shared.sheets_reader import SheetsReader
+        from shared.sheets_db_shim import make_agent_reader
 
         spreadsheet = config.get("google_sheets", {}).get(
             "spreadsheet_name", "Calypso_HYDRA_Live_Data"
         )
-        reader = SheetsReader(config)
+        reader = make_agent_reader(config, agent="homer")
         rows = reader.read_tab_as_dicts(spreadsheet, "Daily Summary")
         if rows:
-            logger.info(f"Read {len(rows)} Daily Summary rows from Sheets")
+            logger.info(f"Read {len(rows)} Daily Summary rows")
         return rows
     except Exception as e:
-        logger.warning(f"Failed to read Daily Summary from Sheets: {e}")
+        logger.warning(f"Failed to read Daily Summary: {e}")
         return None
 
 

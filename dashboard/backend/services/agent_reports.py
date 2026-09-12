@@ -13,6 +13,13 @@ AGENTS = ["apollo", "hermes", "homer", "clio", "argus"]
 # Match date-named report files (YYYY-MM-DD.md) — excludes backup/auxiliary files
 _DATE_FILE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}\.md$")
 
+# Strict YYYY-MM-DD validator for the user-supplied `date_str` path param.
+# audit #6: date_str/agent flow straight into glob(); without validation an
+# unauthenticated caller could traverse out of the intel dir (e.g.
+# date_str="../../../../etc/passwd"). Both params are whitelisted/validated
+# before they ever touch the filesystem.
+_DATE_PARAM_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
+
 
 class AgentReportReader:
     """Read agent intel reports from the filesystem."""
@@ -23,6 +30,9 @@ class AgentReportReader:
     def get_latest_report(self, agent_name: str) -> Optional[dict]:
         """Find the most recent report for an agent."""
         agent_name = agent_name.lower()
+        # audit #6: whitelist the agent before it becomes a path segment.
+        if agent_name not in AGENTS:
+            return None
         agent_dir = self.intel_dir / agent_name
 
         if not agent_dir.exists():
@@ -53,6 +63,10 @@ class AgentReportReader:
     def get_report_for_date(self, agent_name: str, date_str: str) -> Optional[dict]:
         """Get a specific date's report."""
         agent_name = agent_name.lower()
+        # audit #6: validate BOTH params before they touch glob() — whitelist
+        # the agent and require a strict YYYY-MM-DD date, blocking traversal.
+        if agent_name not in AGENTS or not _DATE_PARAM_RE.match(date_str):
+            return None
         agent_dir = self.intel_dir / agent_name
 
         # Try common filename patterns

@@ -3,7 +3,11 @@ import { useHydraStore } from "../../store/hydraStore";
 import { formatPnL, winRate } from "../../lib/formatters";
 import { pnlColor, colors } from "../../lib/tradingColors";
 import { useAnimatedNumber } from "../../hooks/useAnimatedNumber";
-import type { HydraEntry } from "../../store/hydraStore";
+import type { HydraEntry, CumulativeMetrics } from "../../store/hydraStore";
+import type {
+  ICSnapshotSummary,
+  ICSnapshotCumulative,
+} from "../../hooks/useStrategySnapshot";
 
 /** Compute unrealized P&L from active sides + surviving long leg values. */
 function computeUnrealizedPnl(entries: HydraEntry[]): number {
@@ -14,10 +18,12 @@ function computeUnrealizedPnl(entries: HydraEntry[]): number {
     const putActive = !e.put_side_stopped && !e.put_side_skipped && !e.put_side_expired;
     if (callActive) total += e.call_spread_credit - (e.call_spread_value ?? 0);
     if (putActive) total += e.put_spread_credit - (e.put_spread_value ?? 0);
-    // Surviving long legs after MKT-025 stop (long stays open, not salvaged)
-    // Only count long values for sides that were actually opened
-    if (!e.call_side_skipped) total += (e.call_long_value ?? 0);
-    if (!e.put_side_skipped) total += (e.put_long_value ?? 0);
+    // Surviving long leg after a MKT-025 short-only stop (the long stays open).
+    // Only the STOPPED side's long survives separately; for an active side the
+    // long value is already inside spread_value, so adding it here double-counts
+    // (the 2026-06 phantom-$750 bug). Gate strictly on the stopped flag.
+    if (e.call_side_stopped) total += (e.call_long_value ?? 0);
+    if (e.put_side_stopped) total += (e.put_long_value ?? 0);
   }
   return total;
 }
@@ -48,20 +54,70 @@ function StatCell({ label, children, className = "" }: { label: string; children
   );
 }
 
-export function DailyPnLCard() {
-  const { hydraState, metrics, comparisons } = useHydraStore();
+interface DailyPnLCardProps {
+  /** Polled non-primary snapshot's today-summary. When provided, the "Today"
+   *  section reads from THIS (net_pnl/credit/commission/stops/entries) instead
+   *  of the WS store. Omitted → WS store, byte-identical to the old behavior. */
+  summary?: ICSnapshotSummary;
+  /** Polled non-primary snapshot's lifetime cumulative metrics. When provided,
+   *  the "Cumulative" section reads from THIS instead of the WS metrics store. */
+  cumulative?: ICSnapshotCumulative;
+  /** Polled non-primary snapshot's entries — only needed for the Hedge Mark
+   *  stat cell below (everything else in "Today" already comes from `summary`).
+   *  Omitted on the primary path, which reads entries from the WS store instead. */
+  entries?: HydraEntry[];
+}
+
+export function DailyPnLCard({ summary, cumulative, entries: entriesProp }: DailyPnLCardProps = {}) {
+  // Hooks always called; props (when present) override the WS-store reads so the
+  // primary path is unchanged when no prop is passed.
+  const { hydraState, metrics: wsMetrics, comparisons: wsComparisons } = useHydraStore();
+
+  const usingProps = summary !== undefined || cumulative !== undefined;
+  // Off-primary there is no historical-comparison stream (avg/best/worst) — it's
+  // a WS-only augmentation — so the avg badges/threshold simply don't render.
+  const comparisons = usingProps ? null : wsComparisons;
+  const metrics: CumulativeMetrics | ICSnapshotCumulative | null = usingProps
+    ? (cumulative ?? null)
+    : wsMetrics;
 
   const entries = hydraState?.entries ?? [];
-  const commission = hydraState?.total_commission ?? 0;
-  const credit = hydraState?.total_credit_received ?? 0;
-  const totalStops =
+
+  // ── Today section ──
+  // Prop mode: the snapshot summary already carries the LIVE net P&L
+  // (realized + unrealized − commission) + credit/commission/stop totals.
+  // WS mode: derive net P&L from the live store exactly as before.
+  const wsCommission = hydraState?.total_commission ?? 0;
+  const wsCredit = hydraState?.total_credit_received ?? 0;
+  const wsTotalStops =
     (hydraState?.call_stops_triggered ?? 0) +
     (hydraState?.put_stops_triggered ?? 0);
+  const wsRealizedPnl = hydraState?.total_realized_pnl ?? 0;
+  const wsUnrealizedPnl = useMemo(() => computeUnrealizedPnl(entries), [entries]);
 
-  // Live P&L = realized (actual stop costs from bot) + unrealized (active spread values)
-  const realizedPnl = hydraState?.total_realized_pnl ?? 0;
-  const unrealizedPnl = useMemo(() => computeUnrealizedPnl(entries), [entries]);
-  const netPnl = realizedPnl + unrealizedPnl - commission;
+  // Brandon defensive-overlay hedge mark — a LIVE, informational recomputation
+  // (matches brandon_hedge_reader.py's own documented display-only P&L), NOT
+  // folded into netPnl above: once a hedge SETTLES, its P&L is already inside
+  // the bot's own total_realized_pnl (folded in by _book_realized_pnl in
+  // brandon/strategy.py), so adding it again here would double-count. This
+  // cell only shows what an OPEN hedge is currently worth. Zero/hidden on
+  // every day without one (non-Brandon variants, or no threat this session).
+  //
+  // Prop (polled/non-primary) mode: `entries` above is the WS store's, which
+  // isn't the picked variant off-primary — use the passed `entriesProp`
+  // instead. Deliberately NOT wrapped in useMemo (flatMap over a handful of
+  // entries is cheap, and a conditional source expression defeats the React
+  // Compiler's ability to preserve memoization on this line vs. the untouched
+  // `entries` above, which the pre-existing wsUnrealizedPnl memo depends on).
+  const hedgeEntries = usingProps ? (entriesProp ?? []) : entries;
+  const hedgeOverlays = hedgeEntries.flatMap((e) => e.overlays ?? []);
+  const hedgeMark = hedgeOverlays.reduce((sum, o) => sum + (o.pnl ?? 0), 0);
+  const hasHedge = hedgeOverlays.length > 0;
+
+  const commission = summary ? summary.total_commission ?? 0 : wsCommission;
+  const credit = summary ? summary.total_credit_received ?? 0 : wsCredit;
+  const totalStops = summary ? summary.total_stops ?? 0 : wsTotalStops;
+  const netPnl = summary ? summary.net_pnl ?? 0 : wsRealizedPnl + wsUnrealizedPnl - wsCommission;
 
   const animatedPnl = useAnimatedNumber(netPnl);
 
@@ -71,6 +127,9 @@ export function DailyPnLCard() {
   const losingDays = metrics?.losing_days ?? 0;
   const totalDays = winningDays + losingDays;
   const avgPerDay = totalDays > 0 ? cumulativePnl / totalDays : 0;
+  const baselineDate = metrics?.cumulative_baseline_date || "";
+  const roiPct = metrics?.roi_pct ?? 0;
+  const avgCapitalPerDay = metrics?.avg_capital_per_day ?? 0;
 
   // Comparisons
   const avgPnl = comparisons?.avg_pnl ?? 0;
@@ -86,8 +145,21 @@ export function DailyPnLCard() {
   // (Prior fallback of 3 matched canonical pre-regime numbering and would mis-
   // classify Entry #3 as base in the rare state-unavailable window.)
   const baseCount = schedule?.base?.length ?? 2;
-  const baseEntries = entries.filter((e) => e.entry_number <= baseCount).length;
-  const conditionalEntries = entries.filter((e) => e.entry_number > baseCount).length;
+  // Prop mode: the summary's entries_completed is the authoritative "placed"
+  // count (the polled body doesn't carry the WS store's schedule/entries here).
+  const baseEntries = summary
+    ? summary.entries_completed ?? 0
+    : entries.filter((e) => e.entry_number <= baseCount).length;
+  const conditionalEntries = summary
+    ? 0
+    : entries.filter((e) => e.entry_number > baseCount).length;
+  // Denominator for "placed/slots". In summary (non-primary polled) mode the WS
+  // schedule isn't available, so baseCount would fall back to 2 and render a
+  // nonsensical "4/2" for a 7-slot variant like B — use the variant's own
+  // total_entries (its actual slot count) there instead (2026-07-21).
+  const slotsDenominator = summary
+    ? summary.total_entries ?? baseCount
+    : baseCount;
 
   return (
     <div className="space-y-3">
@@ -110,10 +182,10 @@ export function DailyPnLCard() {
           )}
         </div>
 
-        {/* Stat grid — 4 columns, centered */}
-        <div className="grid grid-cols-4 gap-1 pt-3 border-t border-border-dim">
+        {/* Stat grid — 4 columns, 5 when a Brandon hedge is (or was) open today */}
+        <div className={`grid ${hasHedge ? "grid-cols-5" : "grid-cols-4"} gap-1 pt-3 border-t border-border-dim`}>
           <StatCell label="Entries">
-            {baseEntries}/{baseCount}
+            {baseEntries}/{slotsDenominator}
             {conditionalEntries > 0 && (
               <span className="text-text-dim text-xs">+{conditionalEntries}</span>
             )}
@@ -131,12 +203,24 @@ export function DailyPnLCard() {
           <StatCell label="Comm.">
             ${commission.toFixed(0)}
           </StatCell>
+          {hasHedge && (
+            <StatCell label="Hedge Mark">
+              <span style={{ color: pnlColor(hedgeMark) }}>{formatPnL(hedgeMark, 0)}</span>
+            </StatCell>
+          )}
         </div>
       </div>
 
       {/* Cumulative */}
       <div className="bg-card rounded-lg border border-border-dim p-4">
-        <h3 className="label-upper mb-2">Cumulative</h3>
+        <h3 className="label-upper mb-2">
+          Cumulative
+          {baselineDate && (
+            <span className="ml-1 normal-case text-text-dim font-normal">
+              · since {baselineDate}
+            </span>
+          )}
+        </h3>
 
         {/* Hero cumulative P&L */}
         <div className="text-center mb-4">
@@ -165,6 +249,18 @@ export function DailyPnLCard() {
             <span style={{ color: pnlColor(avgPerDay) }}>
               {formatPnL(avgPerDay)}
             </span>
+          </StatCell>
+        </div>
+
+        {/* Capital efficiency row — ROI on capital deployed + avg capital/day */}
+        <div className="grid grid-cols-2 gap-1 pt-3 mt-3 border-t border-border-dim">
+          <StatCell label="ROI (on capital)">
+            <span style={{ color: pnlColor(roiPct) }}>
+              {roiPct >= 0 ? "+" : ""}{roiPct.toFixed(2)}%
+            </span>
+          </StatCell>
+          <StatCell label="Capital / Day">
+            ${Math.round(avgCapitalPerDay).toLocaleString()}
           </StatCell>
         </div>
       </div>

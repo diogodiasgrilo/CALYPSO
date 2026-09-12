@@ -1,0 +1,14 @@
+[Unit]
+Description=Fire the paper order-path smoke ONCE at Mon 2026-06-01 09:35 ET (before the 10:15 entry window)
+
+[Timer]
+# One-shot: a specific date, so it fires once and never recurs. 09:35 ET gives
+# liquid post-open quotes and leaves a buffer to review the result + decide on
+# flipping A to dry_run:false before the 10:15 ET entry window. systemd 252
+# supports the timezone suffix on OnCalendar.
+OnCalendar=2026-06-01 09:35:00 America/New_York
+Persistent=false
+AccuracySec=30s
+
+[Install]
+WantedBy=timers.target

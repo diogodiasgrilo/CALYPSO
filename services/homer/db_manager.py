@@ -141,6 +141,7 @@ CREATE TABLE IF NOT EXISTS schema_info (
 CREATE TABLE IF NOT EXISTS spread_snapshots (
     timestamp TEXT NOT NULL,
     entry_number INTEGER NOT NULL,
+    date TEXT,  -- v10 (kept in sync with shared/data_recorder.py); writer backfills + indexes
     call_spread_value REAL,
     put_spread_value REAL,
     short_call_price REAL,
@@ -409,6 +410,25 @@ class BacktestingDB:
                 conn.execute("ROLLBACK")
                 raise
 
+        # v12 parity (2026-06-30): the per-entry realized_pnl column. The main
+        # DataRecorder (shared/data_recorder.py, schema v12) is the schema
+        # authority and adds this on every run; mirror it here idempotently and
+        # UN-gated (not tied to HOMER's own version counter, which lags at 8) so
+        # HOMER never fails if it touches the DB first and a HOMER-initialized DB
+        # still has the column. Historical rows stay NULL.
+        try:
+            conn.execute("ALTER TABLE trade_entries ADD COLUMN realized_pnl REAL")
+        except sqlite3.OperationalError:
+            pass  # column already exists (idempotent)
+
+        # v13 parity (2026-07-18): per-day unattributed-overlay P&L on
+        # daily_summaries (Brandon aggregate-only hedge — see data_recorder.py
+        # MIGRATION_V13_SQL). Same authority/UN-gated pattern as v12 above.
+        try:
+            conn.execute("ALTER TABLE daily_summaries ADD COLUMN unattributed_overlay_pnl REAL")
+        except sqlite3.OperationalError:
+            pass  # column already exists (idempotent)
+
     def _connect(self) -> sqlite3.Connection:
         """Create a new connection with WAL mode.
 
@@ -475,6 +495,32 @@ class BacktestingDB:
             inserted = conn.total_changes
         return inserted
 
+    def _drop_contaminated_skipped_slots(self, conn, rows):
+        """CONTAMINATION GUARD (2026-07-14): drop back-fill rows whose
+        (date, entry_number) this DB's own variant SKIPPED.
+
+        HOMER back-fills trade rows from the Google-Sheets "Trades" tab, which
+        after the 2026-06-02 pivot reflects the canonical LIVE variant's REAL
+        trades — but the main backtesting.db it writes to belongs to variant A.
+        When A (this DB's variant) SKIPPED an entry the live variant took, A's own
+        DataRecorder recorded it in `skipped_entries` and wrote NO `trade_entries`
+        row, so `INSERT OR IGNORE`'s PK guard has nothing to conflict with and a
+        PHANTOM row (config_version NULL) gets fabricated for a trade A never
+        placed. A slot present in this DB's `skipped_entries` is one the variant
+        provably did not take (skip XOR entry), so any trade row for it is phantom.
+        Genuine gap-fill is preserved: entries the variant actually took are never
+        in `skipped_entries`. On the live variant's own DB (variant_c) this is a
+        no-op (it never skipped those slots). rows[i][0]=date, rows[i][1]=entry_number.
+        """
+        try:
+            skipped = {
+                (r[0], r[1])
+                for r in conn.execute("SELECT date, entry_number FROM skipped_entries")
+            }
+        except sqlite3.OperationalError:
+            return rows  # no skipped_entries table → nothing to filter
+        return [r for r in rows if (r[0], r[1]) not in skipped]
+
     def insert_trade_entries(self, entries: List[Dict[str, Any]]) -> int:
         """Insert trade entry records. Returns rows inserted."""
         if not entries:
@@ -520,6 +566,9 @@ class BacktestingDB:
             for e in entries
         ]
         with self._connect() as conn:
+            rows = self._drop_contaminated_skipped_slots(conn, rows)
+            if not rows:
+                return 0
             conn.executemany(sql, rows)
             inserted = conn.total_changes
         return inserted
@@ -555,20 +604,33 @@ class BacktestingDB:
             for s in stops
         ]
         with self._connect() as conn:
+            rows = self._drop_contaminated_skipped_slots(conn, rows)
+            if not rows:
+                return 0
             conn.executemany(sql, rows)
             inserted = conn.total_changes
         return inserted
 
     def insert_daily_summary(self, summary: Dict[str, Any]) -> int:
         """Insert a daily summary record. Returns 1 if inserted, 0 if duplicate."""
+        # I-M5: the bot's DataRecorder writes the daily_summaries row first
+        # (live P&L / entries are authoritative). HOMER's enrichment was
+        # previously dropped by INSERT OR IGNORE — so day_type and
+        # realized_volatility stayed permanently NULL. Use ON CONFLICT(date) DO
+        # UPDATE to fill ONLY the enrichment columns, and only when currently
+        # NULL (COALESCE), so the bot's authoritative numbers are never clobbered.
         sql = """
-            INSERT OR IGNORE INTO daily_summaries
+            INSERT INTO daily_summaries
             (date, spx_open, spx_close, spx_high, spx_low, day_range,
              vix_open, vix_close,
              entries_placed, entries_stopped, entries_expired,
              gross_pnl, net_pnl, commission, long_salvage_revenue,
-             day_type, day_of_week, contracts_per_entry)
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             day_type, day_of_week, contracts_per_entry, realized_volatility)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(date) DO UPDATE SET
+                day_type = COALESCE(daily_summaries.day_type, excluded.day_type),
+                realized_volatility = COALESCE(
+                    daily_summaries.realized_volatility, excluded.realized_volatility)
         """
         row = (
             summary["date"],
@@ -589,6 +651,7 @@ class BacktestingDB:
             summary.get("day_type"),
             summary.get("day_of_week"),
             summary.get("contracts_per_entry", 1),  # v8
+            summary.get("realized_volatility"),     # I-M5 enrichment
         )
         with self._connect() as conn:
             cursor = conn.execute(sql, row)

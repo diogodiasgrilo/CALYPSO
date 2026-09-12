@@ -30,26 +30,55 @@ function MetricCard({ label, value, color }: MetricCardProps) {
   );
 }
 
-export function PerformanceMetrics() {
+interface PerformanceMetricsProps {
+  /** Polled non-primary snapshot's performance daily-P&L array (the same shape
+   *  /api/metrics/performance returns). When provided, the metrics compute from
+   *  THIS array and the component does NOT fetch the (primary) performance
+   *  endpoint. Omitted → fetch + WS store, byte-identical to the old behavior. */
+  dailyPnls?: number[];
+}
+
+export function PerformanceMetrics({ dailyPnls: dailyPnlsProp }: PerformanceMetricsProps = {}) {
+  const usingProps = dailyPnlsProp !== undefined;
   const [dailyPnls, setDailyPnls] = useState<number[] | null>(null);
   const [error, setError] = useState(false);
   const performancePnls = useHydraStore((s) => s.performancePnls);
+  // EOD auto-update (operator request): re-fetch the one-shot performance
+  // endpoint when the trading day ends OR when settlement writes new metrics —
+  // so the section refreshes at close WITHOUT a manual reload. We key the fetch
+  // effect on the market-open flag and the metrics' last_updated date so a
+  // transition to closed / a fresh metrics write re-runs it. (The WS
+  // performance_update push also feeds `performancePnls` below; this fetch is
+  // the belt-and-suspenders for clients that connect after that one-shot push.)
+  const marketOpen = useHydraStore((s) => s.market?.is_open ?? null);
+  const metricsUpdated = useHydraStore((s) => s.metrics?.last_updated ?? null);
 
   useEffect(() => {
+    // Prop mode: the daily P&L array is supplied by the polled snapshot (the
+    // variant's OWN performance), so DON'T fetch the primary's endpoint.
+    if (usingProps) return;
+    let cancelled = false;
     fetch("/api/metrics/performance")
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();
       })
       .then((data) => {
+        if (cancelled) return;
         if (data.daily_pnls) setDailyPnls(data.daily_pnls);
         else setDailyPnls([]);
       })
-      .catch(() => setError(true));
-  }, []);
+      .catch(() => {
+        if (!cancelled) setError(true);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [usingProps, marketOpen, metricsUpdated]);
 
-  // Use WebSocket-pushed data (after market close) if available, otherwise API data
-  const effectivePnls = performancePnls ?? dailyPnls;
+  // Prop mode: use the supplied array. WS mode: WebSocket-pushed data (after
+  // market close) if available, otherwise API data.
+  const effectivePnls = usingProps ? dailyPnlsProp : (performancePnls ?? dailyPnls);
 
   // useMemo MUST be called unconditionally (Rules of Hooks — no hooks after early returns)
   const stats = useMemo(() => {
@@ -78,7 +107,9 @@ export function PerformanceMetrics() {
     );
   }
 
-  if (dailyPnls === null) {
+  // Loading skeleton only in WS mode (the fetch hasn't resolved yet). In prop
+  // mode the data is supplied synchronously, so there's no loading window.
+  if (!usingProps && dailyPnls === null) {
     return (
       <div>
         <h3 className="label-upper mb-2">Performance</h3>
@@ -106,48 +137,48 @@ export function PerformanceMetrics() {
 
   const { sharpe, sortino, dd, calmar, pf, exp, wlRatio } = stats;
 
-  const fmtRatio = (v: number) =>
-    isNaN(v) ? "N/A" : v === Infinity ? "∞" : v === -Infinity ? "-∞" : v.toFixed(2);
+  // Annualized ratios (Sharpe/Sortino/Calmar/Profit Factor/Win-Loss) are
+  // statistically meaningless on a handful of days — a few flat-ish days makes
+  // Sharpe explode (e.g. 111), and "no losing day yet" makes the others ∞. Gate
+  // them behind a minimum sample and show "—" with a building note until then.
+  // Max Drawdown and Expectancy are dollar values that are meaningful earlier.
+  const MIN_DAYS_FOR_RATIOS = 20;
+  const n = effectivePnls?.length ?? 0;
+  const enoughForRatios = n >= MIN_DAYS_FOR_RATIOS;
+
+  const ratio = (v: number, good: number, ok: number) => {
+    const usable = enoughForRatios && isFinite(v) && !isNaN(v);
+    return {
+      value: usable ? v.toFixed(2) : "—",
+      color: usable
+        ? v >= good ? colors.profit : v >= ok ? colors.warning : colors.loss
+        : colors.textDim,
+    };
+  };
+  const sh = ratio(sharpe, 1, 0);
+  const so = ratio(sortino, 1.5, 0);
+  const ca = ratio(calmar, 2, 0);
+  const pfc = ratio(pf, 1.5, 1);
+  const wl = ratio(wlRatio, 1, 0);
 
   return (
     <div>
-      <h3 className="label-upper mb-2">Performance</h3>
+      <div className="flex items-baseline justify-between mb-2">
+        <h3 className="label-upper">Performance</h3>
+        {!enoughForRatios && (
+          <span className="text-[10px] text-text-dim">
+            ratios need ≥{MIN_DAYS_FOR_RATIOS} days · have {n}
+          </span>
+        )}
+      </div>
       <div className="grid grid-cols-4 max-lg:grid-cols-2 max-sm:grid-cols-1 gap-2">
-        <MetricCard
-          label="Sharpe"
-          value={fmtRatio(sharpe)}
-          color={sharpe >= 1 ? colors.profit : sharpe >= 0 ? colors.warning : colors.loss}
-        />
-        <MetricCard
-          label="Sortino"
-          value={fmtRatio(sortino)}
-          color={sortino >= 1.5 ? colors.profit : sortino >= 0 ? colors.warning : colors.loss}
-        />
-        <MetricCard
-          label="Max Drawdown"
-          value={formatPnL(-dd.value)}
-          color={colors.loss}
-        />
-        <MetricCard
-          label="Calmar"
-          value={fmtRatio(calmar)}
-          color={calmar >= 2 ? colors.profit : calmar >= 0 ? colors.warning : colors.loss}
-        />
-        <MetricCard
-          label="Profit Factor"
-          value={fmtRatio(pf)}
-          color={pf >= 1.5 ? colors.profit : pf >= 1 ? colors.warning : colors.loss}
-        />
-        <MetricCard
-          label="Expectancy"
-          value={formatPnL(exp)}
-          color={pnlColor(exp)}
-        />
-        <MetricCard
-          label="Win/Loss Ratio"
-          value={fmtRatio(wlRatio)}
-          color={wlRatio >= 1 ? colors.profit : colors.loss}
-        />
+        <MetricCard label="Sharpe (ann.)" value={sh.value} color={sh.color} />
+        <MetricCard label="Sortino (ann.)" value={so.value} color={so.color} />
+        <MetricCard label="Max Drawdown" value={formatPnL(-dd.value)} color={colors.loss} />
+        <MetricCard label="Calmar (ann.)" value={ca.value} color={ca.color} />
+        <MetricCard label="Profit Factor" value={pfc.value} color={pfc.color} />
+        <MetricCard label="Expectancy" value={formatPnL(exp)} color={pnlColor(exp)} />
+        <MetricCard label="Win/Loss Ratio" value={wl.value} color={wl.color} />
       </div>
     </div>
   );

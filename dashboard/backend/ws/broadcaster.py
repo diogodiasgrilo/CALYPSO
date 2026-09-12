@@ -3,19 +3,30 @@
 import asyncio
 import logging
 import time
+from pathlib import Path
 
 from dashboard.backend.config import settings
 from dashboard.backend.services.state_reader import StateFileReader
 from dashboard.backend.services.metrics_reader import MetricsFileReader
-from dashboard.backend.services.db_reader import BacktestingDBReader
+from dashboard.backend.services.db_reader import BacktestingDBReader, apply_db_cumulative
 from dashboard.backend.services.log_tailer import LogTailer
 from dashboard.backend.services.live_ohlc import LiveOHLCBuilder
 from dashboard.backend.services.live_state import LiveStateProvider
 from dashboard.backend.services.market_status import get_current_status, get_today_et
 from dashboard.backend.services.agent_reports import AgentReportReader
+from dashboard.backend.services.brandon_hedge_reader import read_overlays_by_entry
 from dashboard.backend.ws.manager import ConnectionManager
 
 logger = logging.getLogger("dashboard.broadcaster")
+
+
+def _on_or_after_baseline(date_str: str) -> bool:
+    """True if date_str (ISO YYYY-MM-DD) is on/after the cumulative rebase
+    baseline, or if no baseline is set. Gates today's-P&L augmentation so a
+    pre-baseline 'today' (e.g. baseline=tomorrow) isn't folded into the rebased
+    'since <baseline>' cumulative card/curve."""
+    baseline = (settings.baseline_date or "").strip()
+    return (not baseline) or (str(date_str) >= baseline)
 
 
 class Broadcaster:
@@ -23,10 +34,28 @@ class Broadcaster:
 
     def __init__(self, manager: ConnectionManager):
         self.manager = manager
-        self.state_reader = StateFileReader(settings.hydra_state_file)
-        self.metrics_reader = MetricsFileReader(settings.hydra_metrics_file)
-        self.db_reader = BacktestingDBReader(settings.backtesting_db)
-        self.log_tailer = LogTailer(settings.hydra_log_file)
+        # Stream the CURRENT live seat (dry_run=false among b/c), resolved at
+        # startup — so the WS "main" view follows a C<->B swap once the dashboard
+        # restarts (the swap procedure restarts it). The request endpoints follow
+        # per-request without a restart; the WS follows at its next start.
+        from dashboard.backend.services.variant_readers import (
+            live_state_file, live_metrics_file, live_log_file, live_backtesting_db,
+        )
+        self.state_reader = StateFileReader(live_state_file())
+        self.metrics_reader = MetricsFileReader(live_metrics_file())
+        self.db_reader = BacktestingDBReader(live_backtesting_db())
+        # Brandon defensive-overlay hedge sidecar for the live seat — resolved
+        # once at startup like the readers above (a B<->C swap needs a
+        # dashboard restart to follow, same as every other "live" path here).
+        # Harmless when the live variant isn't a Brandon strategy: the reader
+        # returns {} for a missing sidecar file.
+        self._hedge_sidecar_path = Path(live_state_file()).parent / "brandon_hedge_legs.json"
+        self._live_db_path = live_backtesting_db()
+        # SPX/VIX price chart is account-agnostic — source it from the densest
+        # recorder (config.market_data_db, e.g. A at ~4-8 ticks/min) so candles
+        # have real bodies, not the flat dojis C's ~1 tick/min produces.
+        self.market_db_reader = BacktestingDBReader(settings.market_data_db)
+        self.log_tailer = LogTailer(live_log_file())
         self.live_ohlc = LiveOHLCBuilder()
         self.live_state = LiveStateProvider(self.state_reader, db_reader=self.db_reader)
         self.agent_reader = AgentReportReader(settings.agent_intel_dir)
@@ -75,39 +104,67 @@ class Broadcaster:
         logger.info("Broadcaster stopped")
 
     async def _get_merged_ohlc(self) -> list[dict]:
-        """Get OHLC bars: SQLite historical + live heartbeat bars.
+        """Get dense SPX OHLC bars for the price chart.
 
-        During market hours, live bars from heartbeat parsing fill the gap
-        until HOMER writes to SQLite post-market. Live bars for timestamps
-        already in SQLite are skipped (SQLite is authoritative).
+        Sourced from the market-data DB (densest recorder, e.g. A), which gives
+        real candle bodies. Priority:
+          1. HOMER's authoritative market_ohlc_1min (post-close).
+          2. Live: compute dense bars from that DB's market_ticks (~4-8/min)
+             — covers today before HOMER runs, and survives dashboard restarts
+             (DB-backed, unlike the log-parsed builder which loses its place on
+             a bot log-rotation).
+          3. Last resort (market-data DB has nothing): the log-parsed live
+             builder. Sparse (~1/min), but better than an empty chart; the
+             frontend renders it as a line rather than crosses.
         """
         today = get_today_et()
-        db_bars: list[dict] = []
 
-        if await self.db_reader.is_available():
-            db_bars = await self.db_reader.get_today_ohlc(today)
+        if await self.market_db_reader.is_available():
+            db_bars = await self.market_db_reader.get_today_ohlc(today)
+            if db_bars:
+                return db_bars
+            tick_bars = await self.market_db_reader.compute_ohlc_from_ticks(today)
+            if tick_bars:
+                return tick_bars
 
-        live_bars = self.live_ohlc.get_ohlc_bars()
+        return self.live_ohlc.get_ohlc_bars()
 
-        if not live_bars:
-            return db_bars
-        if not db_bars:
-            return live_bars
+    def _merge_overlays(self, entries: list[dict], state: dict | None) -> list[dict]:
+        """Attach Brandon defensive-overlay hedge data (the debit spread /
+        butterfly placed against a threatened IC side) to each entry, the
+        same enrichment strategies.py:_ic_snapshot already does for the
+        non-primary polled-snapshot path — this is the primary/live WS path,
+        which never carried it (2026-08-15 fix; overlays regularly drive most
+        of B's daily P&L but were invisible on the default dashboard view).
 
-        # Merge: SQLite is authoritative. Only add live bars not in SQLite.
-        db_timestamps = {b["timestamp"] for b in db_bars}
-        merged = list(db_bars)
-        for bar in live_bars:
-            if bar["timestamp"] not in db_timestamps:
-                merged.append(bar)
+        Cheap no-op when there's nothing to attach (no sidecar file yet, or a
+        non-Brandon live variant) — returns entries unchanged rather than
+        copying every dict on every 1s poll tick for no reason. ``state`` can
+        be None (e.g. hydra_state.json doesn't exist yet) — get_snapshot()
+        passes state_reader.read_latest() straight through unguarded, so this
+        must not assume a dict (2026-08-17: a missing-state-file test caught
+        this crashing the whole snapshot with AttributeError).
+        """
+        from dashboard.backend.routers.variants import _overlay_valuation_spx
 
-        merged.sort(key=lambda b: b["timestamp"])
+        spx = _overlay_valuation_spx(self._live_db_path, state or {})
+        overlays_by_entry = read_overlays_by_entry(str(self._hedge_sidecar_path), spx)
+        if not overlays_by_entry:
+            return entries
+        merged = []
+        for e in entries:
+            e2 = dict(e)
+            e2["overlays"] = overlays_by_entry.get(str(e2.get("entry_number")), [])
+            merged.append(e2)
         return merged
 
     async def get_snapshot(self) -> dict:
         """Build a full snapshot for newly connected clients."""
         state = self.state_reader.read_latest()
-        metrics = self.metrics_reader.read_latest()
+        metrics = apply_db_cumulative(
+            self.metrics_reader.read_latest(),
+            await self.db_reader.get_cumulative_overrides(settings.baseline_date),
+        )
 
         today = get_today_et()
         entries = []
@@ -130,6 +187,21 @@ class Broadcaster:
             for ls in live_stops:
                 if (ls["entry_number"], ls["side"]) not in db_keys:
                     stops.append(ls)
+
+        entries = self._merge_overlays(entries, state)
+
+        # 2026-08-19 fix: the merge above only ever reached the separate
+        # "today_entries" field below, which the frontend's applySnapshot()
+        # never reads (it only consumes "state"). That left hydraState.entries
+        # overlay-less on every WS connect/reconnect -- invisible during market
+        # hours because the next state_update (which DOES merge correctly, see
+        # _poll_state) self-heals it within ~1s, but permanent after market
+        # close once hydra_state.json stops changing for the day. Mirror
+        # _poll_state's exact merge onto state["entries"] itself so a fresh
+        # snapshot carries overlays the same way a live state_update does.
+        if isinstance(state, dict) and isinstance(state.get("entries"), list):
+            state = dict(state)
+            state["entries"] = self._merge_overlays(state["entries"], state)
 
         ohlc = await self._get_merged_ohlc()
         market = get_current_status()
@@ -168,7 +240,11 @@ class Broadcaster:
             today_pnl = self.live_state.get_today_net_pnl()
             if today_pnl is not None:
                 today = get_today_et()
-                if metrics.get("last_updated") != today:
+                # Don't fold today into the rebased cumulative if today is BEFORE
+                # the baseline (e.g. baseline=tomorrow while today already traded):
+                # the "since <baseline>" total must stay 0 until the baseline day.
+                today_in_baseline = _on_or_after_baseline(today)
+                if today_in_baseline and metrics.get("last_updated") != today:
                     metrics = dict(metrics)
                     metrics["cumulative_pnl"] = metrics.get("cumulative_pnl", 0) + today_pnl
                     if today_pnl >= 0:
@@ -177,9 +253,9 @@ class Broadcaster:
                         metrics["losing_days"] = metrics.get("losing_days", 0) + 1
 
                 # Build performance P&L array with today included
-                pnls = await self.db_reader.get_daily_pnls()
+                pnls = await self.db_reader.get_daily_pnls(settings.baseline_date)
                 summaries = await self.db_reader.get_daily_summaries(limit=1)
-                if not summaries or summaries[0].get("date") != today:
+                if today_in_baseline and (not summaries or summaries[0].get("date") != today):
                     pnls = list(pnls) + [today_pnl]
                 performance_pnls = pnls
 
@@ -218,6 +294,9 @@ class Broadcaster:
                 self._check_day_rollover()
                 data = self.state_reader.read_if_changed()
                 if data is not None:
+                    if isinstance(data.get("entries"), list):
+                        data = dict(data)
+                        data["entries"] = self._merge_overlays(data["entries"], data)
                     await self.manager.broadcast({
                         "type": "state_update",
                         "data": data,
@@ -253,6 +332,9 @@ class Broadcaster:
                 if data is not None:
                     # When metrics file updates (bot wrote it), reset flag for next day
                     _sent_today_augmented = False
+                    data = apply_db_cumulative(
+                        data, await self.db_reader.get_cumulative_overrides(settings.baseline_date)
+                    )
                     await self.manager.broadcast({
                         "type": "metrics_update",
                         "data": data,
@@ -265,10 +347,17 @@ class Broadcaster:
                     if today_pnl is not None:
                         _sent_today_augmented = True
 
-                        # Augment cumulative metrics with today's P&L
-                        base_metrics = self.metrics_reader.read_latest() or {}
-                        if base_metrics:
-                            today = get_today_et()
+                        # Augment cumulative metrics with today's P&L. DB-canonical
+                        # first so last_updated reflects the DB — if today's row is
+                        # already in the DB the != today guard below skips the add
+                        # (no double-count); during hours the DB lacks today so it adds.
+                        base_metrics = apply_db_cumulative(
+                            self.metrics_reader.read_latest() or {},
+                            await self.db_reader.get_cumulative_overrides(settings.baseline_date),
+                        ) or {}
+                        today = get_today_et()
+                        today_in_baseline = _on_or_after_baseline(today)
+                        if base_metrics and today_in_baseline:
                             # Only augment if metrics file hasn't been updated for today yet
                             if base_metrics.get("last_updated") != today:
                                 augmented = dict(base_metrics)
@@ -283,10 +372,9 @@ class Broadcaster:
                                 })
 
                         # Push performance data (daily P&L array + today)
-                        pnls = await self.db_reader.get_daily_pnls()
-                        today = get_today_et()
+                        pnls = await self.db_reader.get_daily_pnls(settings.baseline_date)
                         summaries = await self.db_reader.get_daily_summaries(limit=1)
-                        if not summaries or summaries[0].get("date") != today:
+                        if today_in_baseline and (not summaries or summaries[0].get("date") != today):
                             pnls = list(pnls) + [today_pnl]
                         await self.manager.broadcast({
                             "type": "performance_update",

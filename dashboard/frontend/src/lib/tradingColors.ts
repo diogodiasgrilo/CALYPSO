@@ -51,7 +51,7 @@ export function cushionColor(pct: number): string {
 
 /** Entry status badge colors. */
 export function statusColor(
-  status: "active" | "expired" | "stopped" | "stopped_single" | "skipped" | "pending" | "placing"
+  status: "active" | "expired" | "flattened" | "stopped" | "stopped_single" | "skipped" | "failed" | "pending" | "placing" | "take_profit" | "breach"
 ): string {
   switch (status) {
     case "active":
@@ -60,12 +60,23 @@ export function statusColor(
       return colors.warning;
     case "expired":
       return colors.profit;
+    case "flattened":
+      return colors.info; // EOD safety flatten = a managed close, not a stop/expiry
+    case "take_profit":
+      return colors.profit; // Brandon TP = profitable close = green (NOT a stop)
+    case "breach":
+      return colors.warning; // Brandon GEX-breach exit = defensive close = amber
     case "stopped":
       return colors.loss; // double stop = red
     case "stopped_single":
       return colors.warning; // single stop = amber/yellow
     case "skipped":
       return colors.textDim;
+    case "failed":
+      // Broker/execution failure, not a strategic choice — same severity color
+      // as a double stop (colors.loss) so it visually stands apart from the
+      // neutral gray "skipped" badge.
+      return colors.loss;
     case "pending":
       return colors.textDim;
   }

@@ -17,9 +17,12 @@ interface BotConfig {
   entry_times: string[];
   /** Canonical conditional entry times. E{entry_times.length + 1 + i}. */
   conditional_entry_times: string[];
-  /** 2026-04-27: dry_run flag for prominent dashboard banner. True when bot is
-   *  in Path-B dry mode (real Saxo prices, no real orders placed). */
+  /** 2026-04-27: dry_run flag for prominent dashboard banner. True when the
+   *  PRIMARY bot is in dry mode (real IBKR-paper prices, no real orders). */
   dry_run?: boolean;
+  /** 2026-06-02: human label for which strategy the main page is showing
+   *  (e.g. "C · LIVE (Brandon narrow 5/10pt)"). Shown in the header. */
+  primary_label?: string;
 }
 
 const DEFAULT_CONFIG: BotConfig = {
@@ -35,6 +38,7 @@ const DEFAULT_CONFIG: BotConfig = {
   entry_times: [],
   conditional_entry_times: [],
   dry_run: false,
+  primary_label: "",
 };
 
 let _cachedConfig: BotConfig | null = null;

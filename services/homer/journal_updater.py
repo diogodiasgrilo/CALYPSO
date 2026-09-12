@@ -383,7 +383,7 @@ def build_section3_day_block(
     if is_dry_run:
         lines.append(
             "> **Note**: This day was traded in DRY-RUN mode (Path-B dry-run "
-            "with real Saxo quotes for credit estimation, but no real orders "
+            "with real IBKR quotes for credit estimation, but no real orders "
             "placed). P&L numbers are hypothetical-but-realistic — strikes, "
             "credits, and stop levels reflect what the live bot would have "
             "executed given the same market conditions."

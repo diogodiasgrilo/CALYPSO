@@ -27,7 +27,8 @@ For capital-constrained accounts, this hybrid combines both concepts in one bot.
 Author: Trading Bot Developer
 Date: 2026-02-04
 
-Based on: bots/meic/strategy.py (MEIC v1.2.9)
+Base class: bots/hydra/base_strategy.py (HYDRA-owned; originally MEIC
+v1.2.9, relocated into the HYDRA package by the standalone rewrite).
 See docs/HYDRA_STRATEGY_SPECIFICATION.md for full HYDRA details.
 See docs/MEIC_STRATEGY_SPECIFICATION.md for base MEIC details.
 """
@@ -42,14 +43,21 @@ from typing import Optional, Dict, Any, List, Tuple
 from dataclasses import dataclass
 from enum import Enum
 
-from shared.saxo_client import SaxoClient, BuySell
-from shared.alert_service import AlertService, AlertType, AlertPriority
-from shared.market_hours import get_us_market_time, is_early_close_day
+from bots.hydra.order_types import BuySell
+from bots.hydra.leg import LEG_NAMES
+from bots.hydra.calendar_entry import CalendarEntry
+from shared import market_data_adapter
+from shared.ib_client import (
+    IBClient, AmbiguousOrderError, RatePenaltyError, _normalize_position_dict,
+)
+from shared.alert_service import AlertService, AlertType, AlertPriority, describe_exception
+from shared import strategy_taxonomy
+from shared.market_hours import get_us_market_time, is_early_close_day, get_market_close_time
 from shared.technical_indicators import get_current_ema, calculate_atr
 from shared.event_calendar import is_fomc_t_plus_one
 
 # Import the base MEIC classes we need
-from bots.meic.strategy import (
+from bots.hydra.base_strategy import (
     MEICStrategy,
     MEICState,
     IronCondorEntry,
@@ -103,6 +111,71 @@ HYDRA_VERSION = "1.26.0"
 DEFAULT_SCOUT_WINDOW_MINUTES = 10
 DEFAULT_SCOUT_SCORE_THRESHOLD = 65
 
+# MKT-043 forensic fix (2026-06-08): the calm-entry wait must leave at least
+# this many seconds of the entry window for the actual order placement (+ a
+# retry). Without it the wait (max calm_entry_max_delay_min, default 5min)
+# could consume the whole 5-min window, so an entry that needed a retry hit
+# "window expired" and never placed.
+CALM_PLACEMENT_HEADROOM_SEC = 60
+
+# Fix #6 (2026-06-08 forensic): after this many CONSECUTIVE strict broker-read
+# failures in the after-hours settlement loop, emit a CRITICAL alert (operator
+# must reconcile manually). We never auto-complete / clear UICs on a failed
+# read — that would falsely book unconfirmed P&L — but we MUST alert instead of
+# silently retrying "settlement pending" forever. At ~15-min heartbeats this is
+# ~75 min of failed reads before the operator is paged.
+SETTLEMENT_MAX_STRICT_READ_FAILURES = 5
+
+# STATE-004 fix (2026-08-31 forensic): the new-day overnight-position check
+# used to halt the bot PERMANENTLY (_critical_intervention_required, no
+# retry, no expiry) on a single failed broker read — including a routine
+# ~20-27s calypso-broker reconnect blip at market open, which froze 5 of 7
+# live variants for ~6 hours until a manual restart. Bounded retry before
+# latching. Delay matches main.py's BROKER_OUTAGE_RECHECK_S (already
+# calibrated for this exact broker's reconnect behavior) rather than
+# inventing a new number. Worst case if every attempt genuinely hangs
+# (not just fails fast, like this incident did): up to
+# STATE004_MAX_ATTEMPTS * BrokerClient's ~35s HTTP timeout, plus
+# (STATE004_MAX_ATTEMPTS - 1) * STATE004_RETRY_DELAY_S between attempts —
+# roughly 3.5 minutes. Acceptable: this runs once/day at the date-rollover
+# boundary, when STATE-004's own premise is "there should be zero open
+# positions anyway," and TIME-001's operation lock correctly serializes
+# concurrent ticks during the wait.
+STATE004_MAX_ATTEMPTS = 4
+STATE004_RETRY_DELAY_S = 20
+
+# STATE-004 outcome constants (2026-09-06). The check body was extracted from
+# _reset_for_new_day into _run_overnight_position_check() so it can ALSO run
+# from a pre-market hook, closing the "restart gap": if no process survives
+# across ET midnight, every process starts with the date already stamped to
+# today, _reset_for_new_day never fires, and the overnight check is silently
+# skipped for that day. The two call sites diverge only on READ_FAILED — see
+# _run_overnight_position_check's docstring.
+# Latest ET wall-clock time at which the pre-market overnight check may START.
+#
+# WHY A MARGIN AND NOT SIMPLY 09:30: the check reads the WHOLE account (no
+# symbol or variant filter), so it must complete before ANY variant can hold a
+# legitimate position, or it would read that position as an overnight
+# emergency and halt. The fleet's true floor is 09:30, not 09:45 — variant F
+# (Ghauri) sets entry_times = [09:30] and is event-triggered from the open.
+#
+# The check's own worst case is ~4 minutes (STATE004_MAX_ATTEMPTS attempts at
+# BrokerClient's ~35s HTTP timeout, plus 3 x STATE004_RETRY_DELAY_S between
+# them, plus the 20s confirm-before-alarm sleep). 09:20 leaves ~10 minutes of
+# headroom over that pathological case before the 09:30 open.
+#
+# INVARIANT (asserted in tests): this constant plus the worst-case check
+# duration must stay strictly earlier than the earliest possible entry across
+# EVERY variant. If a variant is ever configured to enter before ~09:30, move
+# this earlier or give the check a per-variant scope.
+OVERNIGHT_CHECK_WINDOW_END_ET = dt_time(9, 20)
+
+OVERNIGHT_CHECK_CLEAN = "clean"
+OVERNIGHT_CHECK_POSITIONS = "positions_confirmed"
+OVERNIGHT_CHECK_READ_FAILED = "read_failed"
+OVERNIGHT_CHECK_ALREADY_DONE = "already_done"
+OVERNIGHT_CHECK_SKIPPED_HALTED = "skipped_halted"
+
 # MKT-034: VIX-scaled entry time shifting (DISABLED since v1.10.3 — code preserved)
 # When enabled via vix_time_shift.enabled, these slots replace config entry_times.
 ALL_ENTRY_SLOTS = [
@@ -116,6 +189,13 @@ ALL_ENTRY_SLOTS = [
 ]
 VIX_GATE_CHECK_SECONDS_BEFORE = 30  # Check VIX 30s before entry
 VIX_GATE_FLOOR_SLOT = 2  # Index into ALL_ENTRY_SLOTS that always enters
+
+# POS-003 (2026-06-23): how long a conid the bot ITSELF just closed is exempt
+# from the orphan sweep — IBKR's positions feed can keep showing a closed leg
+# for >80s (a TP-closed leg lingered 83s, outlasting the 30s confirm window and
+# firing a spurious CRITICAL on live C). A close that persists past this grace is
+# a real problem (the close didn't take) and is still surfaced.
+RECON_CLOSE_SETTLE_GRACE_S = 300
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -271,24 +351,49 @@ class HydraStrategy(MEICStrategy):
     # This ensures HYDRA positions are isolated in the registry
     BOT_NAME = "HYDRA"
 
+    # 2026-08-28 audit (cosmetic): get_detailed_position_status()'s "Up-day/
+    # Down-day ... E1-EN: full IC" heartbeat line describes the base-entry
+    # schedule (entry_times, base_entry_downday_callonly_pct, E6/E7
+    # conditionals) — meaningless for a subclass whose entries aren't
+    # clock-scheduled at all (Ghauri fires on an EM-boundary touch, not a
+    # slot count). Overridden False there so the heartbeat doesn't print a
+    # misleading "full IC" label for a strategy that never places one.
+    # Strangle keeps this True — it genuinely reuses the scheduled-entry
+    # machinery unchanged, so the label is accurate for it.
+    _show_ic_schedule_in_heartbeat = True
+
+    # Class-level defaults so these always exist even if a stop-level recompute
+    # is triggered during the state-reload path BEFORE __init__ assigns them
+    # (line ~777). Without this, the first state-save after a restart logged a
+    # caught "no attribute 'buffer_decay_start_mult'" error every startup
+    # (pre-existing, non-fatal). __init__ overrides both from config.
+    buffer_decay_start_mult = None
+    buffer_decay_hours = None
+
     def __init__(
         self,
-        saxo_client: SaxoClient,
+        broker: IBClient,
         config: Dict[str, Any],
         logger_service: Any,
         dry_run: bool = False,
-        alert_service: Optional[AlertService] = None
+        alert_service: Optional[AlertService] = None,
     ):
         """
         Initialize the HYDRA strategy.
 
         Args:
-            saxo_client: Authenticated Saxo API client
+            broker: Connected IBClient (Interactive Brokers adapter) —
+                the sole broker for every read and write path.
             config: Strategy configuration dictionary
             logger_service: Trade logging service
             dry_run: If True, simulate trades without placing real orders
             alert_service: Optional AlertService for Telegram/Email notifications
         """
+        # Stored on self BEFORE the super().__init__() call so any HYDRA
+        # methods that fire during the base __init__ (e.g. recovery
+        # hooks) can use it.
+        self.broker: IBClient = broker
+
         # Initialize trend filter config BEFORE calling super().__init__
         # because parent __init__ calls methods that might need these values
         self.trend_config = config.get("trend_filter", {})
@@ -326,6 +431,52 @@ class HydraStrategy(MEICStrategy):
         if self.put_stop_buffer != self.call_stop_buffer:
             logger.info(f"  Asymmetric stop buffer: call=${self.call_stop_buffer/100:.2f}, put=${self.put_stop_buffer/100:.2f}")
 
+        # A2 (2026-06-10) %-of-width narrow-spread stop — config-gated, default OFF
+        # (A and un-migrated C keep the credit+buffer stop). When enabled, the stop
+        # TRIGGER becomes pct_of_width × width × 100 × contracts (a consistent
+        # %-of-max regardless of width) instead of the fixed-$ credit+buffer, which
+        # fires at 55-89% of max on 5pt spreads. Buffer decay is bypassed in this
+        # mode (it would re-widen the trigger). settlement_hold: on a defined-risk
+        # spread already deep ITM in the final minutes, prefer the 4pm cash
+        # settlement (intrinsic for $0) over a wide-quote marketable buy-back.
+        _nss = strategy_cfg.get("narrow_spread_stop", {}) or {}
+        self.narrow_spread_stop_enabled = bool(_nss.get("enabled", False))
+        self.narrow_spread_stop_pct = float(_nss.get("pct_of_width", 0.40))
+        # SHADOW (2026-06-11): compute the %-of-width trigger and LOG when it
+        # WOULD fire each tick, WITHOUT acting (the credit+buffer stop stays the
+        # acting stop). Set with enabled=false to run a zero-risk head-to-head on
+        # the LIVE variant C before flipping the %-of-width stop on. The
+        # Brandon monitoring loop calls _brandon_check_pctwidth_shadow_stop.
+        self.narrow_spread_stop_shadow = bool(_nss.get("shadow", False))
+        # CONFIRMED shadow (2026-06-25): a SECOND shadow variant that requires the
+        # %-of-width breach to PERSIST this many seconds before it "would fire"
+        # (MKT-046-style), to filter the whipsaw spikes that recover — the
+        # premature stops that made the raw %-width shadow net-negative over C's
+        # history. Logged as A2-SHADOW-CONFIRMED; never acts.
+        self.narrow_spread_stop_confirm_seconds = float(_nss.get("confirm_seconds", 10.0))
+        _sh = _nss.get("settlement_hold", {}) or {}
+        self.settlement_hold_enabled = bool(_sh.get("enabled", True))
+        self.settlement_hold_itm_pct = float(_sh.get("itm_pct_of_width", 0.70))
+        self.settlement_hold_minutes = float(_sh.get("minutes_before_close", 20.0))
+        if self.narrow_spread_stop_enabled:
+            logger.info(
+                f"  A2 narrow-spread stop ENABLED: trigger at {self.narrow_spread_stop_pct:.0%} of width "
+                f"| settlement-hold {'on' if self.settlement_hold_enabled else 'off'} "
+                f"(>{self.settlement_hold_itm_pct:.0%} ITM within {self.settlement_hold_minutes:.0f}min of close)"
+            )
+
+        # MKT-046: anti-spike breach-confirmation window (seconds), used by
+        # _check_stop_with_confirmation when MKT-036 (the 75s timer) is
+        # disabled — which it is on every variant. Was a hardcoded 10s
+        # constant; made configurable 2026-08-28 after a full-history study
+        # of B (16 delayed stops, 3 months) and C (6 delayed stops) found
+        # ZERO cases where the wait ever avoided a stop that didn't happen
+        # anyway, and 19 of 22 delayed stops closed at a WORSE price for
+        # having waited (never better) — see bots/hydra/__init__.py version
+        # history for the full study. Defaults to 10.0 (unchanged behavior)
+        # everywhere except where a variant's own config overrides it.
+        self.mkt046_confirm_seconds = float(strategy_cfg.get("mkt046_confirm_seconds", 10.0))
+
         # Price-based stop: trigger when SPX reaches within N points of the short strike.
         # When set, replaces the credit-based spread-value check for ALL entry types
         # (full IC, call-only, put-only). Set to None to use credit-based stop (default).
@@ -341,22 +492,37 @@ class HydraStrategy(MEICStrategy):
         long_salvage = config.get("long_salvage", {})
         self.short_only_stop = long_salvage.get("short_only_stop", False)
 
-        # MKT-035: downday_theoretical_put_credit must be set BEFORE super().__init__()
-        # because recovery (_reconstruct_entry_from_positions) uses it to compute call-only
-        # stop levels. Without this, the getattr fallback in recovery uses $2.60 instead
-        # of the configured value.
+        # MKT-035: downday_theoretical_put_credit must be set BEFORE
+        # super().__init__() because the MEIC base __init__ runs position
+        # recovery, which (re)computes call-only stop levels and reads
+        # this value. Without it the getattr fallback uses $2.60 instead
+        # of the configured value. (Post-F4.8 HYDRA recovery is
+        # state-file-authoritative and no longer calls
+        # _reconstruct_entry_from_positions, but the set-before-super
+        # ordering is still required for the base __init__'s use.)
         self.downday_theoretical_put_credit = float(strategy_cfg.get("downday_theoretical_put_credit", 2.60)) * 100
 
         # API pacing multiplier — multiplies the monitoring loop's recommended
         # check interval AND main.py's status_interval so non-canonical
-        # variants pace their Saxo calls more loosely. Defaults to 1.0
-        # (no change). When 3+ variants run simultaneously, this is the lever
-        # that keeps the combined Saxo API rate under the ~60 req/min sustained
-        # limit. Variant A: 1.0 (live, safety-critical), B: 1.5, C: 2.0.
+        # variants pace their IBKR calls more loosely. Defaults to 1.0
+        # (no change). When 3+ variants run simultaneously, this helps keep
+        # combined IBKR traffic under the broker's global rate gate
+        # (CALYPSO_IBKR_MAX_RPS=5, below IBKR's 10 req/s/session).
+        # Variant A: 1.0 (live, safety-critical), B: 2.0, C: 2.0.
         # Vigilant mode is intentionally NOT scaled — when a stop is near, we
         # need fast detection on every variant (still cheap because vigilant
         # only kicks in for one entry at a time).
-        self.api_pacing_multiplier = float(strategy_cfg.get("api_pacing_multiplier", 1.0))
+        # L-M11: read from the strategy block first, then fall back to the
+        # config ROOT. B/C configs historically placed api_pacing_multiplier at
+        # the root, so a strategy-block-only read silently left them at 1.0x
+        # (full 10s cadence) instead of the intended 2.0x — extra IBKR request
+        # pressure that the pacing design exists to avoid.
+        self.api_pacing_multiplier = float(
+            strategy_cfg.get(
+                "api_pacing_multiplier",
+                config.get("api_pacing_multiplier", 1.0),
+            )
+        )
         if self.api_pacing_multiplier != 1.0:
             logger.info(f"  API pacing multiplier: {self.api_pacing_multiplier}x (variant={HYDRA_VARIANT_ID or 'a'})")
 
@@ -470,7 +636,7 @@ class HydraStrategy(MEICStrategy):
         self._pnl_history: list = []
 
         # Call parent init (this sets up everything else including recovery)
-        super().__init__(saxo_client, config, logger_service, dry_run, alert_service)
+        super().__init__(broker, config, logger_service, dry_run, alert_service)
 
         logger.info(f"HYDRA using state file: {self.state_file}")
         logger.info(f"HYDRA using metrics file: {self.metrics_file}")
@@ -532,6 +698,60 @@ class HydraStrategy(MEICStrategy):
         self._early_close_pnl = None    # Net P&L locked in at early close
         logger.info(f"  Early close (MKT-018): {'ENABLED' if self.early_close_enabled else 'DISABLED'} at {self.early_close_roc_threshold*100:.1f}% ROC")
 
+        # MKT-047 (2026-06-17): EOD safety flatten. Force-close every open 0DTE
+        # short BEFORE the un-closable final-minutes window — earlier on FOMC
+        # announcement days — so a late breach can't ride to max loss. On
+        # 2026-06-17 (FOMC) variant C's E#1 put stopped at 15:57 but EMERGENCY-001
+        # could not fill before the 16:00 expiry ("Order is already expired" ×5)
+        # → full put-spread max loss. This is a SAFETY exit (NOT profit-gated like
+        # MKT-018) and pairs with the near-expiry MARKET-order escalation in
+        # base_strategy._place_marketable_close.
+        _eod = strategy_config.get("eod_flatten", {}) or {}
+        self.eod_flatten_enabled = bool(_eod.get("enabled", True))
+        self.eod_flatten_time_et = str(_eod.get("time_et", "15:50"))
+        self.eod_flatten_time_fomc_et = str(_eod.get("time_fomc_et", "15:40"))
+        # When within this many minutes of the actual market close, the emergency
+        # close escalates straight to a true MARKET order (a crossing limit can
+        # chase-and-miss a fast tape near expiry). 0 disables the escalation.
+        self.eod_flatten_market_minutes = float(_eod.get("market_order_minutes", 6.0))
+        # OTM-skip (2026-06-25; made PER-SIDE 2026-07-06): leave any alive SHORT that
+        # is at least this many points OTM to cash-settle worthless for FREE, instead
+        # of buying it back in the un-closable window. Data-derived: over 84 days SPX
+        # never moved >=20pt in the final 10 min (max 18.4), so a >=20pt-OTM short's
+        # settlement risk is ~0% while closing it burns the close cost + commission.
+        # Applied PER SIDE: a comfortably-OTM side rides to expiry even when the
+        # sibling side on the same entry is at-risk. The old per-ENTRY gate closed
+        # BOTH sides whenever EITHER was within the cushion — on 2026-07-06 that bought
+        # back C's 72-77pt-OTM puts (calls only ~18pt OTM) for a needless debit +
+        # commission, giving back ~$215 of the day's profit for a $0.35 net. Threshold
+        # lowered 25 -> 20 the same day to match the 84-day final-10-min max move
+        # (18.4pt). 0 disables the skip (always close — the pre-2026-06-25 behavior).
+        # Full analysis: docs/HYDRA_HOLD_IF_SAFE_ANALYSIS.md + the final-10-min study.
+        self.eod_flatten_skip_otm_pts = float(_eod.get("skip_otm_pts", 20.0))
+        self._eod_flatten_done = False  # one-shot latch; reset each new ET day
+        # MKT-047-RECHECK: (entry_number, side) -> last-failed-close time.
+        # In-memory only (not persisted to hydra_state.json) — a same-day
+        # restart during the ~10min EOD tail window resets any cooldown in
+        # progress. Low risk: the per-tick wall-clock budget in
+        # _check_eod_flatten_recheck already bounds how much a REPEATED
+        # failure can compound within a single process lifetime, and a
+        # freshly-restarted process re-attempts a failed close immediately
+        # rather than silently waiting out a cooldown, which is the safer
+        # direction for a safety-net check to fail in.
+        self._eod_recheck_failed_at = {}
+        # MKT-047-RECHECK: round-robin index into active_entries for
+        # _check_eod_flatten_recheck's per-tick iteration order — prevents a
+        # perpetually-stuck early entry from starving later entries of
+        # recheck coverage across many ticks (round-2 review finding).
+        self._eod_recheck_next_start_idx = 0
+        logger.info(
+            f"  EOD safety flatten (MKT-047): "
+            f"{'ENABLED' if self.eod_flatten_enabled else 'DISABLED'} "
+            f"@ {self.eod_flatten_time_et} ET ({self.eod_flatten_time_fomc_et} on FOMC); "
+            f"MARKET-order close inside {self.eod_flatten_market_minutes:.0f}min of close; "
+            f"per-side skip shorts >= {self.eod_flatten_skip_otm_pts:.0f}pt OTM"
+        )
+
         # MKT-021: Pre-entry ROC gate - skip remaining entries if ROC already
         # exceeds early close threshold. Only active when MKT-018 is enabled.
         # Currently disabled (MKT-018 intentionally off).
@@ -570,6 +790,25 @@ class HydraStrategy(MEICStrategy):
         else:
             logger.info(f"  One-sided entries: DISABLED (skip if either side non-viable)")
 
+        # MKT-048 (2026-06-22): fillability gate. MKT-011 decides viability on
+        # MID prices, but real fills are long@ask / short@bid — so a side can
+        # clear the mid threshold yet be UNFILLABLE as a credit spread (its
+        # short_bid − long_ask is a debit). That side then fails at leg 3 when
+        # the placement net-credit floor refuses to leg into a debit, AFTER
+        # buying the protective long: 3 retries, long-leg bleed, a HIGH
+        # watchdog alert, and put-only anyway (2026-06-22 C Entry#1). When
+        # enabled (default), the gate vetoes such a side UP FRONT so the
+        # existing one-sided routing books it cleanly with zero retries. The
+        # veto is FAIL-OPEN — it only fires on a CONFIRMED debit, never on a
+        # missing / crossed quote. Set false to restore pure mid-based gating.
+        self.mkt011_fillability_gate_enabled = bool(
+            strategy_config.get("mkt011_fillability_gate_enabled", True)
+        )
+        logger.info(
+            f"  MKT-048 fillability gate: "
+            f"{'ENABLED' if self.mkt011_fillability_gate_enabled else 'DISABLED'}"
+        )
+
         # Override min credit from base class $0.50 for HYDRA.
         # NOTE: These base values are effectively dead when vix_regime is enabled and all
         # regime slots are filled (live config as of 2026-04-14). _apply_vix_regime_overrides()
@@ -587,8 +826,14 @@ class HydraStrategy(MEICStrategy):
         # regime is disabled.
         _call_floor = strategy_config.get("call_credit_floor", None)
         _put_floor = strategy_config.get("put_credit_floor", None)
-        self.call_credit_floor = float(_call_floor) * 100 if _call_floor is not None else self.min_viable_credit_per_side - 10
-        self.put_credit_floor = float(_put_floor) * 100 if _put_floor is not None else self.min_viable_credit_put_side - 10
+        # AUDIT #62: the legacy "min - $0.10" fallback floor MUST stay a positive
+        # credit. For sub-$0.10 regime/min credits it would otherwise go to 0 or
+        # negative, and the credit-viability gate (which accepts a side when
+        # estimated >= floor) would then pass a net-DEBIT spread as a "minimum
+        # viable CREDIT". Clamp to 1 cent. Explicit operator-set floors are
+        # honored as-is.
+        self.call_credit_floor = float(_call_floor) * 100 if _call_floor is not None else max(1, self.min_viable_credit_per_side - 10)
+        self.put_credit_floor = float(_put_floor) * 100 if _put_floor is not None else max(1, self.min_viable_credit_put_side - 10)
         logger.info(
             f"  Min viable credit - call: ${self.min_viable_credit_per_side / 100:.2f} "
             f"(floor: ${self.call_credit_floor / 100:.2f}), "
@@ -848,7 +1093,7 @@ class HydraStrategy(MEICStrategy):
             vix: Current VIX level
             side: "call" or "put" — determines which floor to use
         """
-        spread_width = round(vix * self.spread_vix_multiplier / 5) * 5
+        spread_width = self._snap_to_grid(vix * self.spread_vix_multiplier)
         if side == "put":
             spread_width = max(self.put_min_spread_width, spread_width)
         else:
@@ -859,6 +1104,15 @@ class HydraStrategy(MEICStrategy):
     # =========================================================================
     # OVERRIDE: Strike calculation with wider starting OTM (MKT-024)
     # =========================================================================
+
+    def _snap_to_grid(self, value: float) -> float:
+        """Round to the nearest strike-grid increment (MKT-024/027 candidate
+        generation). Was a hardcoded 5pt grid; now self.strike_increment, so a
+        different-increment underlying can be configured. With increment 5
+        (the default) this is byte-identical to the old round(x / 5) * 5.
+        """
+        inc = self.strike_increment
+        return round(value / inc) * inc
 
     def _calculate_strikes(self, entry: HydraIronCondorEntry) -> bool:
         """
@@ -892,14 +1146,14 @@ class HydraStrategy(MEICStrategy):
             vix = 15.0
 
         # Round SPX to nearest 5 (SPX strikes are 5-point increments)
-        rounded_spx = round(spx / 5) * 5
+        rounded_spx = self._snap_to_grid(spx)
 
         # Same base OTM calculation as parent MEIC
         base_distance_at_vix15 = 40  # Points OTM for ~8 delta at VIX 15
         delta_adjustment = 8.0 / self.target_delta
         vix_factor = max(0.7, min(2.5, vix / 15.0))
         otm_distance = base_distance_at_vix15 * vix_factor * delta_adjustment
-        otm_distance = round(otm_distance / 5) * 5
+        otm_distance = self._snap_to_grid(otm_distance)
         otm_distance = max(25, min(120, otm_distance))
 
         # MKT-024: Apply separate multipliers for wider starting distance.
@@ -907,9 +1161,9 @@ class HydraStrategy(MEICStrategy):
         # call settled at 116pt) with margin and the theoretical 8-delta
         # strike at VIX 50 (~133pt). Larger clamps just waste MKT-020/022
         # scan distance — settled strikes don't actually land further OTM.
-        call_otm = round((otm_distance * self.call_starting_otm_multiplier) / 5) * 5
+        call_otm = self._snap_to_grid(otm_distance * self.call_starting_otm_multiplier)
         call_otm = max(25, min(180, call_otm))
-        put_otm = round((otm_distance * self.put_starting_otm_multiplier) / 5) * 5
+        put_otm = self._snap_to_grid(otm_distance * self.put_starting_otm_multiplier)
         put_otm = max(25, min(180, put_otm))
 
         # MKT-027/028: Asymmetric VIX-adjusted spread widths
@@ -1262,6 +1516,25 @@ class HydraStrategy(MEICStrategy):
         window_end = scheduled_dt + timedelta(minutes=ENTRY_WINDOW_MINUTES)
         return scout_start <= now <= window_end
 
+    def _entry_window_remaining_sec(self) -> Optional[float]:
+        """Seconds left in the CURRENT entry's PLACEMENT window
+        (scheduled_time + ENTRY_WINDOW_MINUTES), or None when there is no
+        current entry index. Used to cap the MKT-043 calm wait so it leaves
+        headroom to actually place the order (forensic: the calm wait could
+        otherwise consume the whole window → entry never placed). Negative when
+        the window has already closed.
+        """
+        if self._next_entry_index >= len(self.entry_times):
+            return None
+        now = get_us_market_time()
+        scheduled_time = self.entry_times[self._next_entry_index]
+        scheduled_dt = now.replace(
+            hour=scheduled_time.hour, minute=scheduled_time.minute,
+            second=scheduled_time.second, microsecond=0,
+        )
+        window_end = scheduled_dt + timedelta(minutes=ENTRY_WINDOW_MINUTES)
+        return (window_end - now).total_seconds()
+
     def _is_daily_loss_limit_reached(self) -> bool:
         """Disabled for HYDRA — bot always attempts all entries."""
         return False
@@ -1404,18 +1677,802 @@ class HydraStrategy(MEICStrategy):
             self._scouting_active = False
             self._cached_chart_bars = None
 
-    def _refresh_chart_data_for_scouting(self):
-        """MKT-031: Fetch 1-min OHLC bars for ATR calculation. Caches result."""
+    @staticmethod
+    def _normalize_chart_bar(raw_bar: Dict[str, Any]) -> Dict[str, Any]:
+        """Translate an IBKR-raw chart bar into HYDRA's normalized shape.
+
+        Returns a dict with keys:
+          open, high, low, close: float (0.0 if missing/bad)
+          volume: int (0 if missing/bad)
+          timestamp_ms: int (epoch ms, 0 if missing or unparseable)
+
+        Args:
+            raw_bar: a bar dict from IBClient.get_chart_data — a flat
+                list of entries with lowercase compact keys (o/h/l/c/v/t).
+
+        Defensive: missing/null/empty/malformed values gracefully degrade
+        to 0 rather than raising. Caller filters out zero-priced bars
+        downstream (see ATR + EMA loops).
+
+        Static so it's unit-testable without HydraStrategy construction.
+
+        Item 3: the pure logic lives in shared.market_data_adapter; this is a
+        thin delegating wrapper so existing call sites stay unchanged.
+        """
+        return market_data_adapter.normalize_chart_bar(raw_bar)
+
+    def _read_recent_bars(
+        self,
+        *,
+        horizon_min: int,
+        count: int,
+    ) -> Optional[List[Dict[str, Any]]]:
+        """Fetch the most recent `count` OHLC bars at `horizon_min` granularity.
+
+        Returns a list of normalized bars (see _normalize_chart_bar for
+        shape) ordered oldest-first. Returns None on fetch failure or
+        empty broker response — caller falls back to NEUTRAL trend / 0
+        ATR score.
+
+        Translates IBKR's flat list + compact key format to the
+        normalized shape. The IBKR `period` parameter is a lookback
+        window; we request a buffer beyond `count` minutes then slice
+        the last N bars.
+
+        Errors are logged and converted to None — chart fetch is best-
+        effort, not a trading-blocking dependency.
+        """
         try:
-            chart_data = self.client.get_chart_data(
-                uic=self.underlying_uic, asset_type="CfdOnIndex",
-                horizon=self.chart_horizon_minutes, count=self.chart_bars_count
+            # 1-min bars over a window large enough to cover `count`
+            # entries. IBKR's `period` accepts "Nmin" / "Nh" / etc. —
+            # we use a generous window then slice.
+            bar_arg = (
+                f"{horizon_min}min" if horizon_min < 60
+                else f"{max(horizon_min // 60, 1)}h"
             )
-            if chart_data and "Data" in chart_data:
-                self._cached_chart_bars = chart_data["Data"]
-                self._cached_chart_time = get_us_market_time()
+            # Request count + buffer for resilience (closed-market
+            # gaps, partial bars). 60-min floor handles short
+            # lookbacks.
+            period_minutes = max(count * horizon_min + 10, 60)
+            # IBKR's CP API caps the "min" period unit at 30; a
+            # larger lookback MUST be expressed in hours (1-8h) or
+            # it is rejected and the IB-path chart fetch silently
+            # fails (→ NEUTRAL trend / 0 ATR for the whole session).
+            if period_minutes <= 30:
+                period_arg = f"{period_minutes}min"
+            else:
+                period_hours_unclamped = (period_minutes + 59) // 60
+                period_hours = min(period_hours_unclamped, 8)
+                # P7-audit L2: log when the IBKR 8-hour ceiling clamps
+                # the requested window — silent clamping would mask a
+                # caller asking for more history than IBKR's CP API can
+                # serve (which on a Monday morning could mean missing
+                # Friday's session entirely).
+                if period_hours_unclamped > 8:
+                    logger.warning(
+                        "_read_recent_bars: requested lookback "
+                        "%d minutes (~%dh) exceeds IBKR's 8h ceiling — "
+                        "clamping to 8h. Caller may receive fewer bars "
+                        "than requested.",
+                        period_minutes, period_hours_unclamped,
+                    )
+                period_arg = f"{period_hours}h"
+            raw_bars = self.broker.get_chart_data(
+                symbol=self.underlying_symbol, bar=bar_arg, period=period_arg,
+                outside_rth=False,
+            )
+            if not raw_bars:
+                return None
+            tail = raw_bars[-count:] if len(raw_bars) > count else raw_bars
+            return [
+                self._normalize_chart_bar(b)
+                for b in tail
+                if isinstance(b, dict)
+            ]
         except Exception as e:
-            logger.warning(f"MKT-031: Chart data fetch failed: {e}")
+            logger.warning(
+                f"_read_recent_bars: chart fetch failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return None
+
+    def _read_option_quote(self, instrument_id) -> Optional[Dict[str, Any]]:
+        """Fetch a single option's quote from the active broker, returning
+        normalized fields.
+
+        Returns dict or None on fetch failure / no data:
+            {
+              "bid": Optional[float],   # best bid; None if not quoted
+              "ask": Optional[float],   # best ask; None if not quoted
+              "last": Optional[float],  # last traded; None if no trades
+              "mid": Optional[float],   # (bid+ask)/2; None if either side missing
+              "mark": Optional[float],  # broker's mark price
+            }
+
+        ``IBClient.get_quote`` returns a flat dict already in normalized
+        shape — we just slice the price fields we use.
+
+        Why None instead of 0.0 for missing fields: a 0 bid is
+        semantically different from "no bid available". Callers must
+        null-check before computing spreads or comparing thresholds.
+        """
+        def _f(v):
+            if v is None or v == "":
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        try:
+            raw = self.broker.get_quote(int(instrument_id))
+            if not raw:
+                return None
+            # IBKR-audit #11: surface the broker freshness flag (6509) on the
+            # legs we actually trade. First char R=RealTime / D=Delayed /
+            # Z=Frozen / Y=Frozen-Delayed / N=Not-Subscribed. Callers gate on it
+            # via _option_quote_is_realtime(); a non-'R' option quote during RTH
+            # means a delayed/frozen/unentitled OPRA feed — do not price a trade
+            # off it. Warns on every non-'R' read (no rate-limit) so a feed-
+            # entitlement problem stays visible; expected to be silent in
+            # steady state, so the volume itself signals a problem.
+            avail = raw.get("availability")
+            if avail and str(avail)[:1].upper() != "R":
+                logger.warning(
+                    "DATA_QUALITY: option %s quote NOT real-time (6509=%r) — "
+                    "delayed/frozen/unentitled OPRA feed?", instrument_id, avail
+                )
+            return {
+                "bid": _f(raw.get("bid")),
+                "ask": _f(raw.get("ask")),
+                "last": _f(raw.get("last")),
+                "mid": _f(raw.get("mid")),
+                "mark": _f(raw.get("mark")),
+                "availability": avail,
+            }
+        except Exception as e:
+            logger.warning(
+                f"_read_option_quote({instrument_id}) failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return None
+
+    def _option_quote_is_realtime(self, quote: Optional[Dict[str, Any]]) -> bool:
+        """True if an option quote is real-time enough to price a trade off.
+
+        IBKR-audit #11: gates on field 6509 (``availability``). The first char
+        ``R`` (RealTime) passes; ``D``/``Z``/``Y``/``N``
+        (Delayed/Frozen/Frozen-Delayed/Not-Subscribed) are blocked so a
+        delayed/frozen/unentitled OPRA feed never drives strike selection or a
+        salvage decision.
+
+        Semantics chosen to FAIL CLOSED without destabilizing the common case:
+        - ``None``/falsy quote (no quote at all) → ``False`` (unusable).
+        - quote present but ``availability`` missing/None → ``True``. IBKR's
+          batch endpoint does not always populate 6509; mirroring
+          ``MarketData.update_spx``, we reject only an EXPLICIT non-'R' flag so
+          a normal RTH session (where 6509 is 'R' or absent) is unaffected.
+        - ``availability`` present → ``True`` iff its first char is 'R'.
+        """
+        if not quote:
+            return False
+        avail = quote.get("availability")
+        if avail is None:
+            return True
+        return str(avail)[:1].upper() == "R"
+
+    def _read_option_quotes_batch(
+        self,
+        instrument_ids: List,
+    ) -> Dict[Any, Dict[str, Any]]:
+        """Fetch many option quotes from the active broker in one batch.
+
+        Returns ``{instrument_id: {"bid","ask","last","mid","mark",
+        "availability"}}`` — the same per-quote shape as
+        :meth:`_read_option_quote`, keyed by instrument id. Instruments the
+        broker returns nothing for are simply absent from the result. Returns
+        ``{}`` on a batch-level failure (the MKT-020/022 call sites already
+        handle empty maps).
+
+        ``IBClient.get_quotes_batch`` returns a list of flat normalized
+        dicts. The CP API caps a batch at 100 conids, so this chunks at
+        100/call and re-keys by conid.
+
+        Why None (not 0.0) for missing fields: a 0 bid means something
+        different from "not quoted". Callers null-check before computing
+        spreads — see :meth:`_read_option_quote`.
+
+        Args:
+            instrument_ids: IBKR conids, typically from
+                :meth:`_read_option_chain`.
+
+        Returns:
+            ``{instrument_id: {bid, ask, last, mid, mark}}``.
+        """
+        def _f(v):
+            if v is None or v == "":
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        if not instrument_ids:
+            return {}
+
+        out: Dict[Any, Dict[str, Any]] = {}
+        try:
+            # Chunk at 100 conids (CP API batch cap).
+            conids = [int(i) for i in instrument_ids]
+            for start in range(0, len(conids), 100):
+                chunk = conids[start:start + 100]
+                rows = self.broker.get_quotes_batch(chunk) or []
+                rows_with_conid = 0
+                for row in rows:
+                    cid = row.get("conid")
+                    if cid is None:
+                        continue
+                    rows_with_conid += 1
+                    out[int(cid)] = {
+                        "bid": _f(row.get("bid")),
+                        "ask": _f(row.get("ask")),
+                        "last": _f(row.get("last")),
+                        "mid": _f(row.get("mid")),
+                        "mark": _f(row.get("mark")),
+                        # IBKR-audit #11: surface the freshness flag (6509) on
+                        # batch legs too, so candidate-strike pricing can gate on
+                        # it via _option_quote_is_realtime (parity with the
+                        # single-quote _read_option_quote path).
+                        "availability": row.get("availability"),
+                    }
+                # P7-audit L3: surface row drops. Two distinct shapes:
+                # (a) rows we got but couldn't key (no `conid` field) —
+                # signals an ibind response-shape change. (b) chunk size
+                # vs returned rows — signals IBKR didn't quote some
+                # requested conids (illiquid, halted, stale conid). Both
+                # are diagnostically useful; debug-level so steady-state
+                # quiet, but operators can flip to DEBUG when investigating.
+                rows_dropped = len(rows) - rows_with_conid
+                if rows_dropped:
+                    logger.warning(
+                        "_read_option_quotes_batch: %d/%d rows had no "
+                        "conid field (ibind response-shape change?). "
+                        "Investigate first row sample: %r",
+                        rows_dropped, len(rows), rows[0] if rows else None,
+                    )
+                if rows_with_conid < len(chunk):
+                    logger.debug(
+                        "_read_option_quotes_batch: requested %d conids, "
+                        "broker returned %d quoted rows — %d missing "
+                        "(illiquid / halted / invalid conid).",
+                        len(chunk), rows_with_conid,
+                        len(chunk) - rows_with_conid,
+                    )
+            return out
+        except Exception as e:
+            logger.warning(
+                f"_read_option_quotes_batch failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return {}
+
+    def _read_option_greeks(self, instrument_id) -> Optional[Dict[str, Any]]:
+        """Fetch an option's greeks from the active broker, normalized.
+
+        Returns ``{"delta","gamma","theta","vega","iv","open_interest"}``
+        or None on fetch failure / no data. Greeks are written to the
+        analytics DB only (``trade_entries`` greek columns) — never used
+        for trading decisions, so a None here is harmless.
+
+        ``IBClient.get_option_greeks`` already returns lowercase greek
+        fields — sliced directly.
+
+        Args:
+            instrument_id: IBKR conid.
+
+        Returns:
+            ``{delta, gamma, theta, vega, iv, open_interest}`` or None.
+        """
+        def _f(v):
+            if v is None or v == "":
+                return None
+            try:
+                return float(v)
+            except (TypeError, ValueError):
+                return None
+
+        try:
+            raw = self.broker.get_option_greeks(int(instrument_id))
+            if not raw:
+                return None
+            return {
+                "delta": _f(raw.get("delta")),
+                "gamma": _f(raw.get("gamma")),
+                "theta": _f(raw.get("theta")),
+                "vega": _f(raw.get("vega")),
+                "iv": _f(raw.get("iv")),
+                "open_interest": _f(raw.get("open_interest")),
+            }
+        except Exception as e:
+            logger.warning(
+                f"_read_option_greeks({instrument_id}) failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return None
+
+    @staticmethod
+    def _quote_mid(quote: Optional[Dict[str, Any]]) -> float:
+        """Mid price from a normalized quote dict.
+
+        Consumes the :meth:`_read_option_quote` / :meth:`_read_option_quotes_batch`
+        shape. Prefers the broker's ``mid``; falls back to
+        ``(bid + ask) / 2``, then to ``last`` / ``mark``. Returns
+        ``0.0`` when nothing is quotable.
+        """
+        if not quote:
+            return 0.0
+        mid = quote.get("mid")
+        if mid is not None:
+            return mid
+        bid, ask = quote.get("bid"), quote.get("ask")
+        if bid is not None and ask is not None and bid <= ask:
+            # L-M7: only average a SANE (uncrossed) book. During fast moves a
+            # quote can be crossed (bid > ask); (bid+ask)/2 on a crossed market
+            # is nonsense and can drive a false stop or mask a real one. Mirror
+            # the L9 guard in _parse_quote_row — fall through to last/mark.
+            return (bid + ask) / 2
+        return quote.get("last") or quote.get("mark") or 0.0
+
+    def _read_open_positions(self, *, strict: bool = False) -> List[Dict[str, Any]]:
+        """All open option positions from the active broker, normalized.
+
+        Returns a list of dicts with stable broker-agnostic keys:
+            instrument_id  : int            # IBKR conid / Saxo UIC
+            quantity       : int            # signed — negative = short
+            side           : str            # "LONG" | "SHORT" | "FLAT"
+            strike         : Optional[float]
+            right          : Optional[str]  # "C" | "P"
+            expiry         : Optional[date] | Optional[str]
+            unrealized_pnl : Optional[float]
+            position_id    : Optional[str]  # always None on IBKR
+            raw            : dict           # untouched broker row
+
+        Returns ``[]`` on a fetch failure — every F4 call site treats an
+        empty list as "the broker shows no positions".
+
+        ``IBClient.get_positions()`` returns raw IBKR rows; each is run
+        through ``_normalize_position_dict`` and the option rows kept.
+        IBKR has no per-leg position id, so ``position_id`` is None — F4
+        reconciliation keys on ``(instrument_id, right, quantity)``
+        instead (see ``docs/migration/F4_POSITION_FLOW_DESIGN.md``).
+
+        Args:
+            strict: when False (default) a fetch failure is swallowed and
+                ``[]`` returned — fine for callers that treat empty
+                defensively. When True a fetch failure re-raises, so
+                settlement / overnight checks can tell a real empty
+                account apart from a broker outage and halt
+                conservatively instead of mistaking failure for "all
+                settled".
+
+        Returns:
+            list of normalized open-option-position dicts.
+        """
+        out: List[Dict[str, Any]] = []
+        try:
+            raw_list = self.broker.get_positions() or []
+            for raw in raw_list:
+                try:
+                    norm = _normalize_position_dict(raw)
+                except ValueError as e:
+                    logger.debug(
+                        f"_read_open_positions: skipping unparseable "
+                        f"IB position ({e})"
+                    )
+                    continue
+                if norm.get("asset_type") != "OPT":
+                    continue  # HYDRA only reconciles option legs
+                # 2026-06-03 fix: IBKR PAPER leaves an expired 0DTE in the
+                # position list as a quantity-0 "zombie" row (settled, but not
+                # purged for up to ~a day). A zero-qty row is NOT an open
+                # position — including it false-triggered the STATE-004
+                # overnight-0DTE halt at the new-day reset (which froze the bot
+                # all day and would recur, since 0DTE expires daily). A genuine
+                # open leg always carries a non-zero SIGNED quantity, so real
+                # overnight positions still trip the halt as intended.
+                _q = norm.get("quantity")
+                if _q is None or _q == 0:
+                    logger.debug(
+                        "_read_open_positions: skipping settled/zombie row "
+                        "conid=%s qty=%s (expired 0DTE not yet purged by IBKR)",
+                        norm.get("instrument_id"), _q,
+                    )
+                    continue
+                out.append({
+                    "instrument_id": norm["instrument_id"],
+                    "quantity": norm["quantity"],
+                    "side": norm["side"],
+                    "strike": norm.get("strike"),
+                    "right": norm.get("right"),
+                    "expiry": norm.get("expiry"),
+                    "unrealized_pnl": norm.get("unrealized_pnl"),
+                    # IBKR has no per-leg position id — see docstring.
+                    "position_id": None,
+                    "raw": norm.get("raw", raw),
+                })
+            return out
+        except Exception as e:
+            logger.warning(
+                f"_read_open_positions failed ({type(e).__name__}: {e})"
+            )
+            if strict:
+                # strict callers (settlement / overnight checks) must be
+                # able to tell a fetch failure apart from a genuine empty
+                # account — re-raise so they can halt conservatively
+                # rather than mistake a failure for "all settled".
+                raise
+            return []
+
+    def _position_is_open(
+        self,
+        instrument_id,
+        *,
+        right: Optional[str] = None,
+        positions: Optional[List[Dict[str, Any]]] = None,
+        min_abs_qty: int = 1,
+    ) -> bool:
+        """True if the broker shows an open option position at
+        ``instrument_id`` with absolute quantity >= ``min_abs_qty``.
+
+        The F4 reconciliation primitive. Saxo gave every leg a stable
+        per-leg ``PositionId`` and reconciliation was set membership;
+        IBKR positions are conid-keyed with a signed *net* quantity
+        (same-strike legs merge into one row). This predicate answers
+        the quantity question — the form both brokers can answer — and
+        replaces the Saxo ``PositionId in actual_ids`` checks. See
+        ``docs/migration/F4_POSITION_FLOW_DESIGN.md`` §4.
+
+        Args:
+            instrument_id: IBKR conid / Saxo UIC of the leg. None → False.
+            right: optional ``"C"``/``"P"`` filter — when given, a
+                position only counts if its right matches. Defensive; a
+                conid already implies a right on IBKR.
+            positions: a pre-fetched :meth:`_read_open_positions` list,
+                to avoid a re-fetch when checking many legs. None fetches
+                fresh.
+            min_abs_qty: minimum ``|quantity|`` to count as open
+                (default 1).
+
+        Returns:
+            True if a matching open position is found.
+        """
+        if instrument_id is None:
+            return False
+        if positions is None:
+            positions = self._read_open_positions()
+        target = str(instrument_id)
+        for p in positions:
+            if str(p.get("instrument_id")) != target:
+                continue
+            if right is not None and p.get("right") != right:
+                continue
+            if abs(p.get("quantity") or 0) >= min_abs_qty:
+                return True
+        return False
+
+    def _read_fx_rate(
+        self, base_currency: str, account_currency: str
+    ) -> Optional[float]:
+        """FX rate (``base_currency`` → ``account_currency``) from the
+        active broker (F5.3). Returns None on failure — callers treat a
+        missing rate as "skip the currency conversion".
+
+        ``IBClient.get_fx_rate`` takes ``(source, target)`` and returns
+        a float, so this is a thin wrapper + failure guard.
+        """
+        try:
+            return self.broker.get_fx_rate(base_currency, account_currency)
+        except Exception as e:
+            logger.warning(
+                f"_read_fx_rate({base_currency}->{account_currency}) failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return None
+
+    def _read_closed_position_price(
+        self, instrument_id, *, buy_or_sell: str,
+        not_before: Any = None, expect_quantity: Optional[int] = None,
+    ) -> Optional[Dict[str, Any]]:
+        """Closing execution price of a recently-closed leg, from the
+        active broker (F5.3).
+
+        Returns the broker's dict — ``IBClient.get_closed_position_price``
+        returns a mapping with a ``"closing_price"`` key — or None when
+        there is no match / on a fetch failure.
+
+        ``IBClient.get_closed_position_price`` takes a conid and scans
+        `/iserver/account/trades`.
+
+        ``not_before`` / ``expect_quantity`` (2026-09-10) are the
+        opening-vs-closing disambiguation hints. PASS THEM: matching on
+        (conid, side) alone is systematically wrong on a Brandon variant,
+        where the butterfly hedge's long leg sits at the threatened short's
+        own strike by construction, so its OPENING buy is indistinguishable
+        from the short's CLOSING buy. Without the hints the client refuses to
+        report a price whenever more than one execution matches — safe, but it
+        means P&L goes unbooked, so give it what you know.
+        """
+        if instrument_id is None:
+            return None
+        try:
+            return self.broker.get_closed_position_price(
+                int(instrument_id), buy_or_sell=buy_or_sell,
+                not_before=not_before, expect_quantity=expect_quantity,
+            )
+        except Exception as e:
+            logger.warning(
+                f"_read_closed_position_price({instrument_id}) failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return None
+
+    def _read_index_price(self, symbol: str):
+        """Spot price + broker freshness flag of an index (``"SPX"`` / ``"VIX"``)
+        from the active broker (F7.1). Returns ``(price, availability)`` —
+        ``availability`` is IBKR's 6509 flag (first char R=RealTime / D=Delayed /
+        Z=Frozen / Y=Frozen-Delayed / N=Not-Subscribed, possibly with secondary
+        chars) — or ``(None, None)`` on failure.
+
+        IBKR-audit #10: this used to return a bare float, so the ``availability``
+        plumbed into ``update_spx``/``update_vix`` (via ``_split_index_read``)
+        was always None and the freshness gate never fired. Now both SPX and VIX
+        resolve the index conid + ``get_quote`` and take mid → last → mark (the
+        same fallback ladder as ``get_vix_price`` — VIX's cash index delivers
+        only ``mark``), returning the broker's availability alongside.
+
+        Used by GAP-C ``_update_market_data`` and GAP-E ``_check_market_halt``.
+        """
+        try:
+            conid = self.broker.qualify_contract(symbol, sec_type="IND", exchange=self.exchange)
+            q = self.broker.get_quote(conid)
+            if not q:
+                return (None, None)
+            avail = q.get("availability")
+            # P7-audit M10: explicit `is not None` ladder, not an `or`-chain —
+            # a legitimate 0.0 quote (rare for an index but possible during a
+            # halt) is a price, not a fallback trigger.
+            for key in ("mid", "last", "mark"):
+                v = q.get(key)
+                if v is not None:
+                    return (v, avail)
+            return (None, avail)
+        except Exception as e:
+            logger.warning(
+                f"_read_index_price({symbol}) failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return (None, None)
+
+    def _read_account_balance(self) -> Dict[str, Any]:
+        """Account balance from the active broker (F7.1), keyed with the
+        field names :meth:`_check_buying_power` (ORDER-004) reads.
+        ``{}`` on failure.
+
+        Maps ``IBClient.get_balance()['tradable']`` to
+        ``MarginAvailableForTrading``. IBKR's balance does not surface
+        per-position margin-used / utilization — ``_check_buying_power``
+        ``.get()``s those with a 0 default, so omitting them merely
+        zeroes a diagnostic log line.
+        """
+        try:
+            bal = self.broker.get_balance() or {}
+            return {
+                "MarginAvailableForTrading": bal.get("tradable"),
+                "_raw": bal,
+            }
+        except Exception as e:
+            logger.warning(
+                f"_read_account_balance failed ({type(e).__name__}: {e})"
+            )
+            return {}
+
+    # ──────────────────────────────────────────────────────────────────
+    # F6 — order WRITE-path helpers (IBKR)
+    #
+    # These wrap IBClient's write primitives. The orchestration methods
+    # (`_place_option_order`, `_close_position_with_retry`, …) delegate
+    # leg placement / close to these helpers. See
+    # docs/migration/F6_ORDER_WRITE_PATH_DESIGN.md.
+    # ──────────────────────────────────────────────────────────────────
+
+    def _place_leg_order(
+        self,
+        *,
+        instrument_id,
+        side: str,
+        quantity: int,
+        order_type: str = "LMT",
+        limit_price: Optional[float] = None,
+        coid: Optional[str] = None,
+        ambiguous_on_timeout: bool = False,
+    ) -> Dict[str, Any]:
+        """Place ONE option leg on IBKR; place→poll-to-fill in one call.
+
+        Returns a normalized result dict:
+            ``{success, filled, order_id, fill_price, position_id, raw}``
+        — ``position_id`` is always None (IBKR has no per-leg position
+        id). ``filled`` is True only when the broker reports the full
+        ``quantity`` filled.
+
+        IBKR-only — callers branch on ``self.broker`` first; a None
+        broker is a programming error.
+
+        Args:
+            instrument_id: IBKR conid of the option leg.
+            side: ``"BUY"`` or ``"SELL"``.
+            quantity: contracts (positive int).
+            order_type: ``"LMT"`` or ``"MKT"``.
+            limit_price: required for LMT; ignored for MKT.
+            coid: optional client-order-id for retry-safety.
+        """
+        if self.broker is None:
+            raise RuntimeError(
+                "_place_leg_order is IBKR-only — caller must branch on "
+                "self.broker"
+            )
+        ib_type = "MKT" if str(order_type).upper().startswith("M") else "LMT"
+        # Fill timeout scales modestly with size. A serial multi-contract 0DTE
+        # fill needs more poll time than a 1-lot — the 2026-06-08 forensic found
+        # a 7-lot leg cut off mid-fill at the flat 30s default (a contributor to
+        # the partial-fill entry-blocker). fill-the-remainder (ORDER-010) handles
+        # anything beyond this, so the cap stays tight enough that 4 legs still
+        # fit the entry window. The BrokerClient HTTP read timeout tracks this
+        # per-call (broker_client._http_transport) so a still-filling order does
+        # NOT trip an L-H1 transport-timeout abort.
+        fill_timeout = min(30.0 + 3.0 * max(0, int(quantity) - 1), 45.0)
+        try:
+            res = self.broker.place_and_wait_for_fill(
+                conid=int(instrument_id),
+                side=str(side).upper(),
+                quantity=int(quantity),
+                order_type=ib_type,
+                limit_price=limit_price,
+                timeout_seconds=fill_timeout,
+                coid=coid,
+            )
+        except AmbiguousOrderError as e:
+            # The POST may have landed but is unconfirmed. Surface a distinct
+            # `ambiguous` flag so the caller ABORTS instead of re-placing under
+            # a new cOID (which would double-fill). Logged CRITICAL so ARGUS /
+            # the watchdog page it.
+            logger.critical(
+                f"_place_leg_order({instrument_id} {side} x{quantity} "
+                f"{ib_type}) AMBIGUOUS — order may be LIVE but unconfirmed "
+                f"(coid={coid}): {e}. Aborting leg, NOT resubmitting."
+            )
+            return {
+                "success": False, "filled": False, "ambiguous": True,
+                "order_id": None, "fill_price": None, "position_id": None,
+                "raw": None,
+            }
+        except Exception as e:
+            # L-H1: on an ENTRY place (ambiguous_on_timeout=True), a TRANSPORT /
+            # timeout failure means the order MAY have landed server-side — the
+            # broker runs place_and_wait_for_fill in a threadpool the client
+            # timeout does NOT cancel, so the POST can fill late. Re-placing
+            # under a new cOID would double-fill, so surface as AMBIGUOUS (the
+            # caller aborts the leg + reconciles) instead of a clean failure.
+            # We match transport-level signatures only ("unreachable",
+            # "transport failed", "timeout/timed out") so a legitimate broker
+            # REJECTION (e.g. insufficient margin — order never landed) still
+            # returns a clean, retry-safe failure. Closes/flattens pass
+            # ambiguous_on_timeout=False (they WANT a retry, not an abort).
+            msg_l = str(e).lower()
+            is_transport_ambiguous = (
+                "timeout" in msg_l
+                or "timed out" in msg_l
+                or "unreachable" in msg_l
+                or "transport failed" in msg_l
+            )
+            if ambiguous_on_timeout and is_transport_ambiguous:
+                logger.critical(
+                    f"_place_leg_order({instrument_id} {side} x{quantity} "
+                    f"{ib_type}) TRANSPORT FAILURE on entry place — order may be "
+                    f"LIVE but unconfirmed (coid={coid}): {type(e).__name__}: {e}. "
+                    f"Treating as AMBIGUOUS; aborting leg, NOT resubmitting."
+                )
+                return {
+                    "success": False, "filled": False, "ambiguous": True,
+                    "order_id": None, "fill_price": None, "position_id": None,
+                    "raw": None,
+                }
+            logger.warning(
+                f"_place_leg_order({instrument_id} {side} x{quantity} "
+                f"{ib_type}) failed ({type(e).__name__}: {e})"
+            )
+            return {
+                "success": False, "filled": False, "order_id": None,
+                "fill_price": None, "position_id": None, "raw": None,
+            }
+        filled_qty = res.get("filled_quantity") or 0
+        return {
+            "success": bool(res.get("order_id")),
+            "filled": filled_qty >= int(quantity),
+            # Surface the partial-fill count so callers can detect a leg
+            # that filled SOME but not all contracts (ORDER-010) instead of
+            # treating it as a clean miss and silently dropping the filled
+            # contracts into an untracked naked position.
+            "filled_quantity": int(filled_qty),
+            "requested_quantity": int(quantity),
+            "order_id": res.get("order_id"),
+            "fill_price": res.get("avg_fill_price"),
+            "position_id": None,  # IBKR has no per-leg position id
+            "raw": res,
+        }
+
+    def _close_leg_order(
+        self, *, instrument_id, side: str, quantity: int,
+        coid: Optional[str] = None,
+    ) -> Dict[str, Any]:
+        """Close ONE option leg on IBKR with a market order.
+
+        Thin wrapper over :meth:`_place_leg_order` — IBKR has no
+        open/close order flag; a close is just a market order in the
+        opposite direction (``side`` = the close direction: BUY to
+        close a short, SELL to close a long). Same normalized result.
+        """
+        return self._place_leg_order(
+            instrument_id=instrument_id, side=side, quantity=quantity,
+            order_type="MKT", coid=coid,
+        )
+
+    def _cancel_order(self, order_id) -> bool:
+        """Cancel a working order on the active broker. False on
+        failure."""
+        try:
+            return bool(self.broker.cancel_order(str(order_id)))
+        except Exception as e:
+            logger.warning(
+                f"_cancel_order({order_id}) failed ({type(e).__name__}: {e})"
+            )
+            return False
+
+    def _get_order_status(self, order_id) -> Dict[str, Any]:
+        """Current status of an order from the active broker. ``{}`` on
+        failure."""
+        try:
+            return self.broker.get_order_status(str(order_id)) or {}
+        except Exception as e:
+            logger.warning(
+                f"_get_order_status({order_id}) failed "
+                f"({type(e).__name__}: {e})"
+            )
+            return {}
+
+    def _get_open_orders(self) -> List[Dict[str, Any]]:
+        """All live orders on the active broker. ``[]`` on failure."""
+        try:
+            return self.broker.get_open_orders() or []
+        except Exception as e:
+            logger.warning(
+                f"_get_open_orders failed ({type(e).__name__}: {e})"
+            )
+            return []
+
+    def _refresh_chart_data_for_scouting(self):
+        """MKT-031: Fetch 1-min OHLC bars for ATR calculation. Caches result.
+
+        Stores NORMALIZED bars (keys: open/high/low/close/volume/timestamp_ms)
+        in self._cached_chart_bars — broker-independent shape so downstream
+        ATR/EMA code doesn't need to know whether IB or Saxo provided them.
+        """
+        bars = self._read_recent_bars(
+            horizon_min=self.chart_horizon_minutes,
+            count=self.chart_bars_count,
+        )
+        if bars:
+            self._cached_chart_bars = bars
+            self._cached_chart_time = get_us_market_time()
 
     # =========================================================================
     # MKT-031: SMART ENTRY WINDOWS — Scoring Engine
@@ -1465,10 +2522,11 @@ class HydraStrategy(MEICStrategy):
 
         bars = self._cached_chart_bars
 
-        # Saxo CFD data uses HighBid/LowBid/CloseBid, fallback to High/Low/Close
-        highs = [b.get("HighBid") or b.get("High", 0) for b in bars]
-        lows = [b.get("LowBid") or b.get("Low", 0) for b in bars]
-        closes = [b.get("CloseBid") or b.get("Close", 0) for b in bars]
+        # Cached bars are normalized by _read_recent_bars — keys are
+        # open/high/low/close/volume/timestamp_ms regardless of broker.
+        highs = [b.get("high", 0) for b in bars]
+        lows = [b.get("low", 0) for b in bars]
+        closes = [b.get("close", 0) for b in bars]
 
         # Filter zero prices
         valid = [(h, l, c) for h, l, c in zip(highs, lows, closes) if h > 0 and l > 0 and c > 0]
@@ -1589,6 +2647,29 @@ class HydraStrategy(MEICStrategy):
                 early_close_result = self._check_early_close()
                 if early_close_result:
                     return early_close_result
+
+        # MKT-047: EOD safety flatten. INTENTIONALLY fires in the final minutes
+        # (after MKT-018's < 15:45 window), force-closing any still-open 0DTE
+        # short before the un-closable expiry race. One-shot per day.
+        if (self.eod_flatten_enabled
+                and not self._eod_flatten_done
+                and len(self.daily_state.active_entries) > 0):
+            flatten_result = self._check_eod_flatten()
+            if flatten_result:
+                return flatten_result
+
+        # MKT-047 continuous re-check (2026-08-20): after the primary sweep
+        # above has fired once, keep watching every side it left riding —
+        # see _check_eod_flatten_recheck's docstring for the real near-miss
+        # that motivated this. Runs on the same per-tick cadence as
+        # everything else in this method; a no-op return (None) on every
+        # tick where nothing has drifted into danger.
+        if (self.eod_flatten_enabled
+                and self._eod_flatten_done
+                and len(self.daily_state.active_entries) > 0):
+            recheck_result = self._check_eod_flatten_recheck()
+            if recheck_result:
+                return recheck_result
 
         return result
 
@@ -1785,17 +2866,20 @@ class HydraStrategy(MEICStrategy):
 
     def _count_active_position_legs(self) -> int:
         """Count individual position legs still open across all active entries."""
+        # Count by the CONID (uic), not position_id: IBKR has no per-leg
+        # position id (always None) so a pos_id count returns 0 on every live
+        # leg (06-04 audit). uic falls back to pos_id for the dry-run DRY_* ids.
         count = 0
         for entry in self.daily_state.active_entries:
             if not entry.call_side_stopped and not entry.call_side_expired and not getattr(entry, 'call_side_skipped', False):
-                if entry.short_call_position_id:
+                if entry.short_call_uic or entry.short_call_position_id:
                     count += 1
-                if entry.long_call_position_id:
+                if entry.long_call_uic or entry.long_call_position_id:
                     count += 1
             if not entry.put_side_stopped and not entry.put_side_expired and not getattr(entry, 'put_side_skipped', False):
-                if entry.short_put_position_id:
+                if entry.short_put_uic or entry.short_put_position_id:
                     count += 1
-                if entry.long_put_position_id:
+                if entry.long_put_uic or entry.long_put_position_id:
                     count += 1
         return count
 
@@ -1923,13 +3007,597 @@ class HydraStrategy(MEICStrategy):
             f"all positions closed at {now.strftime('%I:%M %p ET')}"
         )
 
-    def _close_entry_early(self, entry) -> Tuple[int, int, list]:
+    def _check_eod_flatten(self) -> Optional[str]:
+        """MKT-047: at the EOD cutoff (earlier on FOMC announcement days),
+        force-close every open 0DTE short so a late breach can't ride to max loss
+        in the un-closable final minutes before expiry. Idempotent per ET day —
+        returns an action string if it flattens, else None.
+
+        0DTE-ONLY (2026-06-18 fix): this is meaningless — and HARMFUL — for the
+        multi-day calendar variants (D/E), which inherit this monitoring path but
+        hold positions for DAYS, not to a 4pm expiry. On 06-18 it force-closed D's
+        calendar at 15:50; on a day D transforms it would flatten the risk-free IC
+        the same afternoon and destroy the multi-day hold. Calendars set
+        requires_protective_wings=False (the 0DTE ICs keep it True), so gate on it
+        and let the calendars manage their own EOD via _dc_manage_calendar."""
+        if not getattr(self, "requires_protective_wings", True):
+            return None  # multi-day calendar — never EOD-flatten (D/E own their close)
+        if not self.eod_flatten_enabled or self._eod_flatten_done:
+            return None
+        if not self.daily_state.active_entries:
+            return None
+        now = get_us_market_time()
+        try:
+            from shared.event_calendar import is_fomc_announcement_day
+            is_fomc = is_fomc_announcement_day(now.date())
+        except Exception:
+            is_fomc = False
+        cutoff = self.eod_flatten_time_fomc_et if is_fomc else self.eod_flatten_time_et
+        try:
+            ch, cm = (int(x) for x in str(cutoff).split(":"))
+        except Exception:
+            ch, cm = 15, 50
+        if (now.hour, now.minute) < (ch, cm):
+            return None  # not yet at the cutoff
+        return self._execute_eod_flatten(cutoff_label=cutoff, is_fomc=is_fomc)
+
+    def _eod_flatten_can_skip(self, entry) -> bool:
+        """OTM-skip gate (MKT-047, 2026-06-25): True iff EVERY still-alive SHORT in
+        ``entry`` is at least ``eod_flatten_skip_otm_pts`` OTM, so the entry will
+        cash-settle worthless and need NOT be closed in the un-closable window
+        (it just reverts to the normal ride-to-expiry + settlement path).
+
+        Conservative — returns False (i.e. CLOSE the entry) when the skip is
+        disabled (pts <= 0), the spot/strikes are unreadable, OR any alive short is
+        within the cushion. Requires >= 1 alive short (nothing to skip otherwise).
+        SPXW is cash-settled (no assignment risk) and the final-10-min reversal
+        study shows ~0% touch at >= 20pt, so a >= 20pt-OTM short settles worthless
+        safely; closing it only burns the close cost + commission.
+
+        NOTE: this is the whole-entry gate (True only if EVERY alive short is safe).
+        When only ONE side is safe, the per-side gate `_eod_flatten_can_skip_side`
+        lets that side ride while the at-risk side is still flattened — added
+        2026-07-06 after the per-entry all-or-nothing gate needlessly bought back C's
+        72-77pt-OTM puts because the call side was ~18pt OTM."""
+        cushion = getattr(self, "eod_flatten_skip_otm_pts", 20.0)
+        if cushion <= 0:
+            return False  # skip disabled → always close (pre-2026-06-25 behavior)
+        spot = getattr(self, "current_price", None)
+        if not (isinstance(spot, (int, float)) and spot > 0):
+            return False  # no usable spot → can't assess → close to be safe
+        any_alive_short = False
+        for side, strike_attr in (("call", "short_call_strike"), ("put", "short_put_strike")):
+            if (getattr(entry, f"{side}_side_stopped", False)
+                    or getattr(entry, f"{side}_side_expired", False)
+                    or getattr(entry, f"{side}_side_skipped", False)
+                    or getattr(entry, f"{side}_side_pivot_closed", False)):
+                continue  # not an alive short (incl. a directional-pivot close)
+            strike = getattr(entry, strike_attr, None)
+            if not (isinstance(strike, (int, float)) and strike > 0):
+                return False  # unreadable short strike → close to be safe
+            any_alive_short = True
+            otm = (strike - spot) if side == "call" else (spot - strike)
+            if otm < cushion:
+                return False  # a short within the cushion → close the whole entry
+        return any_alive_short
+
+    def _eod_flatten_can_skip_side(self, entry, side_name: str) -> bool:
+        """Per-SIDE OTM-skip gate (MKT-047, 2026-07-06). True iff ``side_name``'s
+        (``"call"``/``"put"``) alive short is at least ``eod_flatten_skip_otm_pts``
+        OTM, so THAT side cash-settles worthless and need NOT be bought back in the
+        un-closable window — even when the sibling side on the same entry is at-risk.
+
+        This is what fixes the 2026-07-06 C leak: the per-ENTRY gate above returns
+        False (close the whole entry) the moment ANY short is within the cushion, so
+        a ~18pt-OTM short call forced a needless buy-back of the 72-77pt-OTM put side
+        (~$215 of profit given back). Flattening only the at-risk side, and leaving
+        the safe side to ride to free worthless expiry, keeps the pre-expiry tail
+        protection where it matters without the bleed.
+
+        Same conservative failure posture as the whole-entry gate: returns False (=>
+        CLOSE the side) when the skip is disabled, the spot/strike is unreadable, the
+        side is not an alive short, or the short is within the cushion."""
+        cushion = getattr(self, "eod_flatten_skip_otm_pts", 20.0)
+        if cushion <= 0:
+            return False  # skip disabled → always close
+        spot = getattr(self, "current_price", None)
+        if not (isinstance(spot, (int, float)) and spot > 0):
+            return False  # no usable spot → can't assess → close to be safe
+        # Only an ALIVE short can be skipped (a stopped/expired/skipped/pivot-closed
+        # side is already handled and is not in _close_entry_early's sides_to_close).
+        if (getattr(entry, f"{side_name}_side_stopped", False)
+                or getattr(entry, f"{side_name}_side_expired", False)
+                or getattr(entry, f"{side_name}_side_skipped", False)
+                or getattr(entry, f"{side_name}_side_pivot_closed", False)):
+            return False
+        strike = getattr(entry, f"short_{side_name}_strike", None)
+        if not (isinstance(strike, (int, float)) and strike > 0):
+            return False  # unreadable short strike → close to be safe
+        otm = (strike - spot) if side_name == "call" else (spot - strike)
+        return otm >= cushion
+
+    # Space between retries of a re-check close that transacted 0 legs —
+    # mirrors brandon/strategy.py's _BRANDON_FAILED_CLOSE_COOLDOWN_S exactly
+    # (same rationale: don't hammer the broker + re-alert every tick on a
+    # doomed close; the side stays alive and monitored either way).
+    _EOD_RECHECK_FAILED_COOLDOWN_S = 90.0
+
+    def _eod_recheck_failed_store(self) -> dict:
+        """(entry_number, side) -> last-failed-close timestamp. Lazily
+        created so a bare __new__-constructed test instance is safe."""
+        store = getattr(self, "_eod_recheck_failed_at", None)
+        if store is None:
+            store = {}
+            self._eod_recheck_failed_at = store
+        return store
+
+    def _eod_recheck_in_cooldown(self, entry, side: str) -> bool:
+        last = self._eod_recheck_failed_store().get((entry.entry_number, side))
+        if last is None:
+            return False
+        try:
+            elapsed = (get_us_market_time() - last).total_seconds()
+        except Exception:
+            return False
+        return elapsed < self._EOD_RECHECK_FAILED_COOLDOWN_S
+
+    def _eod_recheck_mark_failed(self, entry, side: str) -> None:
+        self._eod_recheck_failed_store()[(entry.entry_number, side)] = get_us_market_time()
+
+    def _eod_recheck_clear_failed(self, entry, side: str) -> None:
+        self._eod_recheck_failed_store().pop((entry.entry_number, side), None)
+
+    @staticmethod
+    def _eod_side_is_live_short(entry, side_name: str) -> bool:
+        """True iff ``side_name`` is a genuine alive short _close_entry_early
+        would actually attempt to close — mirrors its own internal gate
+        EXACTLY (strategy.py sides_to_close, not skip_sides-dependent).
+
+        Needed because `_eod_flatten_can_skip_side` returning False is
+        overloaded: it means EITHER "genuinely at risk" OR "not an alive
+        short at all" (already stopped/expired/skipped/pivot-closed, or —
+        critically for a put-only/call-only entry — a side that was simply
+        NEVER PLACED). The primary flatten doesn't need to tell these apart
+        (closing a not-alive side is already a safe no-op inside
+        `_close_entry_early`), but the re-check's failure/cooldown tracking
+        does — without this, a put-only entry's never-placed call side gets
+        misdiagnosed as a "close FAILED" every tick forever.
         """
-        Close all open legs of an entry for MKT-018 early close.
+        return bool(
+            not getattr(entry, f"{side_name}_side_stopped", False)
+            and not getattr(entry, f"{side_name}_side_expired", False)
+            and not getattr(entry, f"{side_name}_side_skipped", False)
+            and not getattr(entry, f"{side_name}_side_pivot_closed", False)
+            and (getattr(entry, f"short_{side_name}_uic", None)
+                 or getattr(entry, f"short_{side_name}_position_id", None))
+        )
+
+    def _check_eod_flatten_recheck(self) -> Optional[str]:
+        """MKT-047 continuous safety net (2026-08-20 execution audit finding).
+
+        The primary flatten (_check_eod_flatten / _execute_eod_flatten) makes
+        its OTM-skip decision ONCE, at the 15:50 ET cutoff — a single point-in-
+        time snapshot. Real 2026-08-20 near-miss on variant B (live paper
+        money): two short puts measured 11pt OTM at that single check and were
+        left to ride to free expiry, but SPX kept drifting in the final
+        minutes and the cushion shrank to 0.84pt (essentially at-the-money) at
+        15:57:30 ET before recovering to 1.4pt by the 16:00 close. No loss
+        resulted, but a decision made once, 10 minutes before close, never
+        got re-evaluated as price kept moving in that window.
+
+        This re-checks every side that was left riding, on EVERY tick from
+        the moment the primary flatten fires until market close — reusing the
+        bot's existing monitoring cadence (already runs every ~2-12s during
+        market hours depending on mode/variant; see get_recommended_check_
+        interval) rather than a new timer. Deliberately NOT a restructure of
+        the primary flatten itself (which stays exactly as before, one-shot,
+        fully covered by its existing tests) — this is a narrowly-scoped
+        second layer with its own cooldown/logging, calling the SAME
+        `_eod_flatten_can_skip_side` gate and the SAME `_close_entry_early`
+        close path, both of which are already correctly idempotent at side
+        granularity (a side that's closed/expired/skipped is permanently
+        excluded from `_close_entry_early`'s `sides_to_close`), so repeated
+        calls cannot double-close a side. Silent on every tick where nothing
+        changes — only logs/alerts/saves state when a side actually closes or
+        a close attempt fails.
+        """
+        if not getattr(self, "requires_protective_wings", True):
+            return None  # multi-day calendar — never applies
+        if not self.eod_flatten_enabled or not self._eod_flatten_done:
+            return None  # only runs AFTER the primary sweep has fired once
+        if not self.daily_state.active_entries:
+            return None
+        now = get_us_market_time()
+        try:
+            close_t = get_market_close_time(now)
+            mins_to_close = ((close_t.hour * 60 + close_t.minute)
+                              - (now.hour * 60 + now.minute))
+        except Exception:
+            # Conservative fallback: assume a normal 16:00 ET close rather
+            # than silently disabling the re-check on an unexpected error.
+            mins_to_close = (16 * 60) - (now.hour * 60 + now.minute)
+        if mins_to_close <= 0:
+            return None  # market closed — the primary/settlement path takes over
+
+        # Bound how much wall-clock time a single tick can spend blocked in
+        # retrying `_close_entry_early` across MULTIPLE entries. A single
+        # stuck leg can still take up to ~2.7min (pre-existing risk, shared
+        # with the primary sweep) — this budget only prevents that cost from
+        # COMPOUNDING serially across several entries within one tick, which
+        # would otherwise starve every OTHER entry's safety checks for the
+        # remainder of the ~10min re-check window. Any entry not reached this
+        # tick is picked up on the next one.
+        _RECHECK_TICK_BUDGET_S = 60.0
+        tick_budget_start = time.monotonic()
+
+        # Round-2 review finding: iterating active_entries in the SAME fixed
+        # order every tick means a single entry that blows the budget on
+        # EVERY tick (e.g. a stuck leg whose price keeps oscillating across
+        # the cushion boundary, repeatedly re-arming via the cooldown-clear-
+        # on-safe logic above) can perpetually sit first in line and starve
+        # every LATER entry of its own recheck coverage for a large fraction
+        # of the ~10min window — exactly the failure mode this budget exists
+        # to prevent, reopened across ticks instead of within one. Rotating
+        # the start point to just past wherever the PREVIOUS tick left off
+        # means a persistently-stuck entry gets pushed to the back of the
+        # queue next tick instead of perpetually blocking the front of it.
+        entries_this_tick = list(self.daily_state.active_entries)
+        n_entries = len(entries_this_tick)
+        start_idx = (getattr(self, "_eod_recheck_next_start_idx", 0) % n_entries) if n_entries else 0
+        ordered_entries = entries_this_tick[start_idx:] + entries_this_tick[:start_idx]
+
+        legs_closed = legs_failed = 0
+        reached = 0
+        for entry in ordered_entries:
+            if time.monotonic() - tick_budget_start >= _RECHECK_TICK_BUDGET_S:
+                logger.warning(
+                    "MKT-047-RECHECK: tick time budget (%.0fs) exhausted — "
+                    "deferring remaining entries to the next tick",
+                    _RECHECK_TICK_BUDGET_S,
+                )
+                break
+            reached += 1
+            # A side that failed to close and is now OTM-safe again no longer
+            # needs its cooldown — clearing it here (rather than only on a
+            # future successful close) means a side that drifts back at-risk
+            # WITHIN the 90s window is re-attempted immediately instead of
+            # staying silently unprotected until the cooldown expires.
+            can_skip = {s: self._eod_flatten_can_skip_side(entry, s) for s in ("call", "put")}
+            for s, safe in can_skip.items():
+                if safe:
+                    self._eod_recheck_clear_failed(entry, s)
+            skip_sides = {
+                s for s in ("call", "put")
+                if can_skip[s] or self._eod_recheck_in_cooldown(entry, s)
+            }
+            # Only a genuinely alive short is a real target — a put-only
+            # entry's call side (say) is never live, so it must never be
+            # mistaken for an attempted-and-failed close below.
+            live_sides = {s for s in ("call", "put") if self._eod_side_is_live_short(entry, s)}
+            targeted_sides = {s for s in ("call", "put") if s not in skip_sides} & live_sides
+            if not targeted_sides:
+                continue
+
+            call_expired_before = entry.call_side_expired
+            put_expired_before = entry.put_side_expired
+            c, f, d = self._close_entry_early(entry, skip_sides=skip_sides)
+            if not (c or f):
+                continue  # nothing actually happened this tick — stay silent
+
+            legs_closed += c
+            legs_failed += f
+            if d:
+                self._spawn_async_early_close_fill_correction(d)
+            if not getattr(entry, "close_reason", ""):
+                entry.close_reason = "EOD_FLATTEN"
+
+            for side_name, was_expired in (
+                ("call", call_expired_before), ("put", put_expired_before)
+            ):
+                if side_name not in targeted_sides:
+                    continue
+                if getattr(entry, f"{side_name}_side_expired", False):
+                    if not was_expired:
+                        self._eod_flatten_dry_run_correct(entry, side_name)
+                        self._eod_recheck_clear_failed(entry, side_name)
+                        logger.warning(
+                            "MKT-047-RECHECK: E#%s %s side drifted back within "
+                            "%.0fpt cushion after the primary flatten — late "
+                            "force-closed at %s ET",
+                            entry.entry_number, side_name,
+                            self.eod_flatten_skip_otm_pts, now.strftime("%H:%M:%S"),
+                        )
+                else:
+                    self._eod_recheck_mark_failed(entry, side_name)
+                    logger.error(
+                        "MKT-047-RECHECK: E#%s %s side close FAILED — will retry "
+                        "in %.0fs (side remains live-monitored)",
+                        entry.entry_number, side_name,
+                        self._EOD_RECHECK_FAILED_COOLDOWN_S,
+                    )
+
+        # Persist the rotation point regardless of whether anything closed
+        # this tick — this is what gives a later entry its fair turn at the
+        # FRONT of the next tick's order once an earlier entry has occupied
+        # a full tick's budget. Unchanged (== start_idx) when every entry
+        # was reached this tick.
+        if n_entries:
+            self._eod_recheck_next_start_idx = (start_idx + reached) % n_entries
+
+        if not (legs_closed or legs_failed):
+            return None
+
+        # Unregister fully-closed sides (mirror the primary flatten's Phase 3).
+        for entry in self.daily_state.entries:
+            for side, legs in (("call", ["short_call", "long_call"]),
+                               ("put", ["short_put", "long_put"])):
+                if (getattr(entry, f"{side}_side_expired", False)
+                        or getattr(entry, f"{side}_side_stopped", False)
+                        or getattr(entry, f"{side}_side_skipped", False)):
+                    for leg in legs:
+                        pid = getattr(entry, f"{leg}_position_id", None)
+                        if pid:
+                            try:
+                                self.registry.unregister(pid)
+                            except Exception:
+                                pass
+                            setattr(entry, f"{leg}_position_id", None)
+                            setattr(entry, f"{leg}_uic", 0)
+
+        self._save_state_to_disk()
+        try:
+            self.alert_service.send_alert(
+                alert_type=AlertType.POSITION_CLOSED,
+                title="MKT-047-RECHECK: late EOD flatten",
+                message=(
+                    f"Late force-close at {now.strftime('%I:%M:%S %p ET')} — "
+                    f"{legs_closed} leg(s) closed, {legs_failed} failed. A side "
+                    f"left riding at the 15:50 check drifted back within the "
+                    f"{self.eod_flatten_skip_otm_pts:.0f}pt cushion."
+                ),
+                priority=AlertPriority.HIGH if legs_failed else AlertPriority.MEDIUM,
+                contracts=self.contracts_per_entry,
+            )
+        except Exception as e:
+            logger.error(f"MKT-047-RECHECK: Alert failed: {e}")
+
+        return (
+            f"MKT-047-RECHECK: late flatten at {now.strftime('%I:%M:%S %p ET')} "
+            f"| {legs_closed} legs closed, {legs_failed} failed"
+        )
+
+    def _execute_eod_flatten(self, *, cutoff_label: str, is_fomc: bool) -> str:
+        """MKT-047: force-close ALL open legs as a pre-expiry SAFETY flatten,
+        reusing the MKT-018 leg-closer (which books real fill-based P&L, honors
+        the B2 naked-short guard + Fix #81 worthless-long skip). Unlike MKT-018
+        this is NOT profit-gated — it can realize a loss; the point is to exit
+        while the position is still CLOSABLE. Does NOT force DAILY_COMPLETE /
+        settlement-complete: any leg that fails to close stays active and is
+        handled by the normal stop monitoring (now with MARKET escalation) or
+        natural expiry; settlement skips the sides we already marked expired."""
+        now = get_us_market_time()
+        self._eod_flatten_done = True  # one-shot: don't re-flatten (avoid spam)
+
+        logger.warning("=" * 60)
+        logger.warning(
+            f"MKT-047: EOD SAFETY FLATTEN at {now:%H:%M:%S} ET "
+            f"(cutoff {cutoff_label}{', FOMC' if is_fomc else ''}) — "
+            f"force-closing {len(self.daily_state.active_entries)} open entr(ies) "
+            f"before the un-closable final-minutes window"
+        )
+        logger.warning("=" * 60)
+
+        legs_closed = legs_failed = entries_closed = entries_skipped_otm = 0
+        sides_skipped_otm = 0
+        deferred_legs: list = []
+        for entry in list(self.daily_state.active_entries):
+            # OTM-skip: a comfortably-OTM entry cash-settles worthless for free —
+            # don't pay to close it in the un-closable window (it reverts to the
+            # normal ride-to-expiry + settlement path, exactly as before MKT-047).
+            if self._eod_flatten_can_skip(entry):
+                entries_skipped_otm += 1
+                logger.info(
+                    "  MKT-047: SKIP flatten of E#%s — every alive short >= %.0fpt OTM "
+                    "(cash-settles worthless; saves the close cost). Rides to expiry.",
+                    entry.entry_number, self.eod_flatten_skip_otm_pts,
+                )
+                continue
+            # Per-SIDE OTM-skip (2026-07-06): the whole-entry gate above is False, so
+            # at least one side is at-risk — but the SIBLING side may be comfortably
+            # OTM. Leave any such side to ride to free worthless expiry instead of
+            # dragging it into the flatten (the per-entry gate used to buy back C's
+            # 72-77pt-OTM puts just because the calls were ~18pt OTM: ~$215 given back).
+            skip_sides = {s for s in ("call", "put")
+                          if self._eod_flatten_can_skip_side(entry, s)}
+            if skip_sides:
+                sides_skipped_otm += len(skip_sides)
+                logger.info(
+                    "  MKT-047: PARTIAL flatten of E#%s — %s side >= %.0fpt OTM rides "
+                    "to worthless expiry; closing only the at-risk side(s).",
+                    entry.entry_number, "+".join(sorted(skip_sides)),
+                    self.eod_flatten_skip_otm_pts,
+                )
+            call_expired_before = entry.call_side_expired
+            put_expired_before = entry.put_side_expired
+            c, f, d = self._close_entry_early(entry, skip_sides=skip_sides)
+            legs_closed += c
+            legs_failed += f
+            deferred_legs.extend(d)
+            # 2026-08-20: dry-run cost correction — see _eod_flatten_dry_run_correct.
+            if entry.call_side_expired and not call_expired_before:
+                self._eod_flatten_dry_run_correct(entry, "call")
+            if entry.put_side_expired and not put_expired_before:
+                self._eod_flatten_dry_run_correct(entry, "put")
+            if c or f:
+                entries_closed += 1
+                # Dashboard (2026-06-25): tag the EOD-flatten close so the UI
+                # renders it as "flattened", NOT a spurious "expired" (the
+                # early-close reuses *_side_expired) or a red stop dot. Don't
+                # overwrite a real close reason already set by TP/breach.
+                if not getattr(entry, "close_reason", ""):
+                    entry.close_reason = "EOD_FLATTEN"
+
+        if deferred_legs:
+            self._spawn_async_early_close_fill_correction(deferred_legs)
+
+        # Unregister fully-closed sides (mirror MKT-018 Phase 3); a side that
+        # FAILED to close keeps its uic so it stays trackable to expiry.
+        for entry in self.daily_state.entries:
+            for side, legs in (("call", ["short_call", "long_call"]),
+                               ("put", ["short_put", "long_put"])):
+                if (getattr(entry, f"{side}_side_expired", False)
+                        or getattr(entry, f"{side}_side_stopped", False)
+                        or getattr(entry, f"{side}_side_skipped", False)):
+                    for leg in legs:
+                        pid = getattr(entry, f"{leg}_position_id", None)
+                        if pid:
+                            try:
+                                self.registry.unregister(pid)
+                            except Exception:
+                                pass
+                            setattr(entry, f"{leg}_position_id", None)
+                            setattr(entry, f"{leg}_uic", 0)
+
+        final_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
+        self._save_state_to_disk()
+
+        # Alert ONLY when the flatten actually closed (or failed) a leg. When every
+        # entry was skipped (all shorts >= cushion OTM → ride to free worthless
+        # expiry), NOTHING happened and an email is pure noise ("0 entr(ies)
+        # closed"); the EOD FLATTEN COMPLETE log line below still records the skip.
+        # And do NOT put a day-P&L in this ACTION alert: at 15:50, pre-settlement,
+        # it is just the commission paid and reads as a phantom loss (variant C
+        # 07-07: "0 closed | Net P&L $-64.40" while the real OTM-settled day was
+        # ~+$566). The real number is the DAILY_SUMMARY alert, after settlement.
+        if entries_closed or legs_failed:
+            try:
+                _msg = (
+                    f"Force-closed {entries_closed} open 0DTE entr(ies) "
+                    f"({legs_closed} legs) at {now.strftime('%I:%M %p ET')} "
+                    f"(cutoff {cutoff_label}{', FOMC' if is_fomc else ''}) — pre-expiry safety."
+                )
+                if legs_failed:
+                    _msg += f"\n⚠ {legs_failed} leg(s) FAILED to close — check the position."
+                self.alert_service.send_alert(
+                    alert_type=AlertType.POSITION_CLOSED,
+                    title=f"MKT-047 EOD Flatten: {entries_closed} entr(ies) closed",
+                    message=_msg,
+                    priority=AlertPriority.HIGH if legs_failed else AlertPriority.MEDIUM,
+                    contracts=self.contracts_per_entry,
+                )
+            except Exception as e:
+                logger.error(f"MKT-047: Alert failed: {e}")
+
+        _skip_pts = getattr(self, "eod_flatten_skip_otm_pts", 20.0)
+        logger.warning(
+            f"MKT-047: EOD FLATTEN COMPLETE | {entries_closed} entries, "
+            f"{legs_closed} legs closed, {legs_failed} failed | "
+            f"{entries_skipped_otm} entries + {sides_skipped_otm} side(s) skipped "
+            f"(>= {_skip_pts:.0f}pt OTM, ride to worthless expiry) | "
+            f"Net P&L: ${final_net_pnl:.2f}"
+        )
+        return (
+            f"MKT-047 EOD FLATTEN: {entries_closed} entr(ies) closed at "
+            f"{now.strftime('%I:%M %p ET')} | {legs_closed} legs, "
+            f"{legs_failed} failed | Net P&L: ${final_net_pnl:.2f}"
+        )
+
+    def _book_early_close_side_pnl(self, entry, side_name: str, credit: float,
+                                   side_close_cost: float) -> None:
+        """Book ONE early-closed side's realized P&L (Brandon TP / GEX-breach /
+        MKT-018) into ``total_realized_pnl``. Net for the side = credit −
+        side_close_cost, for ANY credit sign.
+
+        2026-06-09 fix (10-agent verification): the old ``credit > 0`` gate
+        silently DROPPED a NEGATIVE-credit side — a spread sold at a net DEBIT,
+        e.g. a down-day legged call spread whose long cost more than the short
+        collected (E#1 today: call_spread_credit = −$385) — from
+        total_realized_pnl, OVERSTATING the day's P&L by the omitted loss
+        ($525 today). The DB recorder (`_record_stop_to_db`) always booked it
+        unconditionally, so the DB + broker were correct and only the in-memory
+        realized total drifted. Book every closed side regardless of sign.
+        """
+        if side_close_cost != 0:
+            # side_close_cost is positive when we spent more buying back the
+            # short than we received selling the long (net outflow to close).
+            self._book_realized_pnl(credit - side_close_cost, entry)
+            logger.info(
+                f"  Entry #{entry.entry_number} {side_name} side early-closed: "
+                f"credit=${credit:.2f}, close_cost=${side_close_cost:.2f}, "
+                f"net=${credit - side_close_cost:.2f}"
+            )
+        else:
+            # No close fill yet — book the credit (any sign); the deferred fill
+            # lookup corrects the close cost later.
+            self._book_realized_pnl(credit, entry)
+            logger.info(
+                f"  Entry #{entry.entry_number} {side_name} side early-closed: "
+                f"credit=${credit:.2f} (fill prices deferred)"
+            )
+
+    def _eod_flatten_dry_run_correct(self, entry, side_name: str) -> None:
+        """2026-08-20 (execution audit finding, variants A/C): in DRY-RUN,
+        ``_close_position_with_retry`` (SAFETY-DRY-04) never produces a
+        simulated fill price for an early close, so ``side_close_cost`` stays
+        0 and ``_book_early_close_side_pnl`` books the FULL credit as if the
+        side closed for free — silently overstating dry-run P&L by the real
+        cost that would have been paid to buy back the short. Real incident:
+        variant A's day flipped from a reported +$24.85 to a true ~-$40/-$55;
+        variant C overstated by ~$490 (+$619.50 reported vs ~+$129.50 true).
+        Brandon's own TP/GEX-breach handlers already correct for this exact
+        gap (brandon/strategy.py's TP handler, ~1174-1199) by falling back to
+        the pre-close spread-value MARK; MKT-047's EOD-flatten never got the
+        same correction since it shares ``_close_entry_early`` ->
+        ``_book_early_close_side_pnl`` with MKT-018 but has no per-caller
+        override. Mirrors that exact pattern.
+
+        Call ONLY once per side, immediately after confirming THIS call just
+        transitioned that side from open to closed (compare ``*_side_expired``
+        before/after ``_close_entry_early`` — see call sites) — calling it on
+        an already-corrected side would double-subtract the estimated cost.
+        No-ops outside dry-run, and no-ops if a real fill cost is already
+        known (``actual_*_stop_debit`` already set) or no live mark exists.
+
+        KNOWN GAP (inherited from Brandon's pre-existing TP/breach correction
+        pattern, not introduced here, out of scope for this fix): the
+        per-event ``trade_stops`` SQLite row for this close is written by
+        ``_record_stop_to_db`` BEFORE this correction runs, so that row keeps
+        the pre-correction (free-close) numbers permanently — there is no
+        UPDATE path. Day-total P&L and real dry-run bookkeeping above
+        (``total_realized_pnl`` via ``_book_realized_pnl``) ARE correct; only
+        the individual event record in the DB is stale, which can mislead a
+        per-event dashboard/agent narrative for this one row.
+        """
+        if not self.dry_run:
+            return
+        if getattr(entry, f"actual_{side_name}_stop_debit", 0):
+            return  # a real fill cost is already known — nothing to correct
+        close_cost = float(getattr(entry, f"{side_name}_spread_value", 0) or 0)
+        if close_cost <= 0:
+            return  # no usable mark — leave the credit-only booking as-is
+        setattr(entry, f"actual_{side_name}_stop_debit", close_cost)
+        self._book_realized_pnl(-close_cost, entry)
+        logger.info(
+            "  MKT-047: dry-run cost correction for Entry #%s %s side — "
+            "subtracted mark-estimated close cost $%.2f (was booked as free)",
+            entry.entry_number, side_name, close_cost,
+        )
+
+    def _close_entry_early(self, entry, skip_sides=None) -> Tuple[int, int, list]:
+        """
+        Close all open legs of an entry for MKT-018 early close / MKT-047 flatten.
+
+        ``skip_sides`` (a set/collection of {"call", "put"}) leaves those sides
+        UNTOUCHED — used by the MKT-047 per-side OTM-skip so a comfortably-OTM side
+        rides to free worthless expiry while the at-risk side is flattened. A skipped
+        side is NOT marked expired/closed, so it keeps its uic and stays fully stop-
+        monitored + settlement-booked, exactly as before MKT-047. Default (None/empty)
+        closes both sides — the MKT-018 behavior, unchanged.
 
         Returns: (legs_closed, legs_failed, deferred_legs)
             deferred_legs: List of (entry, side_name, leg_name, order_id, uic) for async lookup
         """
+        skip_sides = skip_sides or set()
         legs_closed = 0
         legs_failed = 0
         deferred_legs = []
@@ -1937,16 +3605,27 @@ class HydraStrategy(MEICStrategy):
         sides_to_close = []
 
         # Check call side
-        if (not entry.call_side_stopped and not entry.call_side_expired
-            and not getattr(entry, 'call_side_skipped', False) and entry.short_call_position_id):
+        # P7-audit C1 (06-04): gate on the CONID (uic), NOT the per-leg
+        # position_id. IBKR has no per-leg position id — short_call_position_id
+        # is ALWAYS None on the live path — so gating on it skipped EVERY live
+        # close (Brandon TP + GEX breach exit), orphaning the position while the
+        # caller marked the side stopped. position_id kept as the dry-run
+        # fallback (_simulate_* sets truthy DRY_* ids). Mirrors the fix already
+        # in _execute_stop_loss.
+        if ("call" not in skip_sides
+            and not entry.call_side_stopped and not entry.call_side_expired
+            and not getattr(entry, 'call_side_skipped', False)
+            and (entry.short_call_uic or entry.short_call_position_id)):
             sides_to_close.append(("call", [
                 ("short_call", entry.short_call_position_id, entry.short_call_uic),
                 ("long_call", entry.long_call_position_id, entry.long_call_uic),
             ]))
 
         # Check put side
-        if (not entry.put_side_stopped and not entry.put_side_expired
-            and not getattr(entry, 'put_side_skipped', False) and entry.short_put_position_id):
+        if ("put" not in skip_sides
+            and not entry.put_side_stopped and not entry.put_side_expired
+            and not getattr(entry, 'put_side_skipped', False)
+            and (entry.short_put_uic or entry.short_put_position_id)):
             sides_to_close.append(("put", [
                 ("short_put", entry.short_put_position_id, entry.short_put_uic),
                 ("long_put", entry.long_put_position_id, entry.long_put_uic),
@@ -1955,9 +3634,34 @@ class HydraStrategy(MEICStrategy):
         for side_name, legs in sides_to_close:
             side_close_cost = 0.0
             side_legs_closed = 0
+            # L-M2: leg_names ACTUALLY closed at the broker (qty→0). Worthless
+            # longs skipped via Fix #81 are NOT added here — they stay open to
+            # 0DTE expiry, so their uic must remain set for reconciliation.
+            closed_leg_names: set = set()
+            # B2 (2026-06-10): legs are ordered short-first. If the SHORT buy-back
+            # fails, we must NOT then sell the long — that would leave a NAKED short
+            # (unbounded risk) that the close path used to mark "expired" and drop
+            # from stop monitoring. Tracking this lets us abort the long close and
+            # keep the FULL defined-risk spread intact; the side stays alive and the
+            # TP / breach / credit+buffer stop retries it next tick.
+            short_close_failed = False
 
             for leg_name, pos_id, uic in legs:
-                if not pos_id:
+                # Gate on uic OR pos_id: pos_id is always None on the live IBKR
+                # path (close keys on uic via _close_position_with_retry_ib);
+                # pos_id is the truthy DRY_* fallback in dry-run.
+                if not (uic or pos_id):
+                    continue
+
+                # B2: short failed earlier this pass → do NOT close the long; keep
+                # the hedge so we never create a naked short. Alert once per side.
+                if leg_name.startswith("long") and short_close_failed:
+                    logger.critical(
+                        f"  B2: Entry #{entry.entry_number} {side_name} short close FAILED "
+                        f"— SKIPPING the long close to preserve the hedge (no naked short). "
+                        f"Side left intact + alive; will retry."
+                    )
+                    self._alert_short_close_failed(entry, side_name)
                     continue
 
                 # Fix #81: Skip closing long legs with $0 bid (worthless, expire naturally)
@@ -1966,10 +3670,8 @@ class HydraStrategy(MEICStrategy):
                 # expire worthless at 4 PM, so closing them wastes API calls for ~$0 value.
                 if leg_name.startswith("long") and uic:
                     try:
-                        quote = self.client.get_quote(uic, asset_type="StockIndexOption")
-                        bid = 0
-                        if quote:
-                            bid = quote.get("Quote", {}).get("Bid", 0) or quote.get("Bid", 0) or 0
+                        quote = self._read_option_quote(uic)
+                        bid = (quote or {}).get("bid") or 0
                         if bid <= 0:
                             logger.info(
                                 f"  Fix #81: Skipping {leg_name} close for Entry #{entry.entry_number} "
@@ -1991,6 +3693,7 @@ class HydraStrategy(MEICStrategy):
                 if success:
                     legs_closed += 1
                     side_legs_closed += 1
+                    closed_leg_names.add(leg_name)  # L-M2: closed at broker
                     if fill_price and fill_price > 0:
                         cost = fill_price * 100 * entry.contracts
                         if leg_name.startswith("short"):
@@ -2006,6 +3709,8 @@ class HydraStrategy(MEICStrategy):
                     self.daily_state.total_commission += self.commission_per_leg * entry.contracts
                 else:
                     legs_failed += 1
+                    if leg_name.startswith("short"):
+                        short_close_failed = True  # B2: abort this side's long close
                     logger.error(f"MKT-018: Failed to close {leg_name} for Entry #{entry.entry_number}")
 
             # Mark side as early-closed (reuse expired flag for compatibility)
@@ -2013,6 +3718,16 @@ class HydraStrategy(MEICStrategy):
                 credit = getattr(entry, f"{side_name}_spread_credit", 0)
                 setattr(entry, f"{side_name}_side_expired", True)
                 entry.early_closed = True
+                # L-M2: clear the uics of legs ACTUALLY closed at the broker so
+                # they drop out of _expected_position_quantities. Otherwise a
+                # normally-closed Brandon TP/breach side lingers in the expected
+                # set and reconciliation raises a spurious POS-003 "manual
+                # review" mismatch every tick (broker shows qty 0 for a leg we
+                # still 'expect'). Worthless longs skipped via Fix #81 are NOT
+                # in closed_leg_names, so their uic stays set (they remain open
+                # at the broker until 0DTE expiry → expected == actual).
+                for closed_leg in closed_leg_names:
+                    setattr(entry, f"{closed_leg}_uic", None)
                 # Record the actual close moment so capital-deployed
                 # sweep-line and any other timing-aware metric can pick it
                 # up. HYDRA stop paths set call_stop_time / put_stop_time;
@@ -2025,24 +3740,39 @@ class HydraStrategy(MEICStrategy):
                 if not getattr(entry, "close_time", ""):
                     entry.close_time = get_us_market_time().isoformat()
 
-                if credit > 0 and side_close_cost != 0:
-                    # Net P&L for this side = credit - net_close_cost
-                    # side_close_cost is positive when we spent more buying back short than
-                    # we received from selling long (net outflow)
-                    self.daily_state.total_realized_pnl += credit
-                    self.daily_state.total_realized_pnl -= side_close_cost
-                    logger.info(
-                        f"  Entry #{entry.entry_number} {side_name} side early-closed: "
-                        f"credit=${credit:.2f}, close_cost=${side_close_cost:.2f}, "
-                        f"net=${credit - side_close_cost:.2f}"
-                    )
-                elif credit > 0:
-                    # No fill prices yet — use credit only, deferred lookup will correct
-                    self.daily_state.total_realized_pnl += credit
-                    logger.info(
-                        f"  Entry #{entry.entry_number} {side_name} side early-closed: "
-                        f"credit=${credit:.2f} (fill prices deferred)"
-                    )
+                # Persist the REAL fill-based net close cost so the dashboard's
+                # actual_*_stop_debit holds the actual debit, not the pre-close
+                # spread MARK. The Brandon TP path used to overwrite this field
+                # with entry.*_spread_value (the trigger mark) → live cards
+                # overstated a take-profit's P&L (e.g. mark $87.50 vs real $140).
+                # Only when a real fill cost is known (>0); a 0 (dry-run /
+                # fully-deferred) leaves the field for the Brandon mark estimate.
+                if side_close_cost > 0:
+                    setattr(entry, f"actual_{side_name}_stop_debit", side_close_cost)
+
+                self._book_early_close_side_pnl(
+                    entry, side_name, credit, side_close_cost
+                )
+
+                # Record this early-close (Brandon TP / GEX-breach exit / MKT-018)
+                # to trade_stops with the REAL net close cost. Critical for B/C:
+                # the Brandon variants bypass _execute_stop_loss (the usual recorder
+                # site), so without this every live TP/breach close would write ZERO
+                # rows. Passing side_close_cost (real synchronous IBKR fills, not the
+                # theoretical spread_value mark) makes actual_debit + slippage_on_close
+                # real; _record_stop_to_db books net_pnl = -(cost - credit), so a TP
+                # is recorded as a profit and a breach close as a loss, correctly.
+                # v11: tag the early-close reason so analytics can separate a
+                # profitable take-profit from a real stop-loss. close_reason is
+                # already set to "TP"/"BREACH" by the Brandon strategy before this.
+                _early_reason = {"TP": "take_profit", "BREACH": "gex_breach"}.get(
+                    getattr(entry, "close_reason", None) or "", "early_close")
+                self._record_stop_to_db(
+                    entry, side_name,
+                    getattr(entry, f"{side_name}_side_stop", None) or 0.0,
+                    side_close_cost,
+                    exit_reason=_early_reason,
+                )
 
             # Mark entry complete if all sides now done
             call_done = entry.call_side_stopped or entry.call_side_expired or getattr(entry, 'call_side_skipped', False)
@@ -2058,88 +3788,19 @@ class HydraStrategy(MEICStrategy):
 
     def _spawn_async_early_close_fill_correction(self, deferred_legs: list):
         """
-        MKT-018: Spawn background thread to look up actual fill prices for early close legs.
+        MKT-018: Deferred fill-price correction for early-close legs — no-op.
 
-        Same pattern as FIX #75's _spawn_async_fill_correction but handles multiple
-        entries/sides at once. Non-blocking — main loop continues immediately.
+        On IBKR this is intentionally a no-op. IBKR closes route through
+        ``place_and_wait_for_fill``, which polls to a terminal state and
+        returns the actual ``avg_fill_price`` synchronously — there is no
+        activity-stream sync lag, so no deferred correction is ever
+        needed. (MKT-018 early close is also disabled.)
+
+        The method is kept (rather than removed) so the MKT-018
+        ``_execute_early_close`` call site stays intact in case early
+        close is ever re-enabled.
         """
-        def worker():
-            try:
-                logger.info(
-                    f"MKT-018: Deferred fill lookup for {len(deferred_legs)} legs, "
-                    f"waiting 3s for Saxo sync..."
-                )
-                time.sleep(3)
-
-                total_correction = 0.0
-                for entry, side_name, leg_name, order_id, uic in deferred_legs:
-                    fill_price = None
-                    source = None
-
-                    try:
-                        # Tier 1: Activities endpoint
-                        # Note: uic is captured at close time (5th tuple element) because
-                        # Phase 3 of _execute_early_close clears entry UICs to 0
-                        if order_id:
-                            filled, fill_details = self.client.check_order_filled_by_activity(
-                                order_id=order_id,
-                                uic=uic,
-                                max_retries=3,
-                                retry_delay=1.5
-                            )
-                            if filled and fill_details:
-                                fp = fill_details.get("fill_price", 0)
-                                if fp and fp > 0:
-                                    fill_price = fp
-                                    source = "activities"
-
-                        # Tier 2: Closed positions endpoint
-                        if fill_price is None and uic:
-                            buy_or_sell = "Sell" if leg_name.startswith("short") else "Buy"
-                            closed_info = self.client.get_closed_position_price(uic, buy_or_sell=buy_or_sell)
-                            if closed_info:
-                                cp = closed_info.get("closing_price")
-                                if cp and cp > 0:
-                                    fill_price = cp
-                                    source = "closedpositions"
-
-                        if fill_price is not None:
-                            actual_cost = fill_price * 100 * entry.contracts
-                            if leg_name.startswith("short"):
-                                # We paid to buy back — this is a cost
-                                self.daily_state.total_realized_pnl -= actual_cost
-                                total_correction -= actual_cost
-                            else:
-                                # We received from selling — this reduces cost
-                                self.daily_state.total_realized_pnl += actual_cost
-                                total_correction += actual_cost
-                            logger.info(
-                                f"MKT-018: Deferred fill for Entry #{entry.entry_number} {leg_name} "
-                                f"via {source}: ${fill_price:.2f}"
-                            )
-                        else:
-                            logger.warning(
-                                f"MKT-018: No fill price found for Entry #{entry.entry_number} {leg_name}"
-                            )
-                    except Exception as e:
-                        logger.warning(f"MKT-018: Deferred lookup error for {leg_name}: {e}")
-
-                if abs(total_correction) > 0.01:
-                    self._save_state_to_disk()
-                    logger.info(f"MKT-018: Async fill correction applied: ${total_correction:+.2f}")
-                else:
-                    logger.info("MKT-018: Async fill lookup complete (no correction needed)")
-
-            except Exception as e:
-                logger.warning(f"MKT-018: Async fill correction thread failed: {e}")
-
-        thread = threading.Thread(
-            target=worker, daemon=True,
-            name="mkt018_fill_correction"
-        )
-        thread.start()
-        self._pending_fill_corrections.append(thread)
-        logger.info(f"MKT-018: Spawned async fill correction thread for {len(deferred_legs)} legs")
+        return
 
     # =========================================================================
     # ANTI-WHIPSAW FILTER
@@ -2503,7 +4164,11 @@ class HydraStrategy(MEICStrategy):
         actual_close_cost = 0.0  # accumulator for short_cost - long_revenue
         legs_closed = 0
 
-        if short_pid:
+        # Gate on the CONID (uic), not position_id: pos_id is always None on
+        # the live IBKR path, so `if short_pid:` closed nothing live (06-04
+        # audit, same C1 class as _close_entry_early). pos_id kept as dry-run
+        # fallback; _close_position_with_retry keys on uic.
+        if short_uic or short_pid:
             ok, fill, _ = self._close_position_with_retry(
                 short_pid,
                 f"E#{entry.entry_number} {side} short (pivot)",
@@ -2516,7 +4181,7 @@ class HydraStrategy(MEICStrategy):
                 if fill is not None:
                     actual_close_cost += fill * 100 * contracts
 
-        if long_pid:
+        if long_uic or long_pid:
             ok, fill, _ = self._close_position_with_retry(
                 long_pid,
                 f"E#{entry.entry_number} {side} long (pivot)",
@@ -2541,13 +4206,13 @@ class HydraStrategy(MEICStrategy):
             # Estimate realized loss as credit + buffer (worst-case stop-equivalent)
             buffer = (self.call_stop_buffer if side == "call" else self.put_stop_buffer) * contracts
             realized_loss = -buffer  # net P&L = credit kept - close_cost; estimated as -buffer
-            self.daily_state.total_realized_pnl += credit_received - (credit_received + buffer)
+            self._book_realized_pnl(credit_received - (credit_received + buffer), entry)
         else:
             realized_loss = credit_received - actual_close_cost
-            self.daily_state.total_realized_pnl += realized_loss
+            self._book_realized_pnl(realized_loss, entry)
 
-        # Commission: 2 legs × $2.50 × contracts
-        commission_added = 2 * 2.50 * contracts
+        # Commission: 2 legs × commission_per_leg × contracts
+        commission_added = 2 * self.commission_per_leg * contracts
         self.daily_state.total_commission += commission_added
 
         logger.info(
@@ -2641,7 +4306,7 @@ class HydraStrategy(MEICStrategy):
         triggered = "TRIGGERED → put-only" if is_up else "not triggered"
         logger.info(
             f"Upday-035: SPX {change_pct * 100:+.2f}% from open "
-            f"({current:.1f} vs {spx_ref:.1f}), threshold +{self.upday_threshold_pct * 100:.1f}% — {triggered}"
+            f"({current:.1f} vs {spx_ref:.1f}), threshold +{self.upday_threshold_pct * 100:.2f}% — {triggered}"
         )
         return is_up
 
@@ -2686,7 +4351,7 @@ class HydraStrategy(MEICStrategy):
         """
         Check 20/40 EMA crossover for trend direction.
 
-        Uses SPX 1-minute bars from Saxo Chart API.
+        Uses SPX 1-minute bars from the IBKR chart-data API.
 
         Returns:
             TrendSignal indicating market direction
@@ -2695,27 +4360,26 @@ class HydraStrategy(MEICStrategy):
             return TrendSignal.NEUTRAL
 
         try:
-            # Fetch 1-minute bars for SPX (via US500.I CFD)
-            chart_data = self.client.get_chart_data(
-                uic=self.underlying_uic,
-                asset_type="CfdOnIndex",  # US500.I is a CFD
-                horizon=self.chart_horizon_minutes,
-                count=self.chart_bars_count
+            # Fetch 1-minute bars for SPX via the active broker.
+            # `bars` are normalized — keys: open/high/low/close/volume/
+            # timestamp_ms — broker-independent shape.
+            bars = self._read_recent_bars(
+                horizon_min=self.chart_horizon_minutes,
+                count=self.chart_bars_count,
             )
 
-            if not chart_data or "Data" not in chart_data:
+            if not bars:
                 logger.warning("Could not fetch chart data for trend detection")
                 return TrendSignal.NEUTRAL
 
-            bars = chart_data["Data"]
             if len(bars) < self.ema_long_period:
                 logger.warning(f"Insufficient bars for EMA: {len(bars)} < {self.ema_long_period}")
                 return TrendSignal.NEUTRAL
 
-            # Extract close prices (Saxo CFD data uses CloseBid, not Close)
+            # Extract close prices from normalized bars
             closes = []
             for bar in bars:
-                close = bar.get("CloseBid") or bar.get("Close") or 0
+                close = bar.get("close") or 0
                 if close > 0:
                     closes.append(close)
 
@@ -2771,7 +4435,89 @@ class HydraStrategy(MEICStrategy):
     # MKT-011: Credit Gate for HYDRA
     # =========================================================================
 
-    def _check_credit_gate(self, entry: HydraIronCondorEntry) -> Tuple[str, bool, float, float]:
+    def _build_credit_gate_skip_message(
+        self, nonviable_side: str, est_call: float, est_put: float
+    ) -> Tuple[str, str]:
+        """Build the (skip_reason, skip_details) pair for a credit-gate SKIP.
+
+        Extracted (2026-08-13) from _initiate_entry so this pure formatting
+        logic is directly unit-testable without the full entry-orchestration
+        harness. Keyed directly off `nonviable_side` — the authoritative,
+        final (post-MKT-029-fallback, post-MKT-048-fillability-veto)
+        determination from _check_credit_gate itself, not re-derived from the
+        raw estimated numbers. Re-deriving from raw numbers alone previously
+        produced a factually wrong "both spreads below minimum" message on
+        one-sided-disabled skips where only one side had actually failed —
+        e.g. C's 2026-08-13 Entry #2, where the put spread was genuinely
+        above its own minimum.
+        """
+        _min_call = self.min_viable_credit_per_side / 100
+        _min_put = self.min_viable_credit_put_side / 100
+        if nonviable_side == "both":
+            skip_reason = (
+                f"Not enough premium — both spreads came in below our minimum credit. "
+                f"Call spread ${est_call / 100:.2f} (need ≥ ${_min_call:.2f}), "
+                f"put spread ${est_put / 100:.2f} (need ≥ ${_min_put:.2f}). "
+                f"Skipped (credit gate)."
+            )
+            skip_details = (
+                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f})\n"
+                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f})"
+            )
+        elif nonviable_side == "call" and self.one_sided_entries_enabled:
+            # MKT-032: call non-viable; put-only would otherwise be
+            # offered, but VIX is too high to accept an unhedged put.
+            skip_reason = (
+                f"Call spread too cheap (${est_call / 100:.2f}, need ≥ ${_min_call:.2f}) and "
+                f"VIX {self.current_vix:.1f} is above our {self.put_only_max_vix:.1f} ceiling for a "
+                f"put-only fallback — we don't run a one-sided put in high volatility. "
+                f"Skipped (credit gate + volatility filter)."
+            )
+            skip_details = (
+                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f})\n"
+                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f})\n"
+                f"• VIX: {self.current_vix:.1f} (max {self.put_only_max_vix:.1f} for a put-only fallback)"
+            )
+        elif nonviable_side == "call":
+            # One-sided entries disabled: only the call side
+            # actually failed — the put side may be perfectly
+            # viable, but require-both-sides skips the whole entry.
+            skip_reason = (
+                f"Call spread ${est_call / 100:.2f} is below our ${_min_call:.2f} minimum "
+                f"(put spread ${est_put / 100:.2f} was fine) — but one-sided entries are "
+                f"disabled, so a full iron condor is required. Skipped (credit gate)."
+            )
+            skip_details = (
+                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f}) — NON-VIABLE\n"
+                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f}) — viable, but one-sided entries disabled"
+            )
+        elif nonviable_side == "put":
+            # One-sided entries disabled: only the put side failed.
+            skip_reason = (
+                f"Put spread ${est_put / 100:.2f} is below our ${_min_put:.2f} minimum "
+                f"(call spread ${est_call / 100:.2f} was fine) — but one-sided entries are "
+                f"disabled, so a full iron condor is required. Skipped (credit gate)."
+            )
+            skip_details = (
+                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f}) — viable, but one-sided entries disabled\n"
+                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f}) — NON-VIABLE"
+            )
+        else:
+            # Defensive fallback — _check_credit_gate's only skip
+            # paths set nonviable_side to "both"/"call"/"put", so
+            # this should be unreachable. Never assert a specific
+            # claim we can't back with the actual determination.
+            skip_reason = (
+                f"Credit gate rejected this entry (call ${est_call / 100:.2f}, "
+                f"put ${est_put / 100:.2f}). Skipped (credit gate)."
+            )
+            skip_details = (
+                f"• Call est: ${est_call / 100:.2f} (min ${_min_call:.2f})\n"
+                f"• Put est: ${est_put / 100:.2f} (min ${_min_put:.2f})"
+            )
+        return skip_reason, skip_details
+
+    def _check_credit_gate(self, entry: HydraIronCondorEntry) -> Tuple[str, bool, float, float, str]:
         """
         MKT-011 + MKT-032/MKT-039/MKT-040: Check if estimated credit is above minimum viable threshold.
 
@@ -2785,11 +4531,22 @@ class HydraStrategy(MEICStrategy):
             entry: HydraIronCondorEntry with strikes calculated
 
         Returns:
-            Tuple of (result, estimation_worked, estimated_call, estimated_put):
+            Tuple of (result, estimation_worked, estimated_call, estimated_put, nonviable_side):
             - result: "proceed", "put_only", "call_only", or "skip"
             - estimation_worked: True if we got valid quotes, False if estimation failed
             - estimated_call: estimated call credit in cents (0.0 if failed)
             - estimated_put: estimated put credit in cents (0.0 if failed)
+            - nonviable_side: only meaningful when result=="skip" — "both", "call", or
+              "put", naming which side(s) the FINAL (post-MKT-029-fallback,
+              post-MKT-048-fillability-veto) viability determination actually
+              rejected. "" for every other result. Added (2026-08-13) so callers
+              building a human-readable skip message never have to re-derive
+              viability from the raw estimated-credit numbers, which can
+              disagree with the final decision once MKT-029/MKT-048 have
+              flipped a side's viability after the initial threshold check —
+              re-deriving from raw numbers alone previously produced a
+              factually wrong "both spreads below minimum" message on some
+              one-sided-disabled skips where only one side had actually failed.
         """
         estimated_call, estimated_put = self._estimate_entry_credit(entry)
 
@@ -2800,7 +4557,7 @@ class HydraStrategy(MEICStrategy):
                 f"MKT-011: Could not estimate credit for Entry #{entry.entry_number} - "
                 f"falling back to MKT-010 illiquidity check"
             )
-            return ("proceed", False, 0.0, 0.0)  # estimation_worked = False
+            return ("proceed", False, 0.0, 0.0, "")  # estimation_worked = False
 
         # Separate thresholds: calls use min_viable_credit_per_side, puts use
         # min_viable_credit_put_side. Both are VIX-regime-dependent in live config —
@@ -2853,13 +4610,57 @@ class HydraStrategy(MEICStrategy):
                     )
                     break
 
+        # MKT-048 (2026-06-22): fillability veto. The checks above all use the
+        # MID estimate; but the short fills at its BID and the protective long
+        # at ~its MID (its buy-limit starts at mid), so a side can be mid-viable
+        # yet UNFILLABLE as a credit spread (short_bid − long_mid is a debit).
+        # _estimate_entry_credit stashed each side's per-share fillable credit
+        # on the entry (penny-rounded, off a SANE uncrossed book). If a
+        # still-viable side can't clear the placement net-credit floor (the
+        # same floor _sell_credit_floor_price enforces at leg 3), flip it
+        # non-viable HERE so the one-sided routing below books it cleanly — no
+        # protective-long bleed, no leg-3 retries, no HIGH watchdog alert (the
+        # 2026-06-22 C Entry#1 failure). FAIL-OPEN: only vetoes on a debit the
+        # data CONFIRMS (fillable is not None and < floor); a missing / crossed
+        # quote (None) never vetoes.
+        if self.mkt011_fillability_gate_enabled:
+            floor_ps = self.min_net_credit_per_contract  # per-share $, e.g. 0.05
+            fill_call_ps = getattr(entry, "_fillable_call_ps", None)
+            fill_put_ps = getattr(entry, "_fillable_put_ps", None)
+            if call_viable and fill_call_ps is not None and fill_call_ps < floor_ps:
+                call_viable = False
+                logger.warning(
+                    f"MKT-048: Entry #{entry.entry_number} call side unfillable — "
+                    f"fillable ${fill_call_ps:.2f}/sh < net-credit floor ${floor_ps:.2f}/sh "
+                    f"(mid est ${estimated_call / 100:.2f} passed, but short_bid−long_ask "
+                    f"is a debit) → vetoing call (would fail at leg 3)"
+                )
+                self._log_safety_event(
+                    "MKT-048_CALL_UNFILLABLE",
+                    f"Entry #{entry.entry_number}: call fillable ${fill_call_ps:.2f}/sh "
+                    f"< floor ${floor_ps:.2f}/sh (mid ${estimated_call / 100:.2f})"
+                )
+            if put_viable and fill_put_ps is not None and fill_put_ps < floor_ps:
+                put_viable = False
+                logger.warning(
+                    f"MKT-048: Entry #{entry.entry_number} put side unfillable — "
+                    f"fillable ${fill_put_ps:.2f}/sh < net-credit floor ${floor_ps:.2f}/sh "
+                    f"(mid est ${estimated_put / 100:.2f} passed, but short_bid−long_ask "
+                    f"is a debit) → vetoing put (would fail at leg 3)"
+                )
+                self._log_safety_event(
+                    "MKT-048_PUT_UNFILLABLE",
+                    f"Entry #{entry.entry_number}: put fillable ${fill_put_ps:.2f}/sh "
+                    f"< floor ${floor_ps:.2f}/sh (mid ${estimated_put / 100:.2f})"
+                )
+
         if call_viable and put_viable:
             logger.info(
                 f"MKT-011: Credit gate PASSED for Entry #{entry.entry_number}: "
                 f"Call ${estimated_call / 100:.2f} (min: ${call_min / 100:.2f}), "
                 f"Put ${estimated_put / 100:.2f} (min: ${put_min / 100:.2f})"
             )
-            return ("proceed", True, estimated_call, estimated_put)
+            return ("proceed", True, estimated_call, estimated_put, "")
 
         if not call_viable and not put_viable:
             logger.warning(
@@ -2872,7 +4673,7 @@ class HydraStrategy(MEICStrategy):
                 f"Entry #{entry.entry_number} - call ${estimated_call / 100:.2f}, put ${estimated_put / 100:.2f}",
                 "Skipped"
             )
-            return ("skip", True, estimated_call, estimated_put)
+            return ("skip", True, estimated_call, estimated_put, "both")
 
         # One side viable, other not
         if not call_viable:
@@ -2894,7 +4695,7 @@ class HydraStrategy(MEICStrategy):
                     f"put ${estimated_put / 100:.2f} → put-only (VIX {self.current_vix:.1f})",
                     "Put-Only"
                 )
-                return ("put_only", True, estimated_call, estimated_put)
+                return ("put_only", True, estimated_call, estimated_put, "")
             elif self.one_sided_entries_enabled and not vix_allows_put_only:
                 # MKT-032: VIX too high for put-only → skip
                 logger.warning(
@@ -2909,7 +4710,7 @@ class HydraStrategy(MEICStrategy):
                     f">= {self.put_only_max_vix} → skip (no unhedged put-only)",
                     "Skipped"
                 )
-                return ("skip", True, estimated_call, estimated_put)
+                return ("skip", True, estimated_call, estimated_put, "call")
             else:
                 # One-sided disabled → skip entirely
                 logger.warning(
@@ -2922,7 +4723,7 @@ class HydraStrategy(MEICStrategy):
                     f"Entry #{entry.entry_number} - call non-viable, one-sided disabled",
                     "Skipped"
                 )
-                return ("skip", True, estimated_call, estimated_put)
+                return ("skip", True, estimated_call, estimated_put, "call")
         else:
             # MKT-040: Put non-viable, call viable → convert to call-only
             # Data: low-credit call-only entries have 89% WR, +$46 EV per entry.
@@ -2939,7 +4740,7 @@ class HydraStrategy(MEICStrategy):
                     f"call ${estimated_call / 100:.2f} → call-only",
                     "Call-Only"
                 )
-                return ("call_only", True, estimated_call, estimated_put)
+                return ("call_only", True, estimated_call, estimated_put, "")
             else:
                 logger.warning(
                     f"MKT-011: Entry #{entry.entry_number} put credit non-viable "
@@ -2951,7 +4752,145 @@ class HydraStrategy(MEICStrategy):
                     f"Entry #{entry.entry_number} - put non-viable, one-sided disabled",
                     "Skipped"
                 )
-                return ("skip", True, estimated_call, estimated_put)
+                return ("skip", True, estimated_call, estimated_put, "put")
+
+    def _alert_rate_penalty(self, where: str, exc: Exception) -> None:
+        """Surface a rate-limit penalty box (429) that refused chain resolution.
+
+        With the family-aware box, stop-loss reads/closes are EXEMPT (they keep
+        running on the slow penalty gate), so held positions stay monitored —
+        what's lost is the ability to OPEN new entries until the box clears.
+        Without this, the refusal is swallowed as an empty chain (a silent
+        skipped entry window); a 429 should be operator-visible.
+        """
+        logger.critical(
+            f"_read_option_chain: IBKR rate penalty active during {where} — "
+            f"new entries blocked until it clears: {exc}"
+        )
+        # Dedup: _read_option_chain is re-attempted every ~1s scheduler tick for
+        # the whole entry-window grace, so without a cooldown one boxed window
+        # would emit dozens-to-hundreds of identical HIGH alerts (send_alert has
+        # no throttle). Fire at most once per ~2 min so the operator gets one
+        # clean signal, not a storm.
+        now = time.monotonic()
+        last = getattr(self, "_last_rate_penalty_alert_at", 0.0)
+        if now - last < 120:
+            return
+        self._last_rate_penalty_alert_at = now
+        try:
+            self.alert_service.send_alert(
+                alert_type=AlertType.API_ERROR,
+                title=f"{self.BOT_NAME} — IBKR rate penalty active",
+                message=(
+                    f"A 429 penalty box refused {where}. NEW ENTRIES are blocked "
+                    f"until it clears (~10 min); stop-loss monitoring of open "
+                    f"positions continues (risk reads are exempt). Investigate "
+                    f"the entry-window request burst if this recurs."
+                ),
+                priority=AlertPriority.HIGH,
+            )
+        except Exception as ae:
+            logger.warning(f"_alert_rate_penalty: alert send failed: {ae}")
+
+    def _read_option_chain(
+        self,
+        expiry: str,
+        candidate_strikes: List[float],
+    ) -> Tuple[Dict[float, Any], Dict[float, Any]]:
+        """
+        Option-chain reader for the credit-estimation flow.
+
+        Returns ``(call_map, put_map)`` — each a ``{strike: conid}``
+        dict. Returns ``({}, {})`` on any failure; every caller already
+        handles empty maps gracefully.
+
+        Flow (F3 of the IB-only rewrite):
+          1. ``broker.get_option_chain("SPX", expiry)`` → full strike list
+             (one cheap ``search_strikes_by_conid`` call).
+          2. Each requested candidate is snapped to the nearest real chain
+             strike. HYDRA builds candidates at 5pt steps, but IBKR's
+             ``secdef/info`` rejects strikes that aren't actually listed
+             (25pt spacing far OTM), so candidates must be resolved to
+             real strikes before ``qualify_option_strikes`` will accept
+             them.
+          3. ``broker.qualify_option_strikes()`` batch-resolves conids for
+             the snapped set in parallel (F3.1).
+          4. The maps are keyed by the real (snapped) strikes.
+
+        Args:
+            expiry: 0DTE expiry as ``"YYYY-MM-DD"`` (from
+                :meth:`_get_todays_expiry`).
+            candidate_strikes: Strikes the caller intends to evaluate.
+                Used to bound the conid-resolution batch.
+
+        Returns:
+            ``(call_map, put_map)`` — ``{strike: conid}`` per right.
+        """
+        try:
+            expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+        except (ValueError, TypeError) as e:
+            logger.warning(f"_read_option_chain: bad expiry {expiry!r}: {e}")
+            return {}, {}
+
+        try:
+            strike_list = self.broker.get_option_chain(
+                self.underlying_symbol, expiry_date,
+                trading_class=self.trading_class, exchange=self.exchange,
+            )
+        except RatePenaltyError as e:
+            self._alert_rate_penalty("option-chain fetch", e)
+            return {}, {}
+        except Exception as e:
+            logger.warning(
+                f"_read_option_chain: IB strike-list fetch failed: {e}"
+            )
+            return {}, {}
+        if not strike_list:
+            logger.warning("_read_option_chain: IB returned an empty chain")
+            return {}, {}
+
+        # Snap each requested candidate to the nearest real chain
+        # strike (within 25pt — half the widest far-OTM spacing).
+        snapped: set = set()
+        for cand in candidate_strikes:
+            nearest = min(strike_list, key=lambda s: abs(s - cand))
+            if abs(nearest - cand) <= 25:
+                snapped.add(nearest)
+        if not snapped:
+            logger.warning(
+                "_read_option_chain: no candidate strikes snapped to "
+                "the chain"
+            )
+            return {}, {}
+
+        try:
+            conid_map = self.broker.qualify_option_strikes(
+                symbol=self.underlying_symbol,
+                expiry=expiry_date,
+                strikes=sorted(snapped),
+                trading_class=self.trading_class,
+                exchange=self.exchange,
+            )
+        except RatePenaltyError as e:
+            self._alert_rate_penalty("strike conid resolution", e)
+            return {}, {}
+        except Exception as e:
+            logger.warning(
+                f"_read_option_chain: qualify_option_strikes failed: {e}"
+            )
+            return {}, {}
+
+        call_map = {
+            strike: conid
+            for (strike, right), conid in conid_map.items()
+            if right == "C"
+        }
+        put_map = {
+            strike: conid
+            for (strike, right), conid in conid_map.items()
+            if right == "P"
+        }
+        return call_map, put_map
 
     @staticmethod
     def _snap_to_chain_strike(target: float, uic_map: dict, max_snap: int = 15) -> tuple:
@@ -2970,22 +4909,10 @@ class HydraStrategy(MEICStrategy):
 
         Returns:
             (actual_strike, uic) if found within tolerance, (None, None) otherwise
+
+        Item 3: pure logic in shared.market_data_adapter; thin delegating wrapper.
         """
-        if target in uic_map:
-            return target, uic_map[target]
-
-        best_strike = None
-        best_dist = max_snap + 1
-        for strike in uic_map:
-            dist = abs(strike - target)
-            if dist < best_dist:
-                best_dist = dist
-                best_strike = strike
-
-        if best_strike is not None and best_dist <= max_snap:
-            return best_strike, uic_map[best_strike]
-
-        return None, None
+        return market_data_adapter.snap_to_chain_strike(target, uic_map, max_snap)
 
     @staticmethod
     def _snap_long_for_spread(short_strike: float, target_width: int,
@@ -3005,24 +4932,11 @@ class HydraStrategy(MEICStrategy):
 
         Returns:
             (actual_strike, uic) if found, (None, None) otherwise
+
+        Item 3: pure logic in shared.market_data_adapter; thin delegating wrapper.
         """
-        ideal_long = short_strike + target_width if is_call else short_strike - target_width
-
-        best_strike = None
-        best_dist = 16  # Max tolerance: 15pt
-        for strike in uic_map:
-            dist = abs(strike - ideal_long)
-            if dist < best_dist:
-                # Ensure spread is at least min_width (don't snap to tiny spreads)
-                actual_width = abs(strike - short_strike)
-                if actual_width >= target_width - 15:  # Allow slightly narrower
-                    best_dist = dist
-                    best_strike = strike
-
-        if best_strike is not None:
-            return best_strike, uic_map[best_strike]
-
-        return None, None
+        return market_data_adapter.snap_long_for_spread(
+            short_strike, target_width, uic_map, is_call)
 
     def _snap_entry_strikes_to_chain(self, entry: HydraIronCondorEntry) -> bool:
         """
@@ -3043,29 +4957,27 @@ class HydraStrategy(MEICStrategy):
             expiry = self._get_todays_expiry()
             if not expiry:
                 return False
-            try:
-                chain_resp = self.client.get_option_chain(
-                    option_root_id=self.option_root_uic,
-                    expiry_dates=[expiry]
-                )
-            except Exception as e:
-                logger.warning(f"MKT-045: Option chain fetch failed: {e}")
+            # Candidate set: the entry's 4 strikes plus a ±15pt
+            # neighborhood (5pt steps). The IB path of _read_option_chain
+            # resolves conids only for the candidates it's given, so the
+            # neighborhood gives iteration-2 re-snapping (after overlap
+            # shifts below) real strikes to land on. The Saxo path
+            # ignores candidate_strikes and returns the full chain — its
+            # behavior here is unchanged.
+            base_strikes = [
+                entry.short_call_strike, entry.long_call_strike,
+                entry.short_put_strike, entry.long_put_strike,
+            ]
+            candidates = []
+            for base in base_strikes:
+                if not base or base <= 0:
+                    continue
+                for delta in range(-15, 20, 5):
+                    candidates.append(float(base + delta))
+            call_map, put_map = self._read_option_chain(expiry, candidates)
+            if not call_map and not put_map:
+                logger.warning("MKT-045: Option chain returned no strikes")
                 return False
-            if not chain_resp:
-                return False
-            option_space = chain_resp.get("OptionSpace", [])
-            if not option_space:
-                return False
-            specific_options = option_space[0].get("SpecificOptions", [])
-            call_map = {}
-            put_map = {}
-            for opt in specific_options:
-                strike = opt.get("StrikePrice", 0)
-                pc = opt.get("PutCall", "")
-                if pc == "Call":
-                    call_map[strike] = opt.get("Uic")
-                elif pc == "Put":
-                    put_map[strike] = opt.get("Uic")
             entry._call_uic_map = call_map
             entry._put_uic_map = put_map
 
@@ -3137,7 +5049,73 @@ class HydraStrategy(MEICStrategy):
                 f"Entry #{entry.entry_number}: strikes snapped to chain"
             )
 
+        # WING-SYMMETRY CHECK (2026-09-10). Runs here because this is the LAST
+        # place all four strikes are mutated — chain snapping (25pt tolerance)
+        # and, on B/C, the Brandon GEX adjuster both move strikes AFTER the
+        # width was chosen, so the two wings can silently end up different
+        # widths.
+        #
+        # Why it matters, per IBKR KB article 600: if the put-side and call-side
+        # strike distances differ, the position is margined as TWO SEPARATE
+        # SPREADS with two separate requirements — roughly DOUBLE the symmetric
+        # iron-condor requirement (which is charged on ONE wing width only).
+        #
+        # Invisible today: the paper account holds ~$1M against a ~$35k peak
+        # requirement, so nothing binds. It becomes real at the $150k-$250k
+        # funding level contemplated for a live account, where a 2x margin
+        # surprise mid-entry means a rejected leg with the others already
+        # filled. Surfaced as a WARNING + safety event rather than a block —
+        # asymmetric wings are a legitimate trade, just a more expensive one,
+        # and skipping the entry would be a worse outcome than paying for it.
+        self._check_wing_symmetry(entry)
+
         return any_changed
+
+    def _check_wing_symmetry(self, entry) -> bool:
+        """Warn when the two wings ended up different widths. Returns True if
+        asymmetric. Never raises, never blocks an entry.
+
+        Per IBKR KB article 600, unequal put-side and call-side strike
+        distances are margined as TWO SEPARATE SPREADS with two separate
+        requirements — roughly DOUBLE the symmetric iron-condor requirement,
+        which is charged on ONE wing width only.
+
+        Called at the end of ``_snap_entry_strikes_to_chain`` because that is
+        the last point all four strikes are mutated: chain snapping (25pt
+        tolerance) and, on B/C, the Brandon GEX strike adjuster both move
+        strikes AFTER the width was chosen, so the wings can silently diverge.
+        ``_calculate_strikes`` itself applies one width per side, so an entry
+        that never reaches the snapper is symmetric by construction.
+
+        Invisible on paper (~$1M of buying power against a ~$35k peak
+        requirement, so nothing binds). It becomes real at the $150k-$250k
+        funding level contemplated for live money, where a 2x margin surprise
+        mid-entry means a rejected leg with the others already filled.
+
+        Warn rather than block: asymmetric wings are a legitimate trade, just a
+        more expensive one, and skipping the entry is the worse outcome.
+        """
+        try:
+            cw = abs(float(entry.long_call_strike) - float(entry.short_call_strike))
+            pw = abs(float(entry.short_put_strike) - float(entry.long_put_strike))
+        except (TypeError, ValueError, AttributeError) as e:
+            logger.debug("wing-symmetry check skipped: %s", e)
+            return False
+        if not (cw > 0 and pw > 0) or abs(cw - pw) <= 0.01:
+            return False
+        wide, narrow = max(cw, pw), min(cw, pw)
+        msg = (
+            f"Entry #{entry.entry_number}: ASYMMETRIC wings — call side "
+            f"{cw:.0f}pt vs put side {pw:.0f}pt. IBKR margins unequal wings as "
+            f"two separate spreads: ~${wide * 100:.0f} + ${narrow * 100:.0f} per "
+            f"contract instead of ~${wide * 100:.0f} for a symmetric condor."
+        )
+        logger.warning("MARGIN-ASYM: %s", msg)
+        try:
+            self._log_safety_event("WING_ASYMMETRY", msg)
+        except Exception:  # pragma: no cover - telemetry must not block
+            pass
+        return True
 
     def _apply_progressive_call_tightening(self, entry: HydraIronCondorEntry) -> bool:
         """
@@ -3170,7 +5148,7 @@ class HydraStrategy(MEICStrategy):
             logger.info("MKT-020: skipped (Brandon disable_progressive_tightening=True)")
             return False
 
-        spx = round(self.current_price / 5) * 5
+        spx = self._snap_to_grid(self.current_price)
         min_otm = self.min_call_otm_distance
         min_credit = self.min_viable_credit_per_side  # In cents; VIX-regime-overridden
         spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "call")
@@ -3193,42 +5171,29 @@ class HydraStrategy(MEICStrategy):
             short_s = spx + otm
             long_s = short_s + spread_width
             candidates.append((otm, short_s, long_s))
-            otm -= 5
+            otm -= self.strike_increment
 
         if not candidates:
             return False
 
-        # Fetch option chain ONCE to get UICs for all candidate strikes
-        try:
-            chain_response = self.client.get_option_chain(
-                option_root_id=self.option_root_uic,
-                expiry_dates=[expiry]
-            )
-        except Exception as e:
-            logger.warning(f"MKT-020: Option chain fetch failed: {e}")
+        # Resolve the call chain through the broker-agnostic reader
+        # (F3.2). Candidate set = every short + long strike across the
+        # inward scan range, so the IB path resolves all conids in one
+        # parallel batch and the Saxo path returns the full chain.
+        scan_strikes = []
+        for _, short_s, long_s in candidates:
+            scan_strikes.append(float(short_s))
+            scan_strikes.append(float(long_s))
+        call_uic_map, _ = self._read_option_chain(expiry, scan_strikes)
+        if not call_uic_map:
+            logger.warning("MKT-020: Option chain returned no call strikes")
             return False
-
-        if not chain_response:
-            return False
-
-        option_space = chain_response.get("OptionSpace", [])
-        if not option_space:
-            return False
-
-        # Build strike -> UIC mapping for calls from the chain
-        call_uic_map = {}
-        specific_options = option_space[0].get("SpecificOptions", [])
-        for opt in specific_options:
-            strike = opt.get("StrikePrice", 0)
-            put_call = opt.get("PutCall", "")
-            if put_call == "Call":
-                call_uic_map[strike] = opt.get("Uic")
 
         entry._call_uic_map = call_uic_map
 
-        # Collect UICs for all candidate strikes, snapping to nearest chain
-        # strike when exact 5pt increments don't exist (Saxo uses 25pt spacing
-        # far OTM — e.g., 6900, 6925, 6950 instead of every 5pt).
+        # Collect instrument ids for all candidate strikes, snapping to the
+        # nearest chain strike when exact 5pt increments don't exist (far
+        # OTM uses 25pt spacing — e.g., 6900, 6925, 6950 not every 5pt).
         candidate_uics = []  # [(otm, short_s, long_s, short_uic, long_uic), ...]
         all_uics = []
         seen_pairs = set()  # Avoid duplicate pairs after snapping
@@ -3256,14 +5221,14 @@ class HydraStrategy(MEICStrategy):
                 all_uics.append(long_uic)
 
         if not all_uics:
-            logger.warning("MKT-020: No UICs found for candidate call strikes")
+            logger.warning("MKT-020: No instrument ids found for candidate call strikes")
             return False
 
-        # Batch fetch quotes for all candidates (1 API call)
-        try:
-            quotes = self.client.get_quotes_batch(all_uics, asset_type="StockIndexOption")
-        except Exception as e:
-            logger.warning(f"MKT-020: Batch quote fetch failed: {e}")
+        # Batch fetch quotes for all candidates (1 API call) via the
+        # broker-agnostic helper (F3.4).
+        quotes = self._read_option_quotes_batch(all_uics)
+        if not quotes:
+            logger.warning("MKT-020: Batch quote fetch returned nothing")
             return False
 
         # Phase 1: Compute credits for all candidates (quotes already batch-fetched)
@@ -3272,15 +5237,28 @@ class HydraStrategy(MEICStrategy):
             if not short_uic or not long_uic:
                 continue
 
-            short_quote = quotes.get(short_uic, {})
-            long_quote = quotes.get(long_uic, {}) if long_uic else {}
+            short_quote = quotes.get(short_uic) or {}
+            long_quote = (quotes.get(long_uic) or {}) if long_uic else {}
 
-            sq = short_quote.get("Quote", {})
-            lq = long_quote.get("Quote", {})
-            short_bid = sq.get("Bid", 0) or 0
-            short_ask = sq.get("Ask", 0) or 0
-            long_bid = lq.get("Bid", 0) or 0
-            long_ask = lq.get("Ask", 0) or 0
+            # IBKR-audit #11: never price a strike off a NON-real-time option
+            # quote (explicit 6509 D/Z/Y/N). Missing/empty quotes fall through
+            # to the illiquid handling below; only a PRESENT quote with an
+            # explicit non-'R' flag fails closed here, so normal RTH (6509='R'
+            # or unpopulated) is unaffected.
+            if (short_quote and not self._option_quote_is_realtime(short_quote)) or \
+                    (long_quote and not self._option_quote_is_realtime(long_quote)):
+                logger.warning(
+                    "MKT-020: %spt OTM → option quote NOT real-time "
+                    "(short 6509=%r, long 6509=%r) — skipping candidate",
+                    otm_val, short_quote.get("availability"),
+                    long_quote.get("availability"),
+                )
+                continue
+
+            short_bid = short_quote.get("bid") or 0
+            short_ask = short_quote.get("ask") or 0
+            long_bid = long_quote.get("bid") or 0
+            long_ask = long_quote.get("ask") or 0
 
             if short_bid <= 0 or short_ask <= 0:
                 continue  # Short illiquid, skip
@@ -3418,7 +5396,7 @@ class HydraStrategy(MEICStrategy):
         if entry.call_only or entry.put_only:
             return False
 
-        spx = round(self.current_price / 5) * 5
+        spx = self._snap_to_grid(self.current_price)
         min_otm = self.min_put_otm_distance
         min_credit = self.min_viable_credit_put_side  # Put-specific; VIX-regime-overridden
         spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "put")
@@ -3441,42 +5419,29 @@ class HydraStrategy(MEICStrategy):
             short_s = spx - otm          # Put: BELOW SPX
             long_s = short_s - spread_width  # Put: FURTHER below
             candidates.append((otm, short_s, long_s))
-            otm -= 5
+            otm -= self.strike_increment
 
         if not candidates:
             return False
 
-        # Fetch option chain ONCE to get UICs for all candidate strikes
-        try:
-            chain_response = self.client.get_option_chain(
-                option_root_id=self.option_root_uic,
-                expiry_dates=[expiry]
-            )
-        except Exception as e:
-            logger.warning(f"MKT-022: Option chain fetch failed: {e}")
+        # Resolve the put chain through the broker-agnostic reader
+        # (F3.2). Candidate set = every short + long strike across the
+        # inward scan range, so the IB path resolves all conids in one
+        # parallel batch and the Saxo path returns the full chain.
+        scan_strikes = []
+        for _, short_s, long_s in candidates:
+            scan_strikes.append(float(short_s))
+            scan_strikes.append(float(long_s))
+        _, put_uic_map = self._read_option_chain(expiry, scan_strikes)
+        if not put_uic_map:
+            logger.warning("MKT-022: Option chain returned no put strikes")
             return False
-
-        if not chain_response:
-            return False
-
-        option_space = chain_response.get("OptionSpace", [])
-        if not option_space:
-            return False
-
-        # Build strike -> UIC mapping for puts from the chain
-        put_uic_map = {}
-        specific_options = option_space[0].get("SpecificOptions", [])
-        for opt in specific_options:
-            strike = opt.get("StrikePrice", 0)
-            put_call = opt.get("PutCall", "")
-            if put_call == "Put":
-                put_uic_map[strike] = opt.get("Uic")
 
         entry._put_uic_map = put_uic_map
 
-        # Collect UICs for all candidate strikes, snapping to nearest chain
-        # strike when exact 5pt increments don't exist (Saxo uses 25pt spacing
-        # far OTM — same issue as MKT-020 calls).
+        # Collect instrument ids for all candidate strikes, snapping to the
+        # nearest chain strike when exact 5pt increments don't exist (far
+        # OTM uses 25pt spacing — same issue as MKT-020 calls).
         candidate_uics = []  # [(otm, short_s, long_s, short_uic, long_uic), ...]
         all_uics = []
         seen_pairs = set()  # Avoid duplicate pairs after snapping
@@ -3504,14 +5469,14 @@ class HydraStrategy(MEICStrategy):
                 all_uics.append(long_uic)
 
         if not all_uics:
-            logger.warning("MKT-022: No UICs found for candidate put strikes")
+            logger.warning("MKT-022: No instrument ids found for candidate put strikes")
             return False
 
-        # Batch fetch quotes for all candidates (1 API call)
-        try:
-            quotes = self.client.get_quotes_batch(all_uics, asset_type="StockIndexOption")
-        except Exception as e:
-            logger.warning(f"MKT-022: Batch quote fetch failed: {e}")
+        # Batch fetch quotes for all candidates (1 API call) via the
+        # broker-agnostic helper (F3.4).
+        quotes = self._read_option_quotes_batch(all_uics)
+        if not quotes:
+            logger.warning("MKT-022: Batch quote fetch returned nothing")
             return False
 
         # Phase 1: Compute credits for all candidates (quotes already batch-fetched)
@@ -3520,15 +5485,28 @@ class HydraStrategy(MEICStrategy):
             if not short_uic or not long_uic:
                 continue
 
-            short_quote = quotes.get(short_uic, {})
-            long_quote = quotes.get(long_uic, {}) if long_uic else {}
+            short_quote = quotes.get(short_uic) or {}
+            long_quote = (quotes.get(long_uic) or {}) if long_uic else {}
 
-            sq = short_quote.get("Quote", {})
-            lq = long_quote.get("Quote", {})
-            short_bid = sq.get("Bid", 0) or 0
-            short_ask = sq.get("Ask", 0) or 0
-            long_bid = lq.get("Bid", 0) or 0
-            long_ask = lq.get("Ask", 0) or 0
+            # IBKR-audit #11: never price a strike off a NON-real-time option
+            # quote (explicit 6509 D/Z/Y/N). Missing/empty quotes fall through
+            # to the illiquid handling below; only a PRESENT quote with an
+            # explicit non-'R' flag fails closed here, so normal RTH (6509='R'
+            # or unpopulated) is unaffected.
+            if (short_quote and not self._option_quote_is_realtime(short_quote)) or \
+                    (long_quote and not self._option_quote_is_realtime(long_quote)):
+                logger.warning(
+                    "MKT-022: %spt OTM → option quote NOT real-time "
+                    "(short 6509=%r, long 6509=%r) — skipping candidate",
+                    otm_val, short_quote.get("availability"),
+                    long_quote.get("availability"),
+                )
+                continue
+
+            short_bid = short_quote.get("bid") or 0
+            short_ask = short_quote.get("ask") or 0
+            long_bid = long_quote.get("bid") or 0
+            long_ask = long_quote.get("ask") or 0
 
             if short_bid <= 0 or short_ask <= 0:
                 continue  # Short illiquid, skip
@@ -3640,7 +5618,12 @@ class HydraStrategy(MEICStrategy):
 
     def _record_skipped_entry(self, entry_num: int, skip_reason: str,
                               alert_details: str = "", send_alert: bool = True,
-                              est_call: float = 0.0, est_put: float = 0.0):
+                              est_call: float = 0.0, est_put: float = 0.0,
+                              hydration_pct: Optional[float] = None,
+                              achieved_delta: Optional[float] = None,
+                              target_delta: Optional[float] = None,
+                              delta_floor: Optional[float] = None,
+                              proposed_entry=None):
         """
         Record a skipped entry in daily_state.entries and optionally send Telegram alert.
 
@@ -3655,6 +5638,10 @@ class HydraStrategy(MEICStrategy):
             send_alert: Whether to send a Telegram alert (False when caller sends its own alert)
             est_call: Estimated call credit in cents (0 if not available)
             est_put: Estimated put credit in cents (0 if not available)
+            hydration_pct/achieved_delta/target_delta/delta_floor: schema v15
+                telemetry for the Brandon delta-target degraded-data guard
+                (bots/hydra/brandon/strategy.py) — None for every other skip
+                reason, which is the correct "not applicable" value.
         """
         now = get_us_market_time()
         skipped = HydraIronCondorEntry(entry_number=entry_num)
@@ -3670,7 +5657,26 @@ class HydraStrategy(MEICStrategy):
         # Record skip to SQLite (before alert guard — must run even when send_alert=False)
         if self._data_recorder:
             try:
+                # THE STRIKES WE WOULD HAVE USED (2026-09-11). `skipped_entries`
+                # has carried theoretical_short_call/long_call/short_put/long_put
+                # since v8, and NOTHING has ever populated them: variant B holds
+                # 95 live-era GEX vetoes with 0 strikes recorded. Without them the
+                # counterfactual this table exists for — "would the entries the
+                # GEX adjuster vetoed have won?" — is not computable at all, which
+                # is why that question has stayed open through three audits.
+                #
+                # A VETOED SIDE MAY BE ABSENT: the adjuster zeroes the side it
+                # drops, so on a GEX skip typically only the SURVIVING side has a
+                # strike. That is still the useful half — it is the side that
+                # WOULD have been placed — and the analysis must filter on
+                # presence rather than assume both.
+                _pe = proposed_entry
+                _strike = (lambda name: (getattr(_pe, name, None) or None) if _pe else None)
                 self._data_recorder.record_skipped_entry({
+                    "theoretical_short_call": _strike("short_call_strike"),
+                    "theoretical_long_call": _strike("long_call_strike"),
+                    "theoretical_short_put": _strike("short_put_strike"),
+                    "theoretical_long_put": _strike("long_put_strike"),
                     "date": now.strftime('%Y-%m-%d'),
                     "entry_number": entry_num,
                     "skip_time": now.strftime('%Y-%m-%d %H:%M:%S'),
@@ -3682,6 +5688,12 @@ class HydraStrategy(MEICStrategy):
                     # v8: contracts=0 means "no entry placed" (skip); signals to analytics
                     # that this row should not be counted in per-contract aggregations.
                     "contracts": 0,
+                    # v15: Brandon delta-target degraded-data guard telemetry — None
+                    # (correct "not applicable") for every other skip reason.
+                    "hydration_pct": hydration_pct,
+                    "achieved_delta": achieved_delta,
+                    "target_delta": target_delta,
+                    "delta_floor": delta_floor,
                 })
             except Exception:
                 pass
@@ -3713,6 +5725,113 @@ class HydraStrategy(MEICStrategy):
             )
         except Exception as e:
             logger.warning(f"Failed to send skip alert for Entry #{entry_num}: {e}")
+
+    def _record_failed_entry(self, entry_num: int, error_detail: str,
+                             send_alert: bool = True, used_retry_loop: bool = True):
+        """
+        Record a genuine order-EXECUTION FAILURE (2026-07-31) — distinct from a
+        deliberate strategic skip. Fires when order placement exhausts all
+        retries (e.g. the broker accepted an order but it never filled — an
+        IBKR paper-engine matching anomaly confirmed live on 2026-07-31, not a
+        HYDRA logic bug). Before this method existed, a failure like this
+        produced ZERO operator-visible signal: no DB row, no dashboard detail
+        (the entry-slot card rendered as a blank "window passed", indistinguishable
+        from a slot that never happened), and no alert — only a raw log line and
+        an incremented in-memory counter (daily_state.entries_failed) that
+        nothing surfaced proactively.
+
+        Reuses `_record_skipped_entry`'s plumbing (daily_state.entries append +
+        skipped_entries DB row + shadow-entry log) so the failure flows through
+        the SAME dashboard/DB pipeline a skip already uses — but marks
+        `execution_failed=True` (schema v14 discriminator) so every layer
+        (dashboard card, skipped_entries DB rows, Hermes/Clio analytics) can
+        tell "we chose not to trade" apart from "the broker failed us", and
+        sends a HIGH-priority alert (never LOW — LOW/MEDIUM alerts are silently
+        dropped when a variant's alerts.enabled=false; HIGH/CRITICAL are the
+        only priorities guaranteed to publish regardless, per the severity
+        bypass in shared/alert_service.py — this makes the alert correct
+        whichever variant hits this path, live or dry-run).
+
+        Args:
+            entry_num: The entry number (1-7)
+            error_detail: The underlying error (e.g. "Entry execution failed",
+                or an exception message) — folded into a clear, greppable
+                skip_reason so the DB row/dashboard/alert all read the same way.
+            send_alert: Whether to send a Telegram alert (default True; a
+                caller that already sends its own bespoke alert for this
+                failure can pass False, mirroring _record_skipped_entry).
+            used_retry_loop: True (default) for the main strategy.py entry
+                path, which retries ENTRY_MAX_RETRIES times before giving up
+                — the message says "after N attempts". False for callers
+                (D/E/Strangle) whose single-shot placement has no retry
+                ladder, so the message says "on the first attempt" instead —
+                claiming a retry count that never happened would be its own
+                small instance of the "looks fine but is misleading" problem
+                this method exists to fix.
+        """
+        now = get_us_market_time()
+        failed = HydraIronCondorEntry(entry_number=entry_num)
+        failed.is_complete = True
+        failed.call_side_skipped = True
+        failed.put_side_skipped = True
+        failed.execution_failed = True
+        attempt_phrase = (
+            f"after {ENTRY_MAX_RETRIES} attempts" if used_retry_loop
+            else "on the first attempt (no retry loop for this entry type)"
+        )
+        skip_reason = f"Execution failed {attempt_phrase}: {error_detail}"
+        failed.skip_reason = skip_reason
+        failed.entry_time = now
+        self.daily_state.entries.append(failed)
+
+        # Record to SQLite (before alert guard — must run even when send_alert=False)
+        if self._data_recorder:
+            try:
+                self._data_recorder.record_skipped_entry({
+                    "date": now.strftime('%Y-%m-%d'),
+                    "entry_number": entry_num,
+                    "skip_time": now.strftime('%Y-%m-%d %H:%M:%S'),
+                    "skip_reason": skip_reason,
+                    "spx_at_skip": self.current_price,
+                    "vix_at_skip": self.current_vix,
+                    "estimated_call_credit": None,
+                    "estimated_put_credit": None,
+                    "contracts": 0,
+                    "execution_failed": 1,
+                })
+            except Exception:
+                pass
+
+            self._record_shadow_entry(
+                entry_num=entry_num,
+                actual_entry=None,
+                is_skipped=True,
+                skip_reason=skip_reason,
+            )
+
+        if not send_alert:
+            return
+
+        time_str = now.strftime('%H:%M ET')
+        alert_msg = (
+            f"Entry #{entry_num} FAILED to execute at {time_str}\n"
+            f"{error_detail}\n\n"
+            f"The order was submitted to the broker but never filled, {attempt_phrase}. "
+            f"This is a broker/execution-layer issue, not a strategic decision — "
+            f"verify no partial position was left open."
+        )
+
+        try:
+            self.alert_service.send_alert(
+                alert_type=AlertType.ENTRY_EXECUTION_FAILED,
+                title=f"Entry #{entry_num} Execution FAILED",
+                message=alert_msg,
+                priority=AlertPriority.HIGH,
+                details={"entry_number": entry_num, "reason": error_detail},
+                contracts=self.contracts_per_entry,
+            )
+        except Exception as e:
+            logger.warning(f"Failed to send execution-failure alert for Entry #{entry_num}: {e}")
 
     # ========================================================================
     # DataRecorder: Real-time SQLite writes (non-critical, fire-and-forget)
@@ -3837,8 +5956,8 @@ class HydraStrategy(MEICStrategy):
                 return
 
             # Calculate shadow strikes — round to nearest 5pt (SPX option increment)
-            shadow_sc = round((spx + call_otm) / 5) * 5
-            shadow_sp = round((spx - put_otm) / 5) * 5
+            shadow_sc = self._snap_to_grid(spx + call_otm)
+            shadow_sp = self._snap_to_grid(spx - put_otm)
 
             # Spread width: use current bot's VIX-adjusted width (MKT-027)
             try:
@@ -3921,12 +6040,12 @@ class HydraStrategy(MEICStrategy):
             try:
                 quote_uics = [u for u in [entry.short_call_uic, entry.short_put_uic] if u]
                 if quote_uics:
-                    quotes = self.client.get_quotes_batch(quote_uics, asset_type="StockIndexOption")
+                    quotes = self._read_option_quotes_batch(quote_uics)
                     for side_uic, side_name in [(entry.short_call_uic, "call"), (entry.short_put_uic, "put")]:
                         if side_uic and side_uic in quotes:
-                            q = quotes[side_uic].get("Quote", {})
-                            bid = q.get("Bid", 0) or 0
-                            ask = q.get("Ask", 0) or 0
+                            q = quotes[side_uic]
+                            bid = q.get("bid") or 0
+                            ask = q.get("ask") or 0
                             if bid > 0 and ask > 0:
                                 width = round(ask - bid, 4)
                                 if side_name == "call":
@@ -3936,11 +6055,17 @@ class HydraStrategy(MEICStrategy):
             except Exception:
                 pass
 
-            # Slippage: fill price vs current mid (approximate)
-            if entry.short_call_fill_price and entry.short_call_price:
-                call_slippage = round(entry.short_call_fill_price - entry.short_call_price, 4)
-            if entry.short_put_fill_price and entry.short_put_price:
-                put_slippage = round(entry.short_put_fill_price - entry.short_put_price, 4)
+            # Real per-leg entry slippage = fill - mid_at_fill (the (bid+ask)/2 of
+            # the FILLING attempt, captured in _execute_entry BEFORE the monitoring
+            # *_price was overwritten with the fill). The prior code diffed fill
+            # against short_*_price, which _execute_entry sets equal to the fill —
+            # so it was structurally 0. Signed: the short legs collect credit, so a
+            # fill BELOW the mid (negative) gave up edge (adverse); above = price
+            # improvement. mid_at_fill==0 ⇒ not captured (dry-run / no quote) ⇒ None.
+            if entry.short_call_fill_price and entry.short_call_mid_at_fill:
+                call_slippage = round(entry.short_call_fill_price - entry.short_call_mid_at_fill, 4)
+            if entry.short_put_fill_price and entry.short_put_mid_at_fill:
+                put_slippage = round(entry.short_put_fill_price - entry.short_put_mid_at_fill, 4)
 
             entry_data = {
                 "date": date_str,
@@ -3950,7 +6075,14 @@ class HydraStrategy(MEICStrategy):
                 "vix_at_entry": self.current_vix,
                 "expected_move": getattr(self, '_last_expected_move', None),
                 "trend_signal": entry.trend_signal.value if entry.trend_signal else None,
-                "entry_type": "call_only" if entry.call_only else ("put_only" if entry.put_only else "full_ic"),
+                # Item 6: a structure discriminator distinguishes a naked
+                # strangle from the IC population so analytics (HERMES/HOMER)
+                # don't fold a deep-ITM naked loss into the "clean Expired" IC
+                # bucket. Falls through to the IC labels when unset.
+                "entry_type": (
+                    getattr(entry, "structure", None)
+                    or ("call_only" if entry.call_only else ("put_only" if entry.put_only else "full_ic"))
+                ),
                 "override_reason": getattr(entry, 'override_reason', None),
                 "short_call_strike": entry.short_call_strike,
                 "long_call_strike": entry.long_call_strike,
@@ -3970,6 +6102,28 @@ class HydraStrategy(MEICStrategy):
                 "slippage_call": call_slippage,
                 "slippage_put": put_slippage,
                 "attempts": getattr(entry, '_fill_attempts', 1),
+                # Ground-truth execution prices (v9): the real per-leg fills + the
+                # mid each filled against, so credits/slippage are reconstructable
+                # and reconcilable against the broker. None/0 in dry-run.
+                "short_call_fill_price": entry.short_call_fill_price or None,
+                "long_call_fill_price": entry.long_call_fill_price or None,
+                "short_put_fill_price": entry.short_put_fill_price or None,
+                "long_put_fill_price": entry.long_put_fill_price or None,
+                "short_call_mid_at_fill": entry.short_call_mid_at_fill or None,
+                "long_call_mid_at_fill": entry.long_call_mid_at_fill or None,
+                "short_put_mid_at_fill": entry.short_put_mid_at_fill or None,
+                "long_put_mid_at_fill": entry.long_put_mid_at_fill or None,
+                # v17: the mid when the strategy DECIDED to trade, as distinct
+                # from the mid at the moment of fill. fill - mid_at_fill is
+                # spread capture; fill - mid_at_decision is the TOTAL execution
+                # cost, including drift while a passive order rested. Without
+                # this, a passive order that misses and fills later at a worse
+                # price scores "flat" — which is exactly the cost the
+                # passive-rung change introduces.
+                "short_call_mid_at_decision": getattr(entry, "short_call_mid_at_decision", None) or None,
+                "long_call_mid_at_decision": getattr(entry, "long_call_mid_at_decision", None) or None,
+                "short_put_mid_at_decision": getattr(entry, "short_put_mid_at_decision", None) or None,
+                "long_put_mid_at_decision": getattr(entry, "long_put_mid_at_decision", None) or None,
                 # Margin snapshot
                 "margin_available": self._last_margin_snapshot.get("available"),
                 "margin_utilization_pct": self._last_margin_snapshot.get("utilization_pct"),
@@ -3989,7 +6143,7 @@ class HydraStrategy(MEICStrategy):
                     greeks_data = {}
                     for side, uic in [("call", entry.short_call_uic), ("put", entry.short_put_uic)]:
                         if uic:
-                            g = self.client.get_option_greeks(uic, asset_type="StockIndexOption")
+                            g = self._read_option_greeks(uic)
                             if g:
                                 greeks_data[side] = g
                     if greeks_data:
@@ -4002,7 +6156,7 @@ class HydraStrategy(MEICStrategy):
                                         f"""UPDATE trade_entries SET
                                         delta_{side} = ?, theta_{side} = ?, vega_{side} = ?
                                         WHERE date = ? AND entry_number = ?""",
-                                        (g.get("Delta"), g.get("Theta"), g.get("Vega"),
+                                        (g.get("delta"), g.get("theta"), g.get("vega"),
                                          date_str, entry.entry_number)
                                     )
                             conn.commit()
@@ -4027,8 +6181,28 @@ class HydraStrategy(MEICStrategy):
         )
 
     def _record_stop_to_db(self, entry, side: str, stop_level: float,
-                           actual_close_cost: float):
-        """Record stop loss data to SQLite with execution quality metrics."""
+                           actual_close_cost: float | None, exit_reason: str = "stop_loss",
+                           effective_trigger_level: float | None = None):
+        """Record stop loss data to SQLite with execution quality metrics.
+
+        exit_reason (v11) discriminates a real stop-loss from a Brandon
+        take-profit / GEX-breach early-close — all of which route through here.
+        Defaults to 'stop_loss' so the two HYDRA-stop call sites need no change.
+
+        2026-08-20 (round-1 adversarial review of the trigger_level-decay fix):
+        ``stop_level`` and the DB's ``trigger_level`` column used to be the same
+        number by definition, but ``stop_level`` ALSO feeds the ``net_pnl``
+        fallback below (used only when ``actual_close_cost`` is unknown) — and
+        that fallback must stay consistent with ``daily_state.total_realized_pnl``,
+        which ``super()._execute_stop_loss()`` computes from the STATIC entry-time
+        stop level, never the MKT-042-decayed one. Decoupled: ``stop_level``
+        keeps its original static meaning for the ``net_pnl`` fallback;
+        ``effective_trigger_level`` (optional, defaults to ``stop_level`` when a
+        caller has no better number — e.g. one-sided/A2 paths unaffected by this
+        finding) is what actually gets recorded as ``trigger_level``.
+        """
+        if effective_trigger_level is None:
+            effective_trigger_level = stop_level
         if not self._data_recorder:
             return
         try:
@@ -4064,15 +6238,34 @@ class HydraStrategy(MEICStrategy):
             if actual_close_cost and quoted_mid:
                 slippage = actual_close_cost - quoted_mid
 
+            # I-M2 (fixed 2026-07-14): net_pnl = credit - actual_close_cost whenever
+            # the close cost is KNOWN. A resolved debit of 0.0 is a VALID worthless
+            # close (the short expired / was bought back for ~nothing → full credit
+            # kept), NOT "missing" — so it must book +credit, not the placeholder.
+            # Callers pass None (never 0.0) when a leg fill was genuinely not
+            # captured; only that None case falls back to the trigger-level estimate
+            # -(stop_level - credit) so per-stop analytics aren't permanently NULL
+            # (the async-correction hooks are IBKR no-ops). The daily/cumulative
+            # total is always driven by realized P&L, so this column is reporting-only.
+            # (Prior falsy-0 guard mis-booked a worthless early_close as -(stop-credit),
+            #  e.g. variant B's 07-13 E3: -(2000-500)=-1500 instead of +500.)
+            if actual_close_cost is not None and credit:
+                net_pnl = -(actual_close_cost - credit)
+            elif stop_level and credit:
+                net_pnl = -(stop_level - credit)
+            else:
+                net_pnl = None
+
             self._data_recorder.record_stop({
                 "date": date_str,
                 "entry_number": entry.entry_number,
                 "side": side,
                 "stop_time": now.strftime('%H:%M:%S'),
                 "spx_at_stop": self.current_price,
-                "trigger_level": stop_level,
+                "trigger_level": effective_trigger_level,
                 "actual_debit": actual_close_cost,
-                "net_pnl": -(actual_close_cost - credit) if actual_close_cost and credit else None,
+                "net_pnl": net_pnl,
+                "exit_reason": exit_reason,
                 "quoted_mid_at_stop": quoted_mid,
                 "slippage_on_close": slippage,
                 "spx_move_since_entry": spx_move,
@@ -4087,6 +6280,76 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             logger.debug(f"DataRecorder stop write failed: {e}")
 
+    def _resolve_spx_close(self) -> float:
+        """The SPX close to use for the daily summary.
+
+        Normally ``self.current_price``, but that decays to 0 after-hours — and
+        0DTE settlement can complete HOURS after the 4 PM close (IBKR marked
+        variant C's 2026-06-11 legs settled at 9:52 PM ET), by which point
+        ``current_price`` is 0. The phantom-summary guard then treats a
+        LEGITIMATE traded day as stale and skips it — the cause of C's
+        2026-06-05→11 daily-summary/metrics recording gap. Recover the day's
+        last recorded SPX tick (on disk in market_ticks, so it survives the late
+        timing AND a mid-evening restart). Returns 0.0 only when there is
+        genuinely no intraday data — a true phantom — in which case the guard
+        correctly still skips.
+        """
+        px = float(self.current_price or 0)
+        # Recover the day's last recorded intraday tick from disk (market_ticks) —
+        # it survives a late after-hours settlement AND a mid-evening restart.
+        disk = 0.0
+        rec = getattr(self, "_data_recorder", None)
+        if rec is not None:
+            try:
+                today = get_us_market_time().strftime("%Y-%m-%d")
+                last = rec.get_last_spx_for_date(today)
+                if last and last > 0:
+                    disk = float(last)
+            except Exception:
+                pass
+        # px<=0: after-hours decay → use the on-disk close (2026-06-11 gap fix).
+        if px <= 0:
+            return disk or px
+        # STALE-PRICE GUARD (2026-07-07): a post-close restart can re-fetch a stale,
+        # NON-zero current_price — variant C on 07-06 got 7420.22 (a PRIOR-day value,
+        # ~1.6% below the real 7537.86 recorded close). Settling the daily summary /
+        # Brandon overlays against it booked a phantom -$6,037 loss (the RECONCILE
+        # guard flagged it). A legitimate settlement current_price is the ~4 PM tick,
+        # within ~0.05% of the last recorded intraday tick — so a >1% divergence means
+        # current_price is stale; trust the on-disk close instead.
+        if disk > 0 and abs(px - disk) / disk > 0.01:
+            logger.warning(
+                "SPX-CLOSE GUARD: current_price %.2f diverges >1%% from the recorded "
+                "intraday close %.2f — using the recorded close (stale post-restart "
+                "price?). Prevents a phantom settlement (2026-07-06 variant C).",
+                px, disk,
+            )
+            return disk
+        return px
+
+    @staticmethod
+    def _daily_summary_is_stale(state_date: str, today: str, spx_close) -> bool:
+        """True if a daily summary built from the current in-memory state would
+        be a phantom row, i.e. it must NOT be written.
+
+        Two signatures of the 06-03 phantom (bot down at the 9:30 open, started
+        mid-session, so the new-day reset never fired and it reached the close
+        still holding the PRIOR day's daily_state + session-open, with no live
+        price ever captured for today):
+          • spx_close <= 0  — no live SPX was seen today, so there is nothing
+            legitimate to summarize (the phantom had spx_close=0 / vix=0).
+          • state_date set and != today — the in-memory aggregates belong to a
+            different calendar day than the row's date, so writing them records
+            yesterday's entries/P&L under today's date.
+        An empty state_date (fresh recovery, date not yet set) is allowed —
+        that path is handled by _handle_idle's initial-date logic.
+        """
+        if (spx_close or 0) <= 0:
+            return True
+        if state_date and state_date != today:
+            return True
+        return False
+
     def _record_daily_summary_to_db(self):
         """Record daily summary to SQLite with economic events and overnight gap."""
         if not self._data_recorder:
@@ -4097,6 +6360,23 @@ class HydraStrategy(MEICStrategy):
 
             now = get_us_market_time()
             date_str = now.strftime('%Y-%m-%d')
+
+            # PHANTOM-SUMMARY GUARD (06-03 incident): refuse to write a summary
+            # assembled from a prior day's stale in-memory state. See
+            # _daily_summary_is_stale. Prevents the duplicate/0-close phantom row.
+            # Use the RESOLVED close (recovers the day's last tick when the live
+            # current_price is 0 at a late after-hours write) so a legitimate
+            # traded day is not mis-flagged as a phantom (2026-06-11 C gap fix).
+            spx_close = self._resolve_spx_close()
+            if self._daily_summary_is_stale(self.daily_state.date or "", date_str, spx_close):
+                logger.warning(
+                    "Skipping daily_summary DB write — stale/incomplete state "
+                    f"(state_date={self.daily_state.date or 'unset'}, today={date_str}, "
+                    f"spx_close={spx_close}). Prevents a phantom summary row; "
+                    "a clean row records after the next new-day reset."
+                )
+                return
+
             summary = self.get_daily_summary()
 
             events = get_economic_events_for_date(now.date())
@@ -4113,20 +6393,57 @@ class HydraStrategy(MEICStrategy):
             if spx_low is not None:
                 day_range = self.market_data.spx_high - spx_low
 
+            # AUDIT #76: daily_summaries.entries_stopped / entries_expired are
+            # displayed per-DAY (i.e. per-ENTRY) by the dashboard. Compute them
+            # per-entry directly from daily_state.entries instead of summing the
+            # PER-SIDE counters (call_stops + put_stops): summing per-side stops
+            # double-counts a double-stopped entry (2 instead of 1), and deriving
+            # entries_expired = completed - (call_stops + put_stops) then drove
+            # expired to 0 whenever an entry was stopped on both sides, hiding
+            # genuinely-expired entries. Buckets are disjoint: an entry is
+            # "stopped" if either side stopped; otherwise "expired" if either
+            # side expired.
+            entries_stopped_per_entry = 0
+            entries_expired_per_entry = 0
+            for _e in self.daily_state.entries:
+                _stopped = (getattr(_e, "call_side_stopped", False)
+                            or getattr(_e, "put_side_stopped", False))
+                _expired = (getattr(_e, "call_side_expired", False)
+                            or getattr(_e, "put_side_expired", False))
+                if _stopped:
+                    entries_stopped_per_entry += 1
+                elif _expired:
+                    entries_expired_per_entry += 1
+
             self._data_recorder.record_daily_summary({
                 "date": date_str,
                 "spx_open": self.market_data.spx_open,
-                "spx_close": self.current_price,
+                "spx_close": spx_close,
                 "spx_high": self.market_data.spx_high,
                 "spx_low": spx_low,
                 "day_range": day_range,
                 "vix_open": self.market_data.vix_open,
                 "vix_close": self.current_vix,
                 "entries_placed": summary.get("entries_completed", 0),
-                "entries_stopped": summary.get("call_stops", 0) + summary.get("put_stops", 0),
-                "entries_expired": max(0, summary.get("entries_completed", 0) - (summary.get("call_stops", 0) + summary.get("put_stops", 0))),
-                "gross_pnl": summary.get("total_pnl", 0),
-                "net_pnl": summary.get("total_pnl", 0) - summary.get("total_commission", 0),
+                "entries_stopped": entries_stopped_per_entry,
+                "entries_expired": entries_expired_per_entry,
+                # Routed through _cumulative_tracking_pnl (2026-09-02 metrics-drift
+                # fix) so a carried calendar's DB row doesn't re-book the same open
+                # position's running unrealized mark every day it's held — see
+                # CalendarStrategyBase._cumulative_tracking_pnl. No-op for A/B/C/F/G
+                # (default hook returns net_pnl unchanged, so gross/net below equal
+                # exactly what this line computed before).
+                "gross_pnl": (
+                    self._cumulative_tracking_pnl(
+                        summary,
+                        summary.get("total_pnl", 0) - summary.get("total_commission", 0),
+                    )
+                    + summary.get("total_commission", 0)
+                ),
+                "net_pnl": self._cumulative_tracking_pnl(
+                    summary,
+                    summary.get("total_pnl", 0) - summary.get("total_commission", 0),
+                ),
                 "commission": summary.get("total_commission", 0),
                 "long_salvage_revenue": summary.get("long_salvage_revenue", 0.0),
                 "day_of_week": now.strftime('%A'),
@@ -4136,7 +6453,16 @@ class HydraStrategy(MEICStrategy):
                 "opex_week": 1 if is_opex_week(now.date()) else 0,
                 # v8 contract count for the day
                 "contracts_per_entry": self.contracts_per_entry,
+                # v13: aggregate-only overlay P&L (forwarded from get_daily_summary so
+                # the persisted column is populated — the DB/slot_edge half of the
+                # reconciliation fix; NULL/0 for non-overlay days).
+                "unattributed_overlay_pnl": summary.get("unattributed_overlay_pnl", 0.0),
             })
+
+            # Per-entry realized P&L: reconcile the per-entry attribution against
+            # the authoritative day total, then persist each entry's realized_pnl
+            # to trade_entries (the number slot_edge.py reads).
+            self._record_entry_realized_pnl(date_str)
 
             # Compute MAE/MFE from spread_snapshots
             self._data_recorder.compute_mae_mfe(date_str)
@@ -4144,8 +6470,253 @@ class HydraStrategy(MEICStrategy):
             # WAL checkpoint (prevent unbounded WAL growth)
             self._data_recorder.wal_checkpoint()
 
+            # SELF-HEAL the cumulative metrics from the just-written DB (root-cause
+            # fix for metrics-vs-DB drift, 2026-07-20) — runs AFTER the daily_summary
+            # row is durable so the DB is complete for today.
+            self._reconcile_cumulative_metrics_from_db(date_str)
+
+            # The only check in this codebase that is NOT circular.
+            self._reconcile_pnl_against_broker(date_str)
+
         except Exception as e:
             logger.debug(f"DataRecorder daily summary failed: {e}")
+
+    def _record_entry_realized_pnl(self, date_str: str) -> None:
+        """Reconcile per-entry realized P&L to the day total, then persist it to
+        trade_entries.realized_pnl (schema v12) — the per-entry P&L slot_edge.py
+        reads. RECONCILIATION IS THE CORRECTNESS GUARD: sum(entry.realized_pnl)
+        must equal daily_state.total_realized_pnl because every booking mirrors via
+        _book_realized_pnl; a drift means a booking site did not pass ``entry`` and
+        is logged loudly (per-entry P&L would then be under-attributed). Values are
+        still written best-effort so the miss is visible in the data too. Applies
+        uniformly to A/B/C — real-order and dry-run settle P&L via the same paths."""
+        if not self._data_recorder:
+            return
+        try:
+            entries = list(self.daily_state.entries)
+            per_entry_sum = sum(getattr(e, "realized_pnl", 0.0) for e in entries)
+            # Overlay P&L booked aggregate-only (hedged entry absent from
+            # daily_state) lands in total_realized_pnl but on no entry — add it back
+            # so the identity is sum(entries) + unattributed == total. 0.0 for
+            # non-Brandon / days with no such overlay (2026-07-18 reconciliation
+            # blind-spot fix). Derived from this process's settlement sweep so a
+            # genuine double-book still drifts (not masked).
+            unattributed = self._unattributed_overlay_pnl()
+            agg = self.daily_state.total_realized_pnl
+            drift = (per_entry_sum + unattributed) - agg
+            if abs(drift) > 0.01:
+                logger.warning(
+                    "RECONCILE realized_pnl DRIFT on %s: per-entry sum $%.2f + "
+                    "unattributed-overlay $%.2f = $%.2f != total_realized_pnl $%.2f "
+                    "(drift $%.2f) — a booking site likely did not route through "
+                    "_book_realized_pnl(entry=...); per-entry P&L is under-attributed. "
+                    "Investigate before trusting slot_edge.",
+                    date_str, per_entry_sum, unattributed, per_entry_sum + unattributed,
+                    agg, drift,
+                )
+            elif abs(unattributed) > 0.01:
+                logger.info(
+                    "RECONCILE realized_pnl OK on %s: per-entry sum $%.2f "
+                    "(+ $%.2f aggregate-only overlay) == total_realized_pnl $%.2f "
+                    "(%d entries)",
+                    date_str, per_entry_sum, unattributed, agg, len(entries),
+                )
+            else:
+                logger.info(
+                    "RECONCILE realized_pnl OK on %s: per-entry sum $%.2f == "
+                    "total_realized_pnl $%.2f (%d entries)",
+                    date_str, per_entry_sum, agg, len(entries),
+                )
+            for e in entries:
+                # Fully-skipped entries opened no position — leave realized_pnl NULL.
+                if (getattr(e, "call_side_skipped", False)
+                        and getattr(e, "put_side_skipped", False)):
+                    continue
+                self._data_recorder.update_entry_realized_pnl(
+                    date_str, e.entry_number, round(getattr(e, "realized_pnl", 0.0), 2),
+                )
+        except Exception as ex:
+            logger.debug(f"per-entry realized_pnl record/reconcile failed: {ex}")
+
+    def _reconcile_pnl_against_broker(self, date_str: str) -> Optional[dict]:
+        """INDEPENDENT P&L check — the only one here that is not circular.
+
+        WHY THIS EXISTS. Every other reconciliation compares two numbers that
+        descend from the SAME accumulator: ``_book_realized_pnl`` increments
+        ``daily_state.total_realized_pnl`` and ``entry.realized_pnl`` in one
+        statement pair, and ``daily_summaries.gross_pnl`` derives from that same
+        total. They cannot disagree by construction, so they can only catch a
+        booking site that forgot to pass ``entry=``. The failure classes that
+        have actually bitten this codebase — a WRONG booked amount, a MISSING
+        booking, a DOUBLE booking — are all invisible to them.
+
+        IBKR computes its own realized P&L in the account ledger
+        (``raw_ledger.USD.realizedpnl``). That number shares no code path with
+        anything of ours, so comparing against it can catch all three.
+
+        LIVE SEAT ONLY. A dry-run variant places no orders, so the broker's
+        realized P&L reflects OTHER variants' activity (today, only B trades
+        for real). Comparing a simulated P&L against it would be meaningless
+        and would alarm on every close, so this returns None unless
+        ``dry_run`` is False.
+
+        Executions were the first choice and DO NOT WORK here: probed
+        2026-09-10, ``/iserver/account/trades`` returns ZERO records over a
+        7-day window that contained dozens of real paper fills, with no error.
+        The ledger is what this paper account actually exposes.
+
+        UNVERIFIED SEMANTICS, deliberately reported both ways. It is not
+        established whether IBKR's ``realizedpnl`` is net of commission, nor
+        exactly when it resets. It read 0.0 on a flat pre-market account, which
+        is consistent with a daily/session reset but does not prove one. So the
+        drift is computed against BOTH our gross and our net, and the first real
+        trading day will show which one tracks. Until then this LOGS and does
+        not alert, so an unverified comparison cannot cry wolf on the live seat.
+        Returns the measurement dict, or ``{"skipped": <reason>}`` — the reason
+        is distinguishable on purpose, so "IBKR gave us no field" is never
+        confused with "IBKR says $0". Never raises.
+        """
+        if getattr(self, "dry_run", True):
+            return {"skipped": "dry_run"}
+        try:
+            bal = self.broker.get_balance() or {}
+            ledger = (bal.get("raw_ledger") or {}).get("USD") or {}
+            broker_realized = ledger.get("realizedpnl")
+            if broker_realized is None:
+                # Distinct from an error, and distinct from a real 0.0. Reported
+                # as its own reason so a caller (and a test) can tell "IBKR did
+                # not give us the field" from "IBKR says you made nothing" —
+                # conflating those would report a drift equal to the entire
+                # day's P&L, or hide a genuine flat day.
+                logger.info(
+                    "BROKER-RECONCILE %s: ledger has no realizedpnl — skipped.",
+                    date_str,
+                )
+                return {"skipped": "no_realizedpnl_field"}
+            broker_realized = float(broker_realized)
+            gross = float(self.daily_state.total_realized_pnl or 0.0)
+            commission = float(self.daily_state.total_commission or 0.0)
+            net = gross - commission
+            out = {
+                "date": date_str,
+                "broker_realized_pnl": round(broker_realized, 2),
+                "our_gross": round(gross, 2),
+                "our_net": round(net, 2),
+                "drift_vs_gross": round(gross - broker_realized, 2),
+                "drift_vs_net": round(net - broker_realized, 2),
+                "net_liquidation": ledger.get("netliquidationvalue"),
+            }
+            best = min(abs(out["drift_vs_gross"]), abs(out["drift_vs_net"]))
+            logger.warning(
+                "BROKER-RECONCILE %s: IBKR realized $%.2f | ours gross $%.2f "
+                "(drift $%+.2f) / net $%.2f (drift $%+.2f) | closest $%.2f. "
+                "INDEPENDENT of total_realized_pnl. Semantics of IBKR's "
+                "realizedpnl (net-of-commission? reset cadence?) are still "
+                "UNVERIFIED — compare which drift tracks across sessions before "
+                "trusting either.",
+                date_str, broker_realized, gross, out["drift_vs_gross"],
+                net, out["drift_vs_net"], best,
+            )
+            return out
+        except Exception as e:
+            # Never let a diagnostic disturb settlement.
+            logger.info("BROKER-RECONCILE %s skipped (%s)", date_str, e)
+            return {"skipped": "error", "error": str(e)}
+
+    def _reconcile_cumulative_metrics_from_db(self, date_str: str) -> None:
+        """SELF-HEAL the cumulative metrics (hydra_metrics.json) from the authoritative
+        daily_summaries — the ROOT-CAUSE fix for metrics-vs-DB drift (2026-07-20 audit:
+        B metrics $11,053 vs DB $4,828).
+
+        WHY IT DRIFTED: _book_daily_cumulative accumulates cumulative_pnl and each
+        daily_returns row's net_pnl INCREMENTALLY and IDEMPOTENTLY-BY-DATE, so a day
+        booked with a corrupted total (stale-SPX settlement days like 07-06) or BEFORE
+        a later DB correction (a manual scrub/fix) is NEVER re-reconciled — the metrics
+        file and the reconciled DB drift apart forever, silently. daily_summaries is the
+        per-day-reconciled source of truth, so here — every settlement, after the DB
+        write — we re-derive cumulative_pnl + per-day net_pnl + win/loss from it. That
+        makes the metrics file a SELF-HEALING derived view: any drift (past correction,
+        corruption, restart-timing) is corrected on the next close and cannot accumulate.
+        Only net_pnl/total_stops/double_stops are DB-authoritative; capital_deployed/
+        contracts/total_entries/total_credit_collected stay (metrics-only, no confirmed
+        drift found there; return_pct re-derived). No-op when already consistent (the
+        normal case).
+
+        EXTENDED 2026-09-02: total_stops/double_stops re-derived from trade_stops too.
+        A follow-up fleet-wide audit found C's total_stops stuck at 7 in the metrics
+        file while trade_stops actually held 29 rows — the 2026-07-20 pass above only
+        ever reconciled cumulative_pnl/daily_returns/win-loss, never the stop counters,
+        which _book_daily_cumulative increments via the EXACT same "increment once,
+        idempotent-by-date, never revisited" pattern that caused the original
+        cumulative_pnl drift. Root cause of C's specific gap: _book_daily_cumulative
+        only ever increments these from daily_state.call/put_stops_triggered, which
+        _execute_stop_loss sets — but Brandon's take-profit/GEX-breach exits and the
+        shared MKT-018/047 early-close/flatten path all close a position through
+        _close_entry_early instead, which writes a real trade_stops row (via
+        _record_stop_to_db) but never touches those counters. "Genuine stop" here uses
+        the same definition shared/sheets_db_shim.py already established for HOMER/
+        HERMES/CLIO: exit_reason IN ('stop_loss','gex_breach') — excludes take_profit
+        (a win, not a stop) and early_close/EOD flattens (not stops). Legacy rows
+        written before the v11 exit_reason migration (NULL) fall back to net_pnl < 0,
+        matching what those rows always meant at the time (Brandon's TP/breach paths
+        didn't exist yet, so every pre-v11 trade_stops row IS a real stop-loss)."""
+        if not self._data_recorder:
+            return
+        try:
+            import sqlite3 as _sqlite
+            con = _sqlite.connect(f"file:{self._data_recorder.db_path}?mode=ro", uri=True)
+            db = {r[0]: round((r[1] or 0.0), 2)
+                  for r in con.execute("SELECT date, net_pnl FROM daily_summaries")}
+            _STOP_FILTER = (
+                "(exit_reason IN ('stop_loss','gex_breach') "
+                "OR (exit_reason IS NULL AND net_pnl < 0))"
+            )
+            db_total_stops = con.execute(
+                f"SELECT COUNT(*) FROM trade_stops WHERE {_STOP_FILTER}"
+            ).fetchone()[0]
+            db_double_stops = con.execute(
+                "SELECT COUNT(*) FROM (SELECT date, entry_number FROM trade_stops "
+                f"WHERE {_STOP_FILTER} GROUP BY date, entry_number "
+                "HAVING COUNT(DISTINCT side) = 2)"
+            ).fetchone()[0]
+            con.close()
+            if not db:
+                return
+            cm = self.cumulative_metrics
+            dr = cm.get("daily_returns", [])
+            corrected = 0
+            for row in dr:
+                d = row.get("date")
+                if d in db and abs(float(row.get("net_pnl", 0.0)) - db[d]) > 0.01:
+                    row["net_pnl"] = db[d]
+                    cap = row.get("capital_deployed", 0) or 0
+                    if cap > 0:
+                        row["return_pct"] = db[d] / cap
+                    corrected += 1
+            db_cum = round(sum(db.values()), 2)   # authoritative lifetime total
+            old_cum = round(float(cm.get("cumulative_pnl", 0.0)), 2)
+            drift = round(db_cum - old_cum, 2)
+            old_stops = int(cm.get("total_stops", 0) or 0)
+            old_double_stops = int(cm.get("double_stops", 0) or 0)
+            stops_drift = (db_total_stops != old_stops) or (db_double_stops != old_double_stops)
+            if corrected or abs(drift) > 0.01 or stops_drift:
+                logger.warning(
+                    "METRICS-RECONCILE %s: self-healed from daily_summaries/trade_stops — "
+                    "corrected %d daily_returns net_pnl; cumulative_pnl $%.2f -> $%.2f "
+                    "(drift $%.2f); total_stops %d -> %d; double_stops %d -> %d. "
+                    "Root-cause guard active.",
+                    date_str, corrected, old_cum, db_cum, drift,
+                    old_stops, db_total_stops, old_double_stops, db_double_stops,
+                )
+                cm["cumulative_pnl"] = db_cum
+                cm["total_stops"] = db_total_stops
+                cm["double_stops"] = db_double_stops
+                # win/loss over the reconciled per-day rows (trading days only)
+                cm["winning_days"] = sum(1 for r in dr if float(r.get("net_pnl", 0)) >= 0)
+                cm["losing_days"] = sum(1 for r in dr if float(r.get("net_pnl", 0)) < 0)
+                self._save_cumulative_metrics(trading_date=date_str)
+        except Exception as e:
+            logger.debug("METRICS-RECONCILE %s failed (non-fatal): %s", date_str, e)
 
     def _get_spx_price_minutes_ago(self, minutes: int) -> float:
         """Get SPX price from approximately N minutes ago using heartbeat price history."""
@@ -4158,6 +6729,78 @@ class HydraStrategy(MEICStrategy):
                 best_diff = diff
                 best_price = price
         return best_price if best_diff < minutes * 60 * 2 else 0.0  # reject if too far off
+
+    def _skip_require_both_sides(self, entry, entry_num: int, source: str) -> str:
+        """require-both-sides (one_sided_entries_enabled=false): skip an entry that
+        would be placed one-sided, from ANY source (credit-gate / E6 conditional /
+        the Brandon GEX strike-adjuster). Mirrors the MKT-010 clean-skip pattern so
+        the entry is recorded as a SKIP (not a failed retry). Returns the skip msg."""
+        logger.warning(
+            f"REQUIRE-BOTH-SIDES: Entry #{entry_num} would be one-sided ({source}) — "
+            f"SKIPPING (one_sided_entries_enabled=false)"
+        )
+        self._log_safety_event(
+            "REQUIRE_BOTH_SIDES_SKIP",
+            f"Entry #{entry_num} - one-sided ({source}) → skip (require both sides)",
+            "Skipped - Require Both Sides",
+        )
+        self.daily_state.entries_skipped += 1
+        self.daily_state.credit_gate_skips += 1
+        self._entry_in_progress = False
+        self._current_entry = None
+        self.state = MEICState.MONITORING
+        self._next_entry_index += 1
+        _src_expl = {
+            "call-only": "the put spread didn't have enough premium, so only a call "
+                         "spread would have been placed",
+            "put-only": "the call spread didn't have enough premium, so only a put "
+                        "spread would have been placed",
+            "GEX-skip": "one short strike sat inside a gamma-acceleration zone "
+                        "(where dealer hedging tends to amplify moves), so the GEX "
+                        "strike-adjuster dropped that side (GEX accel-zone skip)",
+        }.get(source, source)
+        self._record_skipped_entry(
+            entry_num,
+            f"Skipped — this entry would have placed only ONE spread, but we require "
+            f"a full iron condor (both a call spread AND a put spread). Single-sided "
+            f"entries have negative expectancy and a naked-short tail risk, so we "
+            f"don't take them (require-both-sides). Cause: {_src_expl}.",
+            proposed_entry=entry,
+        )
+        return f"Entry #{entry_num} skipped - require both sides ({source})"
+
+    def _skip_degraded_entry(self, entry, entry_num: int, reason: str) -> str:
+        """Clean-skip an entry aborted upstream for degraded/unreliable data — the
+        Brandon delta-target floor (under-hydrated Polygon chain → near-worthless
+        far-OTM strikes, 2026-07-17) or the dry-run net-credit-floor honesty check.
+        Mirrors _skip_require_both_sides / the MKT-010 clean-skip so the entry is
+        recorded as a SKIP (not a failed retry)."""
+        logger.warning(f"DEGRADED-DATA SKIP: Entry #{entry_num} — {reason}")
+        self._log_safety_event(
+            "DEGRADED_DATA_SKIP",
+            f"Entry #{entry_num} - {reason}",
+            "Skipped - Degraded Data",
+        )
+        self.daily_state.entries_skipped += 1
+        self.daily_state.credit_gate_skips += 1
+        self._entry_in_progress = False
+        self._current_entry = None
+        self.state = MEICState.MONITORING
+        self._next_entry_index += 1
+        # v15 telemetry: the Brandon delta-target floor stashes hydration/delta
+        # values on `entry` when it sets abort_entry_reason (see
+        # bots/hydra/brandon/strategy.py) — thread them through if present.
+        # None for any other degraded-data-skip caller (e.g. the dry-run
+        # net-credit-floor honesty check), which is the correct "not
+        # applicable" value for those columns.
+        self._record_skipped_entry(
+            entry_num, reason, proposed_entry=entry,
+            hydration_pct=getattr(entry, "abort_entry_hydration_pct", None),
+            achieved_delta=getattr(entry, "abort_entry_achieved_delta", None),
+            target_delta=getattr(entry, "abort_entry_target_delta", None),
+            delta_floor=getattr(entry, "abort_entry_delta_floor", None),
+        )
+        return f"Entry #{entry_num} skipped - degraded data"
 
     # OVERRIDE: Entry initiation with trend detection
     # =========================================================================
@@ -4177,6 +6820,28 @@ class HydraStrategy(MEICStrategy):
         """
         entry_num = self._next_entry_index + 1
         logger.info(f"HYDRA: Initiating Entry #{entry_num} of {self._effective_total_entry_count()}")
+
+        # L-M8: VIX freshness gate. VIX drives spread width, the VIX-regime
+        # credit floors, AND the stop buffer for THIS entry; a frozen VIX
+        # silently mis-sizes all of them. is_vix_stale() existed but had zero
+        # callers. Warn + attempt a refresh so a stale VIX is visible rather
+        # than silent. We warn (not skip) — a missed entry is worse than a
+        # slightly-stale VIX, and the refresh usually recovers it.
+        try:
+            if self.market_data.is_vix_stale():
+                logger.warning(
+                    f"L-M8: VIX appears STALE at Entry #{entry_num} sizing "
+                    f"(VIX={self.current_vix:.1f}); refreshing market data first"
+                )
+                self._update_market_data()
+                if self.market_data.is_vix_stale():
+                    logger.warning(
+                        f"L-M8: VIX STILL stale after refresh "
+                        f"(VIX={self.current_vix:.1f}) — entry sizing may be off; "
+                        f"proceeding"
+                    )
+        except Exception as exc:
+            logger.debug(f"L-M8: VIX staleness check failed (non-fatal): {exc}")
 
         # Directional pivot pre-entry gate (directional_pivot, introduced 2026-05-01).
         # Before any other filters run (including the calm-entry delay), check
@@ -4206,10 +6871,29 @@ class HydraStrategy(MEICStrategy):
                 and self.calm_entry_threshold_pts is not None
                 and self.calm_entry_max_delay_min is not None):
             import time as _time
+            # MKT-043 forensic fix: cap the calm wait so it can't consume the
+            # whole entry window — leave CALM_PLACEMENT_HEADROOM_SEC for the
+            # actual order placement (+ a retry). The wait previously equalled
+            # the 5-min window, so an entry that needed a retry hit "window
+            # expired" and never placed.
             max_delay_sec = self.calm_entry_max_delay_min * 60
+            _win_left = self._entry_window_remaining_sec()
+            if _win_left is not None:
+                max_delay_sec = min(
+                    max_delay_sec,
+                    max(0.0, _win_left - CALM_PLACEMENT_HEADROOM_SEC),
+                )
+            if max_delay_sec < 10:
+                _left_disp = (
+                    f"{_win_left:.0f}s left" if _win_left is not None else "n/a"
+                )
+                logger.info(
+                    f"MKT-043 E#{entry_num}: window headroom too low "
+                    f"({_left_disp}) for a calm wait — placing now"
+                )
             waited = 0
             _first_log = True
-            while waited <= max_delay_sec:
+            while waited < max_delay_sec:
                 # Refresh prices so current_price and price_history stay fresh
                 self._update_market_data()
                 spx_now = self.current_price
@@ -4354,7 +7038,10 @@ class HydraStrategy(MEICStrategy):
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
                         self._record_skipped_entry(
-                            entry_num, f"Conditional: no {direction}-day trigger"
+                            entry_num,
+                            f"Skipped — this is a conditional afternoon entry that only "
+                            f"fires on a {direction} day, and SPX didn't move enough "
+                            f"{direction} from today's open to trigger it (conditional entry)."
                         )
                         return f"Entry #{entry_num} skipped - conditional (no trigger)"
 
@@ -4370,6 +7057,15 @@ class HydraStrategy(MEICStrategy):
                 if not self._calculate_strikes(entry):
                     last_error = "Failed to calculate strikes"
                     continue
+
+                # DEGRADED-DATA clean skip (2026-07-17): the Brandon delta-target
+                # floor sets abort_entry_reason in _calculate_strikes when the
+                # Polygon chain is under-hydrated and it picked near-worthless
+                # far-OTM strikes. Skip cleanly here — before the credit gate
+                # wastes an estimate on garbage — rather than retry (the chain
+                # won't re-hydrate this tick).
+                if getattr(entry, "abort_entry_reason", None):
+                    return self._skip_degraded_entry(entry, entry_num, entry.abort_entry_reason)
 
                 # Determine if this is a conditional entry (MKT-035 E6/E7) before tightening
                 # so we can skip put tightening (saves API calls + main loop time)
@@ -4444,7 +7140,7 @@ class HydraStrategy(MEICStrategy):
                     # Still check call credit viability (with MKT-029 configurable floor)
                     # NOTE: do NOT zero put strikes yet — _estimate_entry_credit needs real
                     # strike values to look up UICs (zeroing causes estimation to fail → skip)
-                    _, _, est_call, _ = self._check_credit_gate(entry)
+                    _, _, est_call, _, _ = self._check_credit_gate(entry)
                     call_floor = self.call_credit_floor  # MKT-029 floor (regime-overwritten to min - $0.10)
                     if est_call < call_floor:
                         logger.info(
@@ -4459,8 +7155,10 @@ class HydraStrategy(MEICStrategy):
                         self._next_entry_index += 1
                         self._record_skipped_entry(
                             entry_num,
-                            f"Downday-035: call credit non-viable (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
-                            f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})",
+                            f"Not enough premium on the call spread (${est_call / 100:.2f}, "
+                            f"need ≥ ${call_floor / 100:.2f}) for this down-day, call-only "
+                            f"afternoon entry. Skipped (credit gate).",
+                            f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, target ${self.min_viable_credit_per_side / 100:.2f})",
                             est_call=est_call
                         )
                         return f"Entry #{entry_num} skipped - call credit non-viable (Downday-035)"
@@ -4479,7 +7177,7 @@ class HydraStrategy(MEICStrategy):
                     )
 
                     # Check put credit viability (MKT-029 configurable floor)
-                    _, _, _, est_put = self._check_credit_gate(entry)
+                    _, _, _, est_put, _ = self._check_credit_gate(entry)
                     put_floor = self.put_credit_floor  # MKT-029 floor (regime-overwritten to min - $0.10)
                     if est_put < put_floor:
                         logger.info(
@@ -4494,8 +7192,10 @@ class HydraStrategy(MEICStrategy):
                         self._next_entry_index += 1
                         self._record_skipped_entry(
                             entry_num,
-                            f"Upday-035: put credit non-viable (${est_put / 100:.2f} < ${put_floor / 100:.2f})",
-                            f"• Put est: ${est_put / 100:.2f} (floor ${put_floor / 100:.2f}, primary ${self.min_viable_credit_put_side / 100:.2f})",
+                            f"Not enough premium on the put spread (${est_put / 100:.2f}, "
+                            f"need ≥ ${put_floor / 100:.2f}) for this up-day, put-only "
+                            f"afternoon entry. Skipped (credit gate).",
+                            f"• Put est: ${est_put / 100:.2f} (floor ${put_floor / 100:.2f}, target ${self.min_viable_credit_put_side / 100:.2f})",
                             est_put=est_put
                         )
                         return f"Entry #{entry_num} skipped - put credit non-viable (Upday-035)"
@@ -4518,7 +7218,7 @@ class HydraStrategy(MEICStrategy):
                         )
 
                         # Check call credit viability (MKT-029 configurable floor)
-                        _, _, est_call, _ = self._check_credit_gate(entry)
+                        _, _, est_call, _, _ = self._check_credit_gate(entry)
                         call_floor = self.call_credit_floor  # MKT-029 floor (regime-overwritten to min - $0.10)
                         if est_call < call_floor:
                             logger.info(
@@ -4533,8 +7233,10 @@ class HydraStrategy(MEICStrategy):
                             self._next_entry_index += 1
                             self._record_skipped_entry(
                                 entry_num,
-                                f"Base-Downday: call credit non-viable (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
-                                f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})",
+                                f"Not enough premium on the call spread (${est_call / 100:.2f}, "
+                                f"need ≥ ${call_floor / 100:.2f}) for this down-day call-only "
+                                f"entry. Skipped (credit gate).",
+                                f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, target ${self.min_viable_credit_per_side / 100:.2f})",
                                 est_call=est_call
                             )
                             return f"Entry #{entry_num} skipped - call credit non-viable (Base-Downday)"
@@ -4553,7 +7255,7 @@ class HydraStrategy(MEICStrategy):
                     )
 
                     # Check call credit viability (MKT-029 configurable floor)
-                    _, _, est_call, _ = self._check_credit_gate(entry)
+                    _, _, est_call, _, _ = self._check_credit_gate(entry)
                     call_floor = self.call_credit_floor  # MKT-029 floor (regime-overwritten to min - $0.10)
                     if est_call < call_floor:
                         logger.info(
@@ -4568,8 +7270,10 @@ class HydraStrategy(MEICStrategy):
                         self._next_entry_index += 1
                         self._record_skipped_entry(
                             entry_num,
-                            f"MKT-038: call credit non-viable on FOMC T+1 (${est_call / 100:.2f} < ${call_floor / 100:.2f})",
-                            f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, primary ${self.min_viable_credit_per_side / 100:.2f})",
+                            f"Not enough premium on the call spread (${est_call / 100:.2f}, "
+                            f"need ≥ ${call_floor / 100:.2f}) for the day-after-FOMC call-only "
+                            f"entry. Skipped (credit gate).",
+                            f"• Call est: ${est_call / 100:.2f} (floor ${call_floor / 100:.2f}, target ${self.min_viable_credit_per_side / 100:.2f})",
                             est_call=est_call
                         )
                         return f"Entry #{entry_num} skipped - call credit non-viable (MKT-038)"
@@ -4579,10 +7283,17 @@ class HydraStrategy(MEICStrategy):
                 # filter dry entries too, otherwise low-credit entries place
                 # without the realistic skip behavior.
                 if not credit_gate_handled:
-                    gate_result, estimation_worked, est_call, est_put = self._check_credit_gate(entry)
+                    gate_result, estimation_worked, est_call, est_put, nonviable_side = self._check_credit_gate(entry)
+
+                    # Stash the MKT-011 per-contract estimates (in cents) so the
+                    # realized-credit guard can optionally compare realized-vs-estimate
+                    # (Rule 2). None when estimation failed → guard uses Rule 1 only.
+                    entry._mkt011_est_call = est_call if estimation_worked else None
+                    entry._mkt011_est_put = est_put if estimation_worked else None
 
                     if gate_result == "skip":
-                        # Skip: both non-viable, or MKT-032 VIX too high for put-only
+                        # Skip: both non-viable, MKT-032 VIX too high for put-only,
+                        # or one side non-viable with one-sided entries disabled.
                         # Fix #79: Increment skip counters (was missing - all other skip paths have this)
                         self.daily_state.entries_skipped += 1
                         self.daily_state.credit_gate_skips += 1
@@ -4590,31 +7301,20 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
-                        # Determine specific skip reason for dashboard/alert
-                        if estimation_worked and est_call < self.min_viable_credit_per_side and est_put < self.min_viable_credit_put_side:
-                            skip_reason = f"MKT-011: both sides below minimum credit (call ${est_call / 100:.2f}, put ${est_put / 100:.2f})"
-                            skip_details = (
-                                f"• Call est: ${est_call / 100:.2f} (min ${self.min_viable_credit_per_side / 100:.2f})\n"
-                                f"• Put est: ${est_put / 100:.2f} (min ${self.min_viable_credit_put_side / 100:.2f})"
-                            )
-                        elif self.current_vix and self.current_vix >= self.put_only_max_vix:
-                            skip_reason = (
-                                f"MKT-032: call non-viable (${est_call / 100:.2f}), "
-                                f"VIX {self.current_vix:.1f} too high for put-only (max {self.put_only_max_vix:.1f})"
-                            )
-                            skip_details = (
-                                f"• Call est: ${est_call / 100:.2f} (min ${self.min_viable_credit_per_side / 100:.2f})\n"
-                                f"• Put est: ${est_put / 100:.2f} (min ${self.min_viable_credit_put_side / 100:.2f})\n"
-                                f"• VIX: {self.current_vix:.1f} (max {self.put_only_max_vix:.1f} for put-only fallback)"
-                            )
-                        else:
-                            skip_reason = f"MKT-011: credit gate skip (call ${est_call / 100:.2f}, put ${est_put / 100:.2f})"
-                            skip_details = (
-                                f"• Call est: ${est_call / 100:.2f} (min ${self.min_viable_credit_per_side / 100:.2f})\n"
-                                f"• Put est: ${est_put / 100:.2f} (min ${self.min_viable_credit_put_side / 100:.2f})"
-                            )
+                        # Determine specific skip reason for dashboard/alert.
+                        skip_reason, skip_details = self._build_credit_gate_skip_message(
+                            nonviable_side, est_call, est_put
+                        )
+                        # proposed_entry (2026-09-11): keep the strikes this entry
+                        # WOULD have used. `entry` is still in scope here even
+                        # though self._current_entry was cleared above, so no
+                        # reordering is needed. Found because today's entry #3
+                        # was a credit-gate skip and recorded SC=None/SP=None —
+                        # the morning's change wired only the GEX/require-both-
+                        # sides and degraded-data paths, not this one.
                         self._record_skipped_entry(entry_num, skip_reason, skip_details,
-                                                    est_call=est_call, est_put=est_put)
+                                                    est_call=est_call, est_put=est_put,
+                                                    proposed_entry=entry)
                         return f"Entry #{entry_num} skipped - credit gate (MKT-011/MKT-032)"
                     elif gate_result == "call_only":
                         # MKT-011 retry: Before converting to call-only, try tightening
@@ -4632,9 +7332,9 @@ class HydraStrategy(MEICStrategy):
                             if current_put_otm <= min_put_floor:
                                 break  # at floor, can't tighten more
 
-                            # Tighten 5pt closer to ATM
-                            entry.short_put_strike += 5
-                            entry.long_put_strike += 5
+                            # Tighten one strike-increment closer to ATM
+                            entry.short_put_strike += self.strike_increment
+                            entry.long_put_strike += self.strike_increment
                             current_put_otm = abs(self.current_price - entry.short_put_strike)
 
                             # Re-estimate credit at new strikes
@@ -4666,6 +7366,28 @@ class HydraStrategy(MEICStrategy):
                                     f"credit ${est_put / 100:.2f}"
                                 )
                                 break
+
+                        # MKT-048 (review F4): a tightened put can be mid-viable
+                        # yet still UNFILLABLE. The re-estimate inside the loop
+                        # re-stashed _fillable_put_ps — if it's a confirmed debit,
+                        # don't proceed to a full IC (it would fail at leg 4 the
+                        # same way the call did); drop back to call-only so the
+                        # entry books cleanly.
+                        if put_retry_succeeded and self.mkt011_fillability_gate_enabled:
+                            fill_put_ps = getattr(entry, "_fillable_put_ps", None)
+                            if fill_put_ps is not None and fill_put_ps < self.min_net_credit_per_contract:
+                                logger.warning(
+                                    f"MKT-048: Entry #{entry_num} tightened put mid-viable "
+                                    f"(${est_put / 100:.2f}) but unfillable "
+                                    f"(${fill_put_ps:.2f}/sh < ${self.min_net_credit_per_contract:.2f}/sh) "
+                                    f"→ call-only instead of full IC"
+                                )
+                                self._log_safety_event(
+                                    "MKT-048_PUT_UNFILLABLE_RETRY",
+                                    f"Entry #{entry_num}: tightened put unfillable "
+                                    f"${fill_put_ps:.2f}/sh → call-only"
+                                )
+                                put_retry_succeeded = False
 
                         if put_retry_succeeded:
                             # Re-run strike conflict checks after changing put strikes
@@ -4730,7 +7452,7 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
-                        self._record_skipped_entry(entry_num, "MKT-010: call wings illiquid")
+                        self._record_skipped_entry(entry_num, "Call spread wings too illiquid to place safely (wide bid/ask) — skipped.")
                         return f"Entry #{entry_num} skipped - call illiquid, no one-sided entries"
                     elif entry.put_wing_illiquid and not entry.call_wing_illiquid:
                         # Put wing illiquid — no one-sided entries, skip
@@ -4749,7 +7471,7 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
-                        self._record_skipped_entry(entry_num, "MKT-010: put wings illiquid")
+                        self._record_skipped_entry(entry_num, "Put spread wings too illiquid to place safely (wide bid/ask) — skipped.")
                         return f"Entry #{entry_num} skipped - put illiquid, no one-sided entries"
                     elif entry.call_wing_illiquid and entry.put_wing_illiquid:
                         # Both wings illiquid — skip entry
@@ -4767,7 +7489,7 @@ class HydraStrategy(MEICStrategy):
                         self._current_entry = None
                         self.state = MEICState.MONITORING
                         self._next_entry_index += 1
-                        self._record_skipped_entry(entry_num, "MKT-010: both wings illiquid")
+                        self._record_skipped_entry(entry_num, "Both spreads' wings too illiquid to place safely (wide bid/ask) — skipped.")
                         return f"Entry #{entry_num} skipped - both wings illiquid"
 
                 # Determine entry type and execute
@@ -4780,6 +7502,13 @@ class HydraStrategy(MEICStrategy):
                         logger.info(f"EMA signal: {original_trend.value} (informational only) → placing full iron condor")
                     else:
                         logger.info(f"NEUTRAL → placing full iron condor")
+
+                # REQUIRE-BOTH-SIDES (B/C): when one-sided entries are disabled, skip
+                # any credit-gate / E6 / conditional one-sided routing before placement.
+                if not getattr(self, "one_sided_entries_enabled", True) and (place_put_only or place_call_only):
+                    return self._skip_require_both_sides(
+                        entry, entry_num, "call-only" if place_call_only else "put-only"
+                    )
 
                 import time as _time
                 _fill_start = _time.monotonic()
@@ -4799,6 +7528,20 @@ class HydraStrategy(MEICStrategy):
                         success = self._simulate_entry(entry)
                     else:
                         success = self._execute_entry(entry)
+
+                # REQUIRE-BOTH-SIDES: the Brandon GEX strike-adjuster runs INSIDE
+                # _execute/_simulate_entry and, when one-sided is disabled, sets
+                # require_both_abort + returns without placing. Convert to a clean skip.
+                if getattr(entry, "require_both_abort", False):
+                    return self._skip_require_both_sides(entry, entry_num, "GEX-skip")
+
+                # DEGRADED-DATA: the dry-run net-credit-floor honesty check in
+                # _simulate_entry sets abort_entry_reason when the simulated credit
+                # can't clear the floor a live entry would require — B would
+                # otherwise book a phantom $0-credit IC that C never takes
+                # (2026-07-17). Convert the False return into a clean skip.
+                if getattr(entry, "abort_entry_reason", None):
+                    return self._skip_degraded_entry(entry, entry_num, entry.abort_entry_reason)
 
                 entry._fill_time_ms = int((_time.monotonic() - _fill_start) * 1000)
                 entry._fill_attempts = attempt + 1
@@ -4840,6 +7583,24 @@ class HydraStrategy(MEICStrategy):
 
                     # Calculate stop losses
                     self._calculate_stop_levels_hydra(entry)
+
+                    # AUDIT #27: Persist state NOW — as soon as the legs are
+                    # confirmed filled, the entry is tracked, and its stop
+                    # levels are computed — and BEFORE the logging / Sheets / DB
+                    # / alert block below. Previously the only save was at the
+                    # very end (after all that work), leaving a wide crash window
+                    # in which the four legs were LIVE on the broker but absent
+                    # from the state file. Recovery is state-file-authoritative
+                    # (_load_state_file_history → _reconcile_recovered_entries_with_broker),
+                    # so a crash in that window would orphan the untracked legs
+                    # AND let the same slot be re-entered on restart. Saving here
+                    # closes the window: the entry is now in daily_state.entries
+                    # (no orphan) and recovery derives _next_entry_index from
+                    # max(entry_number) (no double-entry) even though
+                    # _next_entry_index is not advanced until below. The final
+                    # _save_state_to_disk() at the end still runs to capture the
+                    # advanced index and any later mutations.
+                    self._save_state_to_disk()
 
                     # Log to Google Sheets
                     self._log_entry(entry)
@@ -4968,6 +7729,13 @@ class HydraStrategy(MEICStrategy):
         # All retries exhausted
         self.daily_state.entries_failed += 1
         self._record_api_result(False, f"Entry #{entry_num} failed: {last_error}")
+        # 2026-07-31: this used to be a silent counter bump — no DB row, no
+        # dashboard detail, no alert (see _record_failed_entry's docstring for
+        # the full incident). _record_api_result above only feeds the circuit
+        # breaker's consecutive-failure bookkeeping; it does not alert unless
+        # this is the Nth consecutive failure, a much higher bar than "this one
+        # entry failed to place."
+        self._record_failed_entry(entry_num, last_error or "unknown error")
         self._next_entry_index += 1
 
         self._entry_in_progress = False
@@ -5030,6 +7798,7 @@ class HydraStrategy(MEICStrategy):
             entry.long_put_uic = long_put_result.get("uic")
             long_put_debit = long_put_result.get("debit", 0)
             entry.long_put_fill_price = long_put_result.get("fill_price", 0)
+            entry.long_put_mid_at_fill = long_put_result.get("mid_at_fill", 0)
             filled_legs.append(("long_put", entry.long_put_position_id, entry.long_put_uic))
             self._register_position(entry, "long_put")
 
@@ -5047,6 +7816,7 @@ class HydraStrategy(MEICStrategy):
             entry.short_put_position_id = short_put_result.get("position_id")
             entry.short_put_uic = short_put_result.get("uic")
             entry.short_put_fill_price = short_put_result.get("fill_price", 0)
+            entry.short_put_mid_at_fill = short_put_result.get("mid_at_fill", 0)
             short_put_credit = short_put_result.get("credit", 0)
             entry.put_spread_credit = short_put_credit - long_put_debit
             logger.debug(
@@ -5070,6 +7840,14 @@ class HydraStrategy(MEICStrategy):
             entry.short_call_price = 0
             entry.long_call_price = 0
 
+            # GUARD-INVERT: reject + unwind if the put vertical legged into a debit.
+            if not self._validate_realized_credit(
+                entry, filled_legs,
+                est_call_pc=None,
+                est_put_pc=getattr(entry, "_mkt011_est_put", None),
+            ):
+                return False
+
             logger.info(
                 f"Entry #{entry.entry_number} put-only complete: "
                 f"Put credit ${entry.put_spread_credit:.2f}"
@@ -5092,9 +7870,16 @@ class HydraStrategy(MEICStrategy):
                         naked_short_info = (leg_name, pos_id, uic)
                         break
 
-            if has_naked_short:
+            if has_naked_short and self.requires_protective_wings:
                 logger.critical(f"NAKED SHORT DETECTED: {naked_short_info[0]}")
-                self._handle_naked_short(naked_short_info)
+                # Pass `entry` so the emergency close can book its realized P&L
+                # (2026-09-10 — it previously booked nothing at all), and drop
+                # the leg from filled_legs on success so the unwind below does
+                # not fire a SECOND close at an already-flat position.
+                if self._handle_naked_short(naked_short_info, entry):
+                    filled_legs = [
+                        l for l in filled_legs if l[0] != naked_short_info[0]
+                    ]
 
             # Unwind filled legs
             self._unwind_partial_entry(filled_legs, entry)
@@ -5105,16 +7890,37 @@ class HydraStrategy(MEICStrategy):
         """
         Simulate a put-only entry (dry-run mode).
 
+        2026-06-23: populate the put leg conids + the REAL estimated credit
+        (mirror _simulate_entry's put side) so the heartbeat marks this entry
+        from REAL quotes — like a full IC — instead of the moneyness-BLIND
+        _simulate_hydra_entry_prices fallback, which time-decayed a credit-
+        derived value and so showed a far-OTM put-only entry as deeply negative
+        even as SPX moved away from the short (the reported B bug).
+
         Args:
             entry: HydraIronCondorEntry with put_only=True
 
         Returns:
             True if simulation successful
         """
-        spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "put")
-        credit_ratio = 0.025  # 2.5% of spread width
-        entry.put_spread_credit = spread_width * credit_ratio * 100 * self.contracts_per_entry
         entry.call_spread_credit = 0
+        expiry = self._get_todays_expiry()
+        if expiry and entry.short_put_strike and entry.long_put_strike:
+            try:
+                entry.short_put_uic = self._get_option_uic(entry.short_put_strike, "Put", expiry) or 0
+                entry.long_put_uic = self._get_option_uic(entry.long_put_strike, "Put", expiry) or 0
+                _, est_put = self._estimate_entry_credit(entry)
+                if est_put > 0:
+                    entry.put_spread_credit = est_put * self.contracts_per_entry
+            except Exception as e:
+                logger.warning(
+                    f"[DRY RUN] Put-only quote/credit lookup failed for Entry "
+                    f"#{entry.entry_number}: {e}"
+                )
+        if not entry.put_spread_credit:
+            # Crude fallback ONLY when the real estimate didn't populate a credit.
+            spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "put")
+            entry.put_spread_credit = spread_width * 0.025 * 100 * self.contracts_per_entry
 
         base_id = int(datetime.now().timestamp() * 1000)
         entry.short_put_position_id = f"DRY_{base_id}_SP"
@@ -5122,7 +7928,8 @@ class HydraStrategy(MEICStrategy):
 
         logger.info(
             f"[DRY RUN] Simulated Put-Only Entry #{entry.entry_number}: "
-            f"Put credit ${entry.put_spread_credit:.2f}"
+            f"Put credit ${entry.put_spread_credit:.2f} "
+            f"(UICs SP={entry.short_put_uic} LP={entry.long_put_uic})"
         )
 
         return True
@@ -5175,6 +7982,7 @@ class HydraStrategy(MEICStrategy):
             entry.long_call_uic = long_call_result.get("uic")
             long_call_debit = long_call_result.get("debit", 0)
             entry.long_call_fill_price = long_call_result.get("fill_price", 0)
+            entry.long_call_mid_at_fill = long_call_result.get("mid_at_fill", 0)
             filled_legs.append(("long_call", entry.long_call_position_id, entry.long_call_uic))
             self._register_position(entry, "long_call")
 
@@ -5192,6 +8000,7 @@ class HydraStrategy(MEICStrategy):
             entry.short_call_position_id = short_call_result.get("position_id")
             entry.short_call_uic = short_call_result.get("uic")
             entry.short_call_fill_price = short_call_result.get("fill_price", 0)
+            entry.short_call_mid_at_fill = short_call_result.get("mid_at_fill", 0)
             short_call_credit = short_call_result.get("credit", 0)
             entry.call_spread_credit = short_call_credit - long_call_debit
             logger.debug(
@@ -5215,6 +8024,14 @@ class HydraStrategy(MEICStrategy):
             entry.short_put_price = 0
             entry.long_put_price = 0
 
+            # GUARD-INVERT: reject + unwind if the call vertical legged into a debit.
+            if not self._validate_realized_credit(
+                entry, filled_legs,
+                est_call_pc=getattr(entry, "_mkt011_est_call", None),
+                est_put_pc=None,
+            ):
+                return False
+
             logger.info(
                 f"Entry #{entry.entry_number} call-only complete: "
                 f"Call credit ${entry.call_spread_credit:.2f}"
@@ -5237,9 +8054,16 @@ class HydraStrategy(MEICStrategy):
                         naked_short_info = (leg_name, pos_id, uic)
                         break
 
-            if has_naked_short:
+            if has_naked_short and self.requires_protective_wings:
                 logger.critical(f"NAKED SHORT DETECTED: {naked_short_info[0]}")
-                self._handle_naked_short(naked_short_info)
+                # Pass `entry` so the emergency close can book its realized P&L
+                # (2026-09-10 — it previously booked nothing at all), and drop
+                # the leg from filled_legs on success so the unwind below does
+                # not fire a SECOND close at an already-flat position.
+                if self._handle_naked_short(naked_short_info, entry):
+                    filled_legs = [
+                        l for l in filled_legs if l[0] != naked_short_info[0]
+                    ]
 
             # Unwind filled legs
             self._unwind_partial_entry(filled_legs, entry)
@@ -5250,16 +8074,34 @@ class HydraStrategy(MEICStrategy):
         """
         Simulate a call-only entry (dry-run mode).
 
+        2026-06-23: populate the call leg conids + REAL estimated credit (mirror
+        _simulate_entry) so the heartbeat marks from REAL quotes, not the
+        moneyness-blind fallback (see _simulate_put_spread_only).
+
         Args:
             entry: HydraIronCondorEntry with call_only=True
 
         Returns:
             True if simulation successful
         """
-        spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "call")
-        credit_ratio = 0.010  # 1.0% of spread width (calls have lower premium)
-        entry.call_spread_credit = spread_width * credit_ratio * 100 * self.contracts_per_entry
         entry.put_spread_credit = 0
+        expiry = self._get_todays_expiry()
+        if expiry and entry.short_call_strike and entry.long_call_strike:
+            try:
+                entry.short_call_uic = self._get_option_uic(entry.short_call_strike, "Call", expiry) or 0
+                entry.long_call_uic = self._get_option_uic(entry.long_call_strike, "Call", expiry) or 0
+                est_call, _ = self._estimate_entry_credit(entry)
+                if est_call > 0:
+                    entry.call_spread_credit = est_call * self.contracts_per_entry
+            except Exception as e:
+                logger.warning(
+                    f"[DRY RUN] Call-only quote/credit lookup failed for Entry "
+                    f"#{entry.entry_number}: {e}"
+                )
+        if not entry.call_spread_credit:
+            # Crude fallback ONLY when the real estimate didn't populate a credit.
+            spread_width = self._get_vix_adjusted_spread_width(self.current_vix, "call")
+            entry.call_spread_credit = spread_width * 0.010 * 100 * self.contracts_per_entry
 
         base_id = int(datetime.now().timestamp() * 1000)
         entry.short_call_position_id = f"DRY_{base_id}_SC"
@@ -5267,7 +8109,8 @@ class HydraStrategy(MEICStrategy):
 
         logger.info(
             f"[DRY RUN] Simulated Call-Only Entry #{entry.entry_number}: "
-            f"Call credit ${entry.call_spread_credit:.2f}"
+            f"Call credit ${entry.call_spread_credit:.2f} "
+            f"(UICs SC={entry.short_call_uic} LC={entry.long_call_uic})"
         )
 
         return True
@@ -5280,8 +8123,9 @@ class HydraStrategy(MEICStrategy):
     # worthless at end-of-day settlement (0DTE). This matches Tammy Chambless
     # and Sandvand's approach: "set stops on the short only, not on the spread."
     #
-    # Benefits: reduces slippage (1 market order instead of 2), saves $2.50
-    # commission per stop (1 leg instead of 2), avoids selling illiquid long
+    # Benefits: reduces slippage (1 market order instead of 2), saves ~$1.15
+    # commission per stop (1 leg instead of 2, at the configured IBKR
+    # commission_per_leg), avoids selling illiquid long
     # wings at terrible fill prices.
     #
     # Tradeoff: we lose the long leg's residual value (it expires worthless
@@ -5330,11 +8174,53 @@ class HydraStrategy(MEICStrategy):
 
         # When short_only_stop is disabled, use base MEIC logic (closes both legs)
         if not self.short_only_stop:
-            result = super()._execute_stop_loss(entry, side)
-            # Record stop to SQLite
+            # stop_level / effective_trigger_level depend only on the entry's
+            # own stored state (static side_stop, entry_time, contracts,
+            # strikes) and the current clock — none of it is mutated by
+            # super()._execute_stop_loss(), so computing both BEFORE the call
+            # is safe and lets the same effective_trigger_level feed both the
+            # DB write below AND the base class's final summary log line
+            # (2026-08-21 execution audit finding: that line printed the
+            # static/undecayed level — e.g. $317.50 — instead of the actual
+            # MKT-042-decayed trigger that caused the breach, e.g. $405.76,
+            # already shown correctly one line above in the STOP-DETAIL/
+            # MKT-046 output. Display-only; DB/state/P&L math were already
+            # correct — see the trigger_level comment below, unchanged).
             stop_level = entry.call_side_stop if side == "call" else entry.put_side_stop
+            effective_trigger_level = self._get_effective_stop_level(entry, side)
+            result = super()._execute_stop_loss(
+                entry, side, display_trigger_level=effective_trigger_level,
+            )
+            # Record stop to SQLite. 2026-08-20 (execution audit finding): the
+            # trigger_level column used to read entry.call_side_stop/
+            # put_side_stop directly — the STATIC base level set once at entry
+            # time — while the live trigger check a few lines below (and at
+            # MKT-036 confirmation time) fires against
+            # _get_effective_stop_level()'s dynamically MKT-042-decayed value,
+            # which is never written back to the entry attribute. On a stop
+            # that fires inside the ~4h decay window (most 0DTE stops),
+            # trade_stops.trigger_level silently recorded the wrong number —
+            # any analysis reading "how close was the stop to firing" (buffer
+            # calibration, slot_edge, HERMES) was off by the decay multiplier.
+            #
+            # stop_level here STAYS the static value — round-1 adversarial
+            # review found _record_stop_to_db's own net_pnl fallback (fires
+            # when the close fill wasn't captured) also keys off this same
+            # parameter, and that fallback must stay consistent with
+            # daily_state.total_realized_pnl (booked inside
+            # super()._execute_stop_loss() above using its own separate,
+            # still-static local). The decayed value is passed SEPARATELY as
+            # effective_trigger_level, which only feeds the trigger_level
+            # column — booked P&L (real fill/debit-driven) and this DB
+            # fallback are both untouched by the decay fix.
             actual_debit = entry.actual_call_stop_debit if side == "call" else entry.actual_put_stop_debit
-            self._record_stop_to_db(entry, side, stop_level, actual_debit)
+            # 0.0 here = the stop's close fill was never captured (unknown); a real
+            # stop buys back an ITM short (cost > 0), never worthless — so map 0.0 to
+            # None to keep the trigger-level placeholder (do NOT book +credit).
+            self._record_stop_to_db(
+                entry, side, stop_level, actual_debit or None,
+                effective_trigger_level=effective_trigger_level,
+            )
             return result
 
         logger.warning(
@@ -5345,34 +8231,33 @@ class HydraStrategy(MEICStrategy):
         self.state = MEICState.STOP_TRIGGERED
         stop_time = get_us_market_time().isoformat()
 
+        # CRITICAL C1: Do NOT mark the side stopped / clear the conid / book
+        # the loss yet. The short close can fail for the entire retry budget
+        # (broker unreachable or rejecting). We only commit the stop bookkeeping
+        # below AFTER the SHORT close actually succeeds, so that on failure the
+        # side stays ACTIVE (uic intact) and _check_stop_losses re-attempts the
+        # close on later ticks. Here we only select the leg to close + level.
         if side == "call":
-            entry.call_side_stopped = True
-            entry.call_stop_time = stop_time
-            self.daily_state.call_stops_triggered += 1
             # MKT-025: Only close the short leg — long expires at settlement
             positions_to_close = [
                 (entry.short_call_position_id, "short_call", entry.short_call_uic),
             ]
             stop_level = entry.call_side_stop
         else:
-            entry.put_side_stopped = True
-            entry.put_stop_time = stop_time
-            self.daily_state.put_stops_triggered += 1
             # MKT-025: Only close the short leg — long expires at settlement
             positions_to_close = [
                 (entry.short_put_position_id, "short_put", entry.short_put_uic),
             ]
             stop_level = entry.put_side_stop
 
-        # Check for double stop
-        if entry.call_side_stopped and entry.put_side_stopped:
-            self.daily_state.double_stops += 1
-            logger.warning(f"DOUBLE STOP on Entry #{entry.entry_number}")
-
         # Track actual fill prices for accurate P&L calculation
         actual_close_cost = 0.0  # Cost to close the short leg only
         fill_prices_captured = True
         deferred_legs = []
+        # CRITICAL C1: dry-run is treated as a successful close (it places no
+        # real order and returns (True, None, None)); the live path sets this
+        # from the actual close result below.
+        close_succeeded = self.dry_run
 
         if self.dry_run:
             logger.info(f"[DRY RUN] Would close {side} SHORT of Entry #{entry.entry_number}")
@@ -5393,12 +8278,21 @@ class HydraStrategy(MEICStrategy):
         else:
             # Close only the short leg via market order
             for pos_id, leg_name, uic in positions_to_close:
-                if pos_id:
+                # P7-audit C1: gate on the conid (`uic`), NOT `pos_id`.
+                # IBKR has no per-leg position id — `pos_id` is always
+                # None — so an `if pos_id:` gate skipped the close
+                # entirely, leaving the breached short open and booking
+                # the stop as a profit.
+                if uic:
                     # v8: pass entry.contracts (MKT-025 short-only stop of legacy entry)
-                    _, fill_price, order_id = self._close_position_with_retry(
+                    # CRITICAL C1: capture and HONOR the success flag — on a
+                    # failed close we must NOT mark the side stopped, clear the
+                    # conid, or book the loss (see fail-closed block below).
+                    success, fill_price, order_id = self._close_position_with_retry(
                         pos_id, leg_name, uic=uic, entry_number=entry.entry_number,
                         contracts=entry.contracts,
                     )
+                    close_succeeded = success
                     if fill_price is not None:
                         # Short leg: we BUY to close (costs money)
                         actual_close_cost += fill_price * 100 * entry.contracts
@@ -5408,6 +8302,70 @@ class HydraStrategy(MEICStrategy):
                         logger.info(f"MKT-025: No immediate fill price for {leg_name}, will use deferred lookup")
                         if order_id:
                             deferred_legs.append((order_id, uic, leg_name))
+                else:
+                    # No conid to close — the short is already flat (e.g. cleared
+                    # by a prior settlement/salvage). Nothing live to close, so
+                    # treat the stop as resolved rather than looping forever.
+                    logger.info(
+                        f"MKT-025: {leg_name} has no conid — short already flat, "
+                        f"booking stop without a close order"
+                    )
+                    close_succeeded = True
+
+        # CRITICAL C1: FAIL CLOSED on a failed short close.
+        # _close_position_with_retry returns success=False only after the FULL
+        # retry budget is exhausted (broker unreachable / rejecting), having
+        # already fired its CRITICAL EMERGENCY/CIRCUIT_BREAKER alert and logged
+        # an EMERGENCY_CLOSE_FAILED safety event. In that case the breached
+        # short is STILL LIVE and unhedged. We must NOT mark the side stopped,
+        # NOT clear its conid, and NOT book the loss as realized — doing so
+        # would orphan a live naked short and book a fake closed P&L. Leave the
+        # side ACTIVE (uic intact) so _check_stop_losses re-confirms the breach
+        # and re-attempts the close on subsequent ticks until the short is
+        # confirmed flat. Persist state so the breach context survives a crash.
+        if not close_succeeded:
+            logger.critical(
+                f"MKT-025 STOP CLOSE FAILED: Entry #{entry.entry_number} {side} "
+                f"SHORT did NOT close after full retry budget — leaving side "
+                f"ACTIVE (conid intact) for retry on next tick. NOT marking "
+                f"stopped, NOT booking loss. Live unhedged short remains open!"
+            )
+            self._log_safety_event(
+                event_type="MKT-025_STOP_CLOSE_FAILED",
+                details=(
+                    f"Entry #{entry.entry_number} {side} short close failed; side "
+                    f"kept active for retry. stop_level=${stop_level:.2f}"
+                ),
+                result="Retry pending",
+            )
+            self.state = MEICState.MONITORING
+            self._save_state_to_disk()
+            # Flush the alerts already queued by the retry path.
+            time.sleep(0.1)
+            self._flush_batched_alerts()
+            return (
+                f"MKT-025 Stop loss FAILED to close Entry #{entry.entry_number} "
+                f"{side} SHORT — side kept active, will retry next tick"
+            )
+
+        # CRITICAL C1: The short close SUCCEEDED (or dry-run). NOW commit the
+        # stop bookkeeping that the old code did up front: mark the side
+        # stopped, stamp the time, bump the per-side stop counter, and run the
+        # double-stop check. This guarantees these only fire once the short is
+        # actually flat.
+        if side == "call":
+            entry.call_side_stopped = True
+            entry.call_stop_time = stop_time
+            self.daily_state.call_stops_triggered += 1
+        else:
+            entry.put_side_stopped = True
+            entry.put_stop_time = stop_time
+            self.daily_state.put_stops_triggered += 1
+
+        # Check for double stop
+        if entry.call_side_stopped and entry.put_side_stopped:
+            self.daily_state.double_stops += 1
+            logger.warning(f"DOUBLE STOP on Entry #{entry.entry_number}")
 
         # Fix #86: Clear SHORT position IDs and UICs for the stopped side.
         # MKT-025 only closes the short — long stays open for settlement.
@@ -5415,10 +8373,10 @@ class HydraStrategy(MEICStrategy):
         # Long position ID/UIC stay intact for MKT-033 salvage and settlement.
         if side == "call":
             entry.short_call_position_id = None
-            entry.short_call_uic = 0
+            entry.short_call_uic = None
         else:
             entry.short_put_position_id = None
-            entry.short_put_uic = 0
+            entry.short_put_uic = None
 
         # Calculate net loss
         # MKT-025: close_cost is SHORT only. credit_received is NET of long cost.
@@ -5451,9 +8409,10 @@ class HydraStrategy(MEICStrategy):
                     f"net_loss=${net_loss:.2f} (may be inaccurate!)"
                 )
 
-        self.daily_state.total_realized_pnl -= net_loss
+        self._book_realized_pnl(-net_loss, entry)
 
-        # MKT-025: Commission for 1 close leg only ($2.50 instead of $5.00).
+        # MKT-025: Commission for 1 close leg only (~$1.15 instead of ~$2.30 at
+        # the IBKR commission_per_leg rate).
         # v8: scale by entry.contracts (the count this entry was opened at), NOT
         # self.contracts_per_entry (which may have changed if config flipped).
         close_commission = 1 * self.commission_per_leg * entry.contracts
@@ -5480,7 +8439,22 @@ class HydraStrategy(MEICStrategy):
         self._flush_batched_alerts()
 
         # Record stop to SQLite
-        self._record_stop_to_db(entry, side, stop_level, actual_close_cost)
+        # 0.0 = short buy-back fill not captured (unknown); a real MKT-025 short-only
+        # stop always buys back an expensive ITM short, so 0.0 is never a worthless
+        # close — map to None to retain the placeholder rather than book +credit.
+        # 2026-08-20 (round-2 review: the original trigger_level-decay fix only
+        # covered the `not short_only_stop` branch above — this MKT-025 branch
+        # was left recording the static level too, an incomplete-scope gap,
+        # currently dormant since short_only_stop=false on every tracked
+        # config today). stop_level itself STAYS untouched here — it directly
+        # feeds net_loss/the real booked P&L a few lines up (line 7710), unlike
+        # the other branch where the real booking is fully internal to
+        # super()._execute_stop_loss(). Only trigger_level's DB column changes.
+        effective_trigger_level = self._get_effective_stop_level(entry, side)
+        self._record_stop_to_db(
+            entry, side, stop_level, actual_close_cost or None,
+            effective_trigger_level=effective_trigger_level,
+        )
 
         # MKT-033: Immediately try to sell the long leg if profitable
         if self.long_salvage_enabled and not self.dry_run:
@@ -5488,14 +8462,14 @@ class HydraStrategy(MEICStrategy):
 
         return (
             f"MKT-025 Stop loss: Entry #{entry.entry_number} {side} "
-            f"SHORT closed at ${stop_level:.2f} (long expires at settlement)"
+            f"SHORT closed at ${effective_trigger_level:.2f} (long expires at settlement)"
         )
 
     # =========================================================================
     # MKT-033: LONG LEG SALVAGE (SELL PROFITABLE LONGS AFTER SHORT STOP)
     # =========================================================================
 
-    def _try_sell_long_leg(self, entry, side: str, valid_pos_ids: set = None) -> bool:
+    def _try_sell_long_leg(self, entry, side: str, open_positions: list = None) -> bool:
         """
         MKT-033: Sell the surviving long leg if profitable after short stop.
 
@@ -5512,6 +8486,9 @@ class HydraStrategy(MEICStrategy):
         Args:
             entry: HydraIronCondorEntry with stopped side
             side: "call" or "put" — the side whose short was stopped
+            open_positions: optional pre-fetched _read_open_positions()
+                list, so a multi-entry salvage sweep fetches once. None
+                lets _position_is_open fetch fresh.
 
         Returns:
             bool: True if long was sold successfully
@@ -5534,28 +8511,35 @@ class HydraStrategy(MEICStrategy):
             long_open_price = entry.long_put_fill_price
             already_sold = getattr(entry, 'put_long_sold', False)
 
-        # Guard: already sold, no position, or no UIC
-        if already_sold or not long_pos_id or not long_uic:
+        # Guard: already sold, or no long-leg instrument id.
+        # DEF-3: gate on long_uic only — long_pos_id is None on IBKR
+        # (no per-leg position id); gating on it would dead-code MKT-033
+        # in live IBKR mode. The downstream _close_position_with_retry
+        # keys on uic on the IB path, and registry.unregister(None) is
+        # caught, so a None long_pos_id is harmless here.
+        if already_sold or not long_uic:
             return False
 
         try:
-            # Verify position still exists in Saxo (may have been manually closed)
-            if valid_pos_ids is not None:
-                pos_exists = str(long_pos_id) in valid_pos_ids
-            else:
-                positions = self.client.get_positions()
-                pos_exists = any(
-                    str(p.get("PositionId", "")) == str(long_pos_id)
-                    for p in positions
-                )
+            # Verify the long leg still exists on the broker (may have been
+            # manually closed). F4.2: quantity-aware check via the
+            # broker-agnostic _position_is_open — works for Saxo's per-leg
+            # PositionId model AND IBKR's conid-keyed merged positions.
+            right = "C" if side == "call" else "P"
+            pos_exists = self._position_is_open(
+                long_uic, right=right, positions=open_positions
+            )
             if not pos_exists:
                 logger.info(
                     f"MKT-033 AUTO: Entry #{entry.entry_number} long {side} "
                     f"(pos {long_pos_id}) no longer in Saxo — detecting external close"
                 )
-                # Look up actual sale price from closedpositions
-                closed = self.client.get_closed_position_price(
-                    long_uic, buy_or_sell="Sell"
+                # Look up actual sale price from closed positions (F5.4 —
+                # broker-agnostic).
+                closed = self._read_closed_position_price(
+                    long_uic, buy_or_sell="Sell",
+                    not_before=getattr(entry, "entry_time", None),
+                    expect_quantity=getattr(entry, "contracts", None),
                 )
                 if closed and closed.get("closing_price", 0) > 0:
                     fill_price = closed["closing_price"]
@@ -5564,7 +8548,7 @@ class HydraStrategy(MEICStrategy):
                     # not current config (important when config flipped mid-day).
                     close_commission = self.commission_per_leg * entry.contracts
 
-                    self.daily_state.total_realized_pnl += revenue
+                    self._book_realized_pnl(revenue, entry)
                     self.daily_state.total_commission += close_commission
                     entry.close_commission += close_commission
 
@@ -5596,18 +8580,75 @@ class HydraStrategy(MEICStrategy):
                         f"@ ${fill_price:.2f}, revenue=${revenue:.2f}"
                     )
                 else:
-                    logger.warning(
-                        f"MKT-033 AUTO: Entry #{entry.entry_number} long {side} missing, "
-                        f"no closing price found — marking as sold with $0"
-                    )
+                    # ORDER-011 (2026-09-10): the long was SOLD — it did not
+                    # evaporate. Booking $0 (and in fact booking NOTHING: the
+                    # old branch never called _book_realized_pnl at all) simply
+                    # deletes the long's value from realized P&L. A long that
+                    # someone paid for is essentially never worth exactly zero.
+                    #
+                    # This matters MORE as of today: the opening-vs-closing
+                    # filter added to get_closed_position_price deliberately
+                    # returns None whenever it cannot distinguish a closing
+                    # execution from an opening one, so this branch is now
+                    # reached more often than it used to be. Fixing the lookup
+                    # without fixing its fallback would have traded a wrong
+                    # number for a missing one.
+                    #
+                    # Estimate from the live bid instead — the price the long
+                    # could actually have been sold at — and mark it clearly as
+                    # an ESTIMATE so the number is never mistaken for a fill.
+                    # Fail closed on a stale/non-real-time quote: an estimate
+                    # off a delayed quote is not better than no estimate.
+                    est_revenue = 0.0
+                    est_source = "none"
+                    try:
+                        q = self._read_option_quote(long_uic)
+                        if q and self._option_quote_is_realtime(q):
+                            est_bid = float(q.get("bid") or 0)
+                            if est_bid > 0:
+                                est_revenue = est_bid * 100 * entry.contracts
+                                est_source = f"bid ${est_bid:.2f}"
+                    except Exception as e:
+                        logger.warning(
+                            f"MKT-033 AUTO: quote lookup for the $0 fallback "
+                            f"failed ({type(e).__name__}: {e})"
+                        )
+
+                    if est_revenue > 0:
+                        est_commission = self.commission_per_leg * entry.contracts
+                        self._book_realized_pnl(est_revenue, entry)
+                        self.daily_state.total_commission += est_commission
+                        entry.close_commission += est_commission
+                        logger.warning(
+                            f"MKT-033 AUTO: Entry #{entry.entry_number} long {side} "
+                            f"sold externally but NO closing execution was readable — "
+                            f"booking an ESTIMATE of ${est_revenue:.2f} from the live "
+                            f"{est_source} (not an actual fill). Previously this booked "
+                            f"NOTHING, silently deleting the long's value from P&L."
+                        )
+                        self._log_safety_event(
+                            "LONG_SOLD_EXTERNAL_ESTIMATED",
+                            f"Entry #{entry.entry_number} long {side} booked from "
+                            f"quote estimate ${est_revenue:.2f} ({est_source}) — "
+                            f"no closing execution readable"
+                        )
+                    else:
+                        logger.critical(
+                            f"MKT-033 AUTO: Entry #{entry.entry_number} long {side} "
+                            f"sold externally, NO closing execution readable AND no "
+                            f"usable real-time quote — booking $0. This UNDERSTATES "
+                            f"realized P&L by whatever the long was worth; manual "
+                            f"review recommended."
+                        )
+
                     if side == "call":
                         entry.call_long_sold = True
-                        entry.call_long_sold_revenue = 0.0
+                        entry.call_long_sold_revenue = est_revenue
                         entry.long_call_position_id = None
                         entry.long_call_uic = None
                     else:
                         entry.put_long_sold = True
-                        entry.put_long_sold_revenue = 0.0
+                        entry.put_long_sold_revenue = est_revenue
                         entry.long_put_position_id = None
                         entry.long_put_uic = None
                     try:
@@ -5618,14 +8659,26 @@ class HydraStrategy(MEICStrategy):
                 self._save_state_to_disk()
                 return False  # Not sold by us, but accounted for
 
-            # Fetch quote for bid price
-            quote = self.client.get_quote(long_uic, asset_type="StockIndexOption")
+            # Fetch quote for bid price (broker-agnostic via _read_option_quote)
+            quote = self._read_option_quote(long_uic)
             if not quote:
                 logger.debug(f"MKT-033: No quote for Entry #{entry.entry_number} long {side} UIC {long_uic}")
                 return False
 
-            bid = quote.get("Quote", {}).get("Bid", 0)
-            if not bid or bid <= 0:
+            # IBKR-audit #11: don't price a salvage off a NON-real-time quote
+            # (explicit 6509 D/Z/Y/N) — fail closed; the long simply isn't
+            # salvaged this tick. Missing availability passes (see
+            # _option_quote_is_realtime).
+            if not self._option_quote_is_realtime(quote):
+                logger.warning(
+                    "MKT-033: Entry #%s long %s quote NOT real-time (6509=%r) — "
+                    "skipping salvage", entry.entry_number, side,
+                    quote.get("availability"),
+                )
+                return False
+
+            bid = quote.get("bid") or 0
+            if bid <= 0:
                 return False
 
             # Guard: invalid open price (recovery/fill lookup failure) — skip to avoid false profit
@@ -5672,7 +8725,7 @@ class HydraStrategy(MEICStrategy):
             revenue = actual_fill * 100 * entry.contracts
 
             # Update P&L (revenue is pure recovery — long cost already in spread credit)
-            self.daily_state.total_realized_pnl += revenue
+            self._book_realized_pnl(revenue, entry)
 
             # Commission for closing 1 leg
             # v8: use entry.contracts (stamped at entry creation) not current config —
@@ -5720,7 +8773,7 @@ class HydraStrategy(MEICStrategy):
                     price=actual_fill,
                     delta=0.0,
                     pnl=net_profit,  # Positive: revenue minus commission
-                    saxo_client=self.client,
+                    saxo_client=self.broker,
                     underlying_price=self.current_price,
                     vix=self.current_vix,
                     option_type=f"MKT-033 Long {side.title()}",
@@ -5791,62 +8844,81 @@ class HydraStrategy(MEICStrategy):
         if now.hour < 9 or (now.hour == 9 and now.minute < 30) or now.hour >= 16:
             return
 
-        # Fetch positions once for all long salvage checks (avoid N API calls)
-        try:
-            all_positions = self.client.get_positions()
-            valid_pos_ids = {str(p.get("PositionId", "")) for p in all_positions}
-        except Exception as e:
-            logger.warning(f"MKT-033: Could not fetch positions: {e}")
+        # Fetch positions once for all long salvage checks (avoid N API calls).
+        # F4.1: broker-agnostic — _read_open_positions returns [] on failure.
+        open_positions = self._read_open_positions()
+        if not open_positions:
+            logger.warning("MKT-033: No open positions returned — skipping salvage sweep")
             return
 
         for entry in self.daily_state.entries:
-            # Check call side: short stopped, long still open and unsold
+            # Check call side: short stopped, long still open and unsold.
+            # DEF-3: gate on the long leg's instrument id (*_uic) only —
+            # IBKR has no per-leg position id, so gating on
+            # *_position_id would dead-code MKT-033 in live IBKR mode.
             if entry.call_side_stopped and not getattr(entry, 'call_long_sold', False):
-                if entry.long_call_position_id and entry.long_call_uic:
-                    self._try_sell_long_leg(entry, "call", valid_pos_ids)
+                if entry.long_call_uic:
+                    self._try_sell_long_leg(entry, "call", open_positions)
 
             # Check put side: short stopped, long still open and unsold
             if entry.put_side_stopped and not getattr(entry, 'put_long_sold', False):
-                if entry.long_put_position_id and entry.long_put_uic:
-                    self._try_sell_long_leg(entry, "put", valid_pos_ids)
+                if entry.long_put_uic:
+                    self._try_sell_long_leg(entry, "put", open_positions)
 
-    def _get_saxo_pnl_for_entry(self, entry, positions=None):
-        """MKT-025: Exclude stopped sides' positions from Saxo P&L lookup.
+    def _get_broker_pnl_for_entry(self, entry, positions=None):
+        """MKT-025: Exclude stopped sides' positions from broker P&L lookup.
 
-        When MKT-025 stops only the short leg, the long leg remains open on Saxo.
-        Its ProfitLossOnTrade would double-count loss already in total_realized_pnl.
-        Only include positions for non-stopped sides.
+        When MKT-025 stops only the short leg, the long leg remains open.
+        Its unrealized P&L would double-count a loss already booked into
+        total_realized_pnl — so only non-stopped sides are summed.
+
+        F4.7: matches legs by conid (``instrument_id``) against the
+        broker-agnostic :meth:`_read_open_positions` shape, not by Saxo
+        ``PositionId``. Note: if two entries genuinely share a conid (a
+        merge — which MKT-013/015 strike deconfliction works to
+        prevent), the merged position's P&L is attributed to each — a
+        known limitation of any post-merge per-entry attribution.
+
+        Args:
+            entry: the entry to price.
+            positions: pre-fetched :meth:`_read_open_positions` list, or
+                None to fetch fresh.
+
+        Returns:
+            float — summed unrealized P&L of the entry's open legs.
         """
+        # DRY-RUN coexistence (2026-06-23): a dry-run bot holds NO real broker
+        # positions — the SHARED IBKR account carries the LIVE variant's (C's)
+        # positions. Matching this simulated entry's conids against that account
+        # returns C's P&L (the variant-B contamination, exposed once conids were
+        # re-resolved to strikes overlapping C's). Use the SIMULATED mark.
+        if getattr(self, "dry_run", False):
+            return entry.unrealized_pnl
         try:
             if positions is None:
-                positions = self.client.get_positions()
+                positions = self._read_open_positions()
+
+            # conids of legs on non-stopped sides
+            conids = set()
+            if not entry.call_side_stopped:
+                for leg in ("short_call", "long_call"):
+                    uic = getattr(entry, f"{leg}_uic", None)
+                    if uic:
+                        conids.add(uic)
+            if not entry.put_side_stopped:
+                for leg in ("short_put", "long_put"):
+                    uic = getattr(entry, f"{leg}_uic", None)
+                    if uic:
+                        conids.add(uic)
 
             total_pnl = 0.0
-            position_ids = []
-
-            # Only include position IDs for non-stopped sides
-            if not entry.call_side_stopped:
-                if entry.short_call_position_id:
-                    position_ids.append(entry.short_call_position_id)
-                if entry.long_call_position_id:
-                    position_ids.append(entry.long_call_position_id)
-            if not entry.put_side_stopped:
-                if entry.short_put_position_id:
-                    position_ids.append(entry.short_put_position_id)
-                if entry.long_put_position_id:
-                    position_ids.append(entry.long_put_position_id)
-
             for pos in positions:
-                pos_id = str(pos.get("PositionId", ""))
-                if pos_id in position_ids:
-                    pos_view = pos.get("PositionView", {})
-                    pnl = pos_view.get("ProfitLossOnTrade", 0) or 0
-                    total_pnl += pnl
-
+                if pos.get("instrument_id") in conids:
+                    total_pnl += pos.get("unrealized_pnl") or 0
             return total_pnl
 
         except Exception as e:
-            logger.debug(f"Error getting Saxo P&L for Entry #{entry.entry_number}: {e}")
+            logger.debug(f"Error getting broker P&L for Entry #{entry.entry_number}: {e}")
             return entry.unrealized_pnl
 
     def _calculate_stop_levels_hydra(self, entry: HydraIronCondorEntry):
@@ -5867,7 +8939,21 @@ class HydraStrategy(MEICStrategy):
         Args:
             entry: HydraIronCondorEntry to calculate stops for
         """
-        n = self.contracts_per_entry
+        # Size from the ENTRY, not from config (2026-09-11). These are
+        # identical today — this is called once, at entry time, immediately
+        # after `entry.contracts = self.contracts_per_entry` — so this is
+        # DEFENSIVE, not a live bug fix. It matters the moment either of two
+        # things becomes true:
+        #   * anything recalculates stops later, after a config change or a
+        #     state restore carrying a different contract count; or
+        #   * the combo/BAG path lands, where IBKR can partially fill the whole
+        #     structure and `entry.contracts` becomes the only truth. The leg
+        #     ladder cannot produce that today — ORDER-010 flattens an
+        #     incompletable leg rather than keeping it — but a BAG order has no
+        #     equivalent guard.
+        # Sizing a stop off config while holding a different quantity gets the
+        # trigger wrong in proportion, silently.
+        n = getattr(entry, "contracts", None) or self.contracts_per_entry
         min_stop_level = 50.0 * n
         call_buf = self.call_stop_buffer * n
         put_buf = self.put_stop_buffer * n
@@ -5877,7 +8963,10 @@ class HydraStrategy(MEICStrategy):
             # Only call spread placed
             credit = entry.call_spread_credit
             if credit < min_stop_level:
-                logger.critical(f"CRITICAL: Low credit ${credit:.2f}, using minimum stop")
+                # Routine for narrow-spread variants (Brandon 10c): the credit is
+                # below the MIN_STOP_LEVEL floor, so the floor sets the stop. NOT
+                # an error — logged INFO to avoid CRITICAL alert-fatigue.
+                logger.info(f"Credit ${credit:.2f} below ${min_stop_level:.2f} min-stop floor — using floor for stop ({n}c)")
                 credit = min_stop_level
 
             # All call-only entries use theoretical put for stop calculation:
@@ -5902,7 +8991,9 @@ class HydraStrategy(MEICStrategy):
             # Only put spread placed
             credit = entry.put_spread_credit
             if credit < min_stop_level:
-                logger.critical(f"CRITICAL: Low credit ${credit:.2f}, using minimum stop")
+                # Routine for narrow-spread variants (Brandon 10c): credit below
+                # the MIN_STOP_LEVEL floor → floor sets the stop. NOT an error.
+                logger.info(f"Credit ${credit:.2f} below ${min_stop_level:.2f} min-stop floor — using floor for stop ({n}c)")
                 credit = min_stop_level
 
             # MKT-039: Put-only stop = credit + $1.75 buffer (same pattern as full IC puts).
@@ -5923,7 +9014,9 @@ class HydraStrategy(MEICStrategy):
             total_credit = entry.total_credit
 
             if total_credit < min_stop_level:
-                logger.critical(f"CRITICAL: Total credit ${total_credit:.2f} very low, using minimum stop")
+                # Routine for narrow-spread variants: total credit below the
+                # MIN_STOP_LEVEL floor → floor sets the stop. NOT an error.
+                logger.info(f"Total credit ${total_credit:.2f} below ${min_stop_level:.2f} min-stop floor — using floor for stop ({n}c)")
                 total_credit = min_stop_level
 
             base_stop = total_credit
@@ -5952,6 +9045,33 @@ class HydraStrategy(MEICStrategy):
                     f"MKT-042: Buffer decay ACTIVE — effective stops: call=${eff_call:.2f}, put=${eff_put:.2f} "
                     f"({self.buffer_decay_start_mult:.2f}× decaying to 1× over {self.buffer_decay_hours:.1f}h)"
                 )
+
+        # A2: %-of-width narrow-spread stop OVERRIDE — applied after all three
+        # branches set the credit+buffer stops, so it covers call-only / put-only /
+        # full-IC uniformly. Replaces each non-zero side's trigger with
+        # pct × width × 100 × contracts. Config-gated (default OFF → A and
+        # un-migrated C unchanged). Decay is bypassed for these stops in
+        # _get_effective_stop_level so the % trigger isn't re-widened early-day.
+        if getattr(self, "narrow_spread_stop_enabled", False):
+            pct = self.narrow_spread_stop_pct
+            for side in ("call", "put"):
+                cur = getattr(entry, f"{side}_side_stop", 0) or 0
+                if cur <= 0:
+                    continue  # side not placed
+                if side == "call":
+                    width = (entry.long_call_strike or 0) - (entry.short_call_strike or 0)
+                else:
+                    width = (entry.short_put_strike or 0) - (entry.long_put_strike or 0)
+                if width and width > 0:
+                    # entry.contracts, not config — see _calculate_stop_levels_hydra.
+                    n = getattr(entry, "contracts", None) or self.contracts_per_entry
+                    new_stop = pct * width * 100 * n
+                    setattr(entry, f"{side}_side_stop", new_stop)
+                    logger.info(
+                        f"A2: Entry #{entry.entry_number} {side} %-of-width stop = "
+                        f"{pct:.0%} × {width:.0f}pt × {n}c = ${new_stop:.2f} "
+                        f"(was credit+buffer ${cur:.2f})"
+                    )
 
     # =========================================================================
     # OVERRIDE: P&L sanity validation for one-sided entries (Fix #39)
@@ -6071,6 +9191,37 @@ class HydraStrategy(MEICStrategy):
     # OVERRIDE: Price updates for one-sided entries (Fix #41, 2026-02-05)
     # =========================================================================
 
+    def _repopulate_dry_conids(self, entry) -> None:
+        """Dry-run: re-resolve any MISSING leg conids from the entry's persisted
+        strikes, so the heartbeat marks from REAL quotes rather than the crude
+        moneyness-blind _simulate_hydra_entry_prices fallback. Needed because the
+        state file doesn't carry live conids, so every entry comes back conid-
+        less after a restart-recovery (and the legacy one-sided sim never set
+        them at all). Only resolves legs whose strike is set (skips
+        inactive/skipped sides). `_get_option_uic` is conid-cached so repeated
+        calls are cheap; a resolution failure leaves the leg None → fallback.
+        """
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            return
+        legs = (
+            ("short_call", getattr(entry, "short_call_strike", 0), "Call"),
+            ("long_call", getattr(entry, "long_call_strike", 0), "Call"),
+            ("short_put", getattr(entry, "short_put_strike", 0), "Put"),
+            ("long_put", getattr(entry, "long_put_strike", 0), "Put"),
+        )
+        for leg, strike, right in legs:
+            if getattr(entry, f"{leg}_uic", 0):
+                continue  # already resolved
+            if not strike or strike <= 0:
+                continue  # inactive / skipped side
+            try:
+                uic = self._get_option_uic(strike, right, expiry)
+                if uic:
+                    setattr(entry, f"{leg}_uic", uic)
+            except Exception as e:
+                logger.debug(f"[DRY RUN] conid re-resolve failed for {leg} @ {strike}: {e}")
+
     def _batch_update_entry_prices(self):
         """
         Override parent to handle Hydra one-sided entry simulation in dry-run
@@ -6093,9 +9244,17 @@ class HydraStrategy(MEICStrategy):
                 put_done = entry.put_side_stopped or getattr(entry, 'put_side_expired', False) or getattr(entry, 'put_side_skipped', False)
                 if call_done and put_done:
                     continue
-                has_uic = any(getattr(entry, f"{leg}_uic", 0) for leg in ("short_call", "long_call", "short_put", "long_put"))
+                has_uic = any(getattr(entry, f"{leg}_uic", 0) for leg in LEG_NAMES)
+                if not has_uic:
+                    # An entry can lack conids after a restart-recovery (state
+                    # doesn't carry live conids) or from the legacy one-sided
+                    # sim. Re-resolve them from the persisted strikes so we mark
+                    # from REAL quotes instead of the moneyness-blind fallback
+                    # (2026-06-23 — the variant-B put-only / restart marks bug).
+                    self._repopulate_dry_conids(entry)
+                    has_uic = any(getattr(entry, f"{leg}_uic", 0) for leg in LEG_NAMES)
                 if has_uic:
-                    for leg in ("short_call", "long_call", "short_put", "long_put"):
+                    for leg in LEG_NAMES:
                         uic = getattr(entry, f"{leg}_uic", 0)
                         if uic:
                             uic_map.setdefault(uic, []).append((entry, leg))
@@ -6103,28 +9262,32 @@ class HydraStrategy(MEICStrategy):
                     legacy_entries.append(entry)
 
             if uic_map:
-                try:
-                    quotes = self.client.get_quotes_batch(
-                        list(uic_map.keys()), asset_type="StockIndexOption"
+                # F4.9: broker-agnostic batch quotes. _read_option_quotes_batch
+                # returns {} on failure (never raises) — an empty result with
+                # a non-empty uic_map means the fetch failed, so fall back to
+                # simulation, preserving the old try/except behavior.
+                quotes = self._read_option_quotes_batch(list(uic_map.keys()))
+                if not quotes:
+                    logger.warning(
+                        "[DRY RUN] Real-quote batch fetch returned nothing — "
+                        "using simulation"
                     )
-                    for uic, targets in uic_map.items():
-                        quote = quotes.get(uic)
-                        mid_price = self._extract_mid_price(quote) or 0
-                        bid = None
-                        ask = None
-                        if quote and "Quote" in quote:
-                            q = quote["Quote"]
-                            bid = q.get("Bid") or None
-                            ask = q.get("Ask") or None
-                        for entry, leg in targets:
-                            setattr(entry, f"{leg}_price", mid_price)
-                            setattr(entry, f"{leg}_bid", bid)
-                            setattr(entry, f"{leg}_ask", ask)
-                except Exception as e:
-                    logger.warning(f"[DRY RUN] Real-quote batch fetch failed, using simulation: {e}")
                     for entry in self.daily_state.active_entries:
                         self._simulate_hydra_entry_prices(entry)
                     return
+                for uic, targets in uic_map.items():
+                    quote = quotes.get(uic)
+                    if not quote:
+                        # Per-leg quote miss — keep this leg's prior price
+                        # rather than stamping a bogus 0.0.
+                        continue
+                    mid_price = self._quote_mid(quote)
+                    bid = quote.get("bid") or None
+                    ask = quote.get("ask") or None
+                    for entry, leg in targets:
+                        setattr(entry, f"{leg}_price", mid_price)
+                        setattr(entry, f"{leg}_bid", bid)
+                        setattr(entry, f"{leg}_ask", ask)
 
             # Fall back to simulation for entries without UICs
             for entry in legacy_entries:
@@ -6136,7 +9299,7 @@ class HydraStrategy(MEICStrategy):
         for entry in self.daily_state.active_entries:
             if entry.call_side_stopped and entry.put_side_stopped:
                 continue
-            for leg in ("short_call", "long_call", "short_put", "long_put"):
+            for leg in LEG_NAMES:
                 uic = getattr(entry, f"{leg}_uic", 0)
                 if uic:
                     uic_map.setdefault(uic, []).append((entry, leg))
@@ -6144,21 +9307,28 @@ class HydraStrategy(MEICStrategy):
         if not uic_map:
             return
 
-        quotes = self.client.get_quotes_batch(
-            list(uic_map.keys()), asset_type="StockIndexOption"
-        )
+        # F4.9: broker-agnostic batch quotes. An empty result with a
+        # non-empty uic_map is a fetch failure — skip this tick's price
+        # update (prior prices stand) rather than writing bogus zeros.
+        quotes = self._read_option_quotes_batch(list(uic_map.keys()))
+        if not quotes:
+            logger.warning(
+                "_batch_update_entry_prices: quote batch returned nothing "
+                "— keeping prior prices for this tick"
+            )
+            return
 
         # Distribute prices + preserve bid/ask as transient attributes
         for uic, targets in uic_map.items():
             quote = quotes.get(uic)
-            mid_price = self._extract_mid_price(quote) or 0
-            # Extract raw bid/ask for calibration capture (v6 schema)
-            bid = None
-            ask = None
-            if quote and "Quote" in quote:
-                q = quote["Quote"]
-                bid = q.get("Bid") or None
-                ask = q.get("Ask") or None
+            if not quote:
+                # Per-leg quote miss — keep this leg's prior price rather
+                # than stamping a bogus 0.0 onto a monitored position.
+                continue
+            mid_price = self._quote_mid(quote)
+            # Raw bid/ask for calibration capture (v6 schema)
+            bid = quote.get("bid") or None
+            ask = quote.get("ask") or None
             for entry, leg in targets:
                 setattr(entry, f"{leg}_price", mid_price)
                 # Transient bid/ask — written to spread_snapshots each tick
@@ -6184,22 +9354,37 @@ class HydraStrategy(MEICStrategy):
 
         is_hydra_entry = isinstance(entry, HydraIronCondorEntry)
 
+        # Set the legs so the spread VALUE starts at the credit and decays with
+        # theta. spread_value = (short − long) × 100 × c, and long = short × 0.3,
+        # so short × 0.7 × 100 × c = credit at decay=1 → short = credit/(70×c).
+        # 2026-06-23 FIX: the old `credit / 100` ignored the contract count AND
+        # the 0.7 spread factor, so the value STARTED at ~7× the credit → an
+        # instant deep-negative P&L that then only time-decayed (the reported B
+        # put-only bug). This fallback is still moneyness-BLIND — the real mark
+        # comes from real quotes once conids are populated (Fix 1 above) — but
+        # it at least no longer fabricates a 7× loss.
+        c = max(1, int(getattr(entry, "contracts", 0) or self.contracts_per_entry or 1))
         if is_hydra_entry and entry.call_only:
             # Only simulate call side
-            initial_short_price = entry.call_spread_credit / 100  # Per contract
+            initial_short_price = entry.call_spread_credit / (70.0 * c)
             entry.short_call_price = initial_short_price * decay_factor
             entry.long_call_price = initial_short_price * decay_factor * 0.3
 
         elif is_hydra_entry and entry.put_only:
             # Only simulate put side
-            initial_short_price = entry.put_spread_credit / 100  # Per contract
+            initial_short_price = entry.put_spread_credit / (70.0 * c)
             entry.short_put_price = initial_short_price * decay_factor
             entry.long_put_price = initial_short_price * decay_factor * 0.3
 
         else:
-            # Full IC - use parent's simulation
-            # But call our parent's method for consistency
-            initial_short_price = entry.total_credit / 200  # Per contract
+            # Full IC. Each side starts at ~half the total credit and decays, so
+            # call_value + put_value ≈ total_credit at entry. short × 0.7 × 100 ×
+            # c = total_credit/2 → short = total_credit/(140×c). 2026-06-23 FIX:
+            # the old `/200` ignored the contract count (and the 0.7 factor), so
+            # at 10c it inflated the value ~7× → a fabricated deep-negative P&L
+            # on any full IC that hit this fallback (e.g. after a restart-recovery
+            # dropped its conids — the variant-B regression).
+            initial_short_price = entry.total_credit / (140.0 * c)
             entry.short_call_price = initial_short_price * decay_factor
             entry.short_put_price = initial_short_price * decay_factor
             entry.long_call_price = initial_short_price * decay_factor * 0.3
@@ -6213,6 +9398,11 @@ class HydraStrategy(MEICStrategy):
         """Return effective stop level with MKT-042 buffer decay applied.
         Used by heartbeat and Telegram for accurate cushion display."""
         base_stop = getattr(entry, f'{side}_side_stop', 0)
+        # A2: in %-of-width mode the stop IS the % trigger; MKT-042 buffer decay
+        # would re-widen it back toward max (the L-C2c trap), defeating the
+        # tightening — so skip decay entirely for these stops.
+        if getattr(self, "narrow_spread_stop_enabled", False):
+            return base_stop
         if (self.buffer_decay_start_mult is not None
                 and self.buffer_decay_hours is not None
                 and self.buffer_decay_hours > 0
@@ -6229,7 +9419,22 @@ class HydraStrategy(MEICStrategy):
                 # to match the contract count the entry was placed at (not current config).
                 buf = self.call_stop_buffer if side == "call" else self.put_stop_buffer
                 extra = buf * entry.contracts * (self.buffer_decay_start_mult - 1) * decay_factor
-                return base_stop + extra
+                effective = base_stop + extra
+                # L-C2c (2026-06-10): the decayed effective stop must stay BELOW the
+                # spread_value clamp ceiling (width×100×contracts), or the credit+buffer
+                # stop is physically UNFIRABLE — spread_value is clamped to that ceiling
+                # (base_strategy L-C2b), so a trigger above it can never be reached. On
+                # wide spreads the 2.5× buffer is a small fraction of width and this never
+                # bites; on Brandon's NARROW 5pt spreads the decayed trigger can exceed
+                # width, so cap at 0.9×ceiling to keep the stop reachable.
+                if side == "call":
+                    width = (getattr(entry, "long_call_strike", 0) or 0) - (getattr(entry, "short_call_strike", 0) or 0)
+                else:
+                    width = (getattr(entry, "short_put_strike", 0) or 0) - (getattr(entry, "long_put_strike", 0) or 0)
+                if width and width > 0:
+                    cap = 0.9 * width * 100 * max(int(getattr(entry, "contracts", 1)), 1)
+                    return min(effective, cap)
+                return effective
         return base_stop
 
     # MKT-036: Stop confirmation timer helper
@@ -6279,6 +9484,41 @@ class HydraStrategy(MEICStrategy):
             f"{detail}"
         )
 
+    def _settlement_hold_active(self, entry, side: str, spread_value: float) -> bool:
+        """A2: True when a defined-risk spread is already deep ITM within the final
+        minutes before the 4pm cash settlement, so we should HOLD rather than buy
+        it back through a wide late-day quote. Only active in the %-of-width regime
+        (config-gated) — A and un-migrated C are unaffected.
+        """
+        if not getattr(self, "settlement_hold_enabled", False):
+            return False
+        if not getattr(self, "narrow_spread_stop_enabled", False):
+            return False
+        if side == "call":
+            width = (getattr(entry, "long_call_strike", 0) or 0) - (getattr(entry, "short_call_strike", 0) or 0)
+        else:
+            width = (getattr(entry, "short_put_strike", 0) or 0) - (getattr(entry, "long_put_strike", 0) or 0)
+        if not width or width <= 0:
+            return False
+        max_val = width * 100 * max(int(getattr(entry, "contracts", 1)), 1)
+        if max_val <= 0 or spread_value < self.settlement_hold_itm_pct * max_val:
+            return False  # not deep ITM enough
+        try:
+            now = get_us_market_time()
+            close_dt = now.replace(hour=16, minute=0, second=0, microsecond=0)
+            mins_to_close = (close_dt - now).total_seconds() / 60.0
+        except Exception:
+            return False
+        if 0 <= mins_to_close <= self.settlement_hold_minutes:
+            logger.warning(
+                f"A2 SETTLEMENT-HOLD: E#{entry.entry_number} {side} deep ITM "
+                f"(SV ${spread_value:.0f} >= {self.settlement_hold_itm_pct:.0%} of ${max_val:.0f} max) "
+                f"with {mins_to_close:.0f}min to close — HOLDING to 4pm cash settlement "
+                f"(intrinsic for $0) instead of a wide-quote buy-back."
+            )
+            return True
+        return False
+
     def _check_stop_with_confirmation(self, entry, side: str, spread_value: float, stop_level: float) -> Optional[str]:
         """
         MKT-036: Check stop with confirmation timer (when enabled).
@@ -6296,13 +9536,55 @@ class HydraStrategy(MEICStrategy):
         stop_level = self._get_effective_stop_level(entry, side)
 
         # MKT-046 minimum confirmation time (seconds). Breach must persist for
-        # at least this long before executing. Filters momentary bid/ask spikes
-        # that inflate mid-price (confirmed cause of 80% of false call stops).
-        # 10s is conservative: longer than any observed spike, shorter than a
-        # real trend move toward the strike.
-        MKT046_MIN_CONFIRM_SECONDS = 10
+        # at least this long before executing. Originally built to filter
+        # momentary bid/ask spikes that inflate mid-price (documented cause of
+        # 80% of false call stops at the time — see
+        # docs/HYDRA_STRATEGY_SPECIFICATION.md, and NOT part of Tammy
+        # Chambless's or Sandvand's original MEIC research — a CALYPSO-only
+        # addition, v1.23.0). Now configurable per variant via
+        # self.mkt046_confirm_seconds (default 10.0, set in __init__) — was a
+        # hardcoded constant here until a 2026-08-28 full-history study of
+        # B+C found zero cases where waiting ever avoided a stop that didn't
+        # happen anyway, and the wait made the eventual exit worse in 19 of
+        # 22 delayed stops (never better). B, C, F, and G all set this to
+        # 0.0 as of 2026-08-28 (same day, second change) — extended past B
+        # once C's own independent data confirmed the same result and it was
+        # established the mechanism was never part of any of these
+        # strategies' original research in the first place; F/G have their
+        # own real-money risk at zero (dry-run-locked) so the extension
+        # didn't need each variant's own historical proof first. D/E (the
+        # calendar variants) have a SEPARATE, un-investigated "MKT-046
+        # analogue" of their own in calendar_strategy_base.py /
+        # double_calendar_strategy.py — deliberately not touched here.
 
         if spread_value >= stop_level:
+            # A2 SETTLEMENT-HOLD: on a defined-risk spread already deep ITM in the
+            # final minutes before the 4pm close, prefer the cash settlement (pays
+            # intrinsic for $0) over a wide-quote marketable buy-back that can
+            # realize WORSE than intrinsic. The defined max loss already caps the
+            # risk. Checked BEFORE the severity bypass so even a 2× breach holds.
+            if self._settlement_hold_active(entry, side, spread_value):
+                setattr(entry, f'{side}_breach_time', None)
+                return None
+            # L-M6: severity bypass. MKT-046's 10s confirmation exists to filter
+            # momentary bid/ask spikes — but a breach FAR beyond the stop is a
+            # real fast move, not a spike. Waiting 10s lets the loss balloon (and
+            # compounds L-H3). Execute IMMEDIATELY when the spread is at least
+            # MKT046_SEVERITY_MULT × the stop level. 2.0× (spread value DOUBLE the
+            # stop) is deliberately conservative: a 2× breach is unambiguously a
+            # real adverse move, not a momentary spike, so this preserves MKT-046's
+            # spike-filtering for the common 1–2× breach band (re-audit money-path).
+            MKT046_SEVERITY_MULT = 2.0
+            if stop_level > 0 and spread_value >= MKT046_SEVERITY_MULT * stop_level:
+                self._log_stop_detail(entry, side, spread_value, stop_level, "SEVERITY_BYPASS")
+                logger.warning(
+                    f"MKT-046: E#{entry.entry_number} {side} SEVERITY BYPASS — "
+                    f"SV ${spread_value:.0f} >= {MKT046_SEVERITY_MULT}x trigger "
+                    f"${stop_level:.0f}; executing immediately (no 10s confirm)"
+                )
+                setattr(entry, f'{side}_breach_time', None)
+                return self._execute_stop_loss(entry, side)
+
             breach_time = getattr(entry, f'{side}_breach_time', None)
             now = datetime.now()
 
@@ -6310,7 +9592,7 @@ class HydraStrategy(MEICStrategy):
                 # First breach — start timer
                 setattr(entry, f'{side}_breach_time', now)
                 self._log_stop_detail(entry, side, spread_value, stop_level, "FIRST_BREACH")
-                confirm_secs = self.stop_confirmation_seconds if self.stop_confirmation_enabled else MKT046_MIN_CONFIRM_SECONDS
+                confirm_secs = self.stop_confirmation_seconds if self.stop_confirmation_enabled else self.mkt046_confirm_seconds
                 logger.info(
                     f"MKT-046: E#{entry.entry_number} {side} breached stop "
                     f"(SV=${spread_value:.0f} >= ${stop_level:.0f}), "
@@ -6318,7 +9600,7 @@ class HydraStrategy(MEICStrategy):
                 )
             else:
                 elapsed = (now - breach_time).total_seconds()
-                confirm_secs = self.stop_confirmation_seconds if self.stop_confirmation_enabled else MKT046_MIN_CONFIRM_SECONDS
+                confirm_secs = self.stop_confirmation_seconds if self.stop_confirmation_enabled else self.mkt046_confirm_seconds
                 if elapsed >= confirm_secs:
                     # Confirmed — breach persisted long enough
                     self._log_stop_detail(entry, side, spread_value, stop_level, "CONFIRMED")
@@ -6373,7 +9655,9 @@ class HydraStrategy(MEICStrategy):
         # Batch-fetch ALL option prices in a single API call
         self._batch_update_entry_prices()
 
-        # Price-based stop: fetch SPX price once per loop (refreshed by WebSocket)
+        # Price-based stop: SPX price from the per-loop REST snapshot taken in
+        # _update_market_data (no streaming in REST-only mode); freshness is
+        # bounded by the heartbeat cadence.
         price_stop_pts = self.price_based_stop_points  # None = use credit-based stop
         spx_now = self.current_price if price_stop_pts is not None else 0.0
 
@@ -6697,7 +9981,7 @@ class HydraStrategy(MEICStrategy):
         # SPX vs open indicator (after trend line, before entries)
         # Shows base entry mode (E1-E{N}) and conditional entry eligibility (E6/E7)
         spx_ref = self.market_data.spx_open
-        if spx_ref and spx_ref > 0 and self.current_price > 0:
+        if self._show_ic_schedule_in_heartbeat and spx_ref and spx_ref > 0 and self.current_price > 0:
             change_pct = (self.current_price - spx_ref) / spx_ref * 100
             sign = "+" if change_pct >= 0 else ""
             base_count = self._base_entry_count
@@ -6772,16 +10056,20 @@ class HydraStrategy(MEICStrategy):
             ]
         return "\n".join(lines)
 
-    def build_telegram_snapshot(self) -> str:
+    def build_telegram_snapshot(self, variant_id: Optional[str] = None) -> str:
         """
         Build a formatted Telegram message showing current HYDRA position snapshot.
 
         Sent every 30 minutes during market hours after first entry.
         Uses Telegram legacy Markdown: *bold* only (no _ ` [ in message body).
+        ``variant_id`` (item 6) routes ``/snapshot <name>`` to the named
+        variant's unified view; None / "a" renders this (A) bot.
 
         Returns:
             str: Formatted Markdown message for Telegram
         """
+        if variant_id and variant_id.strip().lower() != strategy_taxonomy.DEFAULT_ID:
+            return self._build_telegram_variant_view(variant_id)
         lines = []
 
         # Market data header
@@ -6803,11 +10091,9 @@ class HydraStrategy(MEICStrategy):
         lines.append("")
         lines.append(f"━━━ Entries {completed}/{total_entries} | Active {active_count} ━━━")
 
-        # Fetch positions once for P&L calculations
-        try:
-            positions = self.client.get_positions()
-        except Exception:
-            positions = []
+        # Fetch positions once for P&L calculations (F4.7: broker-agnostic;
+        # _read_open_positions returns [] on failure — no try/except needed).
+        positions = self._read_open_positions()
 
         # Per-entry details
         for entry in self.daily_state.entries:
@@ -6871,7 +10157,7 @@ class HydraStrategy(MEICStrategy):
             )
 
             # Credit, P&L, cushion line
-            entry_pnl = self._get_saxo_pnl_for_entry(entry, positions=positions)
+            entry_pnl = self._get_broker_pnl_for_entry(entry, positions=positions)
             pnl_sign = "+" if entry_pnl >= 0 else ""
 
             # Cushion percentages (same logic as get_detailed_position_status)
@@ -6925,7 +10211,7 @@ class HydraStrategy(MEICStrategy):
         # P&L summary (use already-fetched positions to avoid second API call)
         realized = self.daily_state.total_realized_pnl
         unrealized = sum(
-            self._get_saxo_pnl_for_entry(e, positions=positions)
+            self._get_broker_pnl_for_entry(e, positions=positions)
             for e in self.daily_state.active_entries
         )
         commission = self.daily_state.total_commission
@@ -6972,17 +10258,28 @@ class HydraStrategy(MEICStrategy):
     # VARIANT COMPARISON (1v1 dry-run experiment)
     # =========================================================================
 
-    def _discover_variant_ids(self) -> list:
-        """Find all non-A variant ids that have a current state file.
+    def _discover_variant_ids(self, group_id: Optional[str] = None) -> list:
+        """Find all non-A variant ids that have current on-disk artifacts,
+        restricted to a comparability ``group_id`` (the apples-to-apples fix).
 
-        Globs ``data/variant_*/hydra_state.json``. Returns lowercase variant
-        ids sorted alphabetically (e.g. ``["b", "c"]``). Filesystem-driven
-        discovery so adding a new variant only requires installing its
-        systemd service — no code change here.
+        Globs ``data/variant_*/``. ``group_id`` defaults to the POLLER's group
+        (variant A → ``ic_0dte``), so a bare call returns exactly ``["b", "c"]``
+        as before — the hardcoded ``if vid == "d": continue`` guard is GONE,
+        replaced by the taxonomy: D/E simply belong to ``calendar_multiday`` and
+        are excluded from the IC group by data, not by a scattered ``if``.
+
+        The artifact probed is family-specific so we never mistake a net-debit
+        calendar for an IC: IC variants must have ``hydra_state.json``; calendar
+        variants must have the calendar sidecar ``dc_open_trades.json`` OR
+        ``dc_calendar.db``. Returns lowercase ids sorted alphabetically.
         """
+        if group_id is None:
+            group_id = strategy_taxonomy.group(strategy_taxonomy.variant_id()).id
         try:
-            project_root = os.path.dirname(os.path.dirname(os.path.dirname(__file__)))
-            variant_dir = os.path.join(project_root, "data")
+            # Data root = the directory holding this (variant-A) bot's state
+            # file — i.e. <repo>/data — the SAME root build_telegram_calendars /
+            # _format_calendar_comparison use, so discovery and rendering agree.
+            variant_dir = os.path.dirname(self.state_file)
             ids = []
             if not os.path.isdir(variant_dir):
                 return []
@@ -6992,9 +10289,21 @@ class HydraStrategy(MEICStrategy):
                 vid = name[len("variant_"):]
                 if not vid or vid == "a":
                     continue
-                state_path = os.path.join(variant_dir, name, "hydra_state.json")
-                if os.path.exists(state_path):
-                    ids.append(vid)
+                # Group-scoped: only consider variants registered to the target
+                # comparability group (credit ICs vs net-debit calendars never mix).
+                if strategy_taxonomy.meta(vid).group_id != group_id:
+                    continue
+                vdir = os.path.join(variant_dir, name)
+                family = strategy_taxonomy.meta(vid).structure_family
+                if family == "double_calendar":
+                    # Calendar variants persist via a sidecar + isolated DB, NOT
+                    # hydra_state.json. Either artifact existing means it ran.
+                    if (os.path.exists(os.path.join(vdir, "dc_open_trades.json"))
+                            or os.path.exists(os.path.join(vdir, "dc_calendar.db"))):
+                        ids.append(vid)
+                else:
+                    if os.path.exists(os.path.join(vdir, "hydra_state.json")):
+                        ids.append(vid)
             return sorted(ids)
         except Exception as e:
             logger.warning(f"Variant discovery failed: {e}")
@@ -7050,6 +10359,46 @@ class HydraStrategy(MEICStrategy):
             "put_stops": state.get("put_stops_triggered", 0),
             "entries": entries,
         }
+
+    def _build_telegram_variant_view(self, vid: str) -> str:
+        """Pragmatic per-variant status for ``/status <name>`` (item 6, 2026-06-22).
+
+        Renders a NAMED variant from its OWN state file (read off disk) so you
+        can check B/C from Telegram without the dashboard. The poller's own
+        variant (A) falls through to the full status view; the calendar group
+        (D/E) points at ``/calendars`` (its debit-native renderer). One unified
+        view — same shape regardless of which command (``/status`` / ``/snapshot``
+        / ``/stops``) carried the name.
+        """
+        vid = (vid or "").strip().lower()
+        meta = strategy_taxonomy.STRATEGIES.get(vid)
+        if meta is None:
+            valid = "/".join(strategy_taxonomy.STRATEGIES.keys())
+            return f"Unknown variant '{vid}'. Valid: {valid} (or /calendars for D/E)."
+        if vid == strategy_taxonomy.DEFAULT_ID:
+            return self.build_telegram_status()  # this bot IS variant A
+        if meta.group_id == "calendar_multiday":
+            return (
+                f"\U0001f4c5 {meta.display_name} ({vid.upper()}) is a multi-day "
+                f"calendar — use /calendars for the D/E view."
+            )
+        state = self._load_variant_state(vid)
+        if not state:
+            return (
+                f"{meta.display_name} ({vid.upper()}): no fresh state today "
+                f"(variant stopped, or hasn't traded yet)."
+            )
+        s = self._build_variant_summary(state)
+        return "\n".join([
+            f"\U0001f4ca *{meta.display_name}* ({vid.upper()}) — _{meta.status}_",
+            f"Date: {s.get('date', '?')}",
+            f"Entries: {s.get('entries_completed', 0)} | "
+            f"Credit: ${float(s.get('total_credit') or 0):.0f}",
+            f"Realized: ${float(s.get('total_pnl') or 0):.2f} | "
+            f"Comm: ${float(s.get('total_commission') or 0):.2f}",
+            f"*Net P&L: ${float(s.get('net_pnl') or 0):.2f}*",
+            f"Stops: {s.get('call_stops', 0)} call / {s.get('put_stops', 0)} put",
+        ])
 
     def _read_variant_spread_width(self, vid: str) -> Optional[int]:
         """Read a non-A variant's actual max_spread_width from its config so
@@ -7256,15 +10605,18 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             logger.warning(f"Variant comparison alert send failed (non-fatal): {e}")
 
-    def _collect_other_variants(self) -> list:
-        """Discover and load every non-A variant whose state file is fresh.
+    def _collect_other_variants(self, group_id: Optional[str] = None) -> list:
+        """Discover and load every non-A IC variant whose state file is fresh.
 
         Returns a list of dicts: ``[{"id": "b", "summary": {...}, "spread": 110,
         "entries": [...]}]`` sorted by id. Stale or missing variants are
         silently dropped — they just don't appear in the comparison.
+
+        ``group_id`` (default = the poller's IC group) scopes discovery so this
+        IC-shaped collector is never fed a net-debit calendar variant.
         """
         out = []
-        for vid in self._discover_variant_ids():
+        for vid in self._discover_variant_ids(group_id):
             state = self._load_variant_state(vid)
             if not state:
                 continue
@@ -7275,16 +10627,133 @@ class HydraStrategy(MEICStrategy):
             })
         return out
 
-    def build_telegram_compare(self) -> str:
-        """Telegram /compare command — on-demand variant comparison message.
+    @staticmethod
+    def _resolve_compare_group(selector: str) -> Optional[str]:
+        """Map a free-text /compare selector to a canonical group_id, or None.
 
-        Works any time of day. Reads each non-A variant's state file at call
-        time so intraday users can spot-check the head-to-head between entries.
-        Auto-discovers variants by globbing data/variant_*/.
+        Accepts the exact group id (``ic_0dte`` / ``calendar_multiday``), the
+        group label (case-insensitive), or friendly aliases (``calendars``,
+        ``calendar``, ``ic``, ``condor``, ``0dte``). Returns None for anything
+        unrecognized so the caller refuses rather than guessing a group (the
+        credit-vs-debit mix must stay impossible).
+        """
+        if not selector:
+            return None
+        s = selector.strip().lower()
+        if s in strategy_taxonomy.GROUPS:
+            return s
+        for gid, g in strategy_taxonomy.GROUPS.items():
+            if s == g.label.lower():
+                return gid
+        aliases = {
+            "calendars": "calendar_multiday",
+            "calendar": "calendar_multiday",
+            "multiday": "calendar_multiday",
+            "dc": "calendar_multiday",
+            "ic": "ic_0dte",
+            "condor": "ic_0dte",
+            "ironcondor": "ic_0dte",
+            "iron_condor": "ic_0dte",
+            "0dte": "ic_0dte",
+        }
+        return aliases.get(s)
+
+    def _format_calendar_comparison(self, group_id: str) -> str:
+        """Calendar-native renderer for the ``calendar_multiday`` group.
+
+        Reads EACH calendar-group member's (D and E) authoritative dry-run
+        artifacts — the open-calendar SIDECAR (``dc_open_trades.json``) + the
+        ``dc_outcomes`` table in its isolated ``dc_calendar.db`` — via
+        ``dc_status``. Renders DEBIT-native (net_debit / open calendars /
+        transformed-credit / outcomes). NEVER touches the IC credit/buffer/
+        spread-width fields (those don't exist for a net-debit calendar and
+        would be fabricated nonsense).
+
+        Enumerates every registered calendar-group member from the taxonomy
+        (not just a hardcoded ``variant_d``), labeled with its display name.
+        """
+        from bots.hydra.dc_status import dc_status, format_calendars_telegram
+        from shared import strategy_taxonomy as _tax
+
+        g = _tax.GROUPS.get(group_id)
+        group_label = g.label if g else "Multi-day Calendar"
+        data_root = os.path.dirname(self.state_file)  # variant A → data/
+
+        sections = [f"📅 *{group_label}* — Calendar comparison (dry-run)"]
+        rendered_any = False
+        for vid in _tax.members(group_id):
+            vdir = os.path.join(data_root, f"variant_{vid}")
+            sidecar = os.path.join(vdir, "dc_open_trades.json")
+            db = os.path.join(vdir, "dc_calendar.db")  # isolated calendar DB
+            if not (os.path.exists(sidecar) or os.path.exists(db)):
+                continue  # this calendar variant hasn't run — skip silently
+            rendered_any = True
+            name = _tax.display_name(vid)
+            try:
+                # Title the inner section with THIS member's display name so E
+                # isn't mislabeled "Strategy D".
+                body = format_calendars_telegram(
+                    dc_status(sidecar, db), title=f"{name} ({vid.upper()})"
+                )
+            except Exception as e:
+                logger.error("calendar status for variant %s failed: %s", vid, e)
+                body = "status unavailable."
+            sections.append(f"\n{body}")
+        if not rendered_any:
+            sections.append("\nNo calendar strategies have run yet.")
+        return "\n".join(sections)
+
+    def build_telegram_calendars(self) -> str:
+        """Telegram /calendars command — thin alias to the calendar-group path
+        of :meth:`build_telegram_compare`.
+
+        The calendar group is a multi-day net-DEBIT family (D = DC Time Machine,
+        E = SPY Double Calendar), deliberately kept OUT of the 0DTE iron-condor
+        ``/compare`` head-to-head (credit/Sharpe are apples-to-oranges). This
+        renders every calendar-group member's native view: open calendars
+        (phase / risk-free / debit→credit) + recent outcomes. Available on
+        variant A's poller; reads the calendars' files cross-variant.
+        """
+        return self.build_telegram_compare(group_id="calendar_multiday")
+
+    def build_telegram_compare(self, group_id: Optional[str] = None) -> str:
+        """Telegram /compare command — group-scoped, on-demand comparison.
+
+        ``group_id`` defaults to the POLLER's group (variant A → ``ic_0dte``),
+        so a bare ``/compare`` reproduces the exact ``{a,b,c}`` IC head-to-head
+        as before (behavior-preserving). The handler may also pass a group
+        selector parsed from the command text (e.g. ``/compare calendars`` →
+        ``calendar_multiday``).
+
+        Comparison is scoped to ONE comparability group, so a credit IC and a
+        net-debit calendar can NEVER share an axis. The renderer is chosen by
+        the group's ``pnl_shape``/``structure_family``: the IC summary renderer
+        for ``ic_0dte`` (credit), the calendar-native renderer for
+        ``calendar_multiday`` (debit).
         """
         if HYDRA_VARIANT_ID is not None:
             return f"/compare is only available on variant A (this bot is variant {HYDRA_VARIANT_ID.upper()})."
-        others = self._collect_other_variants()
+
+        if group_id is None:
+            group_id = strategy_taxonomy.group(strategy_taxonomy.variant_id()).id
+        else:
+            group_id = self._resolve_compare_group(group_id)
+            if group_id is None:
+                return (
+                    "Unknown comparison group. Refusing to mix groups — pick one:\n"
+                    "`/compare` (0DTE Iron Condor) or `/compare calendars` (Multi-day Calendar)."
+                )
+
+        g = strategy_taxonomy.GROUPS.get(group_id)
+        if g is None:
+            return f"Unknown comparison group {group_id!r}. Try `/compare` or `/compare calendars`."
+
+        # Calendar group → debit-native renderer (reads sidecar + dc_calendar.db).
+        if group_id == "calendar_multiday" or g.pnl_shape == "debit":
+            return self._format_calendar_comparison(group_id)
+
+        # IC (credit) group → the existing IC summary renderer, scoped to members.
+        others = self._collect_other_variants(group_id)
         if not others:
             return (
                 "No other variants running (or state files stale).\n"
@@ -7528,15 +10997,19 @@ class HydraStrategy(MEICStrategy):
     # TELEGRAM NEW COMMANDS (v1.7.0)
     # =========================================================================
 
-    def build_telegram_status(self) -> str:
+    def build_telegram_status(self, variant_id: Optional[str] = None) -> str:
         """
         Build a formatted Telegram message showing current HYDRA bot status.
 
-        All data is in-memory — zero I/O, zero API calls.
+        All data is in-memory — zero I/O, zero API calls. ``variant_id`` (item
+        6) routes ``/status <name>`` to the named variant's unified view (read
+        from its state file); None / "a" renders this (A) bot.
 
         Returns:
             str: Formatted Markdown message for Telegram
         """
+        if variant_id and variant_id.strip().lower() != strategy_taxonomy.DEFAULT_ID:
+            return self._build_telegram_variant_view(variant_id)
         # State & mode
         state_str = self.state.value if self.state else "UNKNOWN"
         mode_str = "DRY-RUN" if self.dry_run else "LIVE"
@@ -7890,7 +11363,9 @@ class HydraStrategy(MEICStrategy):
 
         # Trend and type
         trend = entry.trend_signal.value.upper() if hasattr(entry, 'trend_signal') and entry.trend_signal else "N/A"
-        if getattr(entry, 'call_only', False):
+        if getattr(entry, 'structure', None) == "strangle":
+            entry_type = "Strangle"  # item 6: don't mislabel a naked strangle as an IC
+        elif getattr(entry, 'call_only', False):
             entry_type = "Call Only"
         elif getattr(entry, 'put_only', False):
             entry_type = "Put Only"
@@ -7984,15 +11459,19 @@ class HydraStrategy(MEICStrategy):
 
         return self._with_contracts_footer(lines)
 
-    def build_telegram_stops(self) -> str:
+    def build_telegram_stops(self, variant_id: Optional[str] = None) -> str:
         """
         Build a formatted Telegram message showing stop loss analysis.
 
         Today's data from in-memory daily_state. Historical from Google Sheets.
+        ``variant_id`` (item 6) routes ``/stops <name>`` to the named variant's
+        unified view; None / "a" renders this (A) bot.
 
         Returns:
             str: Formatted Markdown message for Telegram
         """
+        if variant_id and variant_id.strip().lower() != strategy_taxonomy.DEFAULT_ID:
+            return self._build_telegram_variant_view(variant_id)
         lines = ["\U0001f6d1 *HYDRA* | Stop Analysis"]
 
         # Today's stops
@@ -8095,9 +11574,12 @@ class HydraStrategy(MEICStrategy):
         min_credit_call = self.min_viable_credit_per_side / 100
         min_credit_put = self.min_viable_credit_put_side / 100
 
-        # Stop buffer
-        stop_buffer_dollars = self.strategy_config.get("call_stop_buffer", 0.10)
-        put_buffer_dollars = self.strategy_config.get("put_stop_buffer", stop_buffer_dollars)
+        # Stop buffer — read the LIVE attributes (in cents), which reflect
+        # both the $0.75 default and any in-force VIX-regime override. The
+        # static strategy_config showed a stale pre-regime value and a wrong
+        # $0.10 default (audit M8).
+        stop_buffer_dollars = self.call_stop_buffer / 100
+        put_buffer_dollars = self.put_stop_buffer / 100
         if put_buffer_dollars != stop_buffer_dollars:
             stop_buffer_str = f"call +${stop_buffer_dollars:.2f} / put +${put_buffer_dollars:.2f}"
         else:
@@ -8339,7 +11821,8 @@ class HydraStrategy(MEICStrategy):
     # =========================================================================
     # OVERRIDE: API pacing — multiply normal-mode check interval by the
     # variant's `api_pacing_multiplier` so parallel variants don't blow past
-    # the Saxo ~60 req/min sustained limit. Vigilant mode is left at the
+    # the broker's IBKR rate gate (CALYPSO_IBKR_MAX_RPS=5, under IBKR's
+    # 10 req/s/session limit). Vigilant mode is left at the
     # parent's value (2s) because stop detection latency is safety-critical.
     # Multiplier 1.0 (default) is a no-op — parent behavior unchanged.
     # =========================================================================
@@ -8356,9 +11839,12 @@ class HydraStrategy(MEICStrategy):
     # OVERRIDE: Logging for trend-following entries
     # =========================================================================
 
-    def log_account_summary(self):
+    def log_account_summary(self, force: bool = False):
         """
         Log HYDRA account summary to Google Sheets dashboard.
+
+        ``force`` (I-M1): settlement passes True to bypass the intraday write
+        throttle so the final settled-state snapshot is never silently dropped.
 
         Overrides parent to include EMA values in the Account Summary tab.
         Fix #62: EMA 20/40 values were showing as N/A because parent's
@@ -8405,11 +11891,11 @@ class HydraStrategy(MEICStrategy):
                     getattr(e, 'put_long_sold_revenue', 0.0)
                     for e in self.daily_state.entries
                 ),
-            })
+            }, force=force)
         except Exception as e:
             logger.error(f"Failed to log HYDRA account summary: {e}")
 
-    def log_performance_metrics(self):
+    def log_performance_metrics(self, period: str = "Intraday"):
         """
         Log HYDRA performance metrics to Google Sheets.
 
@@ -8420,6 +11906,13 @@ class HydraStrategy(MEICStrategy):
         Fix #69: Parent's log_performance_metrics() builds a NEW dict that
         doesn't include HYDRA-specific keys from get_dashboard_metrics().
         The logger reads metrics.get("full_ics", 0) which defaults to 0.
+
+        AUD5 C-3: ``period`` defaults to "Intraday" (the heartbeat caller),
+        which the logger throttles to protect the shared Sheets write quota.
+        The post-settlement caller (main.py) passes an EXEMPT label
+        ("End of Day") so the authoritative settled-P&L write is never
+        throttled/dropped — the throttle exempts periods containing
+        End/All/Weekly/Monthly/Final (see logger_service.log_performance_metrics).
         """
         try:
             metrics = self.get_dashboard_metrics()
@@ -8439,7 +11932,7 @@ class HydraStrategy(MEICStrategy):
             net_pnl = metrics["total_pnl"] - self.daily_state.total_commission
 
             self.trade_logger.log_performance_metrics(
-                period="Intraday",
+                period=period,
                 metrics={
                     # P&L
                     "total_pnl": metrics["total_pnl"],
@@ -8486,14 +11979,17 @@ class HydraStrategy(MEICStrategy):
                         for e in self.daily_state.entries
                     ),
                 },
-                saxo_client=self.client
+                saxo_client=self.broker
             )
         except Exception as e:
             logger.error(f"Failed to log HYDRA performance metrics: {e}")
 
-    def log_position_snapshot(self):
+    def log_position_snapshot(self, force: bool = False):
         """
         Log current position snapshot to the Positions tab in Google Sheets.
+
+        ``force`` (I-M1): settlement passes True to bypass the intraday write
+        throttle so the final post-settlement snapshot is never silently dropped.
 
         Fix #69: Positions tab was created with correct headers but never populated.
         Writes one row per SIDE (call/put) for each entry, showing:
@@ -8505,16 +12001,14 @@ class HydraStrategy(MEICStrategy):
             today = get_us_market_time().strftime("%Y-%m-%d")
             positions = []
 
-            # Get EUR exchange rate (once per snapshot, not per position)
+            # Get EUR exchange rate (once per snapshot, not per position).
+            # F5.4: broker-agnostic — _read_fx_rate returns None on failure.
             eur_rate = 0
             if self.trade_logger.currency_enabled:
-                try:
-                    eur_rate = self.client.get_fx_rate(
-                        self.trade_logger.base_currency,
-                        self.trade_logger.account_currency
-                    ) or 0
-                except Exception:
-                    eur_rate = 0
+                eur_rate = self._read_fx_rate(
+                    self.trade_logger.base_currency,
+                    self.trade_logger.account_currency,
+                ) or 0
 
             for entry in self.daily_state.entries:
                 is_hydra = isinstance(entry, HydraIronCondorEntry)
@@ -8602,7 +12096,7 @@ class HydraStrategy(MEICStrategy):
                         "status": status
                     })
 
-            self.trade_logger.log_position_snapshot(positions)
+            self.trade_logger.log_position_snapshot(positions, force=force)
         except Exception as e:
             logger.error(f"Failed to log HYDRA position snapshot: {e}")
 
@@ -8686,7 +12180,7 @@ class HydraStrategy(MEICStrategy):
                 price=entry.total_credit,
                 delta=0.0,
                 pnl=0.0,
-                saxo_client=self.client,  # Fix #63: Enable EUR conversion
+                saxo_client=self.broker,  # Fix #63: Enable EUR conversion
                 underlying_price=self.current_price,
                 vix=self.current_vix,
                 option_type=entry_type,
@@ -8699,7 +12193,7 @@ class HydraStrategy(MEICStrategy):
             )
 
             logger.info(
-                f"Entry #{entry.entry_number} {trend_tag} logged to Sheets: "
+                f"Entry #{entry.entry_number} {trend_tag} recorded: "
                 f"SPX={self.current_price:.2f}, Credit=${entry.total_credit:.2f}, "
                 f"Type={entry_type}, Strikes: {strike_str}"
             )
@@ -8713,6 +12207,41 @@ class HydraStrategy(MEICStrategy):
     # (hydra_state.json) instead of sharing with MEIC (meic_state.json).
     # This is necessary when both bots may run simultaneously.
 
+    def _atomic_write_json(self, path: str, data) -> None:
+        """Write ``data`` as JSON to ``path`` atomically and durably.
+
+        Writes to ``path + ".tmp"``, flushes Python buffers + ``fsync``s the
+        file data to disk, atomically renames over ``path``, then ``fsync``s
+        the parent directory. A power-loss / SIGKILL mid-write therefore
+        leaves the prior file intact rather than a truncated or empty one —
+        RUNBOOKS RB-5 crash recovery assumes the on-disk state is
+        whole-or-absent. The temp file is removed if the write fails.
+        Directory fsync is best-effort (not all platforms support it).
+        """
+        temp_file = path + ".tmp"
+        os.makedirs(os.path.dirname(path) or ".", exist_ok=True)
+        try:
+            with open(temp_file, "w") as f:
+                json.dump(data, f, indent=2)
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp_file, path)
+            try:
+                dir_fd = os.open(os.path.dirname(path) or ".", os.O_RDONLY)
+                try:
+                    os.fsync(dir_fd)
+                finally:
+                    os.close(dir_fd)
+            except OSError:
+                pass
+        except Exception:
+            try:
+                if os.path.exists(temp_file):
+                    os.remove(temp_file)
+            except OSError:
+                pass
+            raise
+
     def _save_state_to_disk(self):
         """
         Save current daily state to disk for crash recovery.
@@ -8721,10 +12250,37 @@ class HydraStrategy(MEICStrategy):
         Also saves trend-following specific fields (call_only, put_only, trend_signal).
         """
         try:
+            # Polish Item 2: ARGUS Check 2 reads `last_heartbeat_at` to
+            # detect bot-process-alive-but-frozen. Written here so EVERY
+            # state-write (status_interval ~10s + every entry/stop/
+            # settlement event) refreshes the timestamp. ARGUS threshold
+            # is 5 min, so even a slow ~10s cadence stays well under.
+            # ISO-8601 UTC for portability across timezones / json parsers.
+            from datetime import datetime as _dt, timezone as _tz
+            last_heartbeat_at = _dt.now(_tz.utc).isoformat().replace("+00:00", "Z")
+
             state_data = {
                 "bot_type": "hydra",  # Identify this as HYDRA state
                 "date": self.daily_state.date,
                 "state": self.state.value,
+                "last_heartbeat_at": last_heartbeat_at,  # Polish Item 2 (ARGUS)
+                # 2026-08-31 forensic: persisted for VISIBILITY only (dashboard,
+                # ARGUS) — deliberately NOT restored on process restart (see
+                # _load_state_file_history), so "restart clears the halt"
+                # stays the operational convention unchanged. Key name matches
+                # get_dashboard_metrics()'s existing "critical_intervention" key.
+                # getattr-defensive: base_strategy.__init__ always sets both
+                # (see MEICStrategy.__init__), but a strategy built via
+                # __new__() for testing/partial-construction may not have
+                # reached __init__ yet.
+                "critical_intervention": getattr(self, "_critical_intervention_required", False),
+                # STATE-004 restart-gap backstop (2026-09-06). UNLIKE
+                # critical_intervention above, this one IS restored on
+                # restart (same-day only, see _load_state_file_history) —
+                # it records that the overnight check already ran cleanly
+                # today, so a mid-session restart doesn't re-run it.
+                "overnight_check_date": getattr(self, "_overnight_check_date", None),
+                "critical_intervention_reason": getattr(self, "_critical_intervention_reason", ""),
                 "next_entry_index": self._next_entry_index,
                 # Phase 2 X-1: top-level contract count for dashboard / agents / HOMER.
                 # Individual entries already carry their own `contracts` (written inside
@@ -8736,6 +12292,17 @@ class HydraStrategy(MEICStrategy):
                 "entries_skipped": self.daily_state.entries_skipped,
                 "total_credit_received": self.daily_state.total_credit_received,
                 "total_realized_pnl": self.daily_state.total_realized_pnl,
+                # Brandon overlay double-book guard — persisted ATOMICALLY with
+                # total_realized_pnl (this same os.replace save) so a restart can never
+                # restore the guard WITHOUT the booked total it protects, which would
+                # silently lose the overlay (2026-07-18 review). getattr: empty for
+                # non-Brandon variants and during pre-super().__init__ base recovery.
+                "brandon_overlay_booked": sorted(getattr(self, "_brandon_overlay_booked", set()) or set()),
+                # Persisted with the guard it belongs to (2026-09-10): the
+                # aggregate-only overlay total must survive the restart that
+                # produced it, or the day reads as an unexplained drift.
+                "brandon_unattributed_overlay": float(
+                    getattr(self, "_brandon_unattributed_overlay", 0.0) or 0.0),
                 "total_commission": self.daily_state.total_commission,
                 "call_stops_triggered": self.daily_state.call_stops_triggered,
                 "put_stops_triggered": self.daily_state.put_stops_triggered,
@@ -8820,6 +12387,12 @@ class HydraStrategy(MEICStrategy):
                     # happens. Read by the dashboard to label DONE entries
                     # with what actually happened instead of just "DONE".
                     "close_reason": getattr(entry, "close_reason", ""),
+                    # Real per-entry realized net P&L (accumulated by
+                    # _book_realized_pnl). Persist so a mid-day restart keeps the
+                    # per-entry attribution consistent with total_realized_pnl.
+                    "realized_pnl": getattr(entry, "realized_pnl", 0.0),
+                    # Overlay-hedge P&L booked flag (prevents restart double-book).
+                    "overlay_pnl_booked": getattr(entry, "overlay_pnl_booked", False),
                     # Status
                     "is_complete": entry.is_complete,
                     "call_side_stopped": entry.call_side_stopped,
@@ -8828,6 +12401,22 @@ class HydraStrategy(MEICStrategy):
                     "put_side_expired": entry.put_side_expired,
                     "call_side_skipped": entry.call_side_skipped,
                     "put_side_skipped": entry.put_side_skipped,
+                    # L-H5: persist pivot-closed flags so a mid-day restart does
+                    # NOT re-book a directional-pivot-closed side's credit at
+                    # settlement (the re-book guard skips pivot-closed sides; the
+                    # recovery path already restores these flags).
+                    "call_side_pivot_closed": getattr(entry, "call_side_pivot_closed", False),
+                    "put_side_pivot_closed": getattr(entry, "put_side_pivot_closed", False),
+                    # L-M3 double-book guard (2026-09-10). Every OTHER disposition
+                    # flag was already persisted; this one was set via setattr and
+                    # never written, so a restart resurrected it as False and the
+                    # external-close path could book the SAME side a second time.
+                    # It must live in the same atomic os.replace save as
+                    # total_realized_pnl, for the same reason brandon_overlay_booked
+                    # does: a guard restored without the total it protects is worse
+                    # than no guard.
+                    "call_side_pnl_booked_external": getattr(entry, "call_side_pnl_booked_external", False),
+                    "put_side_pnl_booked_external": getattr(entry, "put_side_pnl_booked_external", False),
                     # Fix #61: Position merge tracking
                     "call_side_merged": entry.call_side_merged,
                     "put_side_merged": entry.put_side_merged,
@@ -8844,6 +12433,10 @@ class HydraStrategy(MEICStrategy):
                     "override_reason": getattr(entry, 'override_reason', None),
                     # Skip tracking: reason when entry is fully skipped
                     "skip_reason": getattr(entry, 'skip_reason', ""),
+                    # execution_failed (2026-07-31): distinguishes a genuine order-placement
+                    # FAILURE from a deliberate strategic skip — see field docstring on
+                    # IronCondorEntry (base_strategy.py).
+                    "execution_failed": getattr(entry, 'execution_failed', False),
                     # Fill prices (for /entry display after restart)
                     "short_call_fill_price": entry.short_call_fill_price,
                     "long_call_fill_price": entry.long_call_fill_price,
@@ -8903,27 +12496,60 @@ class HydraStrategy(MEICStrategy):
                 # Compute net P&L: realized + unrealized (active sides) + surviving longs - commission
                 net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
                 for entry in active_entries:
+                    if isinstance(entry, CalendarEntry):
+                        # Calendars are a debit purchase, not a credit sale — the
+                        # credit-vertical math below (call_spread_credit -
+                        # call_spread_value) is meaningless for them: their
+                        # call_spread_credit/put_spread_credit are always ~0, while
+                        # call_spread_value/put_spread_value are OVERRIDDEN to mean
+                        # the calendar's own mark value, not IC cost-to-close.
+                        # Plugging those into the IC formula silently produced
+                        # net_pnl ≈ -calendar_value instead of the correct
+                        # calendar_value - net_debit (found 2026-08-03: dashboard
+                        # showed -$164 on a position whose real P&L was -$8).
+                        # entry.unrealized_pnl is the authoritative, phase-aware
+                        # formula already used everywhere else calendar P&L is
+                        # surfaced (DB snapshots, sidecar, heartbeat log) — reuse
+                        # it instead of hand-rolling calendar math here too.
+                        entry_age = (now - entry.entry_time).total_seconds() if entry.entry_time else 999.0
+                        is_fresh = entry_age < 60.0
+                        if is_fresh and entry.calendar_value == 0:
+                            pass  # marks not loaded yet this minute — contribute 0, not -net_debit
+                        else:
+                            net_pnl += entry.unrealized_pnl
+                        continue
                     call_active = (not entry.call_side_stopped and not entry.call_side_skipped
                                    and not entry.call_side_expired)
                     put_active = (not entry.put_side_stopped and not entry.put_side_skipped
                                   and not entry.put_side_expired)
-                    # Skip a side's unrealized contribution when its spread_value
-                    # is 0 with non-trivial credit. That pattern means the bot
-                    # hasn't refreshed prices for this side yet (just-placed
-                    # entry, default IronCondorEntry.{call,put}_spread_value =
-                    # 0.0), and naively computing credit-0 would produce a
-                    # phantom +credit unrealized that vanishes on the next tick
-                    # — visible as a misleading first-point spike on the
-                    # dashboard's pnl_history chart. Wait one tick, get a real
-                    # mark, then contribute. (2026-05-05 fix; same pattern as
+                    # Stale-mark guard: when spread_value is 0 with non-trivial
+                    # credit on a JUST-PLACED entry, the bot hasn't refreshed
+                    # prices yet (default IronCondorEntry.{call,put}_spread_value
+                    # = 0.0), so credit-0 would produce a phantom +credit
+                    # unrealized that vanishes on the next tick — visible as a
+                    # misleading first-point spike on the dashboard's chart.
+                    # (2026-05-05 fix; same pattern as
                     # bots/hydra/brandon/take_profit.py:evaluate.)
+                    #
+                    # The original guard `credit>0 and value==0` also misfired
+                    # at expiration / TP close, when value LEGITIMATELY hits 0
+                    # before _process_expired_credits flips the *_side_expired
+                    # flags and books the credit into realized. That window
+                    # caused a chart cliff down to ~realized-commission (e.g.
+                    # 2026-05-28 variant A: chart ended at -$10 while TODAY
+                    # tile correctly read +$237.50). Restrict the guard to
+                    # entries placed within the last 60s so post-placement zero
+                    # is treated as stale, but post-expiration zero contributes
+                    # the credit normally.
+                    entry_age = (now - entry.entry_time).total_seconds() if entry.entry_time else 999.0
+                    is_fresh = entry_age < 60.0
                     if call_active:
-                        if entry.call_spread_credit > 0 and (entry.call_spread_value or 0) == 0:
+                        if entry.call_spread_credit > 0 and (entry.call_spread_value or 0) == 0 and is_fresh:
                             pass  # stale — contribute 0 this minute
                         else:
                             net_pnl += entry.call_spread_credit - (entry.call_spread_value or 0)
                     if put_active:
-                        if entry.put_spread_credit > 0 and (entry.put_spread_value or 0) == 0:
+                        if entry.put_spread_credit > 0 and (entry.put_spread_value or 0) == 0 and is_fresh:
                             pass
                         else:
                             net_pnl += entry.put_spread_credit - (entry.put_spread_value or 0)
@@ -8962,16 +12588,33 @@ class HydraStrategy(MEICStrategy):
                 "vix_low": self.market_data.vix_low if self.market_data.vix_low != float('inf') else 0.0,
             }
 
+            # Persist the last-seen SPX so a POST-CLOSE restart can still verify
+            # ITM settlement (IBKR-audit #5b, 2026-06-17). Without it the live
+            # index read fails on a fresh restart (snapshot not warmed up) and an
+            # ITM-settled short is mis-booked as WORTHLESS = a phantom profit
+            # (the 06-17 variant-C +$336.70-vs-actual-(-$3.1k) bug). Consumed by
+            # _settlement_spx_level's fallback chain.
+            #
+            # 2026-08-13 fix: `self.current_price` (refreshed on every live tick,
+            # base_strategy.py) must come FIRST — `self.spx_price` is a strategy-
+            # level attribute set exactly ONCE, at process __init__/state-recovery
+            # (strategy.py's _load_state_file_history), and never touched again by
+            # the live feed. The old `spx_price or current_price` order meant this
+            # frozen recovery value — always truthy once set — permanently won the
+            # `or`, silently overwriting the live price on every save for the rest
+            # of that process's life (found via a full-fleet audit: A/B/C were all
+            # persisting an SPX level hundreds of points stale). current_price
+            # falls back to the recovered spx_price only in the genuine edge case
+            # where no live tick has landed yet (e.g. the first instant after a
+            # fresh restart).
+            state_data["last_spx_price"] = (
+                getattr(self, "current_price", 0.0) or getattr(self, "spx_price", 0.0) or 0.0
+            )
+
             state_data["last_saved"] = get_us_market_time().isoformat()
 
-            # Write atomically using temp file (uses self.state_file set in __init__)
-            temp_file = self.state_file + ".tmp"
-            os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
-
-            with open(temp_file, 'w') as f:
-                json.dump(state_data, f, indent=2)
-
-            os.replace(temp_file, self.state_file)
+            # Write atomically + durably (temp → fsync → rename → dir fsync).
+            self._atomic_write_json(self.state_file, state_data)
             logger.debug(f"HYDRA state saved to {self.state_file}")
 
         except Exception as e:
@@ -9020,7 +12663,7 @@ class HydraStrategy(MEICStrategy):
         Returns:
             Error message if inconsistent, None if OK
         """
-        from bots.meic.strategy import MEICState
+        from bots.hydra.base_strategy import MEICState
 
         active_entries = len(self.daily_state.active_entries)
         my_positions = self.registry.get_positions(self.BOT_NAME)  # Use HYDRA, not MEIC
@@ -9055,80 +12698,700 @@ class HydraStrategy(MEICStrategy):
 
         return None
 
+    def _expected_position_quantities(self) -> Dict[Any, int]:
+        """Net contract quantity HYDRA expects open per conid (F4.4).
+
+        Sums every TRACKED entry's still-tracked legs — short legs
+        negative, long legs positive. A leg whose ``*_uic`` has been
+        cleared (closed / settled / sold) contributes nothing. Two
+        entries on the same conid sum naturally, so a merged broker
+        position reconciles cleanly instead of looking "missing".
+        See ``docs/migration/F4_POSITION_FLOW_DESIGN.md`` §4.
+
+        AUDIT #45: iterate ``daily_state.entries`` (ALL tracked entries),
+        NOT ``active_entries``. Under MKT-025 short-only stops, a stop
+        closes only the SHORT leg and leaves the LONG leg open until 0DTE
+        settlement, but the entry's ``active_entries`` membership flips to
+        "done" the moment both sides are stopped. Keying expected on
+        active_entries therefore dropped the still-open longs of a fully
+        short-only-stopped entry, so settlement declared the day complete
+        while those longs were still live on the broker. Driving expected
+        off every still-tracked ``*_uic`` keeps each open leg in the set
+        until the broker actually shows quantity 0.
+
+        Returns:
+            ``{conid: signed_net_quantity}``.
+        """
+        expected: Dict[Any, int] = {}
+        for entry in self.daily_state.entries:
+            contracts = getattr(entry, "contracts", 1) or 1
+            for leg in LEG_NAMES:
+                uic = getattr(entry, f"{leg}_uic", None)
+                if not uic:
+                    continue
+                sign = -1 if leg.startswith("short") else 1
+                expected[uic] = expected.get(uic, 0) + sign * contracts
+        return expected
+
+    @staticmethod
+    def _actual_position_quantities(
+        positions: List[Dict[str, Any]],
+    ) -> Dict[Any, int]:
+        """Net contract quantity the broker actually shows per conid (F4.4).
+
+        Sums the signed quantities from :meth:`_read_open_positions`.
+        IBKR already returns one row per conid; Saxo may return several
+        rows for a merged conid — summing handles both.
+        """
+        actual: Dict[Any, int] = {}
+        for p in positions:
+            conid = p.get("instrument_id")
+            if conid is None:
+                continue
+            actual[conid] = actual.get(conid, 0) + (p.get("quantity") or 0)
+        return actual
+
+    def _handle_position_discrepancies(
+        self, discrepant: Dict[Any, tuple]
+    ) -> None:
+        """Clean up entry state for conids the broker no longer backs (F4.4).
+
+        For a conid mapped to exactly ONE tracked leg whose broker
+        quantity has dropped to zero, the leg has genuinely vanished —
+        clear its ``*_uic`` and, if it was a short, mark that side
+        stopped (it can no longer be monitored). A conid mapped to
+        several tracked legs (a cross-entry merge) or showing a partial
+        / unexpected non-zero quantity is left for manual review —
+        auto-mutating an ambiguous discrepancy is worse than alerting a
+        human.
+        """
+        for conid, (exp_qty, act_qty) in discrepant.items():
+            # AUDIT #45: iterate ALL tracked entries (matches the expected set,
+            # which is now keyed off daily_state.entries) so a discrepancy on a
+            # surviving long leg of a fully short-only-stopped entry can still
+            # be resolved instead of falling through to "ambiguous".
+            legs = [
+                (entry, leg)
+                for entry in self.daily_state.entries
+                for leg in LEG_NAMES
+                if getattr(entry, f"{leg}_uic", None) == conid
+            ]
+            if len(legs) != 1:
+                logger.warning(
+                    f"POS-003: conid {conid} maps to {len(legs)} tracked "
+                    f"legs — ambiguous, leaving for manual review"
+                )
+                continue
+            entry, leg = legs[0]
+            if act_qty != 0:
+                logger.warning(
+                    f"POS-003: Entry #{entry.entry_number} {leg} (conid "
+                    f"{conid}) shows unexpected quantity {act_qty} — leaving "
+                    f"for manual review"
+                )
+                continue
+            logger.warning(
+                f"POS-003: Entry #{entry.entry_number} {leg} (conid {conid}) "
+                f"missing on the broker — clearing it and marking it closed"
+            )
+            setattr(entry, f"{leg}_uic", None)
+            if leg in ("short_call", "short_put"):
+                side = "call" if leg == "short_call" else "put"
+                # L-M3 DOUBLE-BOOK GUARD (2026-09-10). Read the side's PRIOR
+                # disposition BEFORE the setattr below marks it stopped — that
+                # write would otherwise destroy the very evidence this guard
+                # needs. Order matters here; do not hoist the setattr.
+                #
+                # The old guard tested ONE flag, `{side}_side_pnl_booked_external`,
+                # which no other close path sets and which was not even persisted.
+                # Any side already closed and booked by ANOTHER path therefore
+                # looked unbooked here and got booked a second time.
+                prior_stopped = getattr(entry, f"{side}_side_stopped", False)
+                prior_close_reason = getattr(entry, "close_reason", "") or ""
+                already_booked = (
+                    getattr(entry, f"{side}_side_pnl_booked_external", False)
+                    or getattr(entry, f"{side}_side_expired", False)
+                    or getattr(entry, f"{side}_side_skipped", False)
+                    or getattr(entry, f"{side}_side_pivot_closed", False)
+                    # A GENUINE stop booked its P&L at stop time. A Brandon
+                    # TP/BREACH that closed 0 legs (the 06-04 orphan) set
+                    # *_side_stopped but booked NOTHING, so it must still be
+                    # bookable here. This mirrors settlement's own
+                    # `*_genuine_stop` predicate exactly, so the two paths agree
+                    # on what "already booked" means instead of each guessing.
+                    or (prior_stopped and prior_close_reason not in ("TP", "BREACH"))
+                )
+                setattr(entry, f"{side}_side_stopped", True)
+                # L-M3: a short that vanished from the broker (closed externally
+                # or while the bot was down) was marked stopped but its close
+                # DEBIT was never booked — settlement then treats it as a genuine
+                # stop and SKIPS re-booking, so the loss is silently dropped and
+                # realized P&L is OVERSTATED. Book the side's realized P&L now
+                # from the actual closing execution (closing a short = a BUY) and
+                # tag close_reason so settlement leaves it alone. If the close
+                # price can't be read, alert for manual review rather than
+                # silently dropping it.
+                if not already_booked:
+                    # Hoisted above the lookup (2026-09-10): the contract count
+                    # is now also a disambiguation hint for which execution
+                    # actually CLOSED this leg, so it must be known before the
+                    # call, not just after it.
+                    contracts = (
+                        getattr(entry, "contracts", None)
+                        or getattr(self, "contracts_per_entry", 1)
+                        or 1
+                    )
+                    closed = self._read_closed_position_price(
+                        conid, buy_or_sell="Buy",
+                        not_before=getattr(entry, "entry_time", None),
+                        expect_quantity=contracts,
+                    )
+                    close_px_raw = (closed or {}).get("closing_price")
+                    try:
+                        close_px = float(close_px_raw) if close_px_raw is not None else None
+                    except (TypeError, ValueError):
+                        close_px = None
+                    side_credit = getattr(entry, f"{side}_spread_credit", 0) or 0
+                    # `contracts` is computed above, before the lookup.
+                    if close_px is not None and close_px > 0:
+                        close_debit = float(close_px) * 100 * contracts
+                        realized = side_credit - close_debit
+                        self._book_realized_pnl(realized, entry)
+                        setattr(entry, f"{side}_side_pnl_booked_external", True)
+                        if not getattr(entry, "close_reason", ""):
+                            entry.close_reason = "EXTERNAL"
+                        logger.warning(
+                            f"L-M3: booked external close of E#{entry.entry_number} "
+                            f"{side} short — credit ${side_credit:.2f} − debit "
+                            f"${close_debit:.2f} = ${realized:.2f} realized"
+                        )
+                    else:
+                        # Close price unreadable → leave P&L unbooked but loud in
+                        # the log. We do NOT fire a separate alert here: the
+                        # reconciliation path already alerts about the vanished
+                        # position, so this would only double-notify.
+                        logger.critical(
+                            f"L-M3: E#{entry.entry_number} {side} short vanished "
+                            f"but its close price is unreadable — P&L for this side "
+                            f"is UNBOOKED; manual review recommended."
+                        )
+                else:
+                    # The guard fired. Log it: a SILENT skip is exactly how the
+                    # double-book hid for so long — the day still reconciled
+                    # because the in-process check compares two numbers that
+                    # descend from the same accumulator. Name which flag stopped
+                    # it so the next reader does not have to re-derive this.
+                    logger.info(
+                        f"L-M3: E#{entry.entry_number} {side} short already "
+                        f"disposed (expired={getattr(entry, f'{side}_side_expired', False)}, "
+                        f"skipped={getattr(entry, f'{side}_side_skipped', False)}, "
+                        f"pivot={getattr(entry, f'{side}_side_pivot_closed', False)}, "
+                        f"booked_external={getattr(entry, f'{side}_side_pnl_booked_external', False)}, "
+                        f"prior_stopped={prior_stopped}, close_reason='{prior_close_reason}') "
+                        f"— NOT re-booking its P&L."
+                    )
+
+    @staticmethod
+    def _recon_diff_quantities(expected: Dict[Any, int], actual: Dict[Any, int]) -> Dict[Any, tuple]:
+        """Conids whose broker net quantity != the SUMMED expected quantity.
+
+        `expected` already sums each entry's contribution per conid (see
+        _expected_position_quantities), so a same-conid cross-entry merge
+        (e.g. two entries both short the same strike) nets correctly and is
+        NOT flagged — only a true mismatch is.
+        """
+        return {
+            conid: (exp_qty, actual.get(conid, 0))
+            for conid, exp_qty in expected.items()
+            if actual.get(conid, 0) != exp_qty
+        }
+
+    @staticmethod
+    def _recon_detect_orphans(expected: Dict[Any, int], actual: Dict[Any, int]) -> Dict[Any, int]:
+        """Broker positions at conids HYDRA does not track (untracked legs)."""
+        return {conid: qty for conid, qty in actual.items() if qty and conid not in expected}
+
+    def _recon_suppress_recent_closes(
+        self, orphans: Dict[Any, int], now
+    ) -> Dict[Any, int]:
+        """Drop orphan conids the bot ITSELF closed within RECON_CLOSE_SETTLE_GRACE_S.
+
+        Those are the bot's own close still lagging out of IBKR's positions feed,
+        not an external/crash orphan (2026-06-23: a TP-closed leg lingered 83s,
+        outlasting the 30s confirm window → a false CRITICAL on live C). An orphan
+        at a conid the bot NEVER closed — or one that PERSISTS past the grace (the
+        close didn't actually take) — is kept and still alerts.
+        """
+        recent = getattr(self, "_recent_close_conids", None) or {}
+        if not recent or not orphans:
+            return orphans
+        kept: Dict[Any, int] = {}
+        suppressed = []
+        for conid, qty in orphans.items():
+            ts = recent.get(conid)
+            if ts is not None and (now - ts).total_seconds() <= RECON_CLOSE_SETTLE_GRACE_S:
+                suppressed.append(conid)
+            else:
+                kept[conid] = qty
+        if suppressed:
+            logger.info(
+                "POS-003: suppressed %d orphan(s) at recently-closed conid(s) %s "
+                "(the bot's own close still lagging IBKR's positions feed, within "
+                "the %ds settle grace)",
+                len(suppressed), suppressed, RECON_CLOSE_SETTLE_GRACE_S,
+            )
+        return kept
+
+    @staticmethod
+    def _recon_should_defer(has_findings: bool, is_confirm_pass: bool) -> bool:
+        """Confirm-before-alarm gate: defer the FIRST time a discrepancy is seen
+        (it is often IBKR's positions endpoint lagging a just-executed close /
+        assignment / expiry by ~20-40s); commit only on the confirmation pass."""
+        return has_findings and not is_confirm_pass
+
     def _check_hourly_reconciliation(self):
         """
-        POS-003: Perform hourly position reconciliation during market hours.
+        POS-003: hourly position reconciliation during market hours.
 
-        OVERRIDE: Uses BOT_NAME ("HYDRA") instead of hardcoded "MEIC" in parent class.
+        OVERRIDE: uses BOT_NAME ("HYDRA") instead of the parent's hardcoded "MEIC".
 
-        Compares expected positions vs actual Saxo positions to detect:
-        - Early assignment
-        - Manual intervention
-        - Orphaned positions
+        IBKR-native conid→quantity model (F4.4): compare the net contract
+        quantity HYDRA expects open at each conid (SUMMED across entries, so a
+        same-conid cross-entry merge is not a discrepancy) against the broker's
+        actual net quantity. See ``docs/migration/F4_POSITION_FLOW_DESIGN.md``.
+
+        Confirm-before-alarm (2026-06-15): IBKR's positions endpoint lags fills
+        by ~20-40s, so a reconciliation that races a just-executed close reads
+        STALE quantities — and would both fire a false CRITICAL "orphan" / HIGH
+        "mismatch" AND let _handle_position_discrepancies mark a still-live leg
+        stopped off a stale qty=0. So the FIRST detection only schedules a
+        re-check one settle window later (non-blocking, on a later monitoring
+        tick); we alert/act ONLY on what still persists — same philosophy as
+        MKT-046's stop-confirmation.
         """
-        # Path-B dry-run skip (2026-04-27): DRY_* IDs never exist in Saxo by
-        # design — reconciliation would mark every dry leg as missing.
+        # Path-B dry-run skip (2026-04-27): DRY_* IDs never exist at the broker
+        # by design — reconciliation would mark every dry leg as missing.
         if self.dry_run:
             return
 
-        from bots.meic.strategy import is_market_open, RECONCILIATION_INTERVAL_MINUTES
+        from bots.hydra.base_strategy import is_market_open, RECONCILIATION_INTERVAL_MINUTES
 
         if not is_market_open():
             return
 
+        RECON_CONFIRM_DELAY_S = 60  # settle window before alerting on a discrepancy
+        # (bumped 30→60 on 2026-06-23: IBKR's positions feed lagged a close ~83s;
+        # the recent-close suppression below is the targeted fix, this is margin
+        # for any OTHER feed lag on the mismatch path).
+
         now = get_us_market_time()
 
-        # Check if it's time for reconciliation
-        if self._last_reconciliation_time:
-            elapsed_minutes = (now - self._last_reconciliation_time).total_seconds() / 60
-            if elapsed_minutes < RECONCILIATION_INTERVAL_MINUTES:
-                return
-
-        logger.info("POS-003: Performing hourly position reconciliation")
-        self._last_reconciliation_time = now
+        # Two triggers: the normal hourly cadence, OR a pending settle-delay
+        # confirmation re-check scheduled by a prior discrepancy.
+        recheck_at = getattr(self, "_recon_recheck_at", None)
+        is_confirm_pass = recheck_at is not None and now >= recheck_at
+        if not is_confirm_pass:
+            if self._last_reconciliation_time:
+                elapsed_minutes = (now - self._last_reconciliation_time).total_seconds() / 60
+                if elapsed_minutes < RECONCILIATION_INTERVAL_MINUTES:
+                    return
+            logger.info("POS-003: Performing hourly position reconciliation")
+            self._last_reconciliation_time = now
+        else:
+            logger.info(
+                "POS-003: Settle-delay confirmation re-check (a prior cycle saw a "
+                "discrepancy; verifying it isn't IBKR position-feed lag)"
+            )
+            self._recon_recheck_at = None
 
         try:
-            # Get actual positions from Saxo
-            actual_positions = self.client.get_positions()
-            actual_position_ids = {str(p.get("PositionId")) for p in actual_positions}
+            expected = self._expected_position_quantities()
 
-            # Get expected positions from our tracking
-            expected_position_ids = set()
-            for entry in self.daily_state.active_entries:
-                expected_position_ids.update(entry.all_position_ids)
+            actual_positions = self._read_open_positions()
+            if not actual_positions:
+                # Empty during market hours while we expect open legs is a fetch
+                # failure, not a mass close — never alert/act on it (would
+                # false-flag every leg as vanished).
+                if expected:
+                    logger.warning(
+                        "POS-003: broker returned no positions but HYDRA "
+                        "expects open legs — treating as a fetch failure, "
+                        "skipping this cycle"
+                    )
+                return
 
-            # Check for missing positions (closed manually or assigned)
-            missing = expected_position_ids - actual_position_ids
-            if missing:
-                logger.warning(f"POS-003: {len(missing)} expected positions NOT FOUND in Saxo!")
-                logger.warning(f"  Missing IDs: {missing}")
+            actual = self._actual_position_quantities(actual_positions)
+            discrepant = self._recon_diff_quantities(expected, actual)
+            orphans = self._recon_suppress_recent_closes(
+                self._recon_detect_orphans(expected, actual), now
+            )
 
-                # This is serious - positions may have been manually closed
+            # Confirm-before-alarm: defer the first detection one settle window.
+            if self._recon_should_defer(bool(discrepant or orphans), is_confirm_pass):
+                self._recon_recheck_at = now + timedelta(seconds=RECON_CONFIRM_DELAY_S)
+                logger.warning(
+                    f"POS-003: {len(discrepant)} mismatch(es) + {len(orphans)} "
+                    f"orphan(s) detected — confirming after a {RECON_CONFIRM_DELAY_S}s "
+                    f"settle window before alerting (IBKR position-feed lag guard)"
+                )
+                self._save_state_to_disk()
+                return
+
+            if is_confirm_pass and not discrepant and not orphans:
+                logger.info(
+                    "POS-003: prior discrepancy self-resolved after the settle "
+                    "delay (IBKR position-feed lag) — no alert"
+                )
+
+            if discrepant:
+                logger.warning(
+                    f"POS-003: {len(discrepant)} conid(s) mismatch the broker's quantity"
+                )
+                for conid, (exp_qty, act_qty) in discrepant.items():
+                    logger.warning(
+                        f"  conid {conid}: expected {exp_qty}, broker shows {act_qty}"
+                    )
                 self.alert_service.send_alert(
                     alert_type=AlertType.CRITICAL_INTERVENTION,
                     title="Position Mismatch Detected",
-                    message=f"{len(missing)} {self.BOT_NAME} positions missing from Saxo. Manual intervention suspected.",
+                    message=(
+                        f"{len(discrepant)} {self.BOT_NAME} conid(s) mismatch the "
+                        f"broker's position quantity. Manual intervention suspected."
+                    ),
                     priority=AlertPriority.HIGH,
-                    details={"missing_ids": list(missing)},
+                    details={
+                        "discrepancies": {
+                            str(c): {"expected": e, "actual": a}
+                            for c, (e, a) in discrepant.items()
+                        }
+                    },
                     contracts=self.contracts_per_entry,
                 )
+                self._handle_position_discrepancies(discrepant)
 
-                # Clean up registry and daily state
-                self._handle_missing_positions(missing)
-
-            # Check for unexpected positions (assigned, etc.)
-            my_registry_positions = self.registry.get_positions(self.BOT_NAME)  # Use HYDRA, not MEIC
-            unexpected = (actual_position_ids & my_registry_positions) - expected_position_ids
-            if unexpected:
-                logger.warning(f"POS-003: {len(unexpected)} unexpected {self.BOT_NAME} positions found")
+            # I-M4 orphan sweep (alerts on untracked broker positions).
+            n_orphans = self._reconcile_orphan_sweep(expected, actual)
 
             # Persist state after reconciliation
             self._save_state_to_disk()
 
-            logger.info(f"POS-003: Reconciliation complete - {len(expected_position_ids)} expected, {len(actual_position_ids & my_registry_positions)} found")
+            logger.info(
+                f"POS-003: Reconciliation complete — {len(expected)} conid(s) "
+                f"expected, {len(discrepant)} mismatched, {n_orphans} orphan(s)"
+            )
 
         except Exception as e:
             logger.error(f"POS-003: Reconciliation failed: {e}")
+
+    def _reconcile_orphan_sweep(self, expected: Dict[Any, int], actual: Dict[Any, int]) -> int:
+        """I-M4: detect + alert on ORPHAN broker positions (untracked conids).
+
+        The hourly discrepancy check iterates only EXPECTED conids, so a broker
+        position at a conid HYDRA does NOT track — an orphan from a hard crash
+        after a leg filled but before the post-loop state save — is invisible to
+        it ("reconciled by nothing"). An untracked live short can ride to max
+        loss. We raise a CRITICAL alert but do NOT auto-flatten: a conid we don't
+        recognize could be a legitimate manual position, so manual review is the
+        safe action (same philosophy as the ambiguous-discrepancy path). Called
+        from the hourly reconciliation, which also runs on the FIRST tick after
+        startup (the hourly gate is skipped when _last_reconciliation_time was
+        None) — so this doubles as a post-crash startup sweep. Returns the count.
+        """
+        orphans = self._recon_suppress_recent_closes(
+            self._recon_detect_orphans(expected, actual), get_us_market_time()
+        )
+        if not orphans:
+            return 0
+        detail = ", ".join(
+            f"conid {c} qty {q} ({'SHORT' if q < 0 else 'LONG'})"
+            for c, q in orphans.items()
+        )
+        logger.critical(
+            f"POS-003/I-M4: {len(orphans)} ORPHAN broker position(s) at "
+            f"untracked conid(s) — {detail}. Possible crash-orphaned leg; "
+            f"NOT auto-closing (could be a manual position). MANUAL REVIEW."
+        )
+        try:
+            self.alert_service.send_alert(
+                alert_type=AlertType.CRITICAL_INTERVENTION,
+                title="Orphan position — untracked broker leg",
+                message=(
+                    f"{len(orphans)} {self.BOT_NAME} broker position(s) at conid(s) "
+                    f"HYDRA does not track ({detail}). Likely a crash-orphaned leg; "
+                    f"manual review / flatten recommended."
+                ),
+                priority=AlertPriority.CRITICAL,
+                details={"orphans": {str(c): q for c, q in orphans.items()}},
+                contracts=getattr(self, "contracts_per_entry", 1),
+            )
+        except Exception as exc:
+            logger.error(f"orphan-sweep alert send failed: {describe_exception(exc)}")
+        return len(orphans)
+
+    def _read_open_positions_for_new_day_reset(self) -> List[Dict[str, Any]]:
+        """STATE-004: bounded retry around the overnight-position broker read.
+
+        A single failed read here used to halt the bot PERMANENTLY (see
+        STATE004_MAX_ATTEMPTS's module-level comment) — including on a
+        routine, self-healing broker reconnect blip. Retry up to
+        STATE004_MAX_ATTEMPTS times, STATE004_RETRY_DELAY_S apart, logging
+        each intermediate failure at WARNING. On final exhaustion, let the
+        exception propagate to the caller's except block unchanged (still
+        logs CRITICAL, alerts, and latches the halt — that part is correct
+        and stays; only the missing retry budget was the bug).
+        """
+        last_exc: Optional[Exception] = None
+        for attempt in range(1, STATE004_MAX_ATTEMPTS + 1):
+            try:
+                return self._read_open_positions(strict=True)
+            except Exception as e:
+                last_exc = e
+                if attempt < STATE004_MAX_ATTEMPTS:
+                    logger.warning(
+                        f"STATE-004: overnight-position read failed (attempt "
+                        f"{attempt}/{STATE004_MAX_ATTEMPTS}): {e} — retrying "
+                        f"in {STATE004_RETRY_DELAY_S}s"
+                    )
+                    time.sleep(STATE004_RETRY_DELAY_S)
+        raise last_exc
+
+    def _run_overnight_position_check(self) -> str:
+        """
+        STATE-004 core: ask the broker whether any option position survived
+        overnight, and act on the answer.
+
+        Returns one of the three ``OVERNIGHT_CHECK_*`` outcome constants:
+
+        * ``OVERNIGHT_CHECK_CLEAN`` — the broker confirms nothing is open.
+          Stale registry entries are swept, ``_overnight_check_date`` is
+          stamped with today's ET date and persisted, so the check is not
+          repeated for the rest of the ET day.
+        * ``OVERNIGHT_CHECK_POSITIONS`` — a genuine overnight position was
+          confirmed TWICE (confirm-before-alarm). The CRITICAL alert is sent
+          and ``_critical_intervention_required`` is latched HERE, exactly as
+          the historical in-line code did.
+        * ``OVERNIGHT_CHECK_READ_FAILED`` — the broker read exhausted
+          ``STATE004_MAX_ATTEMPTS``. Nothing is alerted and nothing is latched
+          here; the exception is stashed on ``_overnight_check_read_error`` and
+          the CALLER decides what it means. The date is deliberately NOT
+          stamped, so the check stays owed and can be retried.
+
+        Extracted from ``_reset_for_new_day`` (2026-09-06) so the identical
+        check can also run from the pre-market hook — see
+        ``run_overnight_check_if_owed``. The two callers differ ONLY in how
+        they treat READ_FAILED:
+
+        * the midnight reset keeps its historical "halt conservatively"
+          behaviour, because the statements right after it WIPE ``daily_state``
+          — a failed read there must never be mistaken for "all settled";
+        * the pre-market hook must NOT halt over a transient portfolio-family
+          outage. A green broker ``/health`` only proves the *session* family is
+          up; ``get_positions`` runs on the independent *portfolio* family with
+          its own circuit breaker, and that breaker is shared by all 7 strategy
+          processes through the one broker. Halting the live seat there would
+          stop entries AND stop monitoring for the session, on a flat account,
+          clearable only by another restart.
+        """
+        # P7-audit M7: the prior Saxo design gated this on
+        # `self.registry.get_positions(self.BOT_NAME)` as a fast cache hit
+        # before round-tripping to the broker. On IBKR the Position
+        # Registry is vestigial — IBKR has no per-leg position IDs, so
+        # F4 reconciliation keys on `(conid, quantity)` and the registry
+        # is always empty. That meant the entire STATE-004 trigger never
+        # fired on IBKR.
+        #
+        # Fix: ask the broker directly. ``_read_open_positions(strict=True)``
+        # raises on a fetch failure so a broker outage is never silently
+        # mistaken for "all settled".
+        #
+        # Any stale registry entries (left over from a prior write that
+        # didn't unregister cleanly) get cleaned up too — harmless on
+        # IBKR but keeps the registry tidy if a multi-bot future
+        # resurrects it.
+        self._overnight_check_read_error = None
+        try:
+            open_positions = self._read_open_positions_for_new_day_reset()
+        except Exception as e:
+            # Report-only. The caller owns the alert/halt decision because the
+            # right answer differs by call site (see the class docstring above).
+            self._overnight_check_read_error = e
+            return OVERNIGHT_CHECK_READ_FAILED
+
+        if open_positions:
+            # Confirm-before-alarm (same pattern as _recon_recheck_at):
+            # a non-empty read can itself be a transitional/misleading
+            # snapshot during a reconnect blip rather than a genuine
+            # overnight position. Re-check once before declaring an
+            # emergency — only latch if the SECOND read still shows it.
+            logger.warning(
+                f"STATE-004: {len(open_positions)} position(s) found open — "
+                f"re-checking once in {STATE004_RETRY_DELAY_S}s before "
+                f"declaring an overnight-position emergency"
+            )
+            time.sleep(STATE004_RETRY_DELAY_S)
+            try:
+                open_positions = self._read_open_positions(strict=True)
+            except Exception as recheck_exc:
+                # Treat a failed re-check itself as the broker-outage path,
+                # not a confirmed overnight position — fall through with
+                # the ORIGINAL (possibly stale) open_positions so a genuine
+                # emergency still isn't silently dropped, but don't compound
+                # a transient failure into two different alert types.
+                # Audit finding (2026-08-31): this used to be a bare `pass`
+                # with zero log trace — an operator seeing the CRITICAL
+                # alert below had no way to tell "confirmed twice" from
+                # "confirmed once, then the re-check itself broke."
+                logger.warning(
+                    f"STATE-004: confirm-before-alarm re-check itself failed "
+                    f"({recheck_exc}) — proceeding on the ORIGINAL read, not "
+                    f"re-confirmed"
+                )
+
+        if open_positions:
+            # Genuine overnight 0DTE — 0DTE options always settle same day,
+            # so anything still open at the new-day reset is a real
+            # problem requiring manual intervention.
+            open_conids = sorted(
+                {p.get("instrument_id") for p in open_positions},
+                key=lambda c: (c is None, c),
+            )
+            error_msg = (
+                f"CRITICAL: {len(open_positions)} {self.BOT_NAME} option "
+                f"position(s) still open on the broker overnight! "
+                f"0DTE should expire same day. Conids: {open_conids}"
+            )
+            logger.critical(error_msg)
+            self.alert_service.send_alert(
+                alert_type=AlertType.CRITICAL_INTERVENTION,
+                title=f"{self.BOT_NAME} Overnight Position Detected!",
+                message=error_msg,
+                priority=AlertPriority.CRITICAL,
+                details={"conids": open_conids},
+                contracts=self.contracts_per_entry,
+            )
+            self._critical_intervention_required = True
+            self._critical_intervention_reason = (
+                "Overnight 0DTE positions detected - investigate immediately"
+            )
+            self._save_state_to_disk()
+            return OVERNIGHT_CHECK_POSITIONS
+
+        # Broker shows nothing open — clean up any stale registry entries
+        # (vestigial on IBKR; defensive for the multi-bot legacy code path).
+        try:
+            stale_position_ids = self.registry.get_positions(self.BOT_NAME)
+        except Exception as e:
+            logger.error(
+                f"Registry error reading positions at new-day reset: {e}"
+            )
+            stale_position_ids = set()
+        if stale_position_ids:
+            logger.info(
+                f"Cleaning {len(stale_position_ids)} stale registry "
+                f"id(s) at new-day reset (broker confirms 0 open)"
+            )
+            for pos_id in stale_position_ids:
+                try:
+                    self.registry.unregister(pos_id)
+                except Exception as e:
+                    logger.error(
+                        f"Registry error unregistering stale {pos_id}: {e}"
+                    )
+
+        # Clean: stamp the date so the pre-market hook knows the check is
+        # satisfied for today, and PERSIST it immediately. The stamp is only
+        # written on this path — a halt or a read failure deliberately leaves
+        # the check owed so it is re-derived rather than assumed done.
+        self._overnight_check_date = get_us_market_time().strftime("%Y-%m-%d")
+        try:
+            self._save_state_to_disk()
+        except Exception as e:
+            # Memory-only stamp is still correct for this process; it just
+            # won't survive a restart, which re-runs the (clean) check.
+            logger.warning(
+                f"STATE-004: could not persist overnight_check_date ({e}) — "
+                f"stamp is in-memory only for this process"
+            )
+        return OVERNIGHT_CHECK_CLEAN
+
+    def run_overnight_check_if_owed(self) -> str:
+        """
+        Pre-market entry point for the STATE-004 overnight-position check.
+
+        Closes the "restart gap": ``_reset_for_new_day`` — which is where
+        STATE-004 historically lived — only fires when a process observes the
+        ET date CHANGE under it. On a day where no process survived across ET
+        midnight (VM reboot, crash storm, a deploy straddling midnight), every
+        process starts with ``last_day``/``daily_state.date`` already stamped to
+        today, the reset never runs, and the overnight check is silently
+        skipped for that day.
+
+        Called from ``main.py``'s market-closed branch under a hard
+        ``now_et < 09:30 ET`` guard. That window matters: this check reads the
+        WHOLE account (``_read_open_positions`` has no symbol or variant
+        filter), so it must only ever run at a moment when NO variant can
+        legitimately be holding a position. Pre-market satisfies that by
+        construction — the earliest configured entry across the whole fleet is
+        09:45 (variant B). The same market-closed branch also runs at 16:30
+        while 0DTE legs are still legitimately open, which is exactly why the
+        caller's guard is "before the open", not merely "market closed".
+
+        **Invariant for future variants:** if any variant is ever configured to
+        enter before 09:30 ET, this hook must move earlier (or gain a
+        per-variant scope) — otherwise it would read that variant's legitimate
+        position as an overnight emergency.
+
+        Returns an ``OVERNIGHT_CHECK_*`` constant (including
+        ``OVERNIGHT_CHECK_ALREADY_DONE`` / ``OVERNIGHT_CHECK_SKIPPED_HALTED``
+        for the two no-op paths) so the caller and the tests can assert on what
+        actually happened.
+        """
+        today = get_us_market_time().strftime("%Y-%m-%d")
+        if getattr(self, "_overnight_check_date", None) == today:
+            return OVERNIGHT_CHECK_ALREADY_DONE
+
+        if getattr(self, "_critical_intervention_required", False):
+            # Already halted for some other reason — running the check would
+            # only stack a second alert on an operator who is already paged.
+            return OVERNIGHT_CHECK_SKIPPED_HALTED
+
+        outcome = self._run_overnight_position_check()
+
+        if outcome == OVERNIGHT_CHECK_READ_FAILED:
+            err = getattr(self, "_overnight_check_read_error", None)
+            msg = (
+                f"{self.BOT_NAME} pre-market overnight-position check could "
+                f"not reach the broker after {STATE004_MAX_ATTEMPTS} attempts "
+                f"({err}). The check is left OWED and retries on the next "
+                f"loop while still pre-market. NOT halting: this is a read "
+                f"failure on a pre-market (flat) account, not a confirmed "
+                f"position."
+            )
+            logger.warning(msg)
+            try:
+                self.alert_service.send_alert(
+                    alert_type=AlertType.DATA_QUALITY,
+                    title=f"{self.BOT_NAME} Pre-Market Overnight Check Deferred",
+                    message=msg,
+                    priority=AlertPriority.MEDIUM,
+                    details={
+                        "error": str(err),
+                        "attempts": STATE004_MAX_ATTEMPTS,
+                    },
+                )
+            except Exception as alert_exc:
+                logger.warning(
+                    f"STATE-004: deferred-check alert failed to send "
+                    f"({alert_exc}) — the WARNING above is the record"
+                )
+        elif outcome == OVERNIGHT_CHECK_CLEAN:
+            logger.info(
+                f"STATE-004 pre-market check: broker confirms 0 open "
+                f"position(s) for {self.BOT_NAME} — overnight check satisfied "
+                f"for {today} (restart-gap backstop)."
+            )
+
+        return outcome
 
     def _reset_for_new_day(self):
         """
@@ -9136,73 +13399,63 @@ class HydraStrategy(MEICStrategy):
 
         OVERRIDE: Uses BOT_NAME ("HYDRA") instead of hardcoded "MEIC" in parent class.
         """
-        from bots.meic.strategy import MEICDailyState
+        from bots.hydra.base_strategy import MEICDailyState
 
         logger.info("Resetting for new trading day")
 
-        # STATE-004: Check for overnight 0DTE positions (should NEVER happen)
-        try:
-            my_position_ids = self.registry.get_positions(self.BOT_NAME)  # Use HYDRA, not MEIC
-        except Exception as e:
-            logger.error(f"Registry error checking for overnight positions: {e}")
-            my_position_ids = set()
-        if my_position_ids:
-            # FIX #82: Registry has positions, but they may be stale (already settled on Saxo).
-            # Verify against Saxo before halting - 0DTE options always settle same day.
-            try:
-                actual_positions = self.client.get_positions()
-                actual_position_ids = {str(p.get("PositionId")) for p in actual_positions}
-                still_open = my_position_ids & actual_position_ids
+        # Per-day alert dedup: clear the emergency-close once-per-conid set so a
+        # fresh day starts clean (conids differ day-to-day, so this is hygiene
+        # against unbounded growth, not correctness). See
+        # base_strategy._emergency_close_alert_once.
+        if hasattr(self, "_emergency_close_alerted"):
+            self._emergency_close_alerted.clear()
 
-                if not still_open:
-                    # Positions are gone from Saxo — registry is stale, clean it up
-                    logger.info(
-                        f"FIX #82: Registry had {len(my_position_ids)} stale position IDs "
-                        f"but Saxo confirms 0 still open — cleaning up registry"
-                    )
-                    for pos_id in my_position_ids:
-                        try:
-                            self.registry.unregister(pos_id)
-                        except Exception as e:
-                            logger.error(f"Registry error unregistering stale {pos_id}: {e}")
-                    # Fall through to normal reset below
-                else:
-                    # Positions genuinely still open on Saxo — this is a real problem
-                    error_msg = (
-                        f"CRITICAL: {len(still_open)} {self.BOT_NAME} positions still open on Saxo overnight! "
-                        f"0DTE should expire same day. IDs: {list(still_open)}"
-                    )
-                    logger.critical(error_msg)
-                    self.alert_service.send_alert(
-                        alert_type=AlertType.CRITICAL_INTERVENTION,
-                        title=f"{self.BOT_NAME} Overnight Position Detected!",
-                        message=error_msg,
-                        priority=AlertPriority.CRITICAL,
-                        details={"position_ids": list(still_open)},
-                        contracts=self.contracts_per_entry,
-                    )
-                    # Halt trading - manual intervention required
-                    self._critical_intervention_required = True
-                    self._critical_intervention_reason = "Overnight 0DTE positions detected - investigate immediately"
-                    return  # Don't reset state, need to handle existing positions
-            except Exception as e:
-                # Can't verify — be conservative and halt
-                error_msg = (
-                    f"CRITICAL: {len(my_position_ids)} {self.BOT_NAME} positions in registry and "
-                    f"Saxo verification failed ({e}) — halting for safety"
-                )
-                logger.critical(error_msg)
-                self.alert_service.send_alert(
-                    alert_type=AlertType.CRITICAL_INTERVENTION,
-                    title=f"{self.BOT_NAME} Overnight Position Check Failed!",
-                    message=error_msg,
-                    priority=AlertPriority.CRITICAL,
-                    details={"position_ids": list(my_position_ids), "error": str(e)},
-                    contracts=self.contracts_per_entry,
-                )
-                self._critical_intervention_required = True
-                self._critical_intervention_reason = f"Overnight position verification failed: {e}"
-                return
+        # POS-003: a fresh day starts with no recently-closed conids (conids differ
+        # day-to-day; this also bounds the dict's growth).
+        self._recent_close_conids = {}
+
+        # STATE-004: Check for overnight 0DTE positions (should NEVER happen).
+        #
+        # The check body now lives in _run_overnight_position_check() so the
+        # pre-market hook in main.py can run the IDENTICAL logic on a day where
+        # no process survived across ET midnight (the "restart gap" — see
+        # run_overnight_check_if_owed). Behaviour on THIS path is unchanged
+        # from the historical in-line version, including halting on a failed
+        # broker read.
+        outcome = self._run_overnight_position_check()
+
+        if outcome == OVERNIGHT_CHECK_READ_FAILED:
+            # Historical behaviour, deliberately preserved: at the new-day
+            # reset a failed read must NOT be mistaken for "all settled",
+            # because the statements below WIPE daily_state. Halt for safety.
+            # (The pre-market hook treats the same outcome differently — there
+            # the account is flat and halting would be a pure false positive.)
+            err = getattr(self, "_overnight_check_read_error", None)
+            error_msg = (
+                f"CRITICAL: broker overnight-position check failed at "
+                f"new-day reset after {STATE004_MAX_ATTEMPTS} attempts "
+                f"({err}) — halting for safety"
+            )
+            logger.critical(error_msg)
+            self.alert_service.send_alert(
+                alert_type=AlertType.CRITICAL_INTERVENTION,
+                title=f"{self.BOT_NAME} Overnight Position Check Failed!",
+                message=error_msg,
+                priority=AlertPriority.CRITICAL,
+                details={"error": str(err), "attempts": STATE004_MAX_ATTEMPTS},
+                contracts=self.contracts_per_entry,
+            )
+            self._critical_intervention_required = True
+            self._critical_intervention_reason = (
+                f"Overnight position verification failed: {err}"
+            )
+            self._save_state_to_disk()
+            return
+
+        if outcome == OVERNIGHT_CHECK_POSITIONS:
+            # The CRITICAL alert and the intervention latch already fired
+            # inside the check itself.
+            return  # Don't reset state, need to handle existing positions
 
         self.daily_state = MEICDailyState()
         self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
@@ -9213,6 +13466,9 @@ class HydraStrategy(MEICStrategy):
         self._consecutive_failures = 0
         self._api_results_window.clear()
         self._early_close_triggered = False  # MKT-018: Reset early close
+        self._eod_flatten_done = False  # MKT-047: Reset EOD safety-flatten latch
+        self._eod_recheck_failed_at = {}  # MKT-047-RECHECK: reset failed-close cooldowns
+        self._eod_recheck_next_start_idx = 0  # MKT-047-RECHECK: reset round-robin pointer
         self._roc_gate_triggered = False  # MKT-021: Reset ROC gate
         self._vix_gate_resolved = False  # MKT-034: Reset VIX gate
         self._vix_gate_start_slot = 0
@@ -9241,9 +13497,16 @@ class HydraStrategy(MEICStrategy):
 
         # Reset reconciliation timer
         self._last_reconciliation_time = None
+        # Confirm-before-alarm: when set, a settle-delay reconciliation re-check
+        # is pending (a prior cycle saw a discrepancy that may be IBKR feed lag).
+        self._recon_recheck_at = None
 
         # POS-004: Reset settlement reconciliation flag for new day
         self._settlement_reconciliation_complete = False
+        # Reset the strict-read failure tracking so a prior day's blocked
+        # settlement doesn't suppress today's CRITICAL alert (fix #6).
+        self._settlement_strict_read_failures = 0
+        self._settlement_halt_alerted = False
 
         # Skip weekdays: if today is a skip day, go straight to DAILY_COMPLETE
         today_dow = get_us_market_time().weekday()
@@ -9343,6 +13606,25 @@ class HydraStrategy(MEICStrategy):
                             f"{self._next_entry_index} → {new_idx} "
                             f"(dropped {dropped_count} base entries from front)"
                         )
+                        # AUDIT #70: TIME-002 (_skip_missed_entries) runs on the
+                        # FULL pre-truncation schedule before the VIX regime
+                        # applies, so on a mid-day restart it counted each slot
+                        # it advanced past as a "skipped" entry. The slots it
+                        # advanced through are the same `dropped`-front slots the
+                        # truncation removes here — they were not real skips (the
+                        # restart re-points at the correct, still-pending slot, and
+                        # in the filled-slot case the entry was already placed).
+                        # Roll back exactly the over-count so entries_skipped is
+                        # not inflated for an already-filled / re-pointed slot.
+                        spurious_skips = self._next_entry_index - new_idx
+                        if spurious_skips > 0 and self.daily_state.entries_skipped > 0:
+                            rollback = min(spurious_skips, self.daily_state.entries_skipped)
+                            self.daily_state.entries_skipped -= rollback
+                            logger.info(
+                                f"VIX regime: rolled back {rollback} spurious "
+                                f"entries_skipped over-counted by TIME-002 on the "
+                                f"pre-truncation schedule"
+                            )
                         self._next_entry_index = new_idx
                 logger.info(f"VIX regime: VIX={vix:.1f}, regime={regime}, capped to {cap} base entries (dropped earliest)")
 
@@ -9363,17 +13645,154 @@ class HydraStrategy(MEICStrategy):
         if regime < len(mcc) and mcc[regime] is not None:
             old = self.min_viable_credit_per_side
             self.min_viable_credit_per_side = mcc[regime] * 100
-            self.call_credit_floor = self.min_viable_credit_per_side - 10
-            logger.info(f"VIX regime: min_call_credit ${old/100:.2f} → ${self.min_viable_credit_per_side/100:.2f}")
+            # AUDIT #62: clamp to a positive credit (1 cent). For a sub-$0.10
+            # regime min credit, "min - $0.10" goes 0/negative and the credit
+            # gate would then accept a net-DEBIT spread as a "viable credit".
+            self.call_credit_floor = max(1, self.min_viable_credit_per_side - 10)
+            logger.info(f"VIX regime: min_call_credit ${old/100:.2f} → ${self.min_viable_credit_per_side/100:.2f} (floor ${self.call_credit_floor/100:.2f})")
         mpc = self.vix_regime_min_put_credit
         if regime < len(mpc) and mpc[regime] is not None:
             old = self.min_viable_credit_put_side
             self.min_viable_credit_put_side = mpc[regime] * 100
-            self.put_credit_floor = self.min_viable_credit_put_side - 10
-            logger.info(f"VIX regime: min_put_credit ${old/100:.2f} → ${self.min_viable_credit_put_side/100:.2f}")
+            # AUDIT #62: clamp to a positive credit (see call side above).
+            self.put_credit_floor = max(1, self.min_viable_credit_put_side - 10)
+            logger.info(f"VIX regime: min_put_credit ${old/100:.2f} → ${self.min_viable_credit_put_side/100:.2f} (floor ${self.put_credit_floor/100:.2f})")
 
         self._vix_regime_applied = True
         logger.info(f"VIX regime applied: VIX={vix:.1f}, regime={regime}/{len(self.vix_regime_breakpoints)}")
+
+    def _side_positions_gone(
+        self, entry, side: str,
+        open_positions: Optional[List[Dict[str, Any]]] = None,
+    ) -> bool:
+        """True when BOTH legs of ``side`` ("call"/"put") are settled /
+        gone from the broker (DEF-5).
+
+        - Dry-run: True — Path-B synthetic positions settle at EOD.
+        - Live: a leg is gone when its ``*_uic`` is already cleared OR
+          the broker shows no open position at that conid
+          (``_position_is_open``, F4.2). Robust whether or not POS-004
+          has cleared ``*_uic`` yet, and IBKR has no per-leg position
+          id to key on.
+
+        Replaces the old ``_position_is_settled(*_position_id)`` pair,
+        which on IBKR was always True (``*_position_id`` is never set) —
+        it would have marked a still-open leg expired the moment POS-004
+        ran. See ``docs/migration/DEFERRED_WORK.md`` DEF-5.
+        """
+        if self.dry_run:
+            return True
+
+        def _leg_gone(uic) -> bool:
+            if not uic:
+                return True  # already cleared on settlement
+            return not self._position_is_open(uic, positions=open_positions)
+
+        return (
+            _leg_gone(getattr(entry, f"short_{side}_uic", None))
+            and _leg_gone(getattr(entry, f"long_{side}_uic", None))
+        )
+
+    def _settlement_spx_level(self) -> Optional[float]:
+        """Best-effort SPX level at settlement, used to detect ITM-settled
+        shorts (IBKR-audit #5). Returns None if no usable read.
+
+        SPXW is PM-CASH-settled against the SPX close, so the index level at
+        settlement time is the right reference. Freshness is intentionally
+        IGNORED here: at/after the close the 6509 flag is 'Z' (Frozen) — that
+        frozen value IS the settlement reference we want, so a non-'R' flag
+        must NOT suppress it (unlike intraday reads, where cluster A rejects
+        stale data). Any exception or missing price → None (caller falls back
+        to the legacy worthless assumption rather than crashing settlement).
+        """
+        price = None
+        try:
+            price, _avail = self._read_index_price(self.underlying_symbol)
+        except Exception as exc:  # pragma: no cover - defensive
+            logger.warning(f"  Settlement SPX live read failed ({exc}); trying fallback")
+        if price is not None and price > 0:
+            return float(price)
+        # IBKR-audit #5b (2026-06-17): the live read FAILS on a fresh post-close
+        # restart (snapshot not warmed up). Fall back to the last-known SPX
+        # (persisted as last_spx_price, restored into self.spx_price on recovery)
+        # BEFORE assuming worthless — otherwise an ITM-settled short is mis-booked
+        # as a full-credit profit (the variant-C +$336.70-vs-actual-(-$3.1k) bug).
+        # Only assume worthless when we have NO reference at all.
+        #
+        # 2026-08-13 fix: `self.current_price` (the last LIVE tick this process
+        # actually saw — at/after the close that's the real settlement price)
+        # must come first, mirroring the same fix in _save_state_to_disk.
+        # `self.spx_price` is a strategy-level attribute set exactly ONCE, at
+        # process __init__/state-recovery, and can be stale by days if this
+        # process hasn't restarted since — this is the highest-stakes reader
+        # of that field (it directly gates ITM-vs-worthless settlement
+        # booking), so getting the priority right here matters more than in
+        # any other consumer.
+        fallback = getattr(self, "current_price", 0.0) or getattr(self, "spx_price", 0.0) or 0.0
+        if fallback and fallback > 0:
+            logger.warning(
+                f"  Settlement SPX live read unavailable; using last-known SPX "
+                f"${fallback:.2f} to verify ITM settlement (post-close fallback)"
+            )
+            return float(fallback)
+        logger.warning("  Settlement SPX unavailable AND no last-known fallback; "
+                       "cannot verify ITM settlement, assuming worthless")
+        return None
+
+    def _settlement_booked_pnl(
+        self, entry, side: str, settlement_level: Optional[float],
+    ) -> tuple[float, bool]:
+        """Dollar P&L to book for a side whose positions are gone at settlement.
+
+        IBKR-audit #5: the bot assumed every 'gone' short expired WORTHLESS
+        (full credit kept = profit). But an ITM short at PM settlement is
+        cash-settled and disappears from the book in exactly the same way — the
+        ONLY signal it was a LOSS is settlement-vs-strike. On Saxo, Fix #87
+        cross-checked actual settlement P&L; on IBKR that cross-check is a
+        no-op (no real-time closed-positions report), so without this an
+        ITM-settled short is mis-booked as a full-credit profit.
+
+        Returns ``(booked_pnl, worthless)``. ``worthless`` is True when the side
+        finished OTM or the settlement level is unavailable — then ``booked_pnl``
+        is the full credit kept. Otherwise (ITM) ``booked_pnl`` is
+        ``credit - cash_settled_intrinsic``, which can be NEGATIVE, and the ITM
+        detail is logged here. Credits and the returned value are total dollars
+        (points × 100 × contracts), matching how credits are stored.
+        """
+        if side == "call":
+            credit = entry.call_spread_credit
+            short_k = entry.short_call_strike
+            long_k = entry.long_call_strike
+            itm_points = (settlement_level - short_k) if settlement_level else 0.0
+        else:
+            credit = entry.put_spread_credit
+            short_k = entry.short_put_strike
+            long_k = entry.long_put_strike
+            itm_points = (short_k - settlement_level) if settlement_level else 0.0
+
+        # Can't verify, no short leg, or finished OTM → legacy worthless credit.
+        if settlement_level is None or short_k <= 0 or itm_points <= 0:
+            return credit, True
+
+        # Item 7: a NAKED side (no long wing) has UNBOUNDED intrinsic — do NOT
+        # cap it at the (nonexistent) spread width. long_k=0 would otherwise make
+        # width=short_k and silently cap an extreme ITM naked call. Only
+        # defined-risk verticals cap intrinsic at their width.
+        if not getattr(self, "requires_protective_wings", True):
+            intrinsic_pts = itm_points
+        else:
+            width = abs(long_k - short_k)
+            intrinsic_pts = min(itm_points, width) if width > 0 else itm_points
+        settle_value = intrinsic_pts * 100 * max(int(getattr(entry, "contracts", 1)), 1)
+        booked = credit - settle_value
+        logger.warning(
+            f"  Entry #{entry.entry_number} {side} side settled ITM "
+            f"(SPX={settlement_level:.2f} vs short {short_k:.0f}, "
+            f"{intrinsic_pts:.2f}pt intrinsic): booking ${booked:.2f} "
+            f"(credit ${credit:.2f} - settlement ${settle_value:.2f}) — NOT a "
+            f"worthless expiry"
+        )
+        return booked, False
 
     def _process_expired_credits(self) -> float:
         """
@@ -9396,23 +13815,95 @@ class HydraStrategy(MEICStrategy):
         expired_call_credit = 0.0
         expired_put_credit = 0.0
 
+        # DEF-5: one broker snapshot for the whole sweep — _side_positions_gone
+        # consults it via _position_is_open. None in dry-run / Saxo mode
+        # (those paths don't query the broker).
+        open_positions = (
+            self._read_open_positions()
+            if (self.broker is not None and not self.dry_run)
+            else None
+        )
+
+        # IBKR-audit #5: SPX settlement level, to detect ITM-settled shorts that
+        # would otherwise be mis-booked as worthless profit. Only read on the
+        # real IBKR path — None in dry-run / Saxo, where the booked-PnL helper
+        # falls back to the legacy full-credit assumption.
+        # S-HIGH-2: for a NAKED strategy (requires_protective_wings=False, e.g.
+        # the strangle) we MUST compute the settlement level even in dry-run —
+        # otherwise an ITM-finishing naked short is booked as full-credit PROFIT,
+        # poisoning the very dry-run dataset the strangle exists to produce.
+        # _settlement_spx_level only READS the index (no order), so it is safe in
+        # dry-run. Defined-risk IC dry-run behavior is unchanged.
+        _naked = not getattr(self, "requires_protective_wings", True)
+        _should_read_settlement = self.broker is not None and (not self.dry_run or _naked)
+        settlement_level = (
+            self._settlement_spx_level() if _should_read_settlement else None
+        )
+        # S-HIGH-3 (2026-06-10): on a path where we SHOULD have a settlement level
+        # but the read FAILED, do NOT book this pass — an ITM-settled short would be
+        # mis-booked as a full-credit worthless PROFIT (the IBKR analog of the Saxo
+        # settlement_pnl_bug; today's '8 conids awaiting settlement' + the +885.6
+        # pre-settlement artifact). DEFER: leave every side un-expired so the next
+        # heartbeat retries once SPX is readable, signal the caller via
+        # self._settlement_deferred so it does NOT mark reconciliation complete, and
+        # alert once. The SPX index almost always prints its close value after 4pm,
+        # so this clears within a heartbeat or two; a persistent failure escalates.
+        self._settlement_deferred = False
+        if _should_read_settlement and settlement_level is None:
+            self._settlement_deferred = True
+            logger.critical(
+                "POS-004: settlement SPX unreadable — DEFERRING credit booking to "
+                "avoid mis-booking an ITM-settled short as worthless profit; will "
+                "retry next heartbeat."
+            )
+            self._alert_settlement_deferred()
+            return 0.0
+
         for entry in self.daily_state.entries:
             # Check call side
             call_had_positions = entry.short_call_strike > 0 or entry.long_call_strike > 0
-            call_positions_gone = (
-                self._position_is_settled(entry.short_call_position_id)
-                and self._position_is_settled(entry.long_call_position_id)
+            call_positions_gone = self._side_positions_gone(
+                entry, "call", open_positions,
             )
 
             if call_had_positions and call_positions_gone:
-                if not entry.call_side_stopped and not entry.call_side_expired and not entry.call_side_skipped:
+                # 06-04 audit (fix #5): a Brandon TP/BREACH that closed 0 legs
+                # (the pre-fix orphan bug) set *_side_stopped + close_reason but
+                # never realized any P&L, and the position then expires here.
+                # Still book it. A GENUINE HYDRA stop books at stop time
+                # (close_reason != TP/BREACH) and a genuine TP/BREACH close sets
+                # *_side_expired (skipped just below), so this re-books ONLY the
+                # spurious never-booked case — no double-count.
+                call_genuine_stop = entry.call_side_stopped and getattr(entry, "close_reason", "") not in ("TP", "BREACH")
+                # L-H5: a directional-pivot-closed side already booked its P&L in
+                # _execute_pivot_side_close; re-booking the full credit here would
+                # double-count it. Skip pivot-closed sides.
+                if (not call_genuine_stop and not entry.call_side_expired
+                        and not entry.call_side_skipped
+                        and not getattr(entry, "call_side_pivot_closed", False)
+                        # L-M3 (2026-09-10): the external-close path books the
+                        # side's ACTUAL close debit. Settlement would re-book the
+                        # full credit on top whenever close_reason was already
+                        # TP/BREACH (so call_genuine_stop is False) — the mirror
+                        # image of the bug fixed in the reconcile path.
+                        and not getattr(entry, "call_side_pnl_booked_external", False)):
                     entry.call_side_expired = True
-                    credit = entry.call_spread_credit
-                    if credit > 0:
-                        expired_call_credit += credit
+                    # IBKR-audit #5: book actual settlement P&L (full credit if
+                    # OTM/unverifiable; credit - intrinsic if ITM-settled).
+                    booked, worthless = self._settlement_booked_pnl(
+                        entry, "call", settlement_level,
+                    )
+                    if booked != 0:
+                        expired_call_credit += booked
+                        # Per-entry mirror of this settlement booking. The AGGREGATE
+                        # daily total is booked once below (+= total_expired_credit),
+                        # so mirror per-entry ONLY here (do not route through
+                        # _book_realized_pnl, which would double-book the aggregate).
+                        entry.realized_pnl = getattr(entry, "realized_pnl", 0.0) + booked
+                    if worthless and booked > 0:
                         logger.info(
                             f"  Entry #{entry.entry_number} call side EXPIRED worthless: "
-                            f"+${credit:.2f} profit (credit kept)"
+                            f"+${booked:.2f} profit (credit kept)"
                         )
                     # Capital-deployed sweep needs a close_time on every closed
                     # entry to free margin in its interval calculation. Without
@@ -9427,20 +13918,35 @@ class HydraStrategy(MEICStrategy):
 
             # Check put side
             put_had_positions = entry.short_put_strike > 0 or entry.long_put_strike > 0
-            put_positions_gone = (
-                self._position_is_settled(entry.short_put_position_id)
-                and self._position_is_settled(entry.long_put_position_id)
+            put_positions_gone = self._side_positions_gone(
+                entry, "put", open_positions,
             )
 
             if put_had_positions and put_positions_gone:
-                if not entry.put_side_stopped and not entry.put_side_expired and not entry.put_side_skipped:
+                # 06-04 audit (fix #5): see the call-side rationale above — re-book
+                # a side spuriously flagged stopped by a 0-leg Brandon TP/BREACH.
+                put_genuine_stop = entry.put_side_stopped and getattr(entry, "close_reason", "") not in ("TP", "BREACH")
+                # L-H5: skip pivot-closed sides (P&L already booked in
+                # _execute_pivot_side_close) to avoid double-counting the credit.
+                if (not put_genuine_stop and not entry.put_side_expired
+                        and not entry.put_side_skipped
+                        and not getattr(entry, "put_side_pivot_closed", False)
+                        # L-M3 (2026-09-10) — see the call-side rationale above.
+                        and not getattr(entry, "put_side_pnl_booked_external", False)):
                     entry.put_side_expired = True
-                    credit = entry.put_spread_credit
-                    if credit > 0:
-                        expired_put_credit += credit
+                    # IBKR-audit #5: book actual settlement P&L (full credit if
+                    # OTM/unverifiable; credit - intrinsic if ITM-settled).
+                    booked, worthless = self._settlement_booked_pnl(
+                        entry, "put", settlement_level,
+                    )
+                    if booked != 0:
+                        expired_put_credit += booked
+                        # Per-entry mirror (aggregate booked once below) — see call side.
+                        entry.realized_pnl = getattr(entry, "realized_pnl", 0.0) + booked
+                    if worthless and booked > 0:
                         logger.info(
                             f"  Entry #{entry.entry_number} put side EXPIRED worthless: "
-                            f"+${credit:.2f} profit (credit kept)"
+                            f"+${booked:.2f} profit (credit kept)"
                         )
                     # Same rationale as the call-side block above.
                     if not getattr(entry, "close_time", ""):
@@ -9462,10 +13968,14 @@ class HydraStrategy(MEICStrategy):
                     entry.is_complete = True
 
         total_expired_credit = expired_call_credit + expired_put_credit
-        if total_expired_credit > 0:
+        # IBKR-audit #5: book ANY nonzero net, not just positive — an ITM-settled
+        # side contributes a LOSS, and the net (or an individually-negative side)
+        # must still be applied. The old `> 0` guard silently dropped a
+        # net-negative settlement, overstating realized P&L.
+        if total_expired_credit != 0:
             self.daily_state.total_realized_pnl += total_expired_credit
             logger.info(
-                f"POS-004: Added ${total_expired_credit:.2f} from expired positions to realized P&L "
+                f"POS-004: Booked ${total_expired_credit:.2f} from settled positions to realized P&L "
                 f"(Calls: ${expired_call_credit:.2f}, Puts: ${expired_put_credit:.2f})"
             )
             logger.info(
@@ -9483,93 +13993,51 @@ class HydraStrategy(MEICStrategy):
 
     def _verify_settlement_pnl_from_saxo(self):
         """
-        Fix #87: Verify total P&L against Saxo's closedpositions report.
+        Fix #87 / DEF-6: Settlement-P&L value cross-check — no-op on IBKR.
 
-        The bot calculates P&L from: stop close costs + assumed expired credits.
-        But expired options may settle at non-zero (near-ATM at settlement).
-        Saxo's /cs/v1/reports/closedPositions has actual PnLAccountCurrency
-        for every closed position including settlements.
+        The bot calculates P&L from stop close costs + assumed expired
+        credits. An expired option can settle at non-zero (ITM / near-ATM
+        at settlement). The original Fix #87 cross-checked total P&L
+        against Saxo's `/cs/v1/reports/closedPositions` report.
 
-        If Saxo's total differs from our calculated total, apply a correction
-        to total_realized_pnl. This runs once at settlement time.
+        IBKR's Client Portal Web API has no real-time per-day
+        closed-positions P&L report — per-position realized P&L lives
+        only in Portfolio Analyst / Flex queries, which are not
+        real-time. So this value-level cross-check is unavailable and
+        the method is a no-op. The position-LEVEL settlement check
+        (POS-004 / `check_after_hours_settlement`) still verifies every
+        tracked leg actually settled. Tracked as DEF-6.
+
+        Kept (rather than removed) so the single caller in
+        `_process_expired_credits` stays intact.
         """
-        # Path-B dry-run skip (2026-04-27): no real Saxo closures exist for
-        # DRY_* positions, so the closedpositions report has nothing matching
-        # our entry UICs. The "verification" would always conclude our P&L is
-        # off by the entire dry P&L and try to correct it to zero.
-        if self.dry_run:
-            return
-        try:
-            from shared.market_hours import get_us_market_time
-            today = get_us_market_time().strftime("%Y-%m-%d")
-
-            response = self.client._make_request(
-                "GET",
-                f"/cs/v1/reports/closedPositions/{self.client.client_key}/{today}/{today}"
-            )
-
-            if not response or "Data" not in response:
-                logger.warning("Fix #87: Could not fetch closedpositions report — using assumed P&L")
-                return
-
-            # PnLAccountCurrency = NET P&L per position (includes commission)
-            # Sum = total net P&L for the day from Saxo's perspective
-            saxo_net_pnl = 0.0
-            positions_found = 0
-            for cp in response["Data"]:
-                pnl = cp.get("PnLAccountCurrency", 0) or 0
-                saxo_net_pnl += pnl
-                positions_found += 1
-
-            if positions_found == 0:
-                logger.info("Fix #87: No closed positions in Saxo report — skipping verification")
-                return
-
-            # Our net P&L = total_realized_pnl (gross) - total_commission
-            our_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
-
-            diff = saxo_net_pnl - our_net_pnl
-            if abs(diff) < 1.0:
-                logger.info(
-                    f"Fix #87: P&L verified — Saxo ${saxo_net_pnl:.2f} net matches "
-                    f"bot ${our_net_pnl:.2f} net ({positions_found} positions)"
-                )
-                return
-
-            # Apply correction to total_realized_pnl (gross).
-            # Since diff = saxo_net - our_net, and our_net = gross - commission,
-            # corrected_gross = gross + diff, so corrected_net = gross + diff - commission = saxo_net.
-            logger.warning(
-                f"Fix #87: P&L CORRECTION — Saxo reports ${saxo_net_pnl:.2f} net, "
-                f"bot calculated ${our_net_pnl:.2f} net (diff: ${diff:+.2f}). "
-                f"Adjusting total_realized_pnl by ${diff:+.2f}"
-            )
-            self.daily_state.total_realized_pnl += diff
-            logger.info(
-                f"Fix #87: Corrected total_realized_pnl: ${self.daily_state.total_realized_pnl:.2f} "
-                f"(net after commission: ${self.daily_state.total_realized_pnl - self.daily_state.total_commission:.2f})"
-            )
-
-        except Exception as e:
-            logger.warning(f"Fix #87: Settlement P&L verification failed: {e} — using assumed P&L")
+        return
 
     def _reconcile_positions(self):
         """Override: After base reconciliation, detect manually closed longs.
 
-        When a long leg disappears from Saxo (manually sold by the user),
-        the base class clears position_id and UIC. This override checks
-        Saxo's closedpositions API to capture the actual sale revenue,
-        replicating what MKT-033 would have recorded.
+        When a long leg disappears from the broker (manually sold by the
+        user), the base class clears position_id and UIC. This override
+        checks the broker's closedpositions endpoint to capture the
+        actual sale revenue, replicating what MKT-033 would have recorded.
+
+        P7-audit M8: trigger keys on ``*_uic`` (conid) alone — not
+        ``and pos_id`` — because IBKR has no per-leg position id
+        (``*_position_id`` is always None on the IBKR path). Gating on
+        ``pos_id`` would dead-code the external-sale capture on IBKR
+        even though the closedpositions lookup keys on conid only.
         """
         # Path-B dry-run skip (2026-04-27): the base class skip (MEIC) already
         # returns early in dry mode so this override never sees cleared longs
         # to investigate. But to be defensive (and avoid the MKT-033 AUTO call
         # to client.get_closed_position_price for DRY_* UICs that fired today
-        # at 10:45:23), exit explicitly before any Saxo API call.
+        # at 10:45:23), exit explicitly before any broker API call.
         if self.dry_run:
             return
 
-        # Snapshot which long legs have UICs BEFORE base reconciliation clears them
+        # Snapshot which long legs have UICs (conids) BEFORE base reconciliation
+        # clears them. P7-audit M8: gating on `uic` only, not also `pos_id`,
+        # because on IBKR `pos_id` is always None.
         pre_longs = {}
         for entry in self.daily_state.entries:
             if not entry.entry_time:
@@ -9577,11 +14045,9 @@ class HydraStrategy(MEICStrategy):
             for side in ("call", "put"):
                 sold = getattr(entry, f"{side}_long_sold", False)
                 uic = getattr(entry, f"long_{side}_uic", None)
-                pos_id = getattr(entry, f"long_{side}_position_id", None)
-                if uic and pos_id and not sold:
+                if uic and not sold:
                     pre_longs[(entry.entry_number, side)] = {
                         "uic": uic,
-                        "pos_id": pos_id,
                     }
 
         # Run base reconciliation (clears position_id + UIC for missing legs)
@@ -9611,8 +14077,9 @@ class HydraStrategy(MEICStrategy):
             )
 
             try:
-                # Long positions are "Buy" direction; selling them is recorded as "Sell"
-                closed = self.client.get_closed_position_price(
+                # Long positions are "Buy" direction; selling them is
+                # recorded as "Sell". F5.4 — broker-agnostic.
+                closed = self._read_closed_position_price(
                     info["uic"], buy_or_sell="Sell"
                 )
                 if closed and closed.get("closing_price", 0) > 0:
@@ -9623,7 +14090,7 @@ class HydraStrategy(MEICStrategy):
                     close_commission = self.commission_per_leg * entry.contracts
 
                     # Record exactly as MKT-033 does
-                    self.daily_state.total_realized_pnl += revenue
+                    self._book_realized_pnl(revenue, entry)
                     self.daily_state.total_commission += close_commission
                     entry.close_commission += close_commission
 
@@ -9658,6 +14125,43 @@ class HydraStrategy(MEICStrategy):
         # Save state with any new salvage data
         self._save_state_to_disk()
 
+    @staticmethod
+    def _classify_settlement_conids(expected, actual):
+        """POS-004 (AUD5 fix): classify tracked conids at settlement time.
+
+        IBKR exposes only the NET quantity per conid, so a conid is normally
+        "settled" when we expected a non-zero net there and the broker now
+        reports net 0 (the 0DTE legs expired). The blind spot the original
+        code had: it keyed solely off the broker's ACTUAL net == 0, so a conid
+        whose EXPECTED net is *itself* 0 — one entry's short and another
+        entry's long merged onto the SAME conid (e.g. short_call -1 on E#2 +
+        long_call +1 on E#3) — also reads actual net 0 while BOTH legs are
+        still open, and got marked "settled", clearing both live legs and
+        dropping monitoring of a genuinely-open 0DTE short (a safety risk).
+
+        Returns ``(settled, still_open, merged_net_zero)``:
+        - ``settled``: EXPECTED net != 0 AND broker net == 0 → unambiguously
+          expired; safe to clear these legs.
+        - ``still_open``: broker net != 0 → not settled; keep monitoring.
+        - ``merged_net_zero``: EXPECTED net == 0 AND broker net == 0 →
+          AMBIGUOUS (could be both-open-and-netting OR both-expired). These
+          are NEVER bulk-cleared off the net signal; their legs stay tracked
+          and are booked by the expiry-gated, idempotent
+          ``_process_expired_credits()`` instead. MKT-013/015 deconfliction
+          normally prevents the same-conid opposing-leg merge in the first
+          place; this is defense-in-depth for a deconfliction miss.
+        """
+        settled = {
+            c for c in expected
+            if expected.get(c, 0) != 0 and actual.get(c, 0) == 0
+        }
+        still_open = {c for c in expected if actual.get(c, 0) != 0}
+        merged_net_zero = {
+            c for c in expected
+            if expected.get(c, 0) == 0 and actual.get(c, 0) == 0
+        }
+        return settled, still_open, merged_net_zero
+
     def check_after_hours_settlement(self) -> bool:
         """
         POS-004: Check if 0DTE positions have been settled after market close.
@@ -9672,111 +14176,226 @@ class HydraStrategy(MEICStrategy):
             True if all positions are settled (or were already confirmed settled)
             False if positions still exist on Saxo (settlement pending)
         """
-        # Already confirmed settled for today - but check if new positions appeared
-        # FIX #82: The flag gets set at midnight when registry is empty (pre-market).
-        # If trading happens during the day, registry gets new positions. We must
-        # reset the flag so post-market settlement actually processes them.
+        # P7-audit H2: gate on the conid→quantity model, NOT the Position
+        # Registry. On IBKR the registry is never populated (no per-leg
+        # position id, so _register_position early-returns), so the
+        # registry path was dead code — settlement always took the
+        # empty-registry branch and unconditionally set
+        # `_settlement_reconciliation_complete=True`, dropping the
+        # expired credit of any side still actually open.
+        expected = self._expected_position_quantities()
+
+        # Already confirmed settled today — but if tracked conids
+        # reappeared (next-day reset, new entry mid-day after a
+        # completion), reset and re-reconcile (former FIX #82 path).
         if self._settlement_reconciliation_complete:
-            my_position_ids = self.registry.get_positions(self.BOT_NAME)
-            if my_position_ids:
+            if expected:
                 logger.info(
-                    f"FIX #82: Settlement was marked complete but registry has "
-                    f"{len(my_position_ids)} positions - resetting flag for proper settlement"
+                    f"Settlement was marked complete but {len(expected)} "
+                    f"tracked conid(s) reappeared — resetting flag."
                 )
                 self._settlement_reconciliation_complete = False
-                # Fall through to normal settlement logic below
             else:
                 return True
 
-        # Check how many positions we think we have in registry
-        my_position_ids = self.registry.get_positions(self.BOT_NAME)  # Use HYDRA, not MEIC
-
-        if not my_position_ids:
-            # FIX #77: Registry empty — but entries may have un-finalized surviving sides
-            # that need expired credit processing (e.g., post-restart with partial ICs).
-            # Previously returned True immediately, skipping expired credit processing.
+        if not expected:
+            # No tracked conids — but a state-file restore can leave
+            # entries with un-finalized surviving sides (FIX #77). Run
+            # the expired-credit processor so those get booked, then
+            # mark complete.
             expired_credit = self._process_expired_credits()
+            if getattr(self, "_settlement_deferred", False):
+                logger.warning(
+                    "POS-004: settlement booking deferred (SPX unreadable) — not "
+                    "finalizing reconciliation; will retry next heartbeat."
+                )
+                return False
             if expired_credit > 0:
-                logger.info(f"FIX #77: Processed ${expired_credit:.2f} expired credits from surviving sides (registry was empty)")
-                # Fix #84: Add final P&L history point after settlement
-                final_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
-                now = get_us_market_time()
-                time_key = now.strftime("%H:%M")
-                self._pnl_history.append({"time": time_key, "pnl": round(final_net_pnl, 2)})
-                logger.info(f"Fix #84: Final P&L history point: ${final_net_pnl:.2f} at {time_key}")
+                logger.info(
+                    f"FIX #77: Processed ${expired_credit:.2f} expired credits "
+                    f"from surviving sides (no tracked conids)."
+                )
+                # Fix #84's final-pnl_history-point write used to live here, but
+                # main.py calls log_daily_summary() right after this method
+                # returns True — and for a Brandon variant (B/C), that call
+                # settles the defensive-overlay hedges BEFORE folding their P&L
+                # into total_realized_pnl. Reading total_realized_pnl at THIS
+                # point could grab a pre-hedge-settlement snapshot that never
+                # gets corrected (2026-08-17: dashboard showed +$78.40 all
+                # evening after the true settled total was -$76.60 — exactly
+                # the two hedges' -$155.00). Moved to base_strategy.py's
+                # log_daily_summary(), which runs after ALL settlement work
+                # (subclass-specific included) using the same net_pnl the
+                # real alert/DB row report — see the comment there.
                 self._save_state_to_disk()
-            logger.info(f"POS-004: No {self.BOT_NAME} positions in registry - settlement reconciliation complete")
+            logger.info(
+                f"POS-004: No tracked conids — settlement reconciliation complete."
+            )
             self._settlement_reconciliation_complete = True
             return True
 
-        # We have positions in registry - check if they still exist on Saxo
-        logger.info(f"POS-004: Checking settlement status for {len(my_position_ids)} {self.BOT_NAME} positions...")
+        # Tracked conids exist — check whether they're still open on the broker.
+        logger.info(f"POS-004: Checking settlement for {len(expected)} tracked conid(s)…")
 
         try:
-            # Query Saxo for actual positions
-            actual_positions = self.client.get_positions()
-            actual_position_ids = {str(p.get("PositionId")) for p in actual_positions}
+            # POS-004 in the IBKR-native conid→quantity model (F4.6):
+            # a tracked leg is "settled" when the broker no longer shows
+            # an open position at its conid. strict=True so a fetch
+            # failure is a genuine error (return False, retry next
+            # heartbeat) — never mistaken for "all settled". At 0DTE
+            # settlement the whole conid expires at once, so a merged
+            # position settles cleanly (net quantity → 0).
+            open_positions = self._read_open_positions(strict=True)
+            # Strict read succeeded — broker is responding. Clear any prior
+            # failure streak + re-arm the halt alert (fix #6).
+            if getattr(self, "_settlement_strict_read_failures", 0):
+                logger.info(
+                    "POS-004: broker read recovered after "
+                    f"{self._settlement_strict_read_failures} failed attempt(s)"
+                )
+            self._settlement_strict_read_failures = 0
+            self._settlement_halt_alerted = False
+            actual = self._actual_position_quantities(open_positions)
+            expected = self._expected_position_quantities()
 
-            # Find which of our registered positions still exist
-            still_open = my_position_ids & actual_position_ids
-            settled = my_position_ids - actual_position_ids
+            # POS-004 (AUD5): classify by EXPECTED vs ACTUAL net. A conid whose
+            # expected net is itself 0 (opposing legs merged on one conid) is
+            # ambiguous on a net-0 reading and must NOT be bulk-cleared.
+            settled_conids, still_open_conids, merged_net_zero_conids = \
+                self._classify_settlement_conids(expected, actual)
 
-            if settled:
-                logger.info(f"POS-004: {len(settled)} positions settled/expired - cleaning up registry")
-
-                # Clean up settled positions from registry
-                for pos_id in settled:
-                    try:
-                        self.registry.unregister(pos_id)
-                        logger.info(f"  Unregistered settled position: {pos_id}")
-                    except Exception as e:
-                        logger.error(f"Registry error unregistering {pos_id}: {e}")
-
-                # Also clean up from daily state entries
-                # Clear BOTH position_id AND uic when options settle
-                for entry in self.daily_state.entries:
-                    for leg_name in ["short_call", "long_call", "short_put", "long_put"]:
-                        pos_id = getattr(entry, f"{leg_name}_position_id")
-                        if pos_id and pos_id in settled:
-                            setattr(entry, f"{leg_name}_position_id", None)
-                            setattr(entry, f"{leg_name}_uic", None)  # Also clear UIC
-                            logger.debug(f"  Cleared {leg_name} position_id and uic from entry #{entry.entry_number}")
-
-                # FIX #43 / FIX #77: Process expired positions and add credit to realized P&L.
-                # Extracted to _process_expired_credits() helper to share with empty-registry path.
-                self._process_expired_credits()
-
-                # Save updated state
-                self._save_state_to_disk()
-
-            if still_open:
-                logger.info(f"POS-004: {len(still_open)} positions still open on Saxo - awaiting settlement")
-                return False
-            else:
-                # All positions settled
-                logger.info(f"POS-004: All {self.BOT_NAME} positions confirmed settled - reconciliation complete")
-                self._settlement_reconciliation_complete = True
-
-                # Fix #84: Add final P&L history point after settlement so dashboard
-                # shows post-settlement P&L (not stale pre-settlement snapshot)
-                final_net_pnl = self.daily_state.total_realized_pnl - self.daily_state.total_commission
-                now = get_us_market_time()
-                time_key = now.strftime("%H:%M")
-                self._pnl_history.append({"time": time_key, "pnl": round(final_net_pnl, 2)})
-                logger.info(f"Fix #84: Final P&L history point: ${final_net_pnl:.2f} at {time_key}")
-                self._save_state_to_disk()
-
-                # Log safety event
-                self._log_safety_event(
-                    "SETTLEMENT_COMPLETE",
-                    f"All {len(settled) if settled else len(my_position_ids)} positions settled after market close",
-                    "Complete"
+            if merged_net_zero_conids:
+                logger.warning(
+                    "POS-004: %d conid(s) have EXPECTED net 0 (opposing legs "
+                    "merged on one conid) and broker net 0 — NOT auto-clearing "
+                    "(ambiguous: both-open-and-netting vs both-expired). Legs "
+                    "stay tracked; expiry booking handles them. Check "
+                    "MKT-013/015 deconfliction. conids=%s",
+                    len(merged_net_zero_conids), sorted(merged_net_zero_conids),
                 )
 
-                return True
+            if settled_conids:
+                logger.info(
+                    f"POS-004: {len(settled_conids)} conid(s) settled/expired "
+                    f"— clearing tracked legs"
+                )
+                # Clear BOTH the uic and (legacy) position_id of every
+                # leg sitting on a settled conid.
+                for entry in self.daily_state.entries:
+                    for leg_name in LEG_NAMES:
+                        uic = getattr(entry, f"{leg_name}_uic", None)
+                        if uic and uic in settled_conids:
+                            setattr(entry, f"{leg_name}_uic", None)
+                            setattr(entry, f"{leg_name}_position_id", None)
+                            logger.debug(
+                                f"  Cleared {leg_name} from entry "
+                                f"#{entry.entry_number}"
+                            )
+
+            # FIX #43 / FIX #77: process expired positions into realized
+            # P&L. Idempotent (guards on *_side_expired) — safe to call
+            # every heartbeat.
+            self._process_expired_credits()
+            if getattr(self, "_settlement_deferred", False):
+                logger.warning(
+                    "POS-004: settlement booking deferred (SPX unreadable) — not "
+                    "finalizing reconciliation; will retry next heartbeat."
+                )
+                if settled_conids:
+                    self._save_state_to_disk()
+                return False
+            if settled_conids:
+                self._save_state_to_disk()
+
+            if still_open_conids:
+                logger.info(
+                    f"POS-004: {len(still_open_conids)} conid(s) still open "
+                    f"on the broker — awaiting settlement"
+                )
+                return False
+
+            # All tracked legs settled
+            logger.info(f"POS-004: All {self.BOT_NAME} positions confirmed settled - reconciliation complete")
+            self._settlement_reconciliation_complete = True
+
+            # Fix #84's final-pnl_history-point write used to live here — see
+            # the comment at the sibling call site above (~line 13070) for why
+            # it moved to base_strategy.py's log_daily_summary(). Still save
+            # the settlement-flag/leg-clearing changes made above.
+            self._save_state_to_disk()
+
+            # Log safety event
+            self._log_safety_event(
+                "SETTLEMENT_COMPLETE",
+                # Was `len(my_position_ids)` in the else branch — a Saxo-era
+                # name undefined in this scope, so an empty settled_conids
+                # raised NameError and the try/except logged a spurious
+                # "settlement failed" (audit: latent NameError). settled_conids
+                # is 0 when nothing needed settling, which reads correctly.
+                f"All {len(settled_conids)} positions settled after market close",
+                "Complete"
+            )
+
+            return True
 
         except Exception as e:
-            logger.error(f"POS-004: Settlement check failed: {e}")
+            # Fix #6 (2026-06-08 forensic): a strict-read failure here returns
+            # False so the heartbeat retries next pass (correct — never mistake
+            # a broker outage for "all settled"). But if the broker stays
+            # unreadable, that loops "settlement pending" forever: the daily
+            # summary is never recorded AND no one is told. Count the streak and
+            # PAGE the operator (CRITICAL) once past the threshold. We do NOT
+            # clear UICs / auto-complete — that would falsely book unconfirmed
+            # settlement P&L (the naive "fix" the forensic flagged as unsafe);
+            # the positions stay tracked for manual reconciliation, and a later
+            # successful read still completes settlement normally.
+            self._settlement_strict_read_failures = (
+                getattr(self, "_settlement_strict_read_failures", 0) + 1
+            )
+            logger.error(
+                f"POS-004: Settlement check failed "
+                f"(attempt {self._settlement_strict_read_failures}): {e}"
+            )
+            if (self._settlement_strict_read_failures
+                    >= SETTLEMENT_MAX_STRICT_READ_FAILURES
+                    and not getattr(self, "_settlement_halt_alerted", False)):
+                self._settlement_halt_alerted = True
+                n_tracked = sum(
+                    1 for entry in self.daily_state.entries
+                    for leg_name in LEG_NAMES
+                    if getattr(entry, f"{leg_name}_uic", None)
+                )
+                logger.critical(
+                    "POS-004: settlement BLOCKED — "
+                    f"{self._settlement_strict_read_failures} consecutive broker "
+                    f"reads failed; {n_tracked} leg(s) still tracked. Daily "
+                    "summary is held until a read succeeds. MANUAL reconciliation "
+                    "may be required (positions left tracked — NOT auto-cleared)."
+                )
+                try:
+                    self.alert_service.send_alert(
+                        alert_type=AlertType.CRITICAL_INTERVENTION,
+                        title="Settlement reconciliation BLOCKED",
+                        message=(
+                            f"{self._settlement_strict_read_failures} consecutive "
+                            "broker reads failed during after-hours settlement. "
+                            f"{n_tracked} leg(s) remain tracked and were NOT "
+                            "auto-cleared (avoids falsely booking unconfirmed "
+                            "P&L). The daily summary is held until a read "
+                            "succeeds; check the broker session / restart "
+                            "calypso-broker if the outage persists."
+                        ),
+                        priority=AlertPriority.CRITICAL,
+                        details={
+                            "consecutive_failures": self._settlement_strict_read_failures,
+                            "tracked_legs": n_tracked,
+                            "last_error": str(e),
+                        },
+                    )
+                except Exception as alert_exc:
+                    logger.error(
+                        f"POS-004: failed to send settlement-blocked alert: {alert_exc}"
+                    )
             return False
 
     def _log_safety_event(self, event_type: str, details: str, result: str = "Acknowledged"):
@@ -9806,334 +14425,6 @@ class HydraStrategy(MEICStrategy):
         except Exception as e:
             # Don't let logging failure affect trading
             logger.error(f"Failed to log safety event: {e}")
-
-    def _reconstruct_entry_from_positions(
-        self,
-        entry_number: int,
-        positions: List[Dict]
-    ) -> Optional[HydraIronCondorEntry]:
-        """
-        Reconstruct a HydraIronCondorEntry from Saxo position data.
-
-        OVERRIDE (Fix #40, 2026-02-05): Parent class creates IronCondorEntry objects
-        which don't have call_only/put_only fields. For HYDRA, we must create
-        HydraIronCondorEntry objects and set the one-sided flags based on which legs
-        exist. Without this, recovery of one-sided entries triggers false stops.
-
-        Args:
-            entry_number: The entry number (1-N, based on configured entry_times)
-            positions: List of parsed position dicts for this entry
-
-        Returns:
-            Reconstructed HydraIronCondorEntry or None if invalid
-        """
-        # Create HydraIronCondorEntry instead of IronCondorEntry
-        entry = HydraIronCondorEntry(entry_number=entry_number)
-        entry.strategy_id = f"hydra_{get_us_market_time().strftime('%Y%m%d')}_{entry_number:03d}"
-        # Fix #52: Set contract count for multi-contract support
-        entry.contracts = self.contracts_per_entry
-
-        # Use dictionary approach to handle positions in any order
-        entry_prices = {
-            "short_call": 0.0,
-            "long_call": 0.0,
-            "short_put": 0.0,
-            "long_put": 0.0,
-        }
-
-        # First pass: collect all positions and entry prices
-        for pos in positions:
-            leg_type = pos.get("leg_type")
-            strike = pos.get("strike")
-            is_long = pos.get("is_long")
-
-            # Validate leg type matches expected
-            expected_long = leg_type in ["long_call", "long_put"]
-            if expected_long != is_long:
-                logger.warning(f"Entry #{entry_number}: Leg {leg_type} direction mismatch!")
-
-            # Store entry price for later NET calculation
-            # Fix #52: Multiply by entry.contracts for multi-contract support
-            entry_prices[leg_type] = pos.get("entry_price", 0) * 100 * entry.contracts
-
-            if leg_type == "short_call":
-                entry.short_call_position_id = pos["position_id"]
-                entry.short_call_uic = pos["uic"]
-                entry.short_call_strike = strike
-                entry.short_call_price = pos.get("current_price", 0)
-
-            elif leg_type == "long_call":
-                entry.long_call_position_id = pos["position_id"]
-                entry.long_call_uic = pos["uic"]
-                entry.long_call_strike = strike
-                entry.long_call_price = pos.get("current_price", 0)
-
-            elif leg_type == "short_put":
-                entry.short_put_position_id = pos["position_id"]
-                entry.short_put_uic = pos["uic"]
-                entry.short_put_strike = strike
-                entry.short_put_price = pos.get("current_price", 0)
-
-            elif leg_type == "long_put":
-                entry.long_put_position_id = pos["position_id"]
-                entry.long_put_uic = pos["uic"]
-                entry.long_put_strike = strike
-                entry.long_put_price = pos.get("current_price", 0)
-
-        # Second pass: calculate NET credits (short - long)
-        entry.call_spread_credit = entry_prices["short_call"] - entry_prices["long_call"]
-        entry.put_spread_credit = entry_prices["short_put"] - entry_prices["long_put"]
-
-        logger.debug(
-            f"Entry #{entry_number} recovered credits: "
-            f"Call=${entry.call_spread_credit:.2f} (short ${entry_prices['short_call']:.2f} - long ${entry_prices['long_call']:.2f}), "
-            f"Put=${entry.put_spread_credit:.2f} (short ${entry_prices['short_put']:.2f} - long ${entry_prices['long_put']:.2f})"
-        )
-
-        # Check which legs exist
-        has_call_side = entry.short_call_position_id and entry.long_call_position_id
-        has_put_side = entry.short_put_position_id and entry.long_put_position_id
-        has_all_legs = has_call_side and has_put_side
-
-        if not has_all_legs:
-            # Partial entry - determine if it's a one-sided HYDRA entry or a stopped entry
-            legs_found = []
-            if entry.short_call_position_id:
-                legs_found.append("SC")
-            if entry.long_call_position_id:
-                legs_found.append("LC")
-            if entry.short_put_position_id:
-                legs_found.append("SP")
-            if entry.long_put_position_id:
-                legs_found.append("LP")
-
-            logger.warning(f"Entry #{entry_number} is PARTIAL: only {legs_found}")
-
-            # HYDRA SPECIFIC: Determine if this is a one-sided entry (by design)
-            # or if a side was stopped out
-            # If we have exactly call side OR put side, it's likely a one-sided HYDRA entry
-            # FIX #47: Use "skipped" instead of "stopped" for sides that were never opened
-            if has_call_side and not has_put_side:
-                # Only call spread found in Saxo. Two possibilities:
-                #   (a) Designed call-only entry (MKT-035/038/040) — put side was never opened
-                #   (b) Full IC where put side was stopped intraday — only call remains
-                # We cannot determine which from positions alone. Tentatively set call_only=True
-                # so stop monitoring watches the right side. State file restoration (lines ~8017-8031)
-                # will overwrite call_only/put_side_skipped with the authoritative values.
-                entry.call_only = True
-                entry.put_only = False
-                entry.call_side_stopped = False
-                entry.put_side_skipped = True  # Tentative — state file may change to put_side_stopped
-                logger.info(
-                    f"Entry #{entry_number}: Only call side found in Saxo — "
-                    f"tentatively CALL-ONLY (state file will correct if put was stopped intraday)"
-                )
-            elif has_put_side and not has_call_side:
-                # Only put spread found. Could be designed put-only OR full IC with stopped call.
-                # Tentative classification; state file restoration is authoritative.
-                entry.call_only = False
-                entry.put_only = True
-                entry.call_side_skipped = True  # Tentative — state file may change to call_side_stopped
-                entry.put_side_stopped = False
-                logger.info(
-                    f"Entry #{entry_number}: Only put side found in Saxo — "
-                    f"tentatively PUT-ONLY (state file will correct if call was stopped intraday)"
-                )
-            else:
-                # Mixed partial - probably a stopped entry (not skipped)
-                entry.call_side_stopped = not has_call_side
-                entry.put_side_stopped = not has_put_side
-
-        entry.is_complete = has_all_legs
-
-        # CRITICAL SAFETY CHECK: Prevent zero stop levels
-        # 2-contract scaling: buffers/theoretical-put/floor are per-contract; scale by
-        # entry.contracts (the contract count stamped when the entry was placed), NOT
-        # self.contracts_per_entry (current config) — entries must retain their original
-        # scaling semantics even if config flipped since they were opened.
-        n = entry.contracts
-        min_stop_level = 50.0 * n
-        put_buf = self.put_stop_buffer * n
-        call_buf_live = self.call_stop_buffer * n
-
-        # One-sided entry stop levels (must match _calculate_stop_levels_hydra behavior).
-        # Call-only: call_credit + theoretical_put ($250) + buffer (consistent for all call-only types).
-        # Put-only: credit + $1.75 buffer (MKT-039 — $1.75 buffer prevents false stops, walk-forward optimized).
-        if entry.call_only:
-            credit = entry.call_spread_credit
-            if credit < min_stop_level:
-                logger.critical(
-                    f"Recovery CRITICAL: Entry #{entry.entry_number} (call-only) has low credit "
-                    f"(${credit:.2f}). Using minimum stop level ${min_stop_level:.2f}."
-                )
-                credit = min_stop_level
-
-            # All call-only entries: call_credit + theoretical_put + buffer
-            # Use getattr with default — recovery may run before HYDRA config is loaded.
-            # Defaults are per-contract; scale by entry.contracts.
-            theoretical_put = getattr(self, 'downday_theoretical_put_credit', 260.0) * n
-            call_stop_buffer = getattr(self, 'call_stop_buffer', 35.0) * n
-            base_stop = credit + theoretical_put
-            override = getattr(entry, 'override_reason', None) or "mkt-040"
-            logger.info(
-                f"Recovery: {override.upper()} call-only stop = call ${credit:.2f} + "
-                f"theoretical put ${theoretical_put:.2f} + buffer ${call_stop_buffer:.2f} ({n}c)"
-            )
-
-            stop_level = base_stop + call_stop_buffer
-            stop_level = max(stop_level, min_stop_level)
-
-            entry.call_side_stop = stop_level
-            entry.put_side_stop = 0  # No put side to monitor
-            logger.info(f"Recovery: Call-only stop = ${stop_level:.2f} ({n}c)")
-
-        elif entry.put_only:
-            credit = entry.put_spread_credit
-            if credit < min_stop_level:
-                logger.critical(
-                    f"Recovery CRITICAL: Entry #{entry.entry_number} (put-only) has low credit "
-                    f"(${credit:.2f}). Using minimum stop level ${min_stop_level:.2f}."
-                )
-                credit = min_stop_level
-
-            # MKT-039: Put-only stop = credit + $1.75 buffer (matches _calculate_stop_levels_hydra)
-            base_stop = credit
-            stop_level = base_stop + put_buf
-
-            entry.put_side_stop = stop_level
-            entry.call_side_stop = 0  # No call side to monitor
-            logger.info(f"Recovery: Put-only stop = ${stop_level:.2f} (credit ${credit:.2f} + buffer ${put_buf:.2f}, {n}c)")
-        else:
-            # Full IC — stop = total_credit + buffer (asymmetric: call uses call_stop_buffer, put uses put_stop_buffer)
-            total_credit = entry.total_credit
-
-            if total_credit < min_stop_level:
-                logger.critical(
-                    f"Recovery CRITICAL: Entry #{entry.entry_number} total credit too low "
-                    f"(${total_credit:.2f}). Using minimum."
-                )
-                total_credit = min_stop_level
-
-            base_stop = total_credit
-            call_stop_level = base_stop + call_buf_live
-            put_stop_level = base_stop + put_buf
-
-            entry.call_side_stop = call_stop_level
-            entry.put_side_stop = put_stop_level
-            logger.info(
-                f"Recovery: Full IC stop = call ${call_stop_level:.2f} / put ${put_stop_level:.2f} "
-                f"(total credit ${total_credit:.2f} + call buf ${call_buf_live:.2f} / put buf ${put_buf:.2f}, {n}c)"
-            )
-
-        return entry
-
-    def _recover_from_state_file_uics(self, all_positions: List[Dict]) -> Dict[int, List[Dict]]:
-        """
-        Override to use HYDRA bot name in registry during UIC-based recovery.
-
-        This is a fallback recovery method when registry-based recovery fails.
-        Uses UICs stored in the state file to match positions and re-registers
-        them with the correct bot name (HYDRA instead of MEIC).
-
-        Args:
-            all_positions: All positions from Saxo API
-
-        Returns:
-            Dict mapping entry_number -> list of position data dicts, or empty dict
-        """
-
-        logger.info("Attempting UIC-based recovery from state file...")
-
-        try:
-            if not os.path.exists(self.state_file):
-                logger.warning(f"State file not found: {self.state_file}")
-                return {}
-
-            with open(self.state_file, 'r') as f:
-                state_data = json.load(f)
-
-            # Check if it's from today
-            saved_date = state_data.get("date", "")
-            today = get_us_market_time().strftime("%Y-%m-%d")
-            if saved_date != today:
-                logger.warning(f"State file is from {saved_date}, not today ({today}) - cannot use for recovery")
-                return {}
-
-            entries_data = state_data.get("entries", [])
-            if not entries_data:
-                logger.info("State file has no entries")
-                return {}
-
-            logger.info(f"Found {len(entries_data)} entries in state file")
-
-            # Build UIC to entry/leg mapping from state file
-            uic_to_entry_leg: Dict[int, Tuple[int, str]] = {}
-            for entry_data in entries_data:
-                entry_num = entry_data.get("entry_number")
-                if entry_num is None:
-                    continue
-
-                # Map each UIC to its entry and leg type
-                for leg in ["short_call", "long_call", "short_put", "long_put"]:
-                    uic = entry_data.get(f"{leg}_uic")
-                    if uic:
-                        uic_to_entry_leg[uic] = (entry_num, leg)
-
-            logger.info(f"Built UIC map with {len(uic_to_entry_leg)} UICs")
-
-            # Match Saxo positions by UIC
-            entries_by_number: Dict[int, List[Dict]] = {}
-            matched_count = 0
-
-            for pos in all_positions:
-                pos_base = pos.get("PositionBase", {})
-                uic = pos_base.get("Uic")
-
-                if uic and uic in uic_to_entry_leg:
-                    entry_num, leg_type = uic_to_entry_leg[uic]
-
-                    # Parse the position
-                    parsed = self._parse_spx_option_position(pos)
-                    if parsed:
-                        parsed["leg_type"] = leg_type
-                        parsed["entry_number"] = entry_num
-
-                        if entry_num not in entries_by_number:
-                            entries_by_number[entry_num] = []
-                        entries_by_number[entry_num].append(parsed)
-                        matched_count += 1
-
-                        # Re-register this position with correct ID
-                        pos_id = str(pos.get("PositionId"))
-                        if pos_id and pos_id != "None":
-                            # Find the entry data to get strategy_id
-                            for entry_data in entries_data:
-                                if entry_data.get("entry_number") == entry_num:
-                                    strategy_id = entry_data.get("strategy_id", f"hydra_{today}_entry{entry_num}")
-                                    try:
-                                        self.registry.register(
-                                            position_id=pos_id,
-                                            bot_name=self.BOT_NAME,  # Use HYDRA
-                                            strategy_id=strategy_id,
-                                            metadata={
-                                                "entry_number": entry_num,
-                                                "leg_type": leg_type,
-                                                "strike": parsed.get("strike")
-                                            }
-                                        )
-                                        logger.info(f"Re-registered position {pos_id} (UIC {uic}) as Entry #{entry_num} {leg_type}")
-                                    except Exception as e:
-                                        logger.error(f"Registry error re-registering {pos_id}: {e}")
-                                    break
-
-            logger.info(f"UIC-based recovery matched {matched_count} positions to {len(entries_by_number)} entries")
-            return entries_by_number
-
-        except Exception as e:
-            logger.error(f"UIC-based recovery failed: {e}")
-            import traceback
-            logger.error(traceback.format_exc())
-            return {}
 
     def _restore_market_ohlc_from_state_file_unconditional(self) -> None:
         """Always-on OHLC restoration at HYDRA startup.
@@ -10214,17 +14505,65 @@ class HydraStrategy(MEICStrategy):
                 logger.info("No state file found - truly starting fresh")
                 return False
 
-            with open(self.state_file, 'r') as f:
-                saved_state = json.load(f)
+            # AUD2-M7: explicit JSONDecodeError handling.
+            #
+            # The state-file write goes through `_save_state_to_disk`'s
+            # atomic temp+rename path, so a torn file should be impossible
+            # under normal POSIX semantics. But if the disk fills up
+            # between the temp-write and the rename (or a SIGKILL hits
+            # mid-`json.dump` BEFORE the rename), the on-disk state could
+            # in theory be partial / invalid JSON. Without this explicit
+            # handler, recovery would crash with an unhandled
+            # JSONDecodeError and the operator would have to figure out
+            # the next step from a backtrace.
+            #
+            # With the handler: log explicitly what happened, point at
+            # the Polish #5 snapshot dir for manual recovery, and fall
+            # through to "no history loaded" (existing graceful path).
+            try:
+                with open(self.state_file, 'r') as f:
+                    saved_state = json.load(f)
+            except json.JSONDecodeError as decode_err:
+                logger.error(
+                    "AUD2-M7: state file %s is corrupt JSON (%s). "
+                    "Check data/state_snapshots/ for the most recent "
+                    "pre-restart snapshot — see RUNBOOKS.md RB-5 for "
+                    "the manual restore procedure. Starting cold "
+                    "without historical state.",
+                    self.state_file, decode_err,
+                )
+                return False
 
             # Only use saved state if it's from today
             if saved_state.get("date") != today:
                 logger.info(f"State file is from {saved_state.get('date')}, not today ({today}) - starting fresh")
                 return False
 
+            # STATE-004 restart-gap backstop (2026-09-06). Restored at the SAME
+            # indent as the daily_state.* restores below — deliberately NOT
+            # nested inside the Brandon `hasattr` guard, which would restore it
+            # on B/C only and leave A/D/E/F/G re-running the check (and
+            # re-alerting) on every single restart.
+            #
+            # Safe to restore because we only get here when the state file is
+            # from TODAY (the date check above returns False otherwise), and
+            # because the stamp is only ever written on the CLEAN path — a halt
+            # or a failed broker read leaves it unset, so those are re-derived.
+            # This is not in tension with the "restart clears the halt"
+            # convention: the halt flag itself is still deliberately not
+            # restored (see _save_state_to_disk).
+            self._overnight_check_date = saved_state.get("overnight_check_date")
+
             # Restore historical data
             self.daily_state.date = today
             self.daily_state.total_realized_pnl = saved_state.get("total_realized_pnl", 0.0)
+            # Restore the Brandon overlay double-book guard ATOMICALLY with the total
+            # it protects (same-day-gated by the date check above). Only on Brandon
+            # instances that carry the attr (set in __init__ before recovery runs).
+            if hasattr(self, "_brandon_overlay_booked"):
+                self._brandon_overlay_booked = set(saved_state.get("brandon_overlay_booked", []))
+                self._brandon_unattributed_overlay = float(
+                    saved_state.get("brandon_unattributed_overlay", 0.0) or 0.0)
             self.daily_state.put_stops_triggered = saved_state.get("put_stops_triggered", 0)
             self.daily_state.call_stops_triggered = saved_state.get("call_stops_triggered", 0)
             self.daily_state.double_stops = saved_state.get("double_stops", 0)
@@ -10284,6 +14623,15 @@ class HydraStrategy(MEICStrategy):
                 vix_low = ohlc.get("vix_low", 0.0)
                 if vix_low > 0:
                     self.market_data.vix_low = vix_low
+
+            # Restore the last-seen SPX (IBKR-audit #5b) so post-close settlement
+            # can verify ITM even before the first live index read warms up — the
+            # fix for the 06-17 mis-booking of variant C's ITM put as worthless.
+            _last_spx = saved_state.get("last_spx_price", 0.0) or 0.0
+            if _last_spx > 0:
+                self.spx_price = _last_spx
+                if not getattr(self, "current_price", 0.0):
+                    self.current_price = _last_spx
 
             # FIX #77: Restore ALL entries from state file, not just "fully done" ones.
             # Previously, entries with surviving sides (e.g., IC with call stopped but put
@@ -10349,6 +14697,13 @@ class HydraStrategy(MEICStrategy):
                 # Directional-pivot close flags (directional_pivot, introduced 2026-05-01)
                 restored_entry.call_side_pivot_closed = entry_data.get("call_side_pivot_closed", False)
                 restored_entry.put_side_pivot_closed = entry_data.get("put_side_pivot_closed", False)
+                # L-M3 double-book guard (2026-09-10) — see _save_state_to_disk.
+                # Defaults False for a state file written before this field
+                # existed, which is the pre-fix behaviour and therefore safe.
+                restored_entry.call_side_pnl_booked_external = entry_data.get(
+                    "call_side_pnl_booked_external", False)
+                restored_entry.put_side_pnl_booked_external = entry_data.get(
+                    "put_side_pnl_booked_external", False)
                 # Fix #61: Restore merge flags
                 restored_entry.call_side_merged = entry_data.get("call_side_merged", False)
                 restored_entry.put_side_merged = entry_data.get("put_side_merged", False)
@@ -10370,6 +14725,10 @@ class HydraStrategy(MEICStrategy):
 
                 # Fix #49: Restore override_reason for correct logging
                 restored_entry.override_reason = entry_data.get("override_reason", None)
+                # Restore per-entry realized P&L so post-restart bookings keep
+                # summing to total_realized_pnl (which is itself restored).
+                restored_entry.realized_pnl = entry_data.get("realized_pnl", 0.0)
+                restored_entry.overlay_pnl_booked = entry_data.get("overlay_pnl_booked", False)
                 # Fix #59: Restore EMA values for Trades tab logging
                 restored_entry.ema_20_at_entry = entry_data.get("ema_20_at_entry", None)
                 restored_entry.ema_40_at_entry = entry_data.get("ema_40_at_entry", None)
@@ -10400,6 +14759,10 @@ class HydraStrategy(MEICStrategy):
                 restored_entry.actual_put_stop_debit = entry_data.get("actual_put_stop_debit", 0.0)
                 # v1.16.0: Restore skip reason for dashboard display
                 restored_entry.skip_reason = entry_data.get("skip_reason", "")
+                # 2026-07-31: restore the skip-vs-failure discriminator too, else a
+                # mid-day restart would silently downgrade a FAILED card back to a
+                # generic SKIPPED one.
+                restored_entry.execution_failed = entry_data.get("execution_failed", False)
                 # 2026-05-05: position IDs + UICs were silently dropped on
                 # restore. In live mode the Saxo recovery path (the other
                 # branch in _recover_positions_from_saxo) repopulates these
@@ -10429,6 +14792,15 @@ class HydraStrategy(MEICStrategy):
                 # tag for entries that closed before the last bot restart.
                 if "close_reason" in entry_data:
                     setattr(restored_entry, "close_reason", entry_data.get("close_reason") or "")
+
+                # 06-04 audit: restore the persisted is_complete (saved at
+                # close-tracking time) so a recovered entry with a side still
+                # OPEN keeps is_complete=True and stays in active_entries. The
+                # is_fully_done block below only UPGRADES it, never clobbers — a
+                # live entry's is_complete was lost on restart, dropping the open
+                # position from monitoring (belt-and-braces with the uic-aware
+                # active_entries fix).
+                restored_entry.is_complete = entry_data.get("is_complete", False)
 
                 if is_fully_done:
                     restored_entry.is_complete = True
@@ -10461,678 +14833,142 @@ class HydraStrategy(MEICStrategy):
             logger.warning(f"Could not load state file history: {e}")
             return False
 
-    def _recover_positions_from_saxo(self) -> bool:
-        """
-        Override to use HYDRA bot name in registry queries and logging.
+    def _reconcile_recovered_entries_with_broker(self) -> None:
+        """F4.8 — cross-check state-file-recovered entries against the broker.
 
-        This is the main recovery method that queries Saxo API for positions
-        and uses the Position Registry to identify which belong to HYDRA.
+        After :meth:`_load_state_file_history` reconstructs today's
+        entries, this verifies each still-tracked leg against the
+        broker's actual open positions using the F4.4 conid→quantity
+        machinery. Any leg the broker no longer shows open settled / was
+        closed while the bot was down — :meth:`_handle_position_discrepancies`
+        clears it and marks a vanished short side stopped.
+
+        Uses ``_read_open_positions(strict=True)``: a fetch failure must
+        NOT look like "everything closed" (that would wrongly wipe live
+        legs), so on failure the cross-check is skipped and the
+        state-file entries stand as-is.
+        """
+        try:
+            open_positions = self._read_open_positions(strict=True)
+        except Exception as e:
+            logger.warning(
+                f"POSITION RECOVERY: broker cross-check skipped — position "
+                f"fetch failed ({type(e).__name__}: {e}). Entries restored "
+                f"from the state file as-is."
+            )
+            return
+
+        expected = self._expected_position_quantities()
+        if not expected:
+            return
+        actual = self._actual_position_quantities(open_positions)
+        discrepant = {
+            conid: (exp_qty, actual.get(conid, 0))
+            for conid, exp_qty in expected.items()
+            if actual.get(conid, 0) != exp_qty
+        }
+        if discrepant:
+            logger.warning(
+                f"POSITION RECOVERY: {len(discrepant)} conid(s) differ from "
+                f"the broker — reconciling tracked legs"
+            )
+            self._handle_position_discrepancies(discrepant)
+            self._save_state_to_disk()
+
+    def _recover_positions_from_saxo(self) -> bool:
+        """Recover today's trading session after a bot restart.
+
+        F4.8 — rewritten state-file-authoritative. HYDRA's own state
+        file is the authoritative reconstruction of today's entries: it
+        carries every field (strikes, credits, stop levels, status
+        flags, instrument ids, contract counts, fill prices).
+        :meth:`_load_state_file_history` rebuilds them directly. The
+        broker is then the *reconciliation cross-check* — any leg the
+        broker no longer shows open is marked closed.
+
+        This replaces the former Saxo design that rebuilt entries by
+        guessing their structure from whatever legs were live (the root
+        cause of the Fix #65 / #67 recovery-bug history) and depended on
+        the Position Registry. The method keeps its ``_from_saxo`` name
+        only so the inherited MEIC ``__init__`` dispatches to this
+        override; it no longer talks to Saxo. See
+        ``docs/migration/F4_POSITION_FLOW_DESIGN.md`` §4b.
 
         Returns:
-            bool: True if positions were recovered, False if starting fresh
+            True if at least one still-active entry was recovered,
+            False if there is nothing to recover (a fresh session).
         """
-        # Path-B dry-run skip (2026-04-27): no real Saxo positions exist in dry
-        # mode (DRY_* IDs only). The original comment claimed the dry session
-        # "continues from disk" — that was wrong. Returning False here without
-        # calling `_load_state_file_history()` left `daily_state.entries` empty
-        # in memory; the next state-save then clobbered today's entries on
-        # disk. Live demonstration: 2026-05-05 11:31 ET restart wiped variant A's
-        # 10:45 IC and variant C's 11:16 put-only entry from the journal even
-        # though both were on disk pre-shutdown. Fix: explicitly load today's
-        # state from disk in dry-run mode so a mid-day restart preserves the
-        # session.
-        if self.dry_run:
-            logger.info("Path-B: dry-run — loading HYDRA state from disk (no Saxo recovery in dry mode)")
-            self._load_state_file_history()
-            return False
-
         logger.info("=" * 60)
-        logger.info("POSITION RECOVERY: Querying Saxo API for source of truth...")
+        logger.info("POSITION RECOVERY: reconstructing today's session from the state file...")
         logger.info("=" * 60)
 
         today = get_us_market_time().strftime("%Y-%m-%d")
 
         try:
-            # Step 1: Get ALL positions from Saxo
-            all_positions = self.client.get_positions()
-            if not all_positions:
-                logger.info("No positions found in Saxo account")
-                # FIX #41: Still load historical data from state file
-                self._load_state_file_history()
-                self.daily_state.date = today
-                return False
-
-            logger.info(f"Found {len(all_positions)} total positions in account")
-
-            # Step 2: Get valid position IDs and clean up registry orphans
-            valid_ids = {str(p.get("PositionId")) for p in all_positions}
-            if not self.dry_run:
-                try:
-                    orphans = self.registry.cleanup_orphans(valid_ids)
-                    if orphans:
-                        logger.warning(f"Cleaned up {len(orphans)} orphaned registry entries (positions closed externally)")
-                        self._log_safety_event("ORPHAN_CLEANUP", f"Removed {len(orphans)} orphaned positions from registry")
-                except Exception as e:
-                    logger.error(f"Registry error during orphan cleanup: {e}")
-            else:
-                logger.debug("Skipping orphan cleanup in dry-run mode")
-
-            # Step 3: Get HYDRA positions from registry (using class constant)
-            my_position_ids = self.registry.get_positions(self.BOT_NAME)
-            if not my_position_ids:
-                logger.info(f"No {self.BOT_NAME} positions in registry")
-                # FIX #41: Still load historical data from state file
-                self._load_state_file_history()
-                self.daily_state.date = today
-                return False
-
-            logger.info(f"Found {len(my_position_ids)} {self.BOT_NAME} positions in registry")
-
-            # Step 4: Filter Saxo positions to just HYDRA positions
-            hydra_positions = []
-            for pos in all_positions:
-                pos_id = str(pos.get("PositionId"))
-                if pos_id in my_position_ids:
-                    hydra_positions.append(pos)
-
-            if not hydra_positions:
-                logger.warning(f"Registry says we have {self.BOT_NAME} positions but none found in Saxo! Cleaning registry...")
-                for pos_id in my_position_ids:
-                    try:
-                        self.registry.unregister(pos_id)
-                    except Exception as e:
-                        logger.error(f"Registry error unregistering {pos_id}: {e}")
-                self._log_safety_event("REGISTRY_CLEARED", f"All {self.BOT_NAME} positions removed - not found in Saxo")
-                # FIX #41: Still load historical data from state file
-                self._load_state_file_history()
-                self.daily_state.date = today
-                return False
-
-            logger.info(f"Matched {len(hydra_positions)} positions to {self.BOT_NAME} in Saxo")
-
-            # Step 5: Group positions by entry number using registry metadata
-            entries_by_number = self._group_positions_by_entry(hydra_positions, my_position_ids)
-
-            if not entries_by_number:
-                logger.warning("Could not group positions into entries via registry - trying UIC fallback...")
-                entries_by_number = self._recover_from_state_file_uics(all_positions)
-                if not entries_by_number:
-                    logger.warning("UIC-based recovery also failed - manual review needed")
-                    self._log_safety_event("RECOVERY_FAILED", "Could not reconstruct entries from positions or UICs", "Manual Review Needed")
-                    self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
-                    return False
-                else:
-                    logger.info(f"UIC-based recovery succeeded: found {len(entries_by_number)} entries")
-
-            # Step 6: Reconstruct IronCondorEntry objects
-            recovered_entries = []
-            for entry_num, positions in entries_by_number.items():
-                entry = self._reconstruct_entry_from_positions(entry_num, positions)
-                if entry:
-                    recovered_entries.append(entry)
-                    logger.info(
-                        f"  Entry #{entry_num}: "
-                        f"SC={entry.short_call_strike} LC={entry.long_call_strike} "
-                        f"SP={entry.short_put_strike} LP={entry.long_put_strike}"
-                    )
-
-            if not recovered_entries:
-                logger.warning("Failed to reconstruct any entries from Saxo positions")
-                self.daily_state.date = get_us_market_time().strftime("%Y-%m-%d")
-                return False
-
-            # Step 7: Update local state to match Saxo
-            today = get_us_market_time().strftime("%Y-%m-%d")
-
-            # Load existing state file to preserve realized P&L
-            preserved_realized_pnl = 0.0
-            preserved_put_stops = 0
-            preserved_call_stops = 0
-            preserved_double_stops = 0
-            preserved_total_commission = 0.0
-            # Fix #65: Preserve additional counters from state file
-            preserved_total_credit_received = 0.0
-            preserved_entries_completed = 0
-            preserved_entries_failed = 0
-            preserved_entries_skipped = 0
-            preserved_one_sided_entries = 0
-            preserved_trend_overrides = 0
-            preserved_credit_gate_skips = 0
-            preserved_stops_avoided_mkt036 = 0
-            preserved_entry_credits = {}
-            preserved_stopped_entries = []  # FIX #43: Fully stopped entries (no live positions)
-            preserved_market_ohlc = {}
-            preserved_pnl_history = []  # Dashboard P&L curve
-            preserved_early_close_triggered = False  # MKT-018
-            preserved_early_close_time = None  # MKT-018
-            preserved_early_close_pnl = None  # MKT-018
-            preserved_roc_gate_triggered = False  # MKT-021
-            preserved_vix_gate_resolved = False  # MKT-034
-            preserved_vix_gate_start_slot = 0  # MKT-034
-            preserved_next_entry_index = 0
-            try:
-                if os.path.exists(self.state_file):
-                    with open(self.state_file, "r") as f:
-                        saved_state = json.load(f)
-                        if saved_state.get("date") == today:
-                            preserved_realized_pnl = saved_state.get("total_realized_pnl", 0.0)
-                            preserved_put_stops = saved_state.get("put_stops_triggered", 0)
-                            preserved_call_stops = saved_state.get("call_stops_triggered", 0)
-                            preserved_double_stops = saved_state.get("double_stops", 0)
-                            preserved_total_commission = saved_state.get("total_commission", 0.0)
-                            # Fix #65: Also preserve total_credit_received and other counters
-                            preserved_total_credit_received = saved_state.get("total_credit_received", 0.0)
-                            preserved_entries_completed = saved_state.get("entries_completed", 0)
-                            preserved_entries_failed = saved_state.get("entries_failed", 0)
-                            preserved_entries_skipped = saved_state.get("entries_skipped", 0)
-                            preserved_one_sided_entries = saved_state.get("one_sided_entries", 0)
-                            preserved_trend_overrides = saved_state.get("trend_overrides", 0)
-                            preserved_credit_gate_skips = saved_state.get("credit_gate_skips", 0)
-                            preserved_stops_avoided_mkt036 = saved_state.get("stops_avoided_mkt036", 0)
-                            preserved_market_ohlc = saved_state.get("market_data_ohlc", {})
-                            preserved_pnl_history = saved_state.get("pnl_history", [])
-                            # MKT-018: Preserve early close state
-                            preserved_early_close_triggered = saved_state.get("early_close_triggered", False)
-                            ec_time_str = saved_state.get("early_close_time")
-                            if ec_time_str:
-                                try:
-                                    from datetime import datetime as dt_cls
-                                    preserved_early_close_time = dt_cls.fromisoformat(ec_time_str)
-                                except (ValueError, TypeError):
-                                    pass
-                            preserved_early_close_pnl = saved_state.get("early_close_pnl")
-                            # MKT-021: Preserve ROC gate state
-                            preserved_roc_gate_triggered = saved_state.get("roc_gate_triggered", False)
-                            # MKT-034: Preserve VIX gate state
-                            preserved_vix_gate_resolved = saved_state.get("vix_gate_resolved", False)
-                            preserved_vix_gate_start_slot = saved_state.get("vix_gate_start_slot", 0)
-                            preserved_next_entry_index = saved_state.get("next_entry_index", 0)
-                            for entry_data in saved_state.get("entries", []):
-                                entry_num = entry_data.get("entry_number")
-                                if entry_num:
-                                    preserved_entry_credits[entry_num] = {
-                                        "call_credit": entry_data.get("call_spread_credit", 0),
-                                        "put_credit": entry_data.get("put_spread_credit", 0),
-                                        "call_stop": entry_data.get("call_side_stop", 0),
-                                        "put_stop": entry_data.get("put_side_stop", 0),
-                                        "short_call_strike": entry_data.get("short_call_strike", 0),
-                                        "long_call_strike": entry_data.get("long_call_strike", 0),
-                                        "short_put_strike": entry_data.get("short_put_strike", 0),
-                                        "long_put_strike": entry_data.get("long_put_strike", 0),
-                                        "call_side_stopped": entry_data.get("call_side_stopped", False),
-                                        "put_side_stopped": entry_data.get("put_side_stopped", False),
-                                        "call_side_expired": entry_data.get("call_side_expired", False),
-                                        "put_side_expired": entry_data.get("put_side_expired", False),
-                                        "call_side_skipped": entry_data.get("call_side_skipped", False),
-                                        "put_side_skipped": entry_data.get("put_side_skipped", False),
-                                        "open_commission": entry_data.get("open_commission", 0),
-                                        "close_commission": entry_data.get("close_commission", 0),
-                                        # HYDRA specific fields (Fix #40)
-                                        "call_only": entry_data.get("call_only", False),
-                                        "put_only": entry_data.get("put_only", False),
-                                        "trend_signal": entry_data.get("trend_signal"),
-                                        # Fix #49: Preserve override_reason for correct logging
-                                        "override_reason": entry_data.get("override_reason"),
-                                        # Fix #67: Preserve UICs for merged position recovery
-                                        "long_call_uic": entry_data.get("long_call_uic"),
-                                        "long_put_uic": entry_data.get("long_put_uic"),
-                                        "short_call_uic": entry_data.get("short_call_uic"),
-                                        "short_put_uic": entry_data.get("short_put_uic"),
-                                        # MKT-018: Early close marker
-                                        "early_closed": entry_data.get("early_closed", False),
-                                        # Entry time and fill prices (for /entry display)
-                                        "entry_time": entry_data.get("entry_time"),
-                                        "short_call_fill_price": entry_data.get("short_call_fill_price", 0),
-                                        "long_call_fill_price": entry_data.get("long_call_fill_price", 0),
-                                        "short_put_fill_price": entry_data.get("short_put_fill_price", 0),
-                                        "long_put_fill_price": entry_data.get("long_put_fill_price", 0),
-                                        # MKT-033: Long salvage flags
-                                        "call_long_sold": entry_data.get("call_long_sold", False),
-                                        "put_long_sold": entry_data.get("put_long_sold", False),
-                                        "call_long_sold_revenue": entry_data.get("call_long_sold_revenue", 0.0),
-                                        "put_long_sold_revenue": entry_data.get("put_long_sold_revenue", 0.0),
-                                        # Actual stop debit (for dashboard per-entry P&L accuracy)
-                                        "actual_call_stop_debit": entry_data.get("actual_call_stop_debit", 0.0),
-                                        "actual_put_stop_debit": entry_data.get("actual_put_stop_debit", 0.0),
-                                        # MKT-036: Breach counts (NOT breach_time — reset on restart)
-                                        "call_breach_count": entry_data.get("call_breach_count", 0),
-                                        "put_breach_count": entry_data.get("put_breach_count", 0),
-                                        # MKT-041: Cushion recovery danger flags
-                                        "call_hit_danger": entry_data.get("call_hit_danger", False),
-                                        "put_hit_danger": entry_data.get("put_hit_danger", False),
-                                        # Stop timestamps (for dashboard stop markers)
-                                        "call_stop_time": entry_data.get("call_stop_time", ""),
-                                        "put_stop_time": entry_data.get("put_stop_time", ""),
-                                        # v8: preserve the contract count this entry was OPENED at.
-                                        # Critical when config flips mid-day (1c→2c): stops, spread
-                                        # values, P&L, commissions must stay at the original contract
-                                        # count for entries already in the market.
-                                        # v8 null-safe: `or` instead of default arg so JSON null or 0 also
-                                        # falls back to current config (both are invalid for live entries).
-                                        "contracts": entry_data.get("contracts") or self.contracts_per_entry,
-                                    }
-                                    # FIX #43 + FIX #47: Check if this entry is fully done (no live positions)
-                                    # A side is "done" if it was stopped OR expired OR skipped
-                                    call_stopped = entry_data.get("call_side_stopped", False)
-                                    put_stopped = entry_data.get("put_side_stopped", False)
-                                    call_expired = entry_data.get("call_side_expired", False)
-                                    put_expired = entry_data.get("put_side_expired", False)
-                                    call_skipped = entry_data.get("call_side_skipped", False)
-                                    put_skipped = entry_data.get("put_side_skipped", False)
-                                    call_only = entry_data.get("call_only", False)
-                                    put_only = entry_data.get("put_only", False)
-
-                                    call_done = call_stopped or call_expired or call_skipped
-                                    put_done = put_stopped or put_expired or put_skipped
-
-                                    is_fully_done = False
-                                    if call_only and call_done:
-                                        is_fully_done = True
-                                    elif put_only and put_done:
-                                        is_fully_done = True
-                                    elif not call_only and not put_only and call_done and put_done:
-                                        is_fully_done = True
-
-                                    if is_fully_done:
-                                        preserved_stopped_entries.append(entry_data)
-
-                            logger.info(f"Preserved from state file: realized_pnl=${preserved_realized_pnl:.2f}, "
-                                       f"put_stops={preserved_put_stops}, call_stops={preserved_call_stops}, "
-                                       f"stopped_entries={len(preserved_stopped_entries)}")
-            except Exception as e:
-                logger.warning(f"Could not load state file for preservation: {e}")
-
-            # Apply preserved credits, stop levels, and strikes to recovered entries
-            for entry in recovered_entries:
-                if entry.entry_number in preserved_entry_credits:
-                    saved = preserved_entry_credits[entry.entry_number]
-                    # v8: restore original contract count BEFORE restoring stop levels.
-                    # _reconstruct_entry_from_positions set entry.contracts to current
-                    # config; that's wrong if config flipped while this entry was open.
-                    # saved["contracts"] is the count at the time the entry was placed —
-                    # use it so spread_value / stop_level / commission all stay consistent.
-                    # v8 null-safe: `or` falls back on None (JSON null), 0, and missing alike.
-                    # Bug E-6 scenario: state file with "contracts": null from a crash mid-write
-                    # would otherwise set entry.contracts = None → TypeError in all downstream math.
-                    entry.contracts = saved.get("contracts") or entry.contracts
-                    entry.call_spread_credit = saved["call_credit"]
-                    entry.put_spread_credit = saved["put_credit"]
-                    entry.call_side_stop = saved["call_stop"]
-                    entry.put_side_stop = saved["put_stop"]
-
-                    # Fix #65: Restore ALL status flags from state file (authoritative source)
-                    # The reconstruction code guesses entry types from positions, but the state
-                    # file knows the actual history (e.g., full IC with stopped put vs call-only entry)
-                    entry.call_side_stopped = saved.get("call_side_stopped", False)
-                    entry.put_side_stopped = saved.get("put_side_stopped", False)
-                    entry.call_side_expired = saved.get("call_side_expired", False)
-                    entry.put_side_expired = saved.get("put_side_expired", False)
-                    entry.call_side_skipped = saved.get("call_side_skipped", False)
-                    entry.put_side_skipped = saved.get("put_side_skipped", False)
-                    # Directional-pivot close flags (directional_pivot, introduced 2026-05-01)
-                    entry.call_side_pivot_closed = saved.get("call_side_pivot_closed", False)
-                    entry.put_side_pivot_closed = saved.get("put_side_pivot_closed", False)
-
-                    entry.open_commission = saved.get("open_commission", 0)
-                    entry.close_commission = saved.get("close_commission", 0)
-
-                    # Fix #65: Always restore entry type from state file (authoritative source)
-                    # Without this, a full IC with a stopped put side gets misclassified as
-                    # call_only by _reconstruct_entry_from_positions() (it only sees call positions)
-                    entry.call_only = saved.get("call_only", False)
-                    entry.put_only = saved.get("put_only", False)
-                    if entry.call_only:
-                        logger.info(f"Entry #{entry.entry_number}: Restored as CALL-ONLY from state file")
-                    elif entry.put_only:
-                        logger.info(f"Entry #{entry.entry_number}: Restored as PUT-ONLY from state file")
-                    else:
-                        logger.info(f"Entry #{entry.entry_number}: Restored as FULL IC from state file")
-
-                    # Restore trend signal and override reason if saved
-                    if saved.get("trend_signal"):
-                        try:
-                            entry.trend_signal = TrendSignal(saved["trend_signal"])
-                        except ValueError:
-                            pass  # Invalid trend signal value, ignore
-                    # Fix #65: Restore override_reason for correct logging (was missing)
-                    entry.override_reason = saved.get("override_reason", None)
-                    # MKT-018: Restore early_closed marker
-                    entry.early_closed = saved.get("early_closed", False)
-                    # MKT-033: Restore long salvage flags
-                    entry.call_long_sold = saved.get("call_long_sold", False)
-                    entry.put_long_sold = saved.get("put_long_sold", False)
-                    entry.call_long_sold_revenue = saved.get("call_long_sold_revenue", 0.0)
-                    entry.put_long_sold_revenue = saved.get("put_long_sold_revenue", 0.0)
-                    # Actual stop debit (for dashboard per-entry P&L accuracy)
-                    entry.actual_call_stop_debit = saved.get("actual_call_stop_debit", 0.0)
-                    entry.actual_put_stop_debit = saved.get("actual_put_stop_debit", 0.0)
-                    # Restore stop timestamps (for dashboard stop markers)
-                    entry.call_stop_time = saved.get("call_stop_time", "")
-                    entry.put_stop_time = saved.get("put_stop_time", "")
-                    # MKT-041: Restore cushion recovery danger flags
-                    entry.call_hit_danger = saved.get("call_hit_danger", False)
-                    entry.put_hit_danger = saved.get("put_hit_danger", False)
-
-                    # Restore entry_time and fill prices (for /entry display)
-                    entry_time_str = saved.get("entry_time")
-                    if entry_time_str and not entry.entry_time:
-                        if isinstance(entry_time_str, str):
-                            try:
-                                entry.entry_time = datetime.fromisoformat(entry_time_str)
-                            except ValueError:
-                                pass
-                        else:
-                            entry.entry_time = entry_time_str
-                    if saved.get("short_call_fill_price", 0) > 0 and entry.short_call_fill_price == 0:
-                        entry.short_call_fill_price = saved["short_call_fill_price"]
-                    if saved.get("long_call_fill_price", 0) > 0 and entry.long_call_fill_price == 0:
-                        entry.long_call_fill_price = saved["long_call_fill_price"]
-                    if saved.get("short_put_fill_price", 0) > 0 and entry.short_put_fill_price == 0:
-                        entry.short_put_fill_price = saved["short_put_fill_price"]
-                    if saved.get("long_put_fill_price", 0) > 0 and entry.long_put_fill_price == 0:
-                        entry.long_put_fill_price = saved["long_put_fill_price"]
-
-                    if entry.call_side_stopped and entry.short_call_strike == 0:
-                        entry.short_call_strike = saved.get("short_call_strike", 0)
-                        entry.long_call_strike = saved.get("long_call_strike", 0)
-                        logger.info(f"Entry #{entry.entry_number}: Restored stopped call strikes "
-                                   f"(short={entry.short_call_strike}, long={entry.long_call_strike})")
-                    if entry.put_side_stopped and entry.short_put_strike == 0:
-                        entry.short_put_strike = saved.get("short_put_strike", 0)
-                        entry.long_put_strike = saved.get("long_put_strike", 0)
-                        logger.info(f"Entry #{entry.entry_number}: Restored stopped put strikes "
-                                   f"(short={entry.short_put_strike}, long={entry.long_put_strike})")
-
-                    # Fix #67: Restore missing strikes/UICs for active sides.
-                    # When Saxo merges long positions at the same strike (MKT-015 scenario),
-                    # recovery can't find the older entry's long leg. The state file has
-                    # the correct values from before the merge.
-                    if not entry.call_side_stopped and entry.long_call_strike == 0:
-                        saved_lc_strike = saved.get("long_call_strike", 0)
-                        saved_lc_uic = saved.get("long_call_uic")
-                        if saved_lc_strike:
-                            entry.long_call_strike = saved_lc_strike
-                            if saved_lc_uic:
-                                entry.long_call_uic = saved_lc_uic
-                            logger.warning(
-                                f"Entry #{entry.entry_number}: Restored missing long call from state file "
-                                f"(strike={saved_lc_strike}, uic={saved_lc_uic}) - likely merged position"
-                            )
-                    # Only restore missing long put for entries where the put side was actually active.
-                    # Skip call-only entries (put_side_skipped=True): the state file may have a
-                    # stale long_put_strike from before the entry type was finalized, and restoring
-                    # it would trigger a spurious "Restored missing long put" warning.
-                    if not entry.put_side_stopped and not entry.put_side_skipped and entry.long_put_strike == 0:
-                        saved_lp_strike = saved.get("long_put_strike", 0)
-                        saved_lp_uic = saved.get("long_put_uic")
-                        if saved_lp_strike:
-                            entry.long_put_strike = saved_lp_strike
-                            if saved_lp_uic:
-                                entry.long_put_uic = saved_lp_uic
-                            logger.warning(
-                                f"Entry #{entry.entry_number}: Restored missing long put from state file "
-                                f"(strike={saved_lp_strike}, uic={saved_lp_uic}) - likely merged position"
-                            )
-
-                    logger.info(f"Entry #{entry.entry_number}: Restored credits from state file "
-                               f"(call=${saved['call_credit']:.2f}, put=${saved['put_credit']:.2f}, "
-                               f"stop=${saved['call_stop']:.2f})")
-
-            # FIX #43 (2026-02-05): Reconstruct fully stopped entries that have no live positions
-            recovered_entry_nums = {e.entry_number for e in recovered_entries}
-            for stopped_entry_data in preserved_stopped_entries:
-                entry_num = stopped_entry_data.get("entry_number")
-                if entry_num and entry_num not in recovered_entry_nums:
-                    # Reconstruct HydraIronCondorEntry from saved state data
-                    stopped_entry = HydraIronCondorEntry(entry_number=entry_num)
-                    entry_time_str = stopped_entry_data.get("entry_time")
-                    if entry_time_str and isinstance(entry_time_str, str):
-                        try:
-                            stopped_entry.entry_time = datetime.fromisoformat(entry_time_str)
-                        except ValueError:
-                            stopped_entry.entry_time = None
-                    else:
-                        stopped_entry.entry_time = entry_time_str
-                    stopped_entry.strategy_id = stopped_entry_data.get("strategy_id", f"hydra_{today.replace('-', '')}_{entry_num:03d}")
-
-                    # Strikes
-                    stopped_entry.short_call_strike = stopped_entry_data.get("short_call_strike", 0)
-                    stopped_entry.long_call_strike = stopped_entry_data.get("long_call_strike", 0)
-                    stopped_entry.short_put_strike = stopped_entry_data.get("short_put_strike", 0)
-                    stopped_entry.long_put_strike = stopped_entry_data.get("long_put_strike", 0)
-
-                    # Credits and stops
-                    stopped_entry.call_spread_credit = stopped_entry_data.get("call_spread_credit", 0)
-                    stopped_entry.put_spread_credit = stopped_entry_data.get("put_spread_credit", 0)
-                    stopped_entry.call_side_stop = stopped_entry_data.get("call_side_stop", 0)
-                    stopped_entry.put_side_stop = stopped_entry_data.get("put_side_stop", 0)
-
-                    # Stopped/expired/skipped flags - entry is fully done (FIX #47)
-                    stopped_entry.call_side_stopped = stopped_entry_data.get("call_side_stopped", False)
-                    stopped_entry.put_side_stopped = stopped_entry_data.get("put_side_stopped", False)
-                    stopped_entry.call_side_expired = stopped_entry_data.get("call_side_expired", False)
-                    stopped_entry.put_side_expired = stopped_entry_data.get("put_side_expired", False)
-                    stopped_entry.call_side_skipped = stopped_entry_data.get("call_side_skipped", False)
-                    stopped_entry.put_side_skipped = stopped_entry_data.get("put_side_skipped", False)
-                    # Fix #61: Restore merge flags
-                    stopped_entry.call_side_merged = stopped_entry_data.get("call_side_merged", False)
-                    stopped_entry.put_side_merged = stopped_entry_data.get("put_side_merged", False)
-                    stopped_entry.is_complete = True
-
-                    # Commission
-                    stopped_entry.open_commission = stopped_entry_data.get("open_commission", 0)
-                    stopped_entry.close_commission = stopped_entry_data.get("close_commission", 0)
-
-                    # HYDRA specific: One-sided entry flags
-                    stopped_entry.call_only = stopped_entry_data.get("call_only", False)
-                    stopped_entry.put_only = stopped_entry_data.get("put_only", False)
-                    # Fix #52: Restore contract count (default to current config if not saved)
-                    # v8 null-safe (see E-6): `or` handles None/0/missing uniformly
-                    stopped_entry.contracts = stopped_entry_data.get("contracts") or self.contracts_per_entry
-                    if stopped_entry_data.get("trend_signal"):
-                        try:
-                            stopped_entry.trend_signal = TrendSignal(stopped_entry_data["trend_signal"])
-                        except ValueError:
-                            pass
-
-                    # Fix #49: Restore override_reason for correct logging
-                    stopped_entry.override_reason = stopped_entry_data.get("override_reason", None)
-                    # Fix #59: Restore EMA values for Trades tab logging
-                    stopped_entry.ema_20_at_entry = stopped_entry_data.get("ema_20_at_entry", None)
-                    stopped_entry.ema_40_at_entry = stopped_entry_data.get("ema_40_at_entry", None)
-                    # MKT-018: Restore early_closed marker
-                    stopped_entry.early_closed = stopped_entry_data.get("early_closed", False)
-                    # MKT-033: Long salvage flags (PRE-EXISTING BUG FIX — missing from this path)
-                    stopped_entry.call_long_sold = stopped_entry_data.get("call_long_sold", False)
-                    stopped_entry.put_long_sold = stopped_entry_data.get("put_long_sold", False)
-                    stopped_entry.call_long_sold_revenue = stopped_entry_data.get("call_long_sold_revenue", 0.0)
-                    stopped_entry.put_long_sold_revenue = stopped_entry_data.get("put_long_sold_revenue", 0.0)
-                    # MKT-036: Restore breach counts (NOT breach_time — conservative reset on restart)
-                    stopped_entry.call_breach_count = stopped_entry_data.get("call_breach_count", 0)
-                    stopped_entry.put_breach_count = stopped_entry_data.get("put_breach_count", 0)
-                    # MKT-041: Restore cushion recovery danger flags
-                    stopped_entry.call_hit_danger = stopped_entry_data.get("call_hit_danger", False)
-                    stopped_entry.put_hit_danger = stopped_entry_data.get("put_hit_danger", False)
-                    # Fill prices (for /entry display after restart)
-                    stopped_entry.short_call_fill_price = stopped_entry_data.get("short_call_fill_price", 0)
-                    stopped_entry.long_call_fill_price = stopped_entry_data.get("long_call_fill_price", 0)
-                    stopped_entry.short_put_fill_price = stopped_entry_data.get("short_put_fill_price", 0)
-                    stopped_entry.long_put_fill_price = stopped_entry_data.get("long_put_fill_price", 0)
-                    # Actual stop debit (for dashboard per-entry P&L accuracy)
-                    stopped_entry.actual_call_stop_debit = stopped_entry_data.get("actual_call_stop_debit", 0.0)
-                    stopped_entry.actual_put_stop_debit = stopped_entry_data.get("actual_put_stop_debit", 0.0)
-                    # Stop timestamps (for dashboard stop markers)
-                    stopped_entry.call_stop_time = stopped_entry_data.get("call_stop_time", "")
-                    stopped_entry.put_stop_time = stopped_entry_data.get("put_stop_time", "")
-
-                    # Position IDs are None (positions closed)
-                    stopped_entry.short_call_position_id = None
-                    stopped_entry.long_call_position_id = None
-                    stopped_entry.short_put_position_id = None
-                    stopped_entry.long_put_position_id = None
-
-                    recovered_entries.append(stopped_entry)
-
-                    one_sided_info = ""
-                    if stopped_entry.call_only:
-                        one_sided_info = ", call_only=True"
-                    elif stopped_entry.put_only:
-                        one_sided_info = ", put_only=True"
-                    logger.info(f"FIX #43: Restored fully stopped Entry #{entry_num} from state file "
-                               f"(credit=${stopped_entry.total_credit:.2f}{one_sided_info})")
-
-            # Sort recovered entries by entry number
-            recovered_entries.sort(key=lambda e: e.entry_number)
-
-            # Reset daily state but preserve date
-            self.daily_state = MEICDailyState()
+            # Step 1 — authoritative entry reconstruction from the state
+            # file. _load_state_file_history restores entries, realized
+            # P&L, commission, counters, OHLC and pivot state, and only
+            # accepts a file dated today.
+            loaded = self._load_state_file_history()
             self.daily_state.date = today
-            self.daily_state.entries = recovered_entries
-            self.daily_state.entries_completed = len(recovered_entries)
 
-            # Restore preserved P&L, stop counters, and other state from state file
-            self.daily_state.total_realized_pnl = preserved_realized_pnl
-            self.daily_state.put_stops_triggered = preserved_put_stops
-            self.daily_state.call_stops_triggered = preserved_call_stops
-            self.daily_state.double_stops = preserved_double_stops
-            self.daily_state.total_commission = preserved_total_commission
-            # Fix #65: Restore additional counters that were previously lost on recovery
-            self.daily_state.entries_failed = preserved_entries_failed
-            self.daily_state.entries_skipped = preserved_entries_skipped
-            self.daily_state.one_sided_entries = preserved_one_sided_entries
-            self.daily_state.trend_overrides = preserved_trend_overrides
-            self.daily_state.credit_gate_skips = preserved_credit_gate_skips
-            self.daily_state.stops_avoided_mkt036 = preserved_stops_avoided_mkt036
+            if not loaded or not self.daily_state.entries:
+                logger.info("POSITION RECOVERY: no prior session for today — starting fresh")
+                return False
 
-            # Restore intraday OHLC so mid-day restart doesn't lose open/high/low
-            if preserved_market_ohlc:
-                self.market_data.spx_open = preserved_market_ohlc.get("spx_open", 0.0)
-                self.market_data.spx_high = preserved_market_ohlc.get("spx_high", 0.0)
-                spx_low = preserved_market_ohlc.get("spx_low", 0.0)
-                if spx_low > 0:
-                    self.market_data.spx_low = spx_low
-                self.market_data.vix_open = preserved_market_ohlc.get("vix_open", 0.0)
-                self.market_data.vix_high = preserved_market_ohlc.get("vix_high", 0.0)
-                vix_low = preserved_market_ohlc.get("vix_low", 0.0)
-                if vix_low > 0:
-                    self.market_data.vix_low = vix_low
+            # Step 2 — (live only) cross-check the recovered legs against
+            # the broker. In dry-run there is no broker truth to
+            # reconcile against; the state file IS the truth.
+            if not self.dry_run:
+                self._reconcile_recovered_entries_with_broker()
 
-            # Restore P&L history for dashboard persistence
-            self._pnl_history = preserved_pnl_history
+            active = len(self.daily_state.active_entries)
 
-            # Determine next entry index
-            if recovered_entries:
-                max_entry_num = max(e.entry_number for e in recovered_entries)
-                self._next_entry_index = max(max_entry_num, preserved_next_entry_index)
+            # Restore the state-machine state from the recovered entries.
+            # CRITICAL: without this the bot stays at the __init__ default
+            # (IDLE) after a mid-day restart — the main loop would never
+            # enter _handle_monitoring and a challenged short would run
+            # UNMONITORED. The pre-F4.8 recovery set this; the rewrite
+            # must too.
+            if active > 0:
+                self.state = MEICState.MONITORING
+            elif self._next_entry_index < len(self.entry_times):
+                self.state = MEICState.WAITING_FIRST_ENTRY
             else:
-                self._next_entry_index = preserved_next_entry_index
-
-            # MKT-018: Restore early close state
-            self._early_close_triggered = preserved_early_close_triggered
-            self._early_close_time = preserved_early_close_time
-            self._early_close_pnl = preserved_early_close_pnl
-            # MKT-021: Restore ROC gate state
-            self._roc_gate_triggered = preserved_roc_gate_triggered
-            # MKT-034: Restore VIX gate state
-            if preserved_vix_gate_resolved and self.vix_gate_enabled:
-                self._resolve_vix_gate(preserved_vix_gate_start_slot)
-                # _resolve_vix_gate resets _next_entry_index to 0 — restore correct value
-                if recovered_entries:
-                    self._next_entry_index = max(max_entry_num, preserved_next_entry_index)
-                else:
-                    self._next_entry_index = preserved_next_entry_index
-
-            # Set state based on recovered positions
-            # FIX #43 + FIX #47: For one-sided entries, check only the placed side
-            # A side is "done" if stopped, expired, or skipped
-            if recovered_entries:
-                def is_entry_active(entry):
-                    call_done = entry.call_side_stopped or entry.call_side_expired or entry.call_side_skipped
-                    put_done = entry.put_side_stopped or entry.put_side_expired or entry.put_side_skipped
-                    if getattr(entry, 'call_only', False):
-                        return not call_done
-                    elif getattr(entry, 'put_only', False):
-                        return not put_done
-                    else:
-                        return not (call_done and put_done)
-
-                active_entries = [e for e in recovered_entries if is_entry_active(e)]
-                if active_entries:
-                    self.state = MEICState.MONITORING
-                elif self._next_entry_index < len(self.entry_times):
-                    self.state = MEICState.WAITING_FIRST_ENTRY
-                else:
-                    self.state = MEICState.DAILY_COMPLETE
-
-            # Fix #65: Use preserved total_credit from state file if available,
-            # rather than recalculating (recalculation depends on correct call_only/put_only flags
-            # which may have been wrong before state file restoration in earlier versions)
-            if preserved_total_credit_received > 0:
-                total_credit = preserved_total_credit_received
-                self.daily_state.total_credit_received = preserved_total_credit_received
-            else:
-                total_credit = sum(e.total_credit for e in recovered_entries)
-                self.daily_state.total_credit_received = total_credit
-
-            # Retroactively calculate commission for entries without commission data
-            # BUG FIX: Use 2 legs for one-sided entries, 4 for full ICs
-            # v8: scale by each entry's own entry.contracts (stamped at creation),
-            # not self.contracts_per_entry — recovered entries may span multiple
-            # contract counts if config flipped during a trading day.
-            if self.daily_state.total_commission == 0 and recovered_entries:
-                retroactive_commission = 0.0
-                for entry in recovered_entries:
-                    if entry.open_commission == 0:
-                        # One-sided entries have 2 legs, full ICs have 4
-                        is_one_sided = getattr(entry, 'call_only', False) or getattr(entry, 'put_only', False)
-                        open_legs = 2 if is_one_sided else 4
-                        entry.open_commission = open_legs * self.commission_per_leg * entry.contracts
-                        retroactive_commission += entry.open_commission
-                    if entry.close_commission == 0:
-                        if entry.call_side_stopped:
-                            close_comm = 2 * self.commission_per_leg * entry.contracts
-                            entry.close_commission += close_comm
-                            retroactive_commission += close_comm
-                        if entry.put_side_stopped:
-                            close_comm = 2 * self.commission_per_leg * entry.contracts
-                            entry.close_commission += close_comm
-                            retroactive_commission += close_comm
-                self.daily_state.total_commission = retroactive_commission
-                if retroactive_commission > 0:
-                    logger.info(f"Retroactively calculated commission: ${retroactive_commission:.2f} "
-                               f"(from {len(recovered_entries)} entries)")
+                self.state = MEICState.DAILY_COMPLETE
 
             logger.info("=" * 60)
-            logger.info(f"RECOVERY COMPLETE: {len(recovered_entries)} entries recovered")
+            logger.info(
+                f"RECOVERY COMPLETE: {len(self.daily_state.entries)} entr(ies) "
+                f"restored from the state file, {active} still active"
+            )
             logger.info(f"  State: {self.state.value}")
+            logger.info(f"  Realized P&L: ${self.daily_state.total_realized_pnl:.2f}")
             logger.info(f"  Next entry index: {self._next_entry_index}")
-            logger.info(f"  Total credit: ${total_credit:.2f}")
             logger.info("=" * 60)
 
-            # Send recovery alert. Recovered entries may span multiple contract
-            # counts (after mid-day flips) — use max(entry.contracts) so the
-            # [Nc] title prefix reflects the most prominent scale for user attention.
-            _recovered_contracts = max(
-                (getattr(e, 'contracts', 1) for e in recovered_entries),
-                default=self.contracts_per_entry,
-            )
-            self.alert_service.send_alert(
-                alert_type=AlertType.POSITION_OPENED,
-                title=f"{self.BOT_NAME} Position Recovery",
-                message=f"Recovered {len(recovered_entries)} iron condor(s) from Saxo API",
-                priority=AlertPriority.MEDIUM,
-                details={
-                    "entries_recovered": len(recovered_entries),
-                    "state": self.state.value,
-                    "total_credit": total_credit
-                },
-                contracts=_recovered_contracts,
-            )
+            # Recovery alert (live only — dry-run restarts stay silent,
+            # matching pre-F4.8 behavior).
+            if active > 0 and not self.dry_run:
+                _recovered_contracts = max(
+                    (getattr(e, "contracts", 1)
+                     for e in self.daily_state.active_entries),
+                    default=self.contracts_per_entry,
+                )
+                self.alert_service.send_alert(
+                    alert_type=AlertType.POSITION_OPENED,
+                    title=f"{self.BOT_NAME} Position Recovery",
+                    message=f"Recovered {active} active iron condor(s) from the state file",
+                    priority=AlertPriority.MEDIUM,
+                    details={
+                        "entries_restored": len(self.daily_state.entries),
+                        "active_entries": active,
+                    },
+                    contracts=_recovered_contracts,
+                )
 
-            # Save recovered state to disk
             self._save_state_to_disk()
-
-            return True
+            return active > 0
 
         except Exception as e:
             logger.error(f"Position recovery failed: {e}")

@@ -10,6 +10,25 @@ from typing import Optional
 logger = logging.getLogger("dashboard.db_reader")
 
 
+def apply_db_cumulative(metrics: Optional[dict], overrides: dict) -> Optional[dict]:
+    """Merge DB-canonical aggregates over the metrics-file rollup.
+
+    The metrics file supplies fields the DB doesn't track (e.g. double_stops);
+    the DB supplies the authoritative cumulative_pnl / winning_days /
+    losing_days / total_entries / total_credit_collected / total_stops so every
+    dashboard page agrees. Returns the metrics dict (or the overrides alone if
+    the file is missing) with non-null overrides applied. last_updated is taken
+    from the DB so the broadcaster's after-close augmentation isn't double-applied.
+    """
+    if not overrides:
+        return metrics
+    base = dict(metrics) if metrics else {}
+    for key, value in overrides.items():
+        if value is not None:
+            base[key] = value
+    return base
+
+
 class BacktestingDBReader:
     """Read-only SQLite reader for HOMER's backtesting database.
 
@@ -62,6 +81,23 @@ class BacktestingDBReader:
             # Discard broken connection so next query creates a fresh one
             self._local.conn = None
             return []
+
+    def _trade_stops_has_exit_reason(self) -> bool:
+        """v11's exit_reason is added via ALTER TABLE on an already-existing
+        trade_stops table (shared/data_recorder.py) — only present once the
+        writing bot process has restarted at least one time after 2026-06-15.
+        Referencing a genuinely absent column raises sqlite3.Error, which
+        _query's broad except swallows and turns into an EMPTY result for the
+        whole (multi-subquery) get_cumulative_overrides call — silently
+        dropping cumulative_pnl/winning_days/etc. too, not just total_stops.
+        Checked via PRAGMA so the canonical stop filter can degrade gracefully
+        instead (mirrors _ACTUAL_STOPS's existing pre/post-v11 handling)."""
+        try:
+            conn = self._get_connection()
+            cols = [r[1] for r in conn.execute("PRAGMA table_info(trade_stops)")]
+            return "exit_reason" in cols
+        except sqlite3.Error:
+            return False
 
     async def get_today_ohlc(self, date_str: str) -> list[dict]:
         """Get 1-minute OHLC bars for a date."""
@@ -133,11 +169,25 @@ class BacktestingDBReader:
             (date_str,),
         )
 
+    # actual_stops = authoritative stop-loss EVENT count from trade_stops (the
+    # same table the Analytics Stops tab + day-detail "Stop Losses" list read).
+    # daily_summaries.entries_stopped conflates Brandon take-profit exits with
+    # stop-losses for the B/C variants, which made History disagree with both;
+    # exposing actual_stops lets the "Stops" columns mean stop-losses everywhere.
+    # Count only real stop-LOSSES, not Brandon take-profit / GEX-breach exits
+    # (the bot writes all of them to trade_stops). net_pnl < 0 isolates losses
+    # and needs no exit_reason column, so it's correct on both pre- and
+    # post-v11 DBs (the v11 exit_reason column only appears after a bot restart).
+    _ACTUAL_STOPS = (
+        "(SELECT COUNT(*) FROM trade_stops ts WHERE ts.date = daily_summaries.date "
+        "AND ts.net_pnl < 0) AS actual_stops"
+    )
+
     async def get_daily_summaries(self, limit: int = 30) -> list[dict]:
         """Get recent daily summaries for calendar heat map."""
         return await to_thread(
             self._query,
-            "SELECT * FROM daily_summaries ORDER BY date DESC LIMIT ?",
+            f"SELECT *, {self._ACTUAL_STOPS} FROM daily_summaries ORDER BY date DESC LIMIT ?",
             (limit,),
         )
 
@@ -145,15 +195,34 @@ class BacktestingDBReader:
         """Get all daily summaries for a specific year."""
         return await to_thread(
             self._query,
-            "SELECT * FROM daily_summaries WHERE date LIKE ? ORDER BY date",
+            f"SELECT *, {self._ACTUAL_STOPS} FROM daily_summaries WHERE date LIKE ? ORDER BY date",
             (f"{year}-%",),
         )
 
-    async def get_all_summaries(self) -> list[dict]:
-        """Get all daily summaries for analytics."""
+    @staticmethod
+    def _baseline_clause(baseline_date: str, *, leading: str = "WHERE") -> tuple[str, tuple]:
+        """Build a `<leading> date >= ?` fragment for rebasing cumulative figures.
+
+        Returns ("", ()) when no baseline is set so callers are byte-identical to
+        the unfiltered query. `leading` is "WHERE" for a standalone clause or
+        "AND" to append to a subquery that already has a WHERE.
+        """
+        b = (baseline_date or "").strip()
+        if not b:
+            return "", ()
+        return f"{leading} date >= ?", (b,)
+
+    async def get_all_summaries(self, baseline_date: str = "") -> list[dict]:
+        """Get all daily summaries for analytics.
+
+        When baseline_date is set, only days >= baseline are returned (the
+        Comparison curves rebase to that start). Empty = full history.
+        """
+        clause, params = self._baseline_clause(baseline_date)
         return await to_thread(
             self._query,
-            "SELECT * FROM daily_summaries ORDER BY date",
+            f"SELECT * FROM daily_summaries {clause} ORDER BY date",
+            params,
         )
 
     async def get_all_entries(self) -> list[dict]:
@@ -197,11 +266,102 @@ class BacktestingDBReader:
         )
         return rows[0] if rows else None
 
-    async def get_daily_pnls(self) -> list[float]:
-        """Get all daily net P&L values for performance metric calculations."""
+    async def get_cumulative_overrides(self, baseline_date: str = "") -> dict:
+        """DB-canonical lifetime aggregates that OVERRIDE the metrics-file rollup.
+
+        The metrics file (hydra_metrics.json) is a bot-maintained running total
+        that can drift from the authoritative per-day DB records (it misses an
+        increment whenever the bot is down at a market close). To keep every
+        dashboard page consistent, the cumulative card is derived from the same
+        daily_summaries / trade_entries / trade_stops the History + Analytics
+        pages read. Near-zero P&L (floating-point noise) is rounded so a flat
+        day isn't miscounted as a win/loss.
+
+        When baseline_date is set, EVERY aggregate (the P&L sum, win/loss day
+        counts, entry/stop/credit totals, last_updated) is restricted to
+        days >= baseline so the rebased card is internally consistent — see
+        Settings.baseline_date. Empty = full history (backwards-compatible).
+        """
+        # daily_summaries: net_pnl SUM + last_updated use a standalone WHERE;
+        # win/loss counts already have a WHERE so they take AND. trade_entries /
+        # trade_stops carry their own `date` column → standalone WHERE. Every
+        # subquery binds the same baseline so the card never mixes a rebased
+        # P&L with a lifetime entry/stop count.
+        ds, p_ds = self._baseline_clause(baseline_date)
+        ds_and, p_dsand = self._baseline_clause(baseline_date, leading="AND")
+        te, p_te = self._baseline_clause(baseline_date)
+        ts_and, p_tsand = self._baseline_clause(baseline_date, leading="AND")
+        # When a baseline is set, COALESCE the SUMs to 0 (not NULL) so an EMPTY
+        # rebased window (e.g. baseline=tomorrow) authoritatively OVERRIDES the
+        # stale metrics-file rollup in apply_db_cumulative — which only adopts a
+        # non-null override. Without a baseline, default to NULL (a no-op:
+        # COALESCE(x, NULL) == x) so a genuinely-empty DB still falls back to the
+        # metrics file, preserving the pre-feature behavior.
+        z = "0" if (baseline_date or "").strip() else "NULL"
+        # capital_deployed = the max-risk notional of each entry = the wider of
+        # the two spreads × $100/pt × contracts (matches the bot's
+        # `capital_deployed`: e.g. C's 10c × 5pt = $5,000). entry_days = distinct
+        # days that actually placed a trade, for the avg-capital-per-day figure.
+        # total_stops: canonical "genuine stop" definition, matching the bot's own
+        # self-heal (bots/hydra/strategy.py:_reconcile_cumulative_metrics_from_db,
+        # extended 2026-09-02) and shared/sheets_db_shim.py's established filter —
+        # exit_reason IN ('stop_loss','gex_breach') excludes Brandon take-profit
+        # (a win, not a stop) and MKT-018/047 early-close/flatten rows (not stops).
+        # Legacy pre-v11 rows (NULL exit_reason) fall back to net_pnl < 0, matching
+        # what those rows always meant (written before Brandon's TP/breach paths
+        # existed, so every pre-v11 row IS a real stop-loss). Previously an
+        # unfiltered COUNT(*) here overcounted vs. the bot's own metrics file in
+        # the opposite direction from the file's undercounting bug — the two
+        # numbers disagreed for two different wrong reasons; this makes them agree.
+        has_exit_reason = await to_thread(self._trade_stops_has_exit_reason)
+        stop_filter = (
+            "(exit_reason IN ('stop_loss','gex_breach') OR (exit_reason IS NULL AND net_pnl < 0))"
+            if has_exit_reason
+            # Pre-v11 DB (or a bare test schema) with no exit_reason column at all —
+            # every row predates Brandon's TP/breach paths, so net_pnl < 0 alone is
+            # the correct "genuine stop" definition (same fallback _ACTUAL_STOPS uses).
+            else "(net_pnl < 0)"
+        )
         rows = await to_thread(
             self._query,
-            "SELECT net_pnl FROM daily_summaries ORDER BY date",
+            f"""SELECT
+                (SELECT ROUND(COALESCE(SUM(net_pnl), {z}), 2) FROM daily_summaries {ds}) AS cumulative_pnl,
+                (SELECT COUNT(*) FROM daily_summaries WHERE ROUND(net_pnl, 2) > 0 {ds_and}) AS winning_days,
+                (SELECT COUNT(*) FROM daily_summaries WHERE ROUND(net_pnl, 2) < 0 {ds_and}) AS losing_days,
+                (SELECT COUNT(*) FROM trade_entries {te}) AS total_entries,
+                (SELECT ROUND(COALESCE(SUM(total_credit), {z}), 2) FROM trade_entries {te}) AS total_credit_collected,
+                (SELECT COUNT(*) FROM trade_stops WHERE {stop_filter} {ts_and}) AS total_stops,
+                (SELECT MAX(date) FROM daily_summaries {ds}) AS last_updated,
+                (SELECT ROUND(COALESCE(SUM(
+                    MAX(COALESCE(call_spread_width, 0), COALESCE(put_spread_width, 0))
+                    * 100 * COALESCE(contracts, 1)), {z}), 2) FROM trade_entries {te}) AS capital_deployed,
+                (SELECT COUNT(DISTINCT date) FROM trade_entries {te}) AS entry_days
+            """,
+            p_ds + p_dsand + p_dsand + p_te + p_te + p_tsand + p_ds + p_te + p_te,
+        )
+        row = rows[0] if rows else {}
+        if row:
+            # ROI (on capital deployed) = total P&L per dollar of max-risk
+            # capital deployed across all trades — normalizes for contract size
+            # AND entry count, so A (1c/75pt), B and C (10c/5-10pt) compare fairly.
+            cap = row.get("capital_deployed") or 0.0
+            pnl = row.get("cumulative_pnl") or 0.0
+            days = row.get("entry_days") or 0
+            row["roi_pct"] = round((pnl / cap) * 100, 2) if cap else 0.0
+            row["avg_capital_per_day"] = round(cap / days, 2) if days else 0.0
+        return row
+
+    async def get_daily_pnls(self, baseline_date: str = "") -> list[float]:
+        """Get all daily net P&L values for performance metric calculations.
+
+        baseline_date rebases the perf metrics (Sharpe/drawdown) to match the
+        rebased cumulative card; empty = full history.
+        """
+        clause, params = self._baseline_clause(baseline_date)
+        rows = await to_thread(
+            self._query,
+            f"SELECT net_pnl FROM daily_summaries {clause} ORDER BY date",
+            params,
         )
         return [row["net_pnl"] for row in rows if row.get("net_pnl") is not None]
 

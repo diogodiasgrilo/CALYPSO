@@ -128,8 +128,17 @@ class StreamingManager:
         self._consume_poll_s = consume_poll_s
         self._resubscribe_gap_s = resubscribe_gap_s
 
-        # In-memory state
+        # In-memory state. `_lock` guards ONLY the in-memory dicts below and
+        # is held briefly — readers (get_snapshot/is_healthy/last_tick_age)
+        # must never block on network I/O. `_io_lock` serializes the
+        # unsubscribe→sleep→subscribe wire sequence (subscribe_quote vs the
+        # refresh loop) so they can't interleave for the same conid; it is
+        # the ONLY lock held across ibind's blocking subscribe() — which
+        # waits up to subscription_retries × subscription_timeout (~10s) for
+        # a market-data confirmation (audit #3). Lock order is always
+        # _io_lock → _lock, never the reverse, so the two can't deadlock.
         self._lock = threading.RLock()
+        self._io_lock = threading.RLock()
         self._subscriptions: dict[int, list[str]] = {}  # conid → fields
         self._snapshots: dict[int, TickSnapshot] = {}
 
@@ -182,17 +191,28 @@ class StreamingManager:
                 return
             self._stop_event.set()
 
-        # Unsubscribe all conids
+        # Join the background threads BEFORE tearing down subscriptions. The
+        # refresh loop's umd→sleep→smd sequence runs under _io_lock and can be
+        # mid-flight (ibind's subscribe() blocks ~10s); if we unsubscribed
+        # first, its trailing _send_subscribe could land AFTER our umd and
+        # re-subscribe the conid — leaving a live smd topic on IBKR after
+        # shutdown (audit #54). The refresh thread's join timeout must cover
+        # that worst-case blocking subscribe so it can't outlive stop().
+        for t in (self._refresh_thread, self._consume_thread):
+            if t and t.is_alive():
+                t.join(timeout=15.0)
+
+        # Unsubscribe all conids. Hold _io_lock around each wire call to match
+        # the documented invariant (it is the ONLY lock held across an ibind
+        # wire op) and to serialize against any straggling refresh-loop op that
+        # didn't join in time.
         for conid in list(self._subscriptions.keys()):
             try:
-                self._send_unsubscribe(conid)
+                with self._io_lock:
+                    self._send_unsubscribe(conid)
             except Exception as exc:
                 logger.warning("Unsubscribe failed for conid %s: %s", conid, exc)
 
-        # Wait for threads
-        for t in (self._refresh_thread, self._consume_thread):
-            if t and t.is_alive():
-                t.join(timeout=5.0)
         with self._lock:
             self._started = False
             self._subscriptions.clear()
@@ -218,16 +238,19 @@ class StreamingManager:
         Idempotent — re-subscribing to an already-subscribed conid replaces
         the field set in-place (sends umd then smd with new fields).
 
-        Holds the manager lock through the unsubscribe → sleep → subscribe
-        sequence so the refresh loop can't interleave a competing cycle
-        for the same conid mid-flight. Lock is RLock so it's safe even
-        when callers nest into this from already-locked paths.
+        The wire sequence (unsubscribe → sleep → subscribe) runs under
+        `_io_lock`, NOT the data lock, so it can't interleave with the
+        refresh loop for the same conid yet also can't freeze readers
+        (get_snapshot/is_healthy/last_tick_age) — ibind's market-data
+        subscribe() blocks up to ~10s waiting for confirmation (audit #3).
+        The data lock is taken only briefly to update `_subscriptions`.
         """
         conid = int(conid)
         fields = list(fields) if fields else DEFAULT_QUOTE_FIELDS
         with self._lock:
             already = conid in self._subscriptions
             self._subscriptions[conid] = fields
+        with self._io_lock:
             if already:
                 self._send_unsubscribe(conid)
                 time.sleep(self._resubscribe_gap_s)
@@ -248,7 +271,8 @@ class StreamingManager:
             had = self._subscriptions.pop(conid, None)
             self._snapshots.pop(conid, None)
         if had is not None:
-            self._send_unsubscribe(conid)
+            with self._io_lock:
+                self._send_unsubscribe(conid)
 
     def unsubscribe_all(self) -> None:
         """Tear down every subscription. Doesn't stop the manager itself."""
@@ -258,7 +282,8 @@ class StreamingManager:
             self._snapshots.clear()
         for c in conids:
             try:
-                self._send_unsubscribe(c)
+                with self._io_lock:
+                    self._send_unsubscribe(c)
             except Exception as exc:
                 logger.warning("Unsubscribe failed for conid %s: %s", c, exc)
 
@@ -337,24 +362,28 @@ class StreamingManager:
         Without this, IBKR auto-kills smd topics after ~15 min. ibind 0.1.23
         does NOT handle this; we own it.
 
-        Each per-conid unsub→sleep→sub sequence is held under the manager
-        lock so a concurrent subscribe_quote() call for the same conid
-        can't interleave its own cycle. Sleeping under a lock is OK here
-        — the RLock has a single owner (this manager), contention is
-        only between the refresh thread and direct API callers.
+        Each per-conid unsub→sleep→sub sequence runs under `_io_lock` (not
+        the data lock) so a concurrent subscribe_quote() for the same conid
+        can't interleave, while readers (get_snapshot/is_healthy) never block
+        on ibind's ~10s subscribe confirmation (audit #3). The data lock is
+        taken only briefly, INSIDE _io_lock, to re-check membership + read
+        current fields — lock order is always _io_lock → _lock, so the two
+        can't deadlock.
         """
         while not self._stop_event.wait(self._refresh_interval_s):
             with self._lock:
-                items = list(self._subscriptions.items())
-            for conid, fields in items:
+                conids = list(self._subscriptions.keys())
+            for conid in conids:
                 if self._stop_event.is_set():
                     return
                 try:
-                    with self._lock:
-                        # Re-check membership under the lock — caller may
-                        # have unsubscribed since we snapshotted `items`.
-                        if conid not in self._subscriptions:
-                            continue
+                    with self._io_lock:
+                        with self._lock:
+                            # Re-check membership — caller may have
+                            # unsubscribed since we snapshotted the keys.
+                            if conid not in self._subscriptions:
+                                continue
+                            fields = self._subscriptions[conid]
                         self._send_unsubscribe(conid)
                         time.sleep(self._resubscribe_gap_s)
                         self._send_subscribe(conid, fields)
@@ -428,6 +457,12 @@ class StreamingManager:
             k: v for k, v in msg.items()
             if isinstance(k, str) and (k.isdigit() or k == "6509")
         }
+        # A market-data message with no field codes (e.g. a system/heartbeat
+        # row carrying only conid/_updated/topic) is NOT a fresh quote —
+        # recording received_at on it would mask staleness in is_stale /
+        # is_healthy and keep the bot trading on stale data (audit M5).
+        if not fields:
+            return
         with self._lock:
             snap = self._snapshots.get(conid)
             if snap is None:

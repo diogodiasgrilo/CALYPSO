@@ -1,0 +1,339 @@
+"""Contract tests for the calypso-broker seam (Option 1, P1).
+
+Exercises the full BrokerClient -> (JSON wire) -> BrokerDispatcher -> IBClient
+round-trip IN-PROCESS (no FastAPI/HTTP), asserting:
+  • every one of the 16 allowlisted methods returns the SAME shape the IBClient
+    returned (shape parity is the #1 correctness risk — design §6),
+  • args/kwargs are forwarded verbatim,
+  • non-allowlisted access raises (AttributeError),
+  • IBClient exceptions surface as BrokerError (so strategies degrade, not crash).
+
+See docs/migration/BROKER_SESSION_SERVICE_DESIGN.md.
+"""
+
+from __future__ import annotations
+
+import datetime
+import json
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock, patch
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from shared.broker_service import (ALLOWED_METHODS, BrokerDispatcher,
+                                   _DATACLASS_ARG_METHODS, _json_default)
+from shared.broker_client import BrokerClient, BrokerError
+
+
+def _wire_encode(obj):
+    """Encode exactly the way the real HTTP transport does: stdlib json with the
+    shared ``_json_default`` hook (broker_client._http_transport builds the body
+    this way because requests' ``json=`` path uses no ``default=``). Returns the
+    decoded JSON, i.e. precisely what arrives on the other side of the wire."""
+    return json.loads(json.dumps(obj, default=_json_default))
+
+
+def _wire_transport(dispatcher):
+    """In-process transport that faithfully simulates the HTTP/JSON wire: the
+    request args/kwargs AND the response are round-tripped through JSON using the
+    SAME encoder the real transport uses, so the test catches any non-serializable
+    return, shape drift, OR argument mangling (e.g. a datetime.date arg)."""
+    def transport(method, args, kwargs):
+        req = _wire_encode({"method": method, "args": args, "kwargs": kwargs})
+        resp = dispatcher.dispatch(req["method"], req["args"], req["kwargs"])
+        return _wire_encode(resp)
+    return transport
+
+
+# A real option expiry crosses the wire as a ``datetime.date`` from the strategy
+# (bots/hydra/strategy.py passes ``expiry=expiry_date``), so the contract test
+# must exercise that native type — not a wire-safe string stand-in.
+_EXPIRY = datetime.date(2026, 5, 29)
+
+# (method, call_args, call_kwargs, canned IBClient return) — the REAL shapes the
+# live IBClient produces/consumes (datetime.date args, list[float] / tuple-keyed
+# dict returns), NOT JSON-native stand-ins. Asserting against these makes the
+# round-trip catch any lossy/divergent wire transform.
+CASES = [
+    ("get_quote", (416904,), {}, {"bid": 1.0, "ask": 1.1, "last": 1.05, "mark": 1.05}),
+    ("get_quotes_batch", ([1, 2],), {}, {"1": {"bid": 1.0}, "2": {"bid": 2.0}}),
+    ("get_vix_price", (), {}, 15.3),
+    # get_option_chain(symbol: str, expiry: date, trading_class="SPXW") -> list[float]
+    ("get_option_chain", ("SPX", _EXPIRY), {}, [4990.0, 5000.0, 5010.0]),
+    ("get_option_greeks", (55813670,), {}, {"delta": 0.5, "gamma": 0.01, "theta": -0.3}),
+    ("get_chart_data", (416904,), {"bar": "1min"}, [{"t": 1, "c": 5000.0}, {"t": 2, "c": 5001.0}]),
+    ("qualify_contract", ("SPX", "IND"), {}, {"conid": 416904, "symbol": "SPX"}),
+    # qualify_option_strikes(*, symbol, expiry: date, strikes) -> dict[(strike,right)->conid].
+    # Keyword-only, real date arg, and the genuine tuple-keyed dict return the
+    # strategy unpacks via `for (strike, right), conid in conid_map.items()`.
+    ("qualify_option_strikes", (), {"symbol": "SPX", "expiry": _EXPIRY, "strikes": [5000.0]},
+     {(5000.0, "C"): 55813670, (5000.0, "P"): 55813671}),
+    ("get_positions", (), {}, [{"conid": 1, "position": -1.0}, {"conid": 2, "position": 1.0}]),
+    ("get_balance", (), {"currency": "USD"}, {"USD": 100000.0, "EUR": 0.0}),
+    ("get_fx_rate", ("USD", "EUR"), {}, 0.92),
+    ("get_open_orders", (), {}, [{"orderId": "1", "status": "Submitted"}]),
+    ("get_order_status", ("O1",), {}, {"order_id": "O1", "status": "Filled"}),
+    ("get_closed_position_price", (55813670,), {}, 1.23),
+    # Broker-side executions feed — the INDEPENDENT anchor for P&L
+    # reconciliation (2026-09-10). Every in-process check is circular. The
+    # return MUST survive the RPC round trip with `raw` intact: the field names
+    # in /iserver/account/trades are doc-sourced rather than observed, so `raw`
+    # is how a caller discovers the true shape. A transport that dropped it
+    # would silently hide the fields the reconciliation needs.
+    ("get_day_executions", (), {"days": 1},
+     [{"conid": 55813670, "side": "SELL", "price": 1.25, "size": 7.0,
+       "commission": 8.05, "net_amount": 875.0, "sec_type": "OPT",
+       "symbol": "SPX", "account": "DUR049068", "trade_time": "20260910-13:45:02",
+       "trade_time_r": 1789045502000.0, "execution_id": "0001",
+       "raw": {"conid": 55813670, "side": "S", "price": "1.25", "size": "7"}}]),
+    ("place_and_wait_for_fill", (), {"conid": 55813670, "side": "SELL", "quantity": 1,
+                                     "order_type": "LMT", "limit_price": 1.0, "coid": "x"},
+     {"order_id": "O1", "status": "filled", "filled_quantity": 1, "avg_fill_price": 1.0, "raw": {}}),
+    ("cancel_order", ("O1",), {}, True),
+    # S2 strangle margin gate — primitive leg list in, float (or None) out.
+    ("what_if_naked_margin",
+     ([{"conid": 55813670, "side": "SELL", "quantity": 1},
+       {"conid": 55813671, "side": "SELL", "quantity": 1}],), {}, 31250.0),
+    # Non-committal order preview. Takes an OrderRequest-shaped object and
+    # returns IBKR's 5 blocks verbatim, so the dispatcher must not reshape it.
+    ("what_if_order", ({"conidex": "28812380;;;1/-1,2/1", "side": "SELL",
+                        "quantity": 1, "order_type": "LMT", "price": 1.25},), {},
+     {"amount": {"amount": "1.25 USD"},
+      "initial": {"current": "0", "change": "500", "after": "500"}}),
+    # operator override — returns seconds that were left on the penalty box
+    ("clear_rate_penalty", (), {}, 0.0),
+]
+
+
+def _make():
+    ib = MagicMock()
+    for method, _a, _k, ret in CASES:
+        getattr(ib, method).return_value = ret
+    client = BrokerClient(transport=_wire_transport(BrokerDispatcher(ib)))
+    return ib, client
+
+
+class TestBrokerContract:
+    def test_cases_cover_every_allowlisted_method(self):
+        assert {m for m, *_ in CASES} == set(ALLOWED_METHODS)
+
+    @pytest.mark.parametrize("method,args,kwargs,ret", CASES, ids=[c[0] for c in CASES])
+    def test_shape_parity_and_arg_forwarding(self, method, args, kwargs, ret):
+        ib, client = _make()
+        got = getattr(client, method)(*args, **kwargs)
+        # The strategy must see EXACTLY the object a direct IBClient would have
+        # returned. Compare against the REAL return shape (`ret`), not a
+        # pre-JSON-mangled copy — so any lossy/divergent wire transform (date->str,
+        # tuple-key explosion, Decimal->float) fails here instead of passing
+        # against itself.
+        assert got == ret
+        # The real IBClient is invoked with whatever actually crosses the wire.
+        # Request args are JSON-encoded with the same `_json_default` the HTTP
+        # transport uses, so this asserts faithful forwarding AND documents that
+        # a datetime.date arg arrives as its isoformat string on the broker side
+        # (the dispatcher does NOT re-hydrate it — see cross-file note).
+        wire = _wire_encode({"args": list(args), "kwargs": kwargs})
+        if method in _DATACLASS_ARG_METHODS:
+            # 2026-09-11: these take an ibind OrderRequest DATACLASS, which JSON
+            # cannot carry — it always arrives as a dict. ibind maps snake_case
+            # to IBKR's camelCase ONLY for the dataclass, so an uncoerced dict
+            # sent `order_type` verbatim and IBKR answered 400 "Unknown order
+            # type". The dispatcher rebuilds the dataclass, so what the broker
+            # method receives is deliberately NOT byte-identical to the wire —
+            # it is SEMANTICALLY identical, which is the contract that matters.
+            (call_arg,), _ = getattr(ib, method).call_args
+            from ibind import OrderRequest
+            assert isinstance(call_arg, OrderRequest), (
+                f"{method} must receive a rebuilt OrderRequest, not a raw dict"
+            )
+            for k, v in wire["args"][0].items():
+                assert getattr(call_arg, k) == v, f"{k} lost in coercion"
+        else:
+            getattr(ib, method).assert_called_once_with(*wire["args"], **wire["kwargs"])
+
+    def test_disallowed_method_raises_attribute_error(self):
+        _, client = _make()
+        for bad in ("disconnect", "_ib_call", "place_order", "get_secdef", "foobar"):
+            with pytest.raises(AttributeError):
+                getattr(client, bad)
+
+    def test_circuit_breakers_is_empty_mapping(self):
+        # alert_hooks polls broker.circuit_breakers — must be present + empty
+        # (real breakers live in the broker process), never AttributeError.
+        _, client = _make()
+        assert client.circuit_breakers == {}
+        assert dict(client.circuit_breakers.items()) == {}
+
+    def test_ibclient_exception_surfaces_as_broker_error(self):
+        ib = MagicMock()
+        ib.get_quote.side_effect = RuntimeError("IBKR 503 Service Unavailable")
+        client = BrokerClient(transport=_wire_transport(BrokerDispatcher(ib)))
+        with pytest.raises(BrokerError) as ei:
+            client.get_quote(416904)
+        assert "503" in str(ei.value) and "RuntimeError" in str(ei.value)
+
+    def test_unreachable_broker_raises_broker_error_not_crash(self):
+        def dead_transport(method, args, kwargs):
+            raise ConnectionError("connection refused")
+        client = BrokerClient(transport=dead_transport)
+        with pytest.raises(BrokerError):
+            client.get_vix_price()
+
+    def test_ambiguous_order_error_survives_the_rpc_boundary(self):
+        """Audit #3/double-fill: an AmbiguousOrderError raised in the broker
+        process must re-raise as AmbiguousOrderError on the client side (not a
+        generic BrokerError) — else _place_leg_order's `except
+        AmbiguousOrderError` misses it and the loop re-places under a new cOID
+        (double-fill). The dispatcher preserves the type name; BrokerClient maps
+        it back to the class the bot branches on."""
+        from shared.ib_client import AmbiguousOrderError
+
+        def amb_transport(method, args, kwargs):
+            return {"error": "unconfirmed place — aborting", "type": "AmbiguousOrderError"}
+
+        client = BrokerClient(transport=amb_transport)
+        with pytest.raises(AmbiguousOrderError):
+            client.place_and_wait_for_fill(conid=1, side="BUY", quantity=1)
+        # A generic error still raises the generic BrokerError.
+        client2 = BrokerClient(transport=lambda m, a, k: {"error": "boom", "type": "ValueError"})
+        with pytest.raises(BrokerError):
+            client2.get_vix_price()
+
+    def test_rate_penalty_error_survives_the_rpc_boundary(self):
+        """429-burst fix: a RatePenaltyError raised in the broker process must
+        re-raise as RatePenaltyError on the client side (not a generic
+        BrokerError) — else the strategy's `except RatePenaltyError` RISK-BLIND
+        alert can't distinguish a rate-degraded session from an empty tick."""
+        from shared.ib_client import RatePenaltyError
+
+        def pen_transport(method, args, kwargs):
+            return {"error": "penalty box active", "type": "RatePenaltyError"}
+
+        client = BrokerClient(transport=pen_transport)
+        with pytest.raises(RatePenaltyError):
+            client.get_option_chain("SPX", datetime.date(2026, 6, 1))
+
+    def test_connect_ok_when_broker_holds_session(self):
+        _, client = _make()
+        client.health = lambda: {"status": "ok", "connected": True}
+        assert client.connect() is True
+
+    def test_connect_raises_when_broker_has_no_session(self):
+        _, client = _make()
+        client.health = lambda: {"status": "degraded", "connected": False}
+        with pytest.raises(BrokerError):
+            client.connect()
+
+    def test_ensure_connected_reflects_health_and_never_raises(self):
+        _, client = _make()
+        client.health = lambda: {"connected": True}
+        assert client.ensure_connected() is True
+
+        def boom():
+            raise ConnectionError("broker down")
+        client.health = boom
+        assert client.ensure_connected() is False  # never raises → gate handles it
+
+    def _capture_http_timeout(self, method, kwargs):
+        """Drive the REAL _http_transport with requests.post stubbed, returning
+        the ``timeout=`` it passed."""
+        import requests
+        captured = {}
+
+        class _Resp:
+            def raise_for_status(self):
+                return None
+
+            def json(self):
+                return {"result": True}
+
+        def fake_post(url, data=None, headers=None, timeout=None):
+            captured["timeout"] = timeout
+            return _Resp()
+
+        client = BrokerClient(base_url="http://127.0.0.1:8788", timeout=35.0)
+        with patch.object(requests, "post", fake_post):
+            client._http_transport(method, [], kwargs)
+        return captured["timeout"]
+
+    def test_fill_call_extends_http_timeout_above_server_poll(self):
+        # 45s size-scaled server poll → 55s HTTP read timeout (poll + 10s buffer)
+        # so a still-filling multi-contract order does NOT trip an L-H1 abort.
+        assert self._capture_http_timeout(
+            "place_and_wait_for_fill", {"timeout_seconds": 45.0}
+        ) == 55.0
+
+    def test_fill_call_never_below_the_default_timeout(self):
+        # A small server poll still gets at least the snappy default.
+        assert self._capture_http_timeout(
+            "place_and_wait_for_fill", {"timeout_seconds": 5.0}
+        ) == 35.0
+
+    def test_non_fill_methods_keep_the_snappy_default(self):
+        # A hung quote must fail fast — never wait the fill budget.
+        assert self._capture_http_timeout("get_quote", {}) == 35.0
+        assert self._capture_http_timeout("place_and_wait_for_fill", {}) == 35.0
+
+    def test_dispatcher_health_never_raises(self):
+        # Audit #13: /health is now AUTHORITATIVE (a live check_auth_status
+        # round-trip), not a cached is_connected() flag, and fails CLOSED.
+        # auth/status raises → degraded.
+        ib = MagicMock()
+        ib.check_auth_status.side_effect = RuntimeError("boom")
+        assert BrokerDispatcher(ib).health()["status"] == "degraded"
+        # truly-live session → ok + connected.
+        ib2 = MagicMock()
+        ib2.check_auth_status.return_value = {
+            "authenticated": True, "connected": True, "competing": False,
+        }
+        h2 = BrokerDispatcher(ib2).health()
+        assert h2["status"] == "ok" and h2["connected"] is True
+        # competing login → fail closed (degraded, not connected).
+        ib3 = MagicMock()
+        ib3.check_auth_status.return_value = {
+            "authenticated": True, "connected": True, "competing": True,
+        }
+        h3 = BrokerDispatcher(ib3).health()
+        assert h3["status"] == "degraded" and h3["connected"] is False
+
+
+class TestReauthAlertThrottle:
+    """services.broker.main._should_alert_reauth — the 2026-06-27 weekend-flood fix.
+
+    The old throttle alerted on every 4th failed cycle; with SESSION_CHECK_S=180s
+    that fired a HIGH email every ~12 min all Saturday. The new policy: alert only
+    when the failure has PERSISTED (>=2 cycles), only DURING market hours (off-hours
+    failures are benign + self-clear at the daily reset), and at most ONCE PER HOUR
+    (wall-clock, decoupled from the cycle cadence)."""
+
+    from services.broker.main import _should_alert_reauth
+    _fn = staticmethod(_should_alert_reauth)
+    HOUR = 3600.0
+
+    def test_first_failure_never_alerts(self):
+        # Cycle 1 is almost always the benign ~01:00 ET reset.
+        assert self._fn(1, True, 1000.0, None, self.HOUR) is False
+
+    def test_off_hours_never_alerts_even_when_persisted(self):
+        # The exact weekend-flood case: persisted failure, market closed → silent.
+        assert self._fn(5, False, 1_000_000.0, None, self.HOUR) is False
+
+    def test_persisted_failure_in_market_hours_alerts_first_time(self):
+        assert self._fn(2, True, 1000.0, None, self.HOUR) is True
+
+    def test_throttled_within_the_hour(self):
+        # Already alerted 10 min ago → stay quiet (no 12-min spam).
+        last = 1000.0
+        assert self._fn(6, True, last + 600.0, last, self.HOUR) is False
+
+    def test_re_nags_after_the_hour_during_a_genuine_rth_outage(self):
+        last = 1000.0
+        assert self._fn(20, True, last + self.HOUR + 1.0, last, self.HOUR) is True
+
+    def test_recovery_resets_then_next_outage_alerts_immediately(self):
+        # After recovery the loop sets last_reauth_alert=None, so a fresh outage
+        # in market hours alerts on its 2nd cycle without waiting an hour.
+        assert self._fn(2, True, 9_999_999.0, None, self.HOUR) is True

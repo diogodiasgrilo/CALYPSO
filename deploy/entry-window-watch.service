@@ -1,0 +1,15 @@
+[Unit]
+Description=HYDRA entry-window watchdog — flag entry-path issues on A/B/C + broker
+After=network-online.target calypso-broker.service
+
+[Service]
+Type=oneshot
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+Environment=PYTHONPATH=/opt/calypso
+Environment=GCP_PROJECT=calypso-trading-bot
+ExecStart=/opt/calypso/.venv/bin/python /opt/calypso/scripts/entry_window_watch.py
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=entry-window-watch

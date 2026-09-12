@@ -31,6 +31,20 @@ def _profile(contracts, spot=6800):
     )
 
 
+def _accel_profile(peak_strike, spot=6800, expiry=date(2026, 5, 4)):
+    """A single dominant-OI call strike creates a deterministic accel-zone
+    peak at `peak_strike`, with a thin contiguous tail (mirrors the shape of
+    test_keep_when_proposed_far_from_accel_peak) so the cluster spans a
+    realistic ~60pt range for persistence-gate tests to place `proposed_short`
+    and a drifted/matching prior peak within.
+    """
+    contracts = [_contract(peak_strike, "call", 200000)]
+    for offset in range(-30, 35, 5):
+        if offset != 0:
+            contracts.append(_contract(peak_strike + offset, "call", 2000))
+    return build_profile(contracts, spot=spot, expiry=expiry, time_to_expiry=1 / 365.0)
+
+
 class TestAdjustCallStrike:
     def test_keep_when_no_signals(self):
         # Empty/quiet GEX profile around proposed
@@ -95,9 +109,22 @@ class TestAdjustCallStrike:
     def test_skip_takes_precedence_over_shift(self):
         # An accel zone (call OI) overlapping proposed AND a decel wall (put OI)
         # further OTM → skip wins (don't shift past an accel zone).
+        #
+        # 2026-09-06: the accel side was ONE contract at 6850, which formed a
+        # single-strike cluster. gex_provider.MIN_CLUSTER_STRIKES=2 shipped that
+        # day and correctly rejects those (a wall is not one point), so this
+        # fixture stopped producing an accel zone at all and the assertion fell
+        # through to SHIFT. Widened to 3 contiguous strikes, matching this
+        # class's own test_skip_when_inside_accel_zone. The behaviour under
+        # test — SKIP taking precedence over SHIFT — is unchanged; only the
+        # fixture's realism was at fault. (Real production accel zones are far
+        # wider still: the narrowest cited by any of B's 44 live SKIPs was
+        # 30pt = 7 strikes.)
         prof = _profile(
             [
-                _contract(6850, "call", 100000),  # accel cluster around proposed
+                _contract(6845, "call", 100000),  # accel cluster around proposed
+                _contract(6850, "call", 100000),
+                _contract(6855, "call", 100000),
                 _contract(6900, "put", 100000),   # decel wall further OTM
                 _contract(6905, "put", 100000),
             ],
@@ -231,3 +258,270 @@ class TestSymmetry:
         r_put = adjust_put_strike(spot=6800, proposed_short=6750, profile=prof)
         assert r_call.action == AdjustAction.KEEP
         assert r_put.action == AdjustAction.KEEP
+
+
+class TestAccelPeakPersistenceCall:
+    """2026-08-12: a single noisy GEX read shouldn't be enough to veto an
+    entry. These tests exercise the accel_peak_persistence_enabled gate on
+    the call side — see AdjusterConfig's docstring for the forensic
+    motivation (B/C's Aug 10-12 3-day zero-entry streak)."""
+
+    def test_skip_fires_when_confirmed_by_prior_read_within_tolerance(self):
+        prior = _accel_profile(6815, spot=6800)
+        current = _accel_profile(6820, spot=6800)  # 5pt drift, within default 10pt tolerance
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg, prior_profile=prior,
+        )
+        assert r.action == AdjustAction.SKIP
+
+    def test_unconfirmed_no_prior_cluster_falls_through_to_keep(self):
+        # Prior read had no accel signal anywhere near proposed_short at all.
+        prior = _profile([_contract(6500, "put", 50)], spot=6800)
+        current = _accel_profile(6820, spot=6800)
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg, prior_profile=prior,
+        )
+        assert r.action == AdjustAction.KEEP
+        assert "UNCONFIRMED" in r.reason
+
+    def test_unconfirmed_peak_drifted_beyond_tolerance_falls_through_to_keep(self):
+        # Prior DOES have a covering cluster, but its peak is 15pt away —
+        # beyond the default 10pt tolerance.
+        prior = _accel_profile(6805, spot=6800)
+        current = _accel_profile(6820, spot=6800)
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg, prior_profile=prior,
+        )
+        assert r.action == AdjustAction.KEEP
+        assert "UNCONFIRMED" in r.reason
+        assert "drift" in r.reason
+
+    def test_unconfirmed_but_decel_wall_falls_through_to_shift_not_keep(self):
+        # Proves the design point: an unconfirmed accel veto doesn't force
+        # KEEP — it falls through to the existing SHIFT check like any other
+        # accel zone that was never in locality range.
+        prior = _profile([_contract(6500, "put", 50)], spot=6800)  # no coverage
+        contracts = [_contract(6820, "call", 200000)]
+        for offset in range(-30, 35, 5):
+            if offset != 0:
+                contracts.append(_contract(6820 + offset, "call", 2000))
+        contracts += [_contract(6870, "put", 100000), _contract(6875, "put", 100000)]
+        current = _profile(contracts, spot=6800)
+        cfg = AdjusterConfig(
+            accel_min_pct=0.01, decel_min_pct=0.01, max_shift_pts=70,
+            accel_peak_persistence_enabled=True,
+        )
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg, prior_profile=prior,
+        )
+        assert r.action == AdjustAction.SHIFT
+        assert "UNCONFIRMED" in r.reason
+
+    def test_skip_fires_unconditionally_when_persistence_disabled_kill_switch(self):
+        # Even with a drifted prior passed in, persistence OFF (the default)
+        # reproduces today's single-read behavior exactly.
+        prior = _accel_profile(6600, spot=6800)  # wildly different peak
+        current = _accel_profile(6820, spot=6800)
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=False)
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg, prior_profile=prior,
+        )
+        assert r.action == AdjustAction.SKIP
+
+    def test_skip_fires_when_no_prior_profile_even_with_persistence_enabled(self):
+        # First entry slot of the day / post-restart: no prior read yet.
+        # Falls back to today's single-read behavior for this one slot.
+        current = _accel_profile(6820, spot=6800)
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg, prior_profile=None,
+        )
+        assert r.action == AdjustAction.SKIP
+
+    def test_unconfirmed_when_prior_profile_expiry_differs(self):
+        # Matching peak, but a different expiry — must not be trusted as
+        # "the same wall", even though the strikes happen to line up.
+        prior = _accel_profile(6820, spot=6800, expiry=date(2026, 5, 5))
+        current = _accel_profile(6820, spot=6800, expiry=date(2026, 5, 4))
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg, prior_profile=prior,
+        )
+        assert r.action == AdjustAction.KEEP
+        assert "UNCONFIRMED" in r.reason
+
+    def test_existing_call_tests_unaffected_by_default_config(self):
+        # Regression proof: every existing call-side test constructs
+        # AdjusterConfig without touching the new fields and never passes
+        # prior_profile — confirm the class-level default is inert.
+        assert AdjusterConfig().accel_peak_persistence_enabled is False
+
+
+class TestAccelPeakPersistencePut:
+    """Put-side mirror of TestAccelPeakPersistenceCall — acceleration is
+    sign-based (negative_clusters), not side-based, so the same helper
+    profiles work; only spot/peak placement flips below spot."""
+
+    def test_skip_fires_when_confirmed_by_prior_read_within_tolerance(self):
+        prior = _accel_profile(6775, spot=6800)
+        current = _accel_profile(6780, spot=6800)  # 5pt drift, within tolerance
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_put_strike(
+            spot=6800, proposed_short=6780, profile=current, config=cfg, prior_profile=prior,
+        )
+        assert r.action == AdjustAction.SKIP
+
+    def test_unconfirmed_no_prior_cluster_falls_through_to_keep(self):
+        prior = _profile([_contract(6900, "call", 50)], spot=6800)
+        current = _accel_profile(6780, spot=6800)
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_put_strike(
+            spot=6800, proposed_short=6780, profile=current, config=cfg, prior_profile=prior,
+        )
+        assert r.action == AdjustAction.KEEP
+        assert "UNCONFIRMED" in r.reason
+
+    def test_unconfirmed_peak_drifted_beyond_tolerance_falls_through_to_keep(self):
+        prior = _accel_profile(6795, spot=6800)
+        current = _accel_profile(6780, spot=6800)
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_put_strike(
+            spot=6800, proposed_short=6780, profile=current, config=cfg, prior_profile=prior,
+        )
+        assert r.action == AdjustAction.KEEP
+        assert "UNCONFIRMED" in r.reason
+
+    def test_skip_fires_unconditionally_when_persistence_disabled_kill_switch(self):
+        prior = _accel_profile(6600, spot=6800)
+        current = _accel_profile(6780, spot=6800)
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=False)
+        r = adjust_put_strike(
+            spot=6800, proposed_short=6780, profile=current, config=cfg, prior_profile=prior,
+        )
+        assert r.action == AdjustAction.SKIP
+
+    def test_skip_fires_when_no_prior_profile_even_with_persistence_enabled(self):
+        current = _accel_profile(6780, spot=6800)
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_put_strike(
+            spot=6800, proposed_short=6780, profile=current, config=cfg, prior_profile=None,
+        )
+        assert r.action == AdjustAction.SKIP
+
+    def test_unconfirmed_but_decel_wall_falls_through_to_shift_not_keep(self):
+        # Put-side mirror of the call-side test with the same name.
+        prior = _profile([_contract(6900, "call", 50)], spot=6800)  # no coverage
+        contracts = [_contract(6780, "call", 200000)]
+        for offset in range(-30, 35, 5):
+            if offset != 0:
+                contracts.append(_contract(6780 + offset, "call", 2000))
+        contracts += [_contract(6725, "put", 100000), _contract(6730, "put", 100000)]
+        current = _profile(contracts, spot=6800)
+        cfg = AdjusterConfig(
+            accel_min_pct=0.01, decel_min_pct=0.01, max_shift_pts=70,
+            accel_peak_persistence_enabled=True,
+        )
+        r = adjust_put_strike(
+            spot=6800, proposed_short=6780, profile=current, config=cfg, prior_profile=prior,
+        )
+        assert r.action == AdjustAction.SHIFT
+        assert "UNCONFIRMED" in r.reason
+
+    def test_unconfirmed_when_prior_profile_expiry_differs(self):
+        # Put-side mirror of the call-side test with the same name.
+        prior = _accel_profile(6780, spot=6800, expiry=date(2026, 5, 5))
+        current = _accel_profile(6780, spot=6800, expiry=date(2026, 5, 4))
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_put_strike(
+            spot=6800, proposed_short=6780, profile=current, config=cfg, prior_profile=prior,
+        )
+        assert r.action == AdjustAction.KEEP
+        assert "UNCONFIRMED" in r.reason
+
+
+class TestAccelPeakForceUnconfirmed:
+    """2026-08-12 round-2 review fix: `force_unconfirmed` is a distinct
+    signal from `prior_profile=None` — the caller uses it when the only
+    "prior" available IS the current read itself (a same-profile entry
+    retry or stale-fallback reuse), so no NEW independent confirmation has
+    happened. This must fall through to KEEP/SHIFT like an unconfirmed
+    accel zone, NOT collapse to the "no prior ever" unconditional-SKIP path
+    — otherwise a retried entry would silently revert to pre-persistence-gate
+    behavior while looking identical in the logs to a genuine decision."""
+
+    def test_force_unconfirmed_falls_through_to_keep_with_no_prior_profile(self):
+        current = _accel_profile(6820, spot=6800)
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg,
+            prior_profile=None, force_unconfirmed=True,
+        )
+        assert r.action == AdjustAction.KEEP
+        assert "UNCONFIRMED" in r.reason
+        assert "no new independent confirmation" in r.reason
+
+    def test_force_unconfirmed_falls_through_to_shift_when_decel_wall_present(self):
+        contracts = [_contract(6820, "call", 200000)]
+        for offset in range(-30, 35, 5):
+            if offset != 0:
+                contracts.append(_contract(6820 + offset, "call", 2000))
+        contracts += [_contract(6870, "put", 100000), _contract(6875, "put", 100000)]
+        current = _profile(contracts, spot=6800)
+        cfg = AdjusterConfig(
+            accel_min_pct=0.01, decel_min_pct=0.01, max_shift_pts=70,
+            accel_peak_persistence_enabled=True,
+        )
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg,
+            prior_profile=None, force_unconfirmed=True,
+        )
+        assert r.action == AdjustAction.SHIFT
+        assert "UNCONFIRMED" in r.reason
+
+    def test_force_unconfirmed_ignored_when_persistence_disabled(self):
+        # Kill switch still wins — force_unconfirmed must not matter if the
+        # feature itself is off.
+        current = _accel_profile(6820, spot=6800)
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=False)
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg,
+            prior_profile=None, force_unconfirmed=True,
+        )
+        assert r.action == AdjustAction.SKIP
+
+    def test_put_side_force_unconfirmed_falls_through_to_keep(self):
+        current = _accel_profile(6780, spot=6800)
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_put_strike(
+            spot=6800, proposed_short=6780, profile=current, config=cfg,
+            prior_profile=None, force_unconfirmed=True,
+        )
+        assert r.action == AdjustAction.KEEP
+        assert "UNCONFIRMED" in r.reason
+
+
+class TestAccelPeakPersistenceToleranceBoundary:
+    """<= semantics on accel_peak_persistence_tolerance_pts: a drift exactly
+    equal to the tolerance must still count as confirmed (not just strictly
+    less than)."""
+
+    def test_skip_fires_when_drift_exactly_equals_tolerance(self):
+        prior = _accel_profile(6810, spot=6800)
+        current = _accel_profile(6820, spot=6800)  # drift = 10 = default tolerance
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg, prior_profile=prior,
+        )
+        assert r.action == AdjustAction.SKIP
+
+    def test_keep_when_drift_one_point_past_tolerance(self):
+        prior = _accel_profile(6809, spot=6800)
+        current = _accel_profile(6820, spot=6800)  # drift = 11 > default 10pt tolerance
+        cfg = AdjusterConfig(accel_min_pct=0.01, accel_peak_persistence_enabled=True)
+        r = adjust_call_strike(
+            spot=6800, proposed_short=6820, profile=current, config=cfg, prior_profile=prior,
+        )
+        assert r.action == AdjustAction.KEEP

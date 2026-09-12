@@ -1,7 +1,25 @@
 [Unit]
-Description=HYDRA Variant B (Brandon Trojan Horse stack: TP@80% live, GEX/overlay/breach shadow; dynamic MKT-027 widths; dry-run)
-After=network.target token_keeper.service
-Wants=token_keeper.service
+Description=HYDRA Variant B (Brandon Trojan Horse stack — narrow widths + 7-slot grid + 7c — LIVE paper)
+# OAuth 1.0a is gateway-free and headless — no IB Gateway, no token-keeper
+# service. network-online.target so the OAuth handshake to api.ibkr.com
+# has DNS+TLS available at startup. P7-audit / Polish A-X2: the previous
+# version of this file depended on token_keeper.service which is dead on
+# this branch — variant would have failed to start on a clean VM.
+After=network-online.target
+Wants=network-online.target
+# Audit #2: this variant MUST proxy through the shared calypso-broker session
+# (CALYPSO_BROKER_URL below). IBKR allows ONE brokerage session per username,
+# so if this unit started without the URL it would open its OWN session and
+# re-trigger the eviction crash-loop. Order after the broker so it is up first.
+Wants=calypso-broker.service
+After=calypso-broker.service
+# Restart rate-limiter. StartLimitIntervalSec/StartLimitBurst MUST be in
+# [Unit]; in [Service] systemd silently ignores them (P7-audit H5).
+# 2026-06-03: 5→20 so a multi-min broker blip (broker self-heals) auto-recovers
+# instead of going permanently 'failed'; the bot also now WAITS for the broker
+# (main.py). Backstop only; still catches a genuine crash-loop.
+StartLimitIntervalSec=600
+StartLimitBurst=20
 
 [Service]
 Type=simple
@@ -10,21 +28,83 @@ Group=calypso
 WorkingDirectory=/opt/calypso
 Environment="HYDRA_VARIANT_ID=b"
 Environment="PYTHONUNBUFFERED=1"
+# Matches calypso-broker.service's existing setting — see hydra.service's
+# copy of this comment for the full reasoning (2026-08-04).
+Environment="GCP_PROJECT=calypso-trading-bot"
+# Route all IBKR access through the shared broker (drop-in default committed so
+# a clean redeploy reproduces broker-proxy mode, not direct-session mode).
+Environment="CALYPSO_BROKER_URL=http://127.0.0.1:8788"
+
+# Variant-isolated state file paths (Polish Item 5 — pre-start snapshot).
+# Each variant has its own data/variant_<id>/ tree so the variants don't
+# collide on state writes. The snapshot script reads these env vars to
+# pick the right state file + snapshot dir.
+Environment="STATE_FILE=/opt/calypso/data/variant_b/hydra_state.json"
+Environment="SNAPSHOT_DIR=/opt/calypso/data/variant_b/state_snapshots"
+
+# ─── IBKR OAuth 1.0a credentials (P7 Step 4) ────────────────────────────
+# Variant B talks to IBKR's paper account (same credentials as the canonical
+# bot — they query the same paper account; B is dry-run so it does NOT
+# place real paper orders, but it DOES need real-time data via the same
+# OAuth session). Polish A-X2: previous version had NO LoadCredentialEncrypted
+# entries → variant would have failed on the first load_credentials call.
+LoadCredentialEncrypted=ibkr_consumer_key:/etc/calypso/ibkr/consumer_key.cred
+LoadCredentialEncrypted=ibkr_access_token:/etc/calypso/ibkr/access_token.cred
+LoadCredentialEncrypted=ibkr_access_token_secret:/etc/calypso/ibkr/access_token_secret.cred
+LoadCredentialEncrypted=ibkr_signature_pem:/etc/calypso/ibkr/signature.pem.cred
+LoadCredentialEncrypted=ibkr_encryption_pem:/etc/calypso/ibkr/encryption.pem.cred
+LoadCredentialEncrypted=ibkr_dhparam_pem:/etc/calypso/ibkr/dhparam.pem.cred
+
 # Polygon API key for the Brandon GEX features. Create /etc/calypso/polygon.env
 # with:  POLYGON_API_KEY=pk_xxxxxxxxxxxxxxxxxxxxxxxx
 # The leading dash makes it optional — if the file is absent, GEX features
 # silently disable (logged warning, no crash) and only TP + narrow_spread
 # stay active.
 EnvironmentFile=-/etc/calypso/polygon.env
+
+# Pre-start state-file snapshot (Polish Item 5). Variant-aware via the
+# STATE_FILE / SNAPSHOT_DIR env vars set above.
+ExecStartPre=/opt/calypso/scripts/pre_start_snapshot.sh
+
 ExecStart=/opt/calypso/.venv/bin/python -m bots.hydra.main --config bots/hydra/config/config_variant_b.json
+
+TimeoutStartSec=120
 Restart=always
 RestartSec=30
-StartLimitInterval=600
-StartLimitBurst=5
+# 100s (was 30s, bumped 75s on 2026-08-03, bumped again 2026-08-04 when the
+# direct-Telegram bypass alert channel added new worst-case blocking time
+# to the same failure tail): safety margin while a same-day shutdown-delay
+# finding on this process family was ROOT-CAUSED AND FIXED on 2026-09-05
+# (commit 3986cdf): CPython's Py_FinalizeEx blocked on grpc-core's
+# process-global native threads; _hard_exit()/os._exit() under the __main__
+# guard bypasses it. Verified: zero "stop-sigterm timed out" across 9 clean
+# B stops since. TimeoutStopSec STAYS AT 100s anyway — do NOT lower it. The
+# APP-phase shutdown legitimately reaches 71s observed / 88s worst case, so a
+# shorter timeout would SIGKILL the live seat mid-order-placement. The margin
+# is for the in-flight work below, not for the (now fixed) hang.
+# — see bots/hydra/__init__.py version history and hydra.service's
+# TimeoutStopSec comment for the exact worst-case math this must exceed:
+# 55s order-fill HTTP call + 11s Pub/Sub alert retry + 2s dead-letter flock
+# + 10s Telegram-bypass credential fetch + 10s Telegram POST retry = 88s).
+KillSignal=SIGTERM
+TimeoutStopSec=100
+
 StandardOutput=journal
 StandardError=journal
 SyslogIdentifier=hydra_variant_b
-TimeoutStopSec=30
+
+# ─── Sandboxing (defense-in-depth, parity with hydra.service) ────────────
+# IMPORTANT: same sandboxing posture as the canonical bot. The variant
+# also holds decrypted OAuth keys; the same threat model applies.
+# LoadCredentialEncrypted= runs BEFORE ProtectSystem=strict takes effect.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+# AUD2-L4 — PrivateDevices=yes (ProtectDevices is ignored on systemd 252; see hydra.service)
+PrivateDevices=yes
+ReadWritePaths=/opt/calypso
 
 [Install]
 WantedBy=multi-user.target

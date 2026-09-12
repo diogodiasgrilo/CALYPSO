@@ -19,8 +19,20 @@ from shared.ib_retry import (
     CircuitBreakerOpen,
     CircuitState,
     RetryPolicy,
+    ShutdownRequested,
+    SHUTDOWN_EVENT,
     retry_with_backoff,
 )
+
+
+@pytest.fixture(autouse=True)
+def _clear_shutdown_event():
+    """SHUTDOWN_EVENT is process-wide global state (shared.ib_retry) — clear
+    it before AND after every test in this file so a test that sets it (or a
+    future test added carelessly) can never leak into an unrelated test."""
+    SHUTDOWN_EVENT.clear()
+    yield
+    SHUTDOWN_EVENT.clear()
 
 
 # ─── CircuitBreaker ─────────────────────────────────────────────────────────
@@ -58,19 +70,21 @@ class TestCircuitBreakerConsecutiveFailures:
 
 class TestCircuitBreakerFailureRate:
     def test_low_volume_does_not_trip(self):
+        # Tall consecutive threshold so ONLY the failure-rate path can trip;
+        # this lets us exercise the real under-window guard via record_failure().
         cb = CircuitBreaker(
-            name="t", window_size=20, failure_rate_threshold=0.5,
+            name="t",
+            consecutive_failures_threshold=999,  # disable consecutive trip
+            window_size=20,
+            failure_rate_threshold=0.5,
         )
-        # Only 5 outcomes — under window_size, rate not yet evaluable
-        for _ in range(5):
+        # Drive failures through the public API, strictly below window_size.
+        # Each record_failure() invokes _failure_rate_exceeded(), which must
+        # decline to trip while the rolling window is not yet full.
+        for _ in range(window_failures := 19):
             cb.record_failure()
-        # consecutive_failures_threshold (default 5) WOULD trip — adjust
-        # for this test by giving us a tall consecutive threshold
-        cb._consecutive_failures = 0
-        cb._state = CircuitState.CLOSED  # reset
-        for _ in range(5):
-            cb._outcomes.append((time.monotonic(), False))
-        assert cb.state == CircuitState.CLOSED  # under window_size
+        assert window_failures < cb.window_size
+        assert cb.state == CircuitState.CLOSED  # under window_size — no trip
 
     def test_high_rate_trips_when_window_full(self):
         cb = CircuitBreaker(
@@ -142,9 +156,16 @@ class TestCircuitBreakerReset:
 
 
 class TestRetryPolicy:
-    def test_429_is_retryable(self):
+    def test_429_is_NOT_retryable(self):
+        # IBKR-audit #9: a 429 puts the IP in a ~10-min penalty box (repeat
+        # offenders permanently blocked), so it must NOT be retried — it surfaces
+        # immediately and _ib_call enters a fail-fast cooldown.
         pol = RetryPolicy()
-        assert pol.is_retryable(Exception("429 Too Many Requests"))
+        assert not pol.is_retryable(Exception("429 Too Many Requests"))
+
+        class _E429(Exception):
+            status_code = 429
+        assert not pol.is_retryable(_E429("Too Many Requests"))
 
     def test_5xx_is_retryable(self):
         pol = RetryPolicy()
@@ -169,6 +190,61 @@ class TestRetryPolicy:
     def test_arbitrary_error_is_NOT_retryable(self):
         pol = RetryPolicy()
         assert not pol.is_retryable(ValueError("bad input"))
+
+    # ─── IBKR 5xx-misuse patterns (discovered 2026-05-17 paper smoke) ──
+    # IBKR returns 5xx status codes for several conditions that are
+    # semantically permanent (404-equivalent). is_retryable MUST treat
+    # these as non-retryable to avoid wasting backoff budget and tripping
+    # the orders breaker on transient lookups.
+
+    def test_ibkr_503_order_not_found_is_NOT_retryable(self):
+        """get_order_status({purged_id}) returns 503 with body
+        '{"error":"Order X is not found","statusCode":503}'. Despite the
+        503, the order will never come back — short-circuit immediately.
+        """
+        pol = RetryPolicy()
+        exc = Exception(
+            "IbkrClient: response error :: 503 :: Service Unavailable :: "
+            '{"error":"Order 893931734 is not found","statusCode":503}'
+        )
+        assert not pol.is_retryable(exc), (
+            "503-with-'is not found'-body must NOT retry — it's IBKR's "
+            "misuse of 503 for what's logically a 404"
+        )
+
+    def test_ibkr_cancel_on_terminated_order_is_NOT_retryable(self):
+        """Cancelling an already-filled/cancelled order returns
+        '400 Bad Request' (sometimes 503) with body containing
+        'Order is filled or canceled'. Don't retry."""
+        pol = RetryPolicy()
+        exc = Exception(
+            "IbkrClient: response error :: 400 :: Bad Request :: "
+            '{"error":"Order Message:\\nSELL 1 Combo\\nOrder is filled or canceled"}'
+        )
+        assert not pol.is_retryable(exc)
+
+    def test_ibkr_already_cancelled_variants_NOT_retryable(self):
+        """Both spellings: 'cancel' (US) and 'cancelled' substring catches."""
+        pol = RetryPolicy()
+        for msg in (
+            "503 Service Unavailable: order is already cancelled",
+            "503 Service Unavailable: order is already canceled",
+            "400 Bad Request: already filled",
+        ):
+            assert not pol.is_retryable(Exception(msg)), (
+                f"Should not retry permanent-error variant: {msg!r}"
+            )
+
+    def test_generic_503_still_retryable(self):
+        """Don't over-correct — a vanilla 503 without a known permanent-error
+        body still indicates transient server issue and SHOULD retry."""
+        pol = RetryPolicy()
+        assert pol.is_retryable(Exception("503 Service Unavailable")), (
+            "Plain 503 without permanent-error body must still retry"
+        )
+        assert pol.is_retryable(Exception(
+            "503 Service Unavailable: temporary upstream failure"
+        ))
 
     def test_delay_grows_exponentially(self):
         pol = RetryPolicy(base_delay_s=1.0, jitter_fraction=0.0)
@@ -209,7 +285,10 @@ class TestRetryDecorator:
         assert fn.call_count == 3
 
     def test_exhausts_retries_then_raises(self):
-        fn = MagicMock(side_effect=Exception("503"))
+        # Realistic retryable 5xx token (leading HTTP status line). A bare
+        # "503" with no status framing is intentionally NOT retryable now —
+        # see RetryPolicy.is_retryable / _HTTP_RETRYABLE_CODE_RE.
+        fn = MagicMock(side_effect=Exception("503 Service Unavailable"))
         wrapped = retry_with_backoff(
             RetryPolicy(max_attempts=3, base_delay_s=0.001, jitter_fraction=0)
         )(fn)
@@ -252,7 +331,8 @@ class TestRetryDecorator:
 
     def test_breaker_records_failure_on_retryable_error(self):
         cb = CircuitBreaker(name="t", consecutive_failures_threshold=10)
-        fn = MagicMock(side_effect=Exception("503"))
+        # Realistic retryable 5xx token (see _HTTP_RETRYABLE_CODE_RE).
+        fn = MagicMock(side_effect=Exception("503 Service Unavailable"))
         wrapped = retry_with_backoff(
             RetryPolicy(max_attempts=3, base_delay_s=0.001, jitter_fraction=0),
             breaker=cb,
@@ -347,3 +427,108 @@ class TestCircuitBreakerWindowCutoff:
         # Now record one fresh success
         cb.record_success()
         assert cb.state == CircuitState.CLOSED
+
+
+# ─── Cooperative shutdown (2026-08-03) ──────────────────────────────────────
+# Found in the 2026-08-03 full-day audit: calypso-broker's shutdown hook
+# blocked the full 30s systemd grace period on an in-flight retry backoff
+# sleep, forcing a SIGKILL of 84 processes. SHUTDOWN_EVENT lets an abortable
+# retry bail out immediately instead. See shared/ib_retry.py's module-level
+# docstring for the full incident.
+class TestShutdownAbort:
+    def test_set_before_call_aborts_immediately_fn_never_invoked(self):
+        SHUTDOWN_EVENT.set()
+        fn = MagicMock(return_value="ok")
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=5, base_delay_s=0.001)
+        )(fn)
+        with pytest.raises(ShutdownRequested):
+            wrapped()
+        assert fn.call_count == 0
+
+    def test_set_mid_backoff_aborts_without_exhausting_attempts(self):
+        # fn's first call sets SHUTDOWN_EVENT (simulating SIGTERM arriving
+        # while a retryable failure is being handled) then raises — the
+        # subsequent SHUTDOWN_EVENT.wait(delay) must return True immediately
+        # (the event is already set) rather than sleeping the full delay,
+        # and the wrapper must raise ShutdownRequested instead of retrying.
+        def _side_effect():
+            SHUTDOWN_EVENT.set()
+            raise ConnectionError("connection reset")
+
+        fn = MagicMock(side_effect=_side_effect)
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=5, base_delay_s=5.0, jitter_fraction=0)
+        )(fn)
+        start = time.monotonic()
+        with pytest.raises(ShutdownRequested):
+            wrapped()
+        elapsed = time.monotonic() - start
+        assert fn.call_count == 1  # aborted after the first failure, no retry
+        assert elapsed < 1.0, (
+            f"took {elapsed:.2f}s — should abort near-instantly, not sleep "
+            f"the full 5s backoff"
+        )
+
+    def test_shutdown_requested_chains_the_original_exception(self):
+        def _side_effect():
+            SHUTDOWN_EVENT.set()
+            raise ConnectionError("connection reset")
+
+        fn = MagicMock(side_effect=_side_effect)
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=5, base_delay_s=0.001, jitter_fraction=0)
+        )(fn)
+        try:
+            wrapped()
+            pytest.fail("expected ShutdownRequested")
+        except ShutdownRequested as e:
+            assert isinstance(e.__cause__, ConnectionError)
+
+    def test_abortable_false_ignores_shutdown_runs_full_schedule(self):
+        # THE safety-critical negative test: order-family calls
+        # (abortable_on_shutdown=False, wired in shared/ib_client.py:_ib_call
+        # for family='orders') must NEVER abort early — abandoning an
+        # in-flight order retry risks leaving a naked/partial leg untracked.
+        SHUTDOWN_EVENT.set()
+        fn = MagicMock(side_effect=Exception("503 Service Unavailable"))
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=3, base_delay_s=0.001, jitter_fraction=0),
+            abortable_on_shutdown=False,
+        )(fn)
+        with pytest.raises(Exception, match="503"):
+            wrapped()
+        assert fn.call_count == 3  # full schedule ran despite SHUTDOWN_EVENT
+
+    def test_abortable_false_succeeds_normally_even_with_shutdown_set(self):
+        SHUTDOWN_EVENT.set()
+        fn = MagicMock(return_value="ok")
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=3, base_delay_s=0.001),
+            abortable_on_shutdown=False,
+        )(fn)
+        assert wrapped() == "ok"
+        assert fn.call_count == 1
+
+    def test_non_retryable_exception_not_masked_by_shutdown_check(self):
+        # A non-retryable error must still propagate as itself (not get
+        # swallowed/reclassified) regardless of SHUTDOWN_EVENT state.
+        SHUTDOWN_EVENT.clear()
+        fn = MagicMock(side_effect=ValueError("bad input"))
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=5, base_delay_s=0.001)
+        )(fn)
+        with pytest.raises(ValueError, match="bad input"):
+            wrapped()
+        assert fn.call_count == 1
+
+    def test_clear_shutdown_event_restores_normal_retry_behavior(self):
+        # Sanity check on the autouse fixture itself: a previously-set event
+        # (cleared by the fixture between tests) must not leak.
+        assert not SHUTDOWN_EVENT.is_set()
+        fn = MagicMock(side_effect=[Exception("503 Service Unavailable"), "ok"])
+        wrapped = retry_with_backoff(
+            RetryPolicy(max_attempts=3, base_delay_s=0.001, jitter_fraction=0)
+        )(fn)
+        assert wrapped() == "ok"
+        assert fn.call_count == 2

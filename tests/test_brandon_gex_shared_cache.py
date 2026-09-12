@@ -4,6 +4,7 @@ import json
 import os
 import sys
 import time
+from dataclasses import replace
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -58,6 +59,52 @@ class TestSharedCacheRoundTrip:
         assert tuple((d.strike, d.contract_type, d.delta, d.iv) for d in loaded.deltas) == tuple(
             (d.strike, d.contract_type, d.delta, d.iv) for d in p.deltas
         )
+
+    def test_chain_hydration_telemetry_survives_round_trip(self):
+        # 2026-08-03: chain_total/hydrated_count are embedded on the profile
+        # specifically so a sibling variant reusing this cached profile (B/C
+        # share entry slots) gets the CORRECT hydration numbers for the
+        # decision it's actually making, not a stale per-instance counter
+        # from its own last unrelated fetch (see bots/hydra/brandon/strategy.py
+        # ::_brandon_get_gex_profile for the full incident).
+        p = _sample_profile()
+        p = replace(p, chain_total=492, hydrated_count=80)
+        gex_shared_cache.save_shared_profile(p, underlying="SPX")
+        loaded = gex_shared_cache.load_shared_profile(
+            underlying="SPX", expiry=p.expiry, max_age_seconds=300,
+        )
+        assert loaded is not None
+        assert loaded.chain_total == 492
+        assert loaded.hydrated_count == 80
+
+    def test_legacy_cache_file_without_telemetry_fields_loads_as_zero(self, _tmp_cache_dir):
+        # A cache file written by pre-2026-08-03 code has no chain_total/
+        # hydrated_count keys at all — must load as 0 (== "unknown"), not
+        # raise KeyError. Write the legacy JSON shape directly rather than
+        # via save_shared_profile (which always writes current-format data).
+        p = _sample_profile()
+        legacy_payload = {
+            "underlying": "SPX",
+            "expiry": p.expiry.isoformat(),
+            "fetched_at": p.fetched_at.isoformat(),
+            "spot": p.spot,
+            "strikes": [[s.strike, s.gex] for s in p.strikes],
+            "deltas": [
+                {"strike": d.strike, "contract_type": d.contract_type,
+                 "delta": d.delta, "iv": d.iv}
+                for d in p.deltas
+            ],
+            # deliberately no "chain_total" / "hydrated_count" keys
+        }
+        cache_file = _tmp_cache_dir / "brandon_gex_profile.json"
+        cache_file.write_text(json.dumps(legacy_payload))
+
+        loaded = gex_shared_cache.load_shared_profile(
+            underlying="SPX", expiry=p.expiry, max_age_seconds=300,
+        )
+        assert loaded is not None
+        assert loaded.chain_total == 0
+        assert loaded.hydrated_count == 0
 
     def test_load_returns_none_when_file_missing(self):
         loaded = gex_shared_cache.load_shared_profile(

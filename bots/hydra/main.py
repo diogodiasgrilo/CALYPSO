@@ -22,16 +22,16 @@ Strategy Summary:
 
 Usage:
 ------
-    python -m bots.hydra.main              # Run in SIM environment
-    python -m bots.hydra.main --live       # Run in LIVE environment
-    python -m bots.hydra.main --dry-run    # Simulate without orders
-    python -m bots.hydra.main --status     # Show current status only
+    python -m bots.hydra.main              # Connect to IBKR paper, place real paper orders
+    python -m bots.hydra.main --dry-run    # Connect to IBKR paper, simulate orders only
+    python -m bots.hydra.main --status     # Show current status and exit
 
-Author: Trading Bot Developer
-Date: 2026-02-04
+This branch is IBKR-paper only. The legacy `--live` flag is a no-op
+(retained for CLI back-compat).
 
 See docs/HYDRA_STRATEGY_SPECIFICATION.md for full HYDRA details.
-See docs/MEIC_STRATEGY_SPECIFICATION.md for base MEIC details.
+See docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md for the Saxo→IBKR
+migration history.
 """
 
 import os
@@ -41,6 +41,7 @@ import signal
 import argparse
 import logging
 import subprocess
+import threading
 from datetime import datetime
 
 # Ensure project root is in path for imports when running as script
@@ -49,7 +50,11 @@ if _project_root not in sys.path:
     sys.path.insert(0, _project_root)
 
 # Import shared modules
-from shared.saxo_client import SaxoClient
+from shared.ib_client import (
+    IBClient, IBConfig, IBClientError, IBAuthError, IBConnectionError,
+)
+from shared.ib_oauth import load_credentials, resolve_environment
+from shared.broker_client import BrokerClient, BrokerError
 from shared.logger_service import setup_logging
 from shared.market_hours import (
     is_market_open, get_market_status_message, calculate_sleep_duration,
@@ -58,9 +63,11 @@ from shared.market_hours import (
 from shared.config_loader import ConfigLoader
 from shared.secret_manager import is_running_on_gcp
 from shared.alert_service import AlertType, AlertPriority
+# Polish Item 1: Telegram alert hooks for IBKR-specific failure modes.
+from bots.hydra.alert_hooks import IBKRAlertHooks
 
 # Import bot-specific strategy
-from bots.hydra.strategy import HydraStrategy
+from bots.hydra.strategy import HydraStrategy, OVERNIGHT_CHECK_WINDOW_END_ET
 
 # Configure main logger
 logger = logging.getLogger(__name__)
@@ -71,12 +78,88 @@ USE_WEBSOCKET_STREAMING = False
 # Global flag for graceful shutdown
 shutdown_requested = False
 
+# 2026-08-03: a reference to the running strategy instance, set once
+# build_strategy() succeeds (see run_bot()) — purely so signal_handler can log
+# a "what were you doing" snapshot on SIGTERM. Found in the full-day audit:
+# hydra/hydra_variant_{b,d,e} needed a forced SIGKILL during a same-day
+# restart and the exact reason was NOT fully root-caused (unlike
+# calypso-broker's confirmed ensure_connected-retry hang, fixed separately in
+# shared/ib_retry.py) — this diagnostic exists so, IF it recurs, the next
+# incident's logs pinpoint exactly what the process was doing instead of
+# requiring another round of journalctl archaeology. Read-only / best-effort;
+# never used to alter shutdown behavior.
+_active_strategy = None
+
 
 def signal_handler(signum, frame):
     """Handle shutdown signals (CTRL+C, SIGTERM)."""
     global shutdown_requested
     logger.info(f"\nShutdown signal received ({signum}). Initiating graceful shutdown...")
+    try:
+        strat = _active_strategy
+        if strat is not None:
+            state = getattr(strat, "state", None)
+            current_entry = getattr(strat, "_current_entry", None)
+            entry_num = getattr(current_entry, "entry_number", None) if current_entry else None
+            logger.info(
+                "SIGTERM-DIAG: strategy state=%s entry_in_progress=%s current_entry=%s",
+                state, getattr(strat, "_entry_in_progress", None), entry_num,
+            )
+    except Exception as diag_exc:  # noqa: BLE001 — diagnostics must never block shutdown
+        logger.warning("SIGTERM-DIAG: snapshot failed (non-fatal): %s", diag_exc)
     shutdown_requested = True
+
+
+def close_alert_service_safely(strategy, trade_logger) -> None:
+    """Best-effort AlertService.close() call from the shutdown sequence.
+
+    Part of the 2026-08-18 shutdown-hang investigation (see
+    AlertService.close()'s own docstring for the full writeup) — releases
+    the Pub/Sub publisher's gRPC channel promptly instead of leaving it to
+    GC. Never raises: a failure here must not prevent the rest of shutdown
+    (in particular the "Shutdown complete" log line main.py's own
+    idempotency/restart handling depends on) from completing."""
+    if strategy is None:
+        return
+    try:
+        strategy.alert_service.close()
+    except Exception as e:  # noqa: BLE001 — must never block shutdown
+        trade_logger.log_event(f"alert_service.close() failed (non-fatal): {e}")
+
+
+def log_shutdown_diagnostics(trade_logger) -> None:
+    """SHUTDOWN-DIAG: log what's still alive right before the final
+    "Shutdown complete" line.
+
+    The original SIGTERM-DIAG (signal_handler, above) captures a snapshot
+    at signal-RECEIPT time — nothing about live threads. That gap is what
+    made the 2026-08-18 shutdown-hang investigation (strategy processes
+    occasionally taking 44-82+ seconds, sometimes past the 100s systemd
+    TimeoutStopSec, to actually exit after this point) require a full
+    forensic pass instead of reading a log line. threading.enumerate()
+    cannot see grpc-core's native C threads (confirmed during that
+    investigation — they're spawned via grpc_core::Thread/pthread_create,
+    entirely outside Python's thread registry), so this also reads
+    /proc/self/status's native thread count on Linux as a coarse
+    cross-check. Best-effort only; never raises."""
+    try:
+        py_threads = [t.name for t in threading.enumerate()]
+        native_thread_count = None
+        try:
+            with open("/proc/self/status") as f:
+                for line in f:
+                    if line.startswith("Threads:"):
+                        native_thread_count = line.split()[1]
+                        break
+        except OSError:
+            pass  # non-Linux or /proc unavailable — best-effort only
+        trade_logger.log_event(
+            f"SHUTDOWN-DIAG: {len(py_threads)} Python thread(s) alive {py_threads}; "
+            f"native OS threads (includes non-Python, e.g. grpc-core): "
+            f"{native_thread_count or 'unknown'}"
+        )
+    except Exception as e:  # noqa: BLE001 — diagnostics must never block shutdown
+        trade_logger.log_event(f"SHUTDOWN-DIAG logging failed (non-fatal): {e}")
 
 
 def interruptible_sleep(seconds: int, check_interval: int = 1) -> bool:
@@ -177,66 +260,170 @@ def load_config(config_path: str = "bots/hydra/config/config.json") -> dict:
     return config
 
 
+def _variant_bot_name() -> str:
+    """Derive the monitor-log bot_name from HYDRA_VARIANT_ID so the shared
+    logs/monitor.log can attribute each line to the variant that emitted it.
+
+    All three variants (A/B/C) append to the SAME logs/monitor.log, where each
+    line is tagged with the bot_name column. Variant A leaves HYDRA_VARIANT_ID
+    unset (-> "HYDRA"); B/C set it (hydra_variant_b/c.service) -> "HYDRA_B" /
+    "HYDRA_C". Mirrors the variant read at kill_existing_instances():125.
+    """
+    variant = (os.environ.get("HYDRA_VARIANT_ID", "") or "").strip().lower()
+    return f"HYDRA_{variant.upper()}" if variant else "HYDRA"
+
+
 def print_banner():
-    """Print the application banner."""
-    banner = """
+    """Print the application banner, driven by the strategy taxonomy.
+
+    The banner is built from shared.strategy_taxonomy (display name + comparability
+    group + structure/pnl-shape/cadence/status) keyed on HYDRA_VARIANT_ID, so every
+    variant — including future ones — gets a correct, non-misleading startup banner
+    without a hardcoded ``if variant == "d"`` special-case.
+    """
+    from shared import strategy_taxonomy as tax
+
+    m = tax.meta()
+    g = tax.group()
+    banner = f"""
     ╔═══════════════════════════════════════════════════════════════╗
-    ║                                                               ║
-    ║         HYDRA 0DTE TRADING BOT                                ║
-    ║         ══════════════════════                                ║
-    ║                                                               ║
-    ║         Multi-Entry Iron Condors (SPX 0DTE)                   ║
-    ║         3 Entries | Credit Gates | Buffer Decay               ║
-    ║                                                               ║
-    ║         #1: 10:45 ET (base)                                   ║
-    ║         #2: 11:15 ET (base)                                   ║
-    ║         #3: 14:00 ET (conditional Up/Down-day)                ║
-    ║                                                               ║
-    ║         Version: 1.24.0                                       ║
-    ║         API: Saxo Bank OpenAPI                                ║
-    ║                                                               ║
+    ║  CALYPSO · HYDRA on Interactive Brokers (paper)
+    ║  ─────────────────────────────────────────────
+    ║  Strategy : {m.display_name}  [{m.id.upper()}]
+    ║  Group    : {g.label}  ({m.structure_family} · {m.pnl_shape})
+    ║  Cadence  : {m.dte_class}   Status: {m.status}
+    ║  Version  : 2.0.0-rc.1 (IBKR-standalone)
     ╚═══════════════════════════════════════════════════════════════╝
     """
     print(banner)
+
+
+def _build_broker():
+    """Construct the broker the strategy talks to.
+
+    If CALYPSO_BROKER_URL is set, return a BrokerClient that proxies to the
+    shared calypso-broker service (which owns the ONE IBKR session — see
+    docs/migration/BROKER_SESSION_SERVICE_DESIGN.md), so this process opens NO
+    IBKR session of its own. This is how A/B/C run concurrently without the
+    one-session-per-username eviction war. Otherwise (unset), return a direct
+    IBClient that owns its own session (legacy / single-bot mode). Either object
+    is a drop-in: it answers connect()/ensure_connected() + the 16 data methods.
+    """
+    broker_url = os.environ.get("CALYPSO_BROKER_URL")
+    if broker_url:
+        return BrokerClient(broker_url)
+    return IBClient(IBConfig(credentials=load_credentials(resolve_environment())))
 
 
 def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config_path: str = "bots/hydra/config/config.json"):
     """Run the main trading bot loop."""
     global shutdown_requested
 
-    # Initialize logging service
-    trade_logger = setup_logging(config, bot_name="HYDRA")
+    # Initialize logging service. bot_name is variant-derived so the shared
+    # monitor.log can attribute each line to A/B/C (was hardcoded "HYDRA").
+    trade_logger = setup_logging(config, bot_name=_variant_bot_name())
     trade_logger.log_event("=" * 60)
     trade_logger.log_event("HYDRA BOT STARTING")
     trade_logger.log_event(f"Mode: {'DRY RUN (Simulation)' if dry_run else 'LIVE TRADING'}")
     trade_logger.log_event(f"Check Interval: {check_interval} seconds")
     trade_logger.log_event("=" * 60)
 
-    # Initialize Saxo client
-    client = SaxoClient(config)
-
-    # Authenticate with Saxo API
-    trade_logger.log_event("Authenticating with Saxo Bank API...")
-    if not client.authenticate():
-        trade_logger.log_error("Failed to authenticate. Please check your credentials.")
+    # Initialize the IBKR broker client (paper account — never live).
+    # P7-audit H4: IBClient.connect() returns True or RAISES — it never
+    # returns False — so a bare `if not broker.connect()` is dead code.
+    # Catch the real exception, shut the logger down cleanly, exit.
+    trade_logger.log_event("Connecting to Interactive Brokers (paper)...")
+    try:
+        broker = _build_broker()
+    except Exception as e:
+        trade_logger.log_error(f"Failed to build broker client: {e}")
+        # 2026-08-18 shutdown-hang investigation, round-1 review: this early
+        # exit bypasses run_bot()'s main finally: block entirely, so without
+        # this call any AlertService/Secret-Manager grpc state from code run
+        # before this point would get zero cleanup or diagnostics. No
+        # `strategy` exists yet at this point in the function — pass None
+        # explicitly (close_alert_service_safely no-ops on it).
+        close_alert_service_safely(None, trade_logger)
+        log_shutdown_diagnostics(trade_logger)
         trade_logger.shutdown()
         return
 
-    trade_logger.log_event("Authentication successful!")
+    # 2026-06-03 incident fix: in BROKER mode the bot WAITS for the shared
+    # calypso-broker instead of crashing. The broker self-heals in its own
+    # maintenance loop after an IBKR session-bridge blip; restarting THIS bot
+    # can't fix a broker-side fault and just crash-loops into systemd's
+    # StartLimit (which took all bots down today). A BrokerError at startup
+    # means the broker isn't holding a session yet — wait + retry rather than
+    # exit. LEGACY direct-IBClient mode keeps fail-fast (its connect failure is
+    # a genuine auth problem and a fresh-connect restart re-auths).
+    _is_broker_mode = isinstance(broker, BrokerClient)
+    _connect_attempts = 0
+    _CONNECT_MAX_ATTEMPTS = 48  # ~12 min at 15s, then give up (systemd backstop)
+    while True:
+        try:
+            broker.connect()
+            break
+        except BrokerError as e:
+            if not _is_broker_mode or _connect_attempts >= _CONNECT_MAX_ATTEMPTS:
+                trade_logger.log_error(f"Failed to connect to IBKR broker: {e}")
+                # See the matching comment at the broker-build except above.
+                close_alert_service_safely(None, trade_logger)
+                log_shutdown_diagnostics(trade_logger)
+                trade_logger.shutdown()
+                return
+            _connect_attempts += 1
+            trade_logger.log_event(
+                f"calypso-broker not holding a session yet ({e}) — waiting 15s "
+                f"+ retrying (attempt {_connect_attempts}/{_CONNECT_MAX_ATTEMPTS}); not exiting."
+            )
+            if not interruptible_sleep(15):
+                close_alert_service_safely(None, trade_logger)
+                log_shutdown_diagnostics(trade_logger)
+                trade_logger.shutdown()
+                return
+        except (IBAuthError, IBConnectionError, IBClientError) as e:
+            trade_logger.log_error(f"Failed to connect to IBKR: {e}")
+            close_alert_service_safely(None, trade_logger)
+            log_shutdown_diagnostics(trade_logger)
+            trade_logger.shutdown()
+            return
+
+    trade_logger.log_event("IBKR connection successful!")
 
     strategy = None
     try:
-        strategy_cfg = config.get("strategy", {}) or {}
-        brandon_cfg = strategy_cfg.get("brandon") or {}
-        if brandon_cfg.get("enabled", False):
-            from bots.hydra.brandon.strategy import BrandonHydraStrategy
-            trade_logger.log_event("Loading BrandonHydraStrategy (TP / GEX / overlay / narrow-spread)")
-            strategy = BrandonHydraStrategy(client, config, trade_logger, dry_run=dry_run)
-        else:
-            strategy = HydraStrategy(client, config, trade_logger, dry_run=dry_run)
+        # Item 4a: strategy selected by name via the registry (was a hardcoded
+        # if brandon.enabled / else). resolve_strategy_name preserves the legacy
+        # precedence (brandon.enabled wins, else strategy.name, else "hydra"), so
+        # this is behavior-identical for the current config.
+        from bots.hydra.registry import build_strategy, resolve_strategy_name
+        from shared import strategy_taxonomy as _tax
+        selected = resolve_strategy_name(config)
+        # Guardrail (audit AUD-4-F1): the variant->class binding is config-driven
+        # (which --config the unit passes) and enforced nowhere, so a mis-pointed
+        # unit could silently run the wrong strategy under a letter and mis-render
+        # it across every surface. Fail-stop if the runtime-resolved class disagrees
+        # with the taxonomy's expectation for this variant.
+        _tax.assert_class_matches(_tax.variant_id(), selected)
+        trade_logger.log_event(
+            f"Loading strategy: {selected} "
+            f"({_tax.display_name()} [{_tax.variant_id().upper()}] · {_tax.group().label})"
+        )
+        strategy = build_strategy(config, broker, trade_logger, dry_run=dry_run)
+        global _active_strategy
+        _active_strategy = strategy
     except Exception as e:
         trade_logger.log_error(f"Failed to initialize strategy: {e}")
         logger.exception("Strategy initialization failed")
+        # strategy is still None here (build_strategy's assignment never
+        # completed) — passed anyway for clarity; the real value of this
+        # call on THIS path is log_shutdown_diagnostics, since a raise deep
+        # inside build_strategy's __init__ (e.g. AlertService's
+        # PublisherClient construction succeeding, then a later __init__
+        # line raising) can leave grpc-core threads alive with no reference
+        # anywhere to close — see the 2026-08-18 shutdown-hang investigation.
+        close_alert_service_safely(strategy, trade_logger)
+        log_shutdown_diagnostics(trade_logger)
         trade_logger.shutdown()
         return
 
@@ -245,6 +432,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
         trade_logger.log_event("Logging dashboard metrics on startup...")
         strategy.update_market_data()
         strategy.log_account_summary()
+        # Startup/intraday snapshot → default period "Intraday" (Sheets-throttled).
+        # The settlement caller passes period="End of Day" (throttle-exempt); see
+        # the after-hours settlement block below.
         strategy.log_performance_metrics()
         strategy.log_position_snapshot()
 
@@ -258,9 +448,62 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
             flush=True
         )
 
-        trade_logger.log_event("Dashboard metrics logged to Google Sheets")
+        # AUD5: only claim "logged to Google Sheets" when Sheets is actually
+        # enabled (dry-run shadows have it off — the write is a no-op).
+        if trade_logger.google_logger.enabled:
+            trade_logger.log_event("Dashboard metrics logged to Google Sheets")
+        else:
+            trade_logger.log_event("Dashboard metrics updated (Sheets disabled — local/DB only)")
     except Exception as e:
         trade_logger.log_error(f"Failed to log startup dashboard metrics: {e}")
+
+    # L-M10: post-connect instrument resolvability probe. _assert_instrument_
+    # parameterized only checks truthiness; a stale-but-non-empty symbol (e.g. a
+    # leftover Saxo ticker like "US500.I") passes it and then silently fails at
+    # IBKR resolution — the bot then runs BLIND and skips every trade. If the
+    # underlying price is still 0/None after the startup market-data fetch
+    # DURING market hours, treat it as an unresolvable-instrument signal: alert
+    # CRITICAL and refuse to enter the trading loop (loud startup failure beats a
+    # silent runtime blind-spot). Outside market hours a 0 is normal → warn only.
+    try:
+        from shared.market_hours import is_market_open as _mkt_open
+        _px = getattr(strategy, "current_price", 0) or 0
+        _sym = getattr(strategy, "underlying_symbol", "?")
+        _exch = getattr(strategy, "exchange", "?")
+        if _px <= 0:
+            if _mkt_open():
+                msg = (
+                    f"Underlying {_sym} returned NO price at startup during market "
+                    f"hours — the symbol may be stale/unresolvable at the broker "
+                    f"(exchange={_exch}). Refusing to trade blind."
+                )
+                logger.critical(f"L-M10: {msg}")
+                try:
+                    strategy.alert_service.send_alert(
+                        alert_type=AlertType.DATA_QUALITY,
+                        title="HYDRA refusing to start — underlying unresolvable",
+                        message=msg,
+                        priority=AlertPriority.CRITICAL,
+                    )
+                except Exception:
+                    pass
+                # strategy is fully constructed and live here (its
+                # alert_service was just used above) — this early exit
+                # bypasses run_bot()'s main finally: block, so without this
+                # call its Pub/Sub channel would get zero cleanup.
+                close_alert_service_safely(strategy, trade_logger)
+                log_shutdown_diagnostics(trade_logger)
+                trade_logger.shutdown()
+                return
+            else:
+                logger.warning(
+                    f"L-M10: underlying {_sym} has no price at startup (market "
+                    f"closed — normal); will re-verify once the session opens."
+                )
+        else:
+            logger.info(f"L-M10: instrument probe OK — {_sym} priced at {_px:.2f}")
+    except Exception as _probe_exc:
+        logger.warning(f"L-M10 instrument probe skipped (non-fatal): {_probe_exc}")
 
     # Send BOT_STARTED alert. The contracts= kwarg auto-prefixes title with
     # [{N}c] when > 1, so the manual prefix used in Phase 1 T-3 is removed —
@@ -288,28 +531,43 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     except Exception as e:
         trade_logger.log_error(f"Failed to send BOT_STARTED alert: {e}")
 
-    # Initialize Telegram command handler (16 commands incl. /compare)
+    # Initialize the Telegram command handler (16 commands incl. /compare).
+    # POLLER OWNERSHIP (2026-06-14): Telegram getUpdates allows only ONE consumer
+    # per bot token — if every variant polled, the long-poll offset race would
+    # route a /status (etc.) to a RANDOM variant. So ONLY variant A
+    # (HYDRA_VARIANT_ID unset) owns the poller; B/C/D do NOT start their own.
+    # A's /compare aggregates the other variants from their state files. This
+    # also fixes a latent LIVE bug: previously every variant started its own
+    # poller, so B/C already raced A on the shared token.
     from bots.hydra.telegram_commands import TelegramCommandHandler
+    _tg_variant = (os.environ.get("HYDRA_VARIANT_ID", "") or "").strip().lower() or None
     telegram_cmd_handler = TelegramCommandHandler()
-    try:
-        telegram_cmd_handler.start(
-            snapshot_callback=strategy.build_telegram_snapshot,
-            lastday_callback=strategy.build_telegram_lastday,
-            account_callback=strategy.build_telegram_account,
-            status_callback=strategy.build_telegram_status,
-            hermes_callback=strategy.build_telegram_hermes,
-            apollo_callback=strategy.build_telegram_apollo,
-            clio_callback=strategy.build_telegram_clio,
-            week_callback=strategy.build_telegram_week,
-            entry_callback=strategy.build_telegram_entry,
-            stops_callback=strategy.build_telegram_stops,
-            config_callback=strategy.build_telegram_config,
-            compare_callback=strategy.build_telegram_compare,
-            config_path=config_path,
-            active_positions_callback=lambda: len(strategy.daily_state.active_entries),
+    if _tg_variant is not None:
+        trade_logger.log_event(
+            f"Telegram command poller NOT started for variant {_tg_variant.upper()} "
+            f"— only variant A owns the shared bot-token getUpdates poller."
         )
-    except Exception as e:
-        trade_logger.log_error(f"Failed to start Telegram command handler: {e}")
+    else:
+        try:
+            telegram_cmd_handler.start(
+                snapshot_callback=strategy.build_telegram_snapshot,
+                lastday_callback=strategy.build_telegram_lastday,
+                account_callback=strategy.build_telegram_account,
+                status_callback=strategy.build_telegram_status,
+                hermes_callback=strategy.build_telegram_hermes,
+                apollo_callback=strategy.build_telegram_apollo,
+                clio_callback=strategy.build_telegram_clio,
+                week_callback=strategy.build_telegram_week,
+                entry_callback=strategy.build_telegram_entry,
+                stops_callback=strategy.build_telegram_stops,
+                config_callback=strategy.build_telegram_config,
+                compare_callback=strategy.build_telegram_compare,
+                calendars_callback=getattr(strategy, "build_telegram_calendars", None),
+                config_path=config_path,
+                active_positions_callback=lambda: len(strategy.daily_state.active_entries),
+            )
+        except Exception as e:
+            trade_logger.log_error(f"Failed to start Telegram command handler: {e}")
 
     # REST-only mode
     trade_logger.log_event("REST-only mode: WebSocket streaming disabled")
@@ -323,9 +581,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     last_status_time = datetime.now()
     # Heartbeat cadence — drives spread_snapshots, account summary, state file
     # write, and cushion bar updates. Variants pace this looser via
-    # api_pacing_multiplier (variant A = 1.0 → 10s; B at 1.5 → 15s; C at 2.0 → 20s).
-    # Account summary calls Saxo /port/v1/balances every cycle so this is one of
-    # the API-load levers when running 3+ variants.
+    # api_pacing_multiplier (variant A = 1.0 → 10s; B at 2.0 → 20s; C at 2.0 → 20s).
+    # Account summary calls the IBKR balance endpoint every cycle so this is
+    # one of the API-load levers when running 3+ variants.
     pacing = float(getattr(strategy, "api_pacing_multiplier", 1.0) or 1.0)
     status_interval = max(10, int(round(10 * pacing)))
     last_bot_log_time = datetime.now()
@@ -335,6 +593,24 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
     last_day = get_us_market_time().date()
     consecutive_errors = 0
     daily_summary_sent_date = None
+    last_session_check_date = None  # P7: once-per-day IBKR re-auth gate
+    last_intraday_session_check = datetime.min  # P7-audit H6: periodic re-check
+    INTRADAY_SESSION_CHECK_INTERVAL_S = 15 * 60  # 15 min
+    # 2026-06-03: in broker mode, ride out a transiently-down broker (it
+    # self-heals) by pausing trading + re-checking, instead of exiting into a
+    # StartLimit crash-loop. Track the outage so we alert/log ONCE per blip.
+    broker_outage_active = False
+    BROKER_OUTAGE_RECHECK_S = 20  # re-check cadence while waiting for the broker
+
+    # Polish Item 1: IBKR-specific Telegram alert bridge. Polls the broker's
+    # circuit-breaker state + snapshot warmup exhaustion counter once per
+    # iteration. Idempotent per state transition (each CLOSED→OPEN fires
+    # ONE alert; stuck-OPEN reminders every 15 min, capped 4/day per
+    # family). main.py calls on_ensure_connected_failed() at both
+    # ensure_connected() gates so the operator doesn't see the bot
+    # vanish silently.
+    alert_hooks = IBKRAlertHooks(broker, strategy.alert_service)
+    trade_logger.log_event("IBKR alert hooks initialized (breaker / warmup / re-auth)")
 
     try:
         while not shutdown_requested:
@@ -344,8 +620,28 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 if today != last_day:
                     trade_logger.log_event("New trading day detected - resetting strategy")
                     strategy._reset_for_new_day()
+                    # 2026-08-31 forensic: `last_day` is set UNCONDITIONALLY here
+                    # regardless of whether _reset_for_new_day() succeeded — this
+                    # is intentional, don't "fix" it in isolation. STATE-004's own
+                    # retry budget (strategy.py: STATE004_MAX_ATTEMPTS /
+                    # _read_open_positions_for_new_day_reset) is what protects a
+                    # transient broker blip now; without it, a bare failure here
+                    # with this line still unconditional would leave the bot
+                    # silently stuck in DAILY_COMPLETE forever (this loop would
+                    # never attempt the reset again today).
                     last_day = today
                     last_snapshot_time = None
+                    # Polish Item 1: reset per-day alert flags (first-of-day
+                    # warmup-exhaustion alert + 25+ severe alert + per-day
+                    # stuck-OPEN reminder counts).
+                    alert_hooks.mark_new_day()
+
+                # Polish Item 1: poll IBKR-specific signals → Telegram on
+                # state transitions. Cheap when nothing changes (dict +
+                # int comparison per family). Wrapped in its own
+                # exception-handler inside the hook so a bug here cannot
+                # propagate.
+                alert_hooks.poll()
 
                 # Check if market is open
                 if not is_market_open():
@@ -363,9 +659,9 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                         close_reason = ""
 
                     # After-hours settlement reconciliation
-                    # FIX #39: Check settlement until complete, not just during 4-5 PM window
-                    # Saxo settles 0DTE options anytime between 5 PM - 2 AM ET, so we need to
-                    # keep checking until settlement_complete returns True (all positions cleared)
+                    # FIX #39: Check settlement until complete, not just during 4-5 PM window.
+                    # 0DTE options settle after the close, so we keep checking until
+                    # settlement_complete returns True (all positions cleared).
                     today_date = now_et.date()
                     if not is_weekend() and daily_summary_sent_date != today_date:
                         try:
@@ -375,20 +671,54 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                             settlement_complete = False
 
                         if not settlement_complete:
-                            trade_logger.log_event("Settlement pending - positions still open on Saxo")
+                            trade_logger.log_event("Settlement pending - positions still open")
                         else:
                             # FIX #48: Don't send empty daily summary on pre-market startup
                             # If settlement is "complete" because there's nothing to settle AND
                             # we're before market open with no trading activity, skip the summary
+                            # 2026-08-18: delegated to a strategy method (was inlined here) so a
+                            # calendar variant can override it — its daily_state.entries always
+                            # holds any CARRIED multi-day position, so the naive len(entries) > 0
+                            # check below is trivially true for as long as one is held, even on a
+                            # day nothing new happened (see CalendarStrategyBase._had_trading_
+                            # activity_today's docstring for the 2026-08-18 incident this fixed).
                             market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
-                            had_trading_activity = (
-                                strategy.daily_state.entries_completed > 0 or
-                                strategy.daily_state.total_realized_pnl != 0 or
-                                len(strategy.daily_state.entries) > 0
-                            )
+                            had_trading_activity = strategy._had_trading_activity_today()
                             is_after_market_close = now_et.hour >= 16  # 4 PM or later
 
-                            if had_trading_activity or is_after_market_close:
+                            # PHANTOM-SUMMARY GUARD (06-03 incident): if the bot
+                            # was down at the 9:30 open and started mid-session, it
+                            # can reach the close still holding the PRIOR day's
+                            # in-memory state with no live price captured for today.
+                            # A summary built from it records yesterday's entries/P&L
+                            # under today's date (spx_close=0) — the phantom row.
+                            # Use the RESOLVED close (recovers the day's last
+                            # recorded tick when the live current_price has gone
+                            # to 0 at a late after-hours write — e.g. C's 0DTE
+                            # settlement completing ~6h after the close). Without
+                            # this, a legitimate traded day was mis-flagged as a
+                            # phantom and its summary+metrics silently skipped
+                            # (the 2026-06-05→11 C recording gap).
+                            _resolve = getattr(strategy, "_resolve_spx_close", None)
+                            _spx_close = _resolve() if callable(_resolve) else strategy.current_price
+                            _summary_stale = strategy._daily_summary_is_stale(
+                                getattr(strategy.daily_state, "date", "") or "",
+                                now_et.strftime("%Y-%m-%d"),
+                                _spx_close,
+                            )
+
+                            if (had_trading_activity or is_after_market_close) and _summary_stale:
+                                # Skip the WHOLE summary (DB + Sheets + metrics) and
+                                # lock the gate so we don't retry the stale write all
+                                # evening. A clean row records after the next reset.
+                                trade_logger.log_error(
+                                    "Daily summary SKIPPED — stale prior-day state "
+                                    f"(state_date={getattr(strategy.daily_state, 'date', '') or 'unset'}, "
+                                    f"today={now_et.strftime('%Y-%m-%d')}, spx_close={strategy.current_price}). "
+                                    "Avoids a phantom summary; resets at the next day boundary."
+                                )
+                                daily_summary_sent_date = today_date
+                            elif had_trading_activity or is_after_market_close:
                                 trade_logger.log_event("Settlement complete - sending daily summary...")
                                 try:
                                     strategy.log_daily_summary()
@@ -396,13 +726,27 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                                     # Fix #65: Also log post-settlement account summary and performance metrics
                                     # These were previously only logged during market hours heartbeat (pre-settlement),
                                     # meaning the final values with settled P&L were never recorded
-                                    strategy.log_account_summary()
-                                    strategy.log_performance_metrics()
-                                    strategy.log_position_snapshot()
+                                    # I-M1: force=True so the settled-state
+                                    # account-summary + position-snapshot writes
+                                    # bypass the intraday Sheets-write throttle —
+                                    # otherwise the final daily record could be
+                                    # silently dropped (DB stays authoritative).
+                                    strategy.log_account_summary(force=True)
+                                    # AUD5 C-3: pass an EXEMPT period so the
+                                    # settled-P&L write bypasses the intraday
+                                    # Sheets-write throttle (heartbeat callers
+                                    # keep the default "Intraday").
+                                    strategy.log_performance_metrics(period="End of Day")
+                                    strategy.log_position_snapshot(force=True)
                                 except Exception as e:
                                     trade_logger.log_error(f"Failed to log daily summary: {e}")
                                 daily_summary_sent_date = today_date
-                                trade_logger.log_event("Daily summary sent to Google Sheets and alerts")
+                                # AUD5: accurate event text — dry-run shadows
+                                # have Sheets + alerts off (the sends are no-ops).
+                                if trade_logger.google_logger.enabled:
+                                    trade_logger.log_event("Daily summary sent to Google Sheets and alerts")
+                                else:
+                                    trade_logger.log_event("Daily summary recorded (Sheets/alerts disabled — local/DB only)")
                             else:
                                 # FIX #82: Do NOT lock the settlement gate pre-market when there's no activity.
                                 # At midnight ET, _reset_for_new_day() clears the registry, then settlement
@@ -414,6 +758,79 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                     sleep_time = calculate_sleep_duration(max_sleep=900)
                     market_open_time = now_et.replace(hour=9, minute=30, second=0, microsecond=0)
 
+                    # STATE-004 restart-gap backstop (2026-09-06).
+                    #
+                    # _reset_for_new_day() — where the overnight-position check
+                    # historically lived — only fires when a process observes the
+                    # ET date CHANGE under it. If NO process survives across ET
+                    # midnight (VM reboot, crash storm, a deploy straddling
+                    # midnight), every process starts with the date already
+                    # stamped to today, the reset never runs, and the check is
+                    # silently skipped for that day.
+                    #
+                    # Guards, all of which matter:
+                    #   * now_et.time() < OVERNIGHT_CHECK_WINDOW_END_ET (09:20)
+                    #     — MANDATORY. The check reads the WHOLE account (no
+                    #     symbol/variant filter), so it may only run when no
+                    #     variant can legitimately hold a position. This same
+                    #     market-closed branch ALSO runs at 16:30 with 0DTE legs
+                    #     still legitimately open, which is why the guard is
+                    #     "before the window ends", not merely "market closed".
+                    #     The 10-minute margin before the 09:30 open covers the
+                    #     check's own ~4-minute worst-case retry budget; see the
+                    #     constant's comment in strategy.py.
+                    #   * weekday + not a holiday — no point on a closed day; the
+                    #     next real rollover covers it.
+                    #   * owed — run_overnight_check_if_owed() no-ops once the
+                    #     check has completed cleanly for this ET date.
+                    #
+                    # Deliberately NOT inside the once-per-day
+                    # `last_session_check_date` block below: a deferred or failed
+                    # check must be free to retry on the next loop while still
+                    # pre-market. Runs before the open, so its retry sleeps cost
+                    # nothing and can't stall stop monitoring.
+                    _oc_owed = (
+                        now_et.weekday() < 5
+                        and not holiday_name
+                        and hasattr(strategy, "run_overnight_check_if_owed")
+                        and getattr(strategy, "_overnight_check_date", None)
+                        != now_et.strftime("%Y-%m-%d")
+                    )
+                    if _oc_owed and now_et.time() < OVERNIGHT_CHECK_WINDOW_END_ET:
+                        try:
+                            if broker.ensure_connected():
+                                _oc = strategy.run_overnight_check_if_owed()
+                                if _oc not in ("already_done", "clean"):
+                                    trade_logger.log_event(
+                                        f"Pre-market overnight-position check: {_oc}"
+                                    )
+                            else:
+                                trade_logger.log_event(
+                                    "Pre-market overnight-position check deferred "
+                                    "— broker session unavailable; will retry."
+                                )
+                        except Exception as e:
+                            # Never let the backstop take the bot down: the
+                            # midnight reset remains the primary path and the
+                            # hourly orphan sweep is a further backstop.
+                            trade_logger.log_error(
+                                f"Pre-market overnight-position check errored "
+                                f"({e}) — continuing; check stays owed."
+                            )
+                    elif _oc_owed and now_et < market_open_time:
+                        # Owed, but the process came up too late in the
+                        # pre-market window to run the check safely (e.g. a
+                        # RestartSec=30 crash loop spanning 09:20-09:30).
+                        # Deliberately skipped rather than run into RTH. The
+                        # hourly reconciliation's orphan sweep still fires a
+                        # CRITICAL alert ~2 min after the open if a genuine
+                        # overnight leg exists, so this is not a blind spot.
+                        trade_logger.log_event(
+                            "Pre-market overnight-position check SKIPPED — "
+                            f"started after {OVERNIGHT_CHECK_WINDOW_END_ET:%H:%M} ET. "
+                            "Orphan sweep remains the backstop."
+                        )
+
                     if now_et < market_open_time and now_et.weekday() < 5 and not holiday_name:
                         seconds_until_open = (market_open_time - now_et).total_seconds()
                         if seconds_until_open > 0 and seconds_until_open < sleep_time:
@@ -422,7 +839,8 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
 
                     if sleep_time > 0:
                         minutes = sleep_time // 60
-                        client.authenticate(force_refresh=True)
+                        # IBKR session keepalive is handled by IBClient's
+                        # Tickler thread; no manual token refresh needed.
                         trade_logger.log_event(f"HEARTBEAT | Market closed {close_reason} - sleeping for {minutes}m")
 
                         if not interruptible_sleep(sleep_time):
@@ -432,6 +850,99 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                         if not interruptible_sleep(60):
                             break
                     continue
+
+                # P7: morning IBKR re-auth gate. The brokerage session does
+                # NOT survive IBKR's ~01:00 ET daily server reset or the 24h
+                # live-session-token TTL — ibind's Tickler only holds off the
+                # idle timeout. Verify (and, if stale, re-establish) the
+                # session once per trading day before any entry. On failure,
+                # break the loop so systemd restarts with a fresh connect().
+                if last_session_check_date != today:
+                    trade_logger.log_event("Verifying IBKR session for the trading day...")
+                    if not broker.ensure_connected():
+                        if _is_broker_mode:
+                            # 2026-06-03: broker self-heals in its own loop;
+                            # restarting THIS bot can't fix it. Pause trading +
+                            # wait (re-check each loop) instead of exiting into a
+                            # StartLimit crash-loop. Alert/log ONCE per outage.
+                            if not broker_outage_active:
+                                broker_outage_active = True
+                                alert_hooks.on_ensure_connected_failed(
+                                    reason="morning daily re-auth gate"
+                                )
+                                trade_logger.log_error(
+                                    "Broker session unavailable (morning re-auth "
+                                    "gate) — pausing trading and waiting for the "
+                                    "broker to self-heal (NOT exiting)."
+                                )
+                            interruptible_sleep(BROKER_OUTAGE_RECHECK_S)
+                            continue
+                        # Legacy direct-IBClient: a fresh-connect restart re-auths.
+                        alert_hooks.on_ensure_connected_failed(
+                            reason="morning daily re-auth gate"
+                        )
+                        trade_logger.log_error(
+                            "IBKR session could not be re-established — "
+                            "exiting for systemd restart (fresh connect)."
+                        )
+                        break
+                    if broker_outage_active:
+                        broker_outage_active = False
+                        trade_logger.log_event("Broker session recovered — resuming trading.")
+                    last_session_check_date = today
+                    last_intraday_session_check = datetime.now()
+                    trade_logger.log_event("IBKR session verified.")
+
+                # P7-audit H6: intraday session re-check. The daily gate
+                # above only fires once/day, so a mid-session 401/410
+                # (the 24h LST TTL elapsing mid-day, IBKR-side restart,
+                # a competing login) would silently leave the bot
+                # trading on a dead session. Re-verify every 15 minutes via
+                # ensure_connected(). Behavior depends on the broker object:
+                #   - legacy direct IBClient (CALYPSO_BROKER_URL unset):
+                #     ensure_connected() itself round-trips auth/status (one
+                #     cheap call if healthy) and re-establishes if not.
+                #   - deployed BrokerClient (CALYPSO_BROKER_URL set): it GETs the
+                #     broker's /health, which is now AUTHORITATIVE — the broker
+                #     performs a LIVE check_auth_status() round-trip per call
+                #     (audit #13), reporting connected only when the session is
+                #     authenticated AND connected AND not competing (5s cached).
+                #     Session RE-ESTABLISH still happens in calypso-broker's own
+                #     maintenance loop, not here. Either way a dead session
+                #     reports connected=False here, so this gate fails CLOSED and
+                #     breaks for restart.
+                now_ = datetime.now()
+                if (now_ - last_intraday_session_check).total_seconds() >= INTRADAY_SESSION_CHECK_INTERVAL_S:
+                    if not broker.ensure_connected():
+                        if _is_broker_mode:
+                            # 2026-06-03: broker self-heals; restarting THIS bot
+                            # can't fix it and crash-loops StartLimit. Pause +
+                            # wait (re-check each loop), don't exit. Alert ONCE.
+                            if not broker_outage_active:
+                                broker_outage_active = True
+                                alert_hooks.on_ensure_connected_failed(
+                                    reason="intraday session re-check (every 15 min)"
+                                )
+                                trade_logger.log_error(
+                                    "Broker session unavailable (intraday re-check) "
+                                    "— pausing trading and waiting for the broker to "
+                                    "self-heal (NOT exiting)."
+                                )
+                            interruptible_sleep(BROKER_OUTAGE_RECHECK_S)
+                            continue
+                        # Legacy direct-IBClient: a fresh-connect restart re-auths.
+                        alert_hooks.on_ensure_connected_failed(
+                            reason="intraday session re-check (every 15 min)"
+                        )
+                        trade_logger.log_error(
+                            "Intraday IBKR session check failed — "
+                            "exiting for systemd restart."
+                        )
+                        break
+                    if broker_outage_active:
+                        broker_outage_active = False
+                        trade_logger.log_event("Broker session recovered — resuming trading.")
+                    last_intraday_session_check = now_
 
                 # Directional-pivot continuous monitor (introduced 2026-05-01 in v1.26.0).
                 # Fires BEFORE the strategy state machine on each heartbeat, so a
@@ -513,7 +1024,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                     commission = status.get('total_commission', 0)
                     net_pnl = total_pnl - commission
                     net_sign = "+" if net_pnl >= 0 else ""
-                    pnl_text = f"  {net_sign}${net_pnl:.2f} net (${commission:.0f} comm)  "
+                    pnl_text = f"  {net_sign}${net_pnl:.2f} net (${commission:.2f} comm)  "
                     pnl_len = len(pnl_text)
                     left_len = (bar_width - pnl_len) // 2
                     right_len = bar_width - pnl_len - left_len
@@ -644,6 +1155,17 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                     })
                     logger.critical(f"CRITICAL: {consecutive_errors} consecutive errors in main loop!")
 
+                # P7-audit M1: a persistent fault (dead IBKR session, a
+                # strategy bug) must not spin forever — break so systemd
+                # restarts with a fresh connect(). StartLimitBurst caps
+                # the restart loop. 15 ≈ 15s of failures at check_interval=1.
+                if consecutive_errors >= 15:
+                    trade_logger.log_error(
+                        f"{consecutive_errors} consecutive main-loop errors — "
+                        f"exiting for a clean systemd restart."
+                    )
+                    break
+
                 if not interruptible_sleep(check_interval):
                     break
 
@@ -680,26 +1202,70 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 if active > 0:
                     spy_price = status.get('underlying_price', 0)
                     vix = status.get('vix', 0)
-                    logger.critical(
-                        f"CRITICAL: Bot shutting down with {active} ACTIVE positions! "
-                        f"P&L: ${realized + unrealized:.2f}"
-                    )
-                    trade_logger.log_event(
-                        f"WARNING: Bot shutting down with {active} ACTIVE positions! "
-                        "Manual intervention may be required."
-                    )
-                    trade_logger.log_safety_event({
-                        "event_type": "HYDRA_SHUTDOWN_WITH_POSITION",
-                        "spy_price": spy_price,
-                        "vix": vix,
-                        "description": f"Bot shutdown with {active} active positions",
-                        "result": "Positions left open - MANUAL INTERVENTION REQUIRED"
-                    })
+                    # L-M9: the discriminator for "is this a real safety event" is
+                    # PLANNED (SIGTERM → shutdown_requested) vs UNEXPECTED (crash/
+                    # OOM-kill), NOT dry_run alone. A planned `systemctl restart`
+                    # with open positions is normal operation — systemd
+                    # (Restart=always) brings the bot back and recovery re-adopts
+                    # the positions — so it must not trip the CRITICAL/safety_event
+                    # cascade every time (the old code did, on every routine
+                    # restart of the live-order paper variant). Only an UNEXPECTED
+                    # shutdown of a non-dry-run variant is a genuine safety event.
+                    planned = bool(shutdown_requested)
+                    is_dry = getattr(strategy, 'dry_run', False)
+                    if is_dry:
+                        # Dry-run: the "active" positions are SIMULATED — no real
+                        # risk regardless of how we stopped. INFO only.
+                        logger.info(
+                            f"Shutdown with {active} active SIMULATED positions "
+                            f"(dry-run, no real risk). P&L: "
+                            f"${realized + unrealized:.2f}"
+                        )
+                    elif planned:
+                        # Real positions but a PLANNED restart: systemd restarts +
+                        # recovery re-adopts them. Expected — WARNING, no CRITICAL
+                        # safety_event, so routine restarts don't cry wolf.
+                        logger.warning(
+                            f"Planned shutdown with {active} active positions; "
+                            f"systemd will restart and recovery will re-adopt them. "
+                            f"P&L: ${realized + unrealized:.2f}"
+                        )
+                        trade_logger.log_event(
+                            f"Planned shutdown with {active} active positions "
+                            "(systemd restart + recovery expected)."
+                        )
+                    else:
+                        # UNEXPECTED shutdown (crash/kill, no SIGTERM) with real
+                        # positions — a genuine safety event: CRITICAL + safety_event.
+                        logger.critical(
+                            f"CRITICAL: Unexpected shutdown with {active} ACTIVE positions! "
+                            f"P&L: ${realized + unrealized:.2f}"
+                        )
+                        trade_logger.log_event(
+                            f"WARNING: Unexpected shutdown with {active} ACTIVE positions! "
+                            "Manual intervention may be required."
+                        )
+                        trade_logger.log_safety_event({
+                            "event_type": "HYDRA_SHUTDOWN_WITH_POSITION",
+                            "spy_price": spy_price,
+                            "vix": vix,
+                            "description": f"Unexpected shutdown with {active} active positions",
+                            "result": "Positions left open - MANUAL INTERVENTION REQUIRED"
+                        })
 
                 # Send BOT_STOPPED alert
                 try:
                     reason = "Signal received" if shutdown_requested else "Unexpected shutdown"
-                    priority = AlertPriority.HIGH if active > 0 else AlertPriority.LOW
+                    # L-M9: escalate to HIGH only on an UNEXPECTED shutdown of a
+                    # non-dry-run variant with positions open. A planned restart
+                    # recovers, and dry-run positions are simulated → LOW (so
+                    # routine A/B/C restarts don't fire a HIGH on every stop).
+                    escalate = (
+                        active > 0
+                        and not getattr(strategy, 'dry_run', False)
+                        and not bool(shutdown_requested)
+                    )
+                    priority = AlertPriority.HIGH if escalate else AlertPriority.LOW
                     msg = f"HYDRA stopped. Reason: {reason}\nState: {state}, Entries: {entries}, P&L: ${realized + unrealized:.2f}"
                     if active > 0:
                         msg += f"\n⚠️ {active} ACTIVE positions remaining!"
@@ -717,22 +1283,41 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
         except Exception as e:
             trade_logger.log_error(f"Error during shutdown status reporting: {e}")
 
+        # 2026-08-18 shutdown-hang investigation: strategy processes were
+        # observed taking 44-82+ seconds (occasionally past the 100s
+        # systemd TimeoutStopSec, needing a forced SIGKILL) to actually
+        # exit after this point, with lingering child threads named
+        # grpc_global_tim/event_engine/lifeguard — grpc-core's
+        # process-global background threads, spawned by the Secret Manager
+        # + Pub/Sub clients every variant constructs at startup (Pub/Sub is
+        # constructed even when alerts are config-disabled, so this affects
+        # ALL of A/B/C/D/E, not just alert-enabled variants). Those threads
+        # can only be torn down by grpc's own internal shutdown sequence at
+        # real interpreter exit, not by application code — see
+        # close_alert_service_safely / AlertService.close() for what IS
+        # achievable, and log_shutdown_diagnostics for the evidence this
+        # investigation found was missing.
+        close_alert_service_safely(strategy, trade_logger)
+        log_shutdown_diagnostics(trade_logger)
+
         trade_logger.log_event("Shutdown complete.")
         trade_logger.shutdown()
 
 
 def show_status(config: dict):
     """Show current status without entering trading loop."""
-    trade_logger = setup_logging(config, bot_name="HYDRA")
-    client = SaxoClient(config)
-
-    if not client.authenticate():
-        print("Failed to authenticate. Please check your credentials.")
+    trade_logger = setup_logging(config, bot_name=_variant_bot_name())
+    # P7-audit H4: connect() raises on failure — it never returns False.
+    try:
+        broker = _build_broker()
+        broker.connect()
+    except (IBAuthError, IBConnectionError, IBClientError, BrokerError) as e:
+        print(f"Failed to connect to IBKR: {e}")
         trade_logger.shutdown()
         return
 
     try:
-        strategy = HydraStrategy(client, config, trade_logger)
+        strategy = HydraStrategy(broker, config, trade_logger)
         strategy.update_market_data()
         status = strategy.get_status_summary()
 
@@ -786,14 +1371,17 @@ def main():
     kill_existing_instances()
 
     parser = argparse.ArgumentParser(
-        description="HYDRA 0DTE Trading Bot - Multi-Entry Iron Condors",
+        description="HYDRA 0DTE Trading Bot — Multi-Entry Iron Condors (IBKR paper)",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog="""
 Examples:
-  python -m bots.hydra.main              Run in SIM environment
-  python -m bots.hydra.main --live       Run in LIVE environment
-  python -m bots.hydra.main --dry-run    Simulate without orders
-  python -m bots.hydra.main --status     Show current status only
+  python -m bots.hydra.main              Connect to IBKR paper, place real paper orders
+  python -m bots.hydra.main --dry-run    Connect to IBKR paper, simulate orders (no placement)
+  python -m bots.hydra.main --status     Show current status and exit
+
+The IBKR-standalone branch trades the paper account only — there is no
+live-money path. The legacy `--live` flag is retained for CLI back-compat
+and is a no-op.
         """
     )
 
@@ -805,7 +1393,7 @@ Examples:
     parser.add_argument(
         "--dry-run", "-d",
         action="store_true",
-        help="Run in simulation mode without placing real trades"
+        help="Simulate orders against live IBKR paper quotes (no placement)"
     )
     parser.add_argument(
         "--status", "-s",
@@ -826,7 +1414,11 @@ Examples:
     parser.add_argument(
         "--live", "-l",
         action="store_true",
-        help="Use LIVE environment (real money trading)"
+        # P7-audit L10: kept for back-compat (no-op). The IBKR-standalone
+        # branch does NOT support live trading — it talks to IBKR paper
+        # only. Removing the flag would break any caller still passing
+        # it; the runtime emits a NOTE that it has no effect.
+        help="(DEPRECATED, no-op) Pre-migration flag retained for CLI back-compat."
     )
 
     args = parser.parse_args()
@@ -844,21 +1436,16 @@ Examples:
             print("  Credentials: Loaded from Secret Manager")
             print("=" * 60 + "\n")
         else:
+            # HYDRA trades the IBKR paper account only — there is no
+            # live-money path. `--live` is retained for CLI back-compat
+            # but has no effect.
             if args.live:
-                config["saxo_api"]["environment"] = "live"
-                if args.dry_run:
-                    print("\n" + "=" * 60)
-                    print("  DRY RUN MODE - LIVE DATA, NO REAL ORDERS")
-                    print("  Using LIVE market data for realistic simulation")
-                    print("=" * 60 + "\n")
-                else:
-                    print("\n  WARNING: LIVE ENVIRONMENT ENABLED - REAL MONEY TRADING\n")
+                print("\n  NOTE: --live has no effect — HYDRA trades the "
+                      "IBKR paper account only.\n")
+            if args.dry_run:
+                print("\n  Environment: IBKR PAPER (DRY RUN - No real orders)\n")
             else:
-                env_name = config.get('saxo_api', {}).get('environment', 'sim').upper()
-                if args.dry_run:
-                    print(f"\n  Environment: {env_name} (DRY RUN - No real orders)\n")
-                else:
-                    print(f"\n  Environment: {env_name}\n")
+                print("\n  Environment: IBKR PAPER\n")
 
         if args.verbose:
             config["logging"]["log_level"] = "DEBUG"
@@ -893,5 +1480,61 @@ Examples:
         sys.exit(1)
 
 
+def _hard_exit(code: int):
+    """Exit immediately, bypassing CPython interpreter finalization.
+
+    ROOT CAUSE (established 2026-09-06, correcting the record). After
+    run_bot()'s graceful shutdown has fully completed and logged, the process
+    was spending 58-100+s inside Py_FinalizeEx and getting SIGKILLed by
+    systemd at TimeoutStopSec (100s). The blocker is NOT any Python thread:
+      * Every thread in the SHUTDOWN-DIAG line is a daemon — the logger's
+        _process_log_queue (logger_service.py), the "Dummy-N" threads (created
+        outside the threading module, e.g. by grpc), and
+        Thread-CommitBatchPublisher (daemon=True in the installed
+        google-cloud-pubsub). Daemon threads cannot block threading._shutdown().
+      * On 2026-09-03 ALL SEVEN units were SIGKILLed in the same second, and
+        six of them (A/C/D/E/F/G) never publish to Pub/Sub and had no
+        Thread-CommitBatchPublisher at all. That alone rules out the publisher
+        as the cause — the 2026-09-05 traceback from that thread is a
+        consequence of shutdown, not its trigger.
+    What actually persists to SIGKILL are grpc-core's process-global native
+    threads (grpc_global_tim / event_engine / lifeguard). AlertService.close()
+    already documents (2026-08-18) that those are process-wide singletons torn
+    down only by grpc's own sequence at real interpreter exit and CANNOT be
+    eliminated per-channel — which is exactly why closing channels was never
+    going to fix this. The escape hatch is to not run finalization at all.
+
+    WHY os._exit IS SAFE HERE — each precondition verified, not assumed:
+      * ZERO atexit handlers are registered anywhere in shared/, bots/ or
+        services/ (pinned by a test — see tests/test_shutdown_hard_exit_*).
+      * DataRecorder commits per write; nothing is buffered awaiting exit.
+      * _save_state_to_disk writes tmp + os.replace (atomic, already durable).
+      * Logging handlers flush per record, and logging.shutdown() runs below.
+      * This runs ONLY after main()/run_bot() has returned, i.e. after the
+        graceful shutdown sequence is complete. It skips no bot logic.
+
+    THE ONE REAL DOWNSIDE: any atexit handler added to this codebase in future
+    would be silently skipped. The test above exists to catch that.
+    """
+    try:
+        logging.shutdown()
+    except Exception:
+        pass
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.flush()
+        except Exception:
+            pass
+    os._exit(code)
+
+
 if __name__ == "__main__":
-    main()
+    _exit_code = 0
+    try:
+        main()
+    except SystemExit as e:
+        # Preserve main()'s own sys.exit(1) paths — without this, every error
+        # exit would be reported to systemd as a clean 0.
+        _exit_code = e.code if isinstance(e.code, int) else (0 if e.code is None else 1)
+    finally:
+        _hard_exit(_exit_code)

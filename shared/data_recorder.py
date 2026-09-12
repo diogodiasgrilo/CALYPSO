@@ -15,8 +15,28 @@ Safety guarantees:
 Schema v5 adds: individual leg prices, Greeks, bid-ask width, slippage,
 margin, execution quality, MAE/MFE, skipped entries, economic events.
 
-Schema v6 adds: per-leg Saxo bid/ask in spread_snapshots (~10s resolution)
-for ThetaData-vs-Saxo backtest calibration.
+Schema v6 adds: per-leg broker (IBKR; originally Saxo) bid/ask in spread_snapshots
+(~10s resolution) for ThetaData-vs-broker backtest calibration.
+
+Schema v7 adds: the `shadow_entries` table — records what OTM-based strike
+selection WOULD have chosen (observation only; never traded).
+
+Schema v8 adds: a per-row `contracts` column on trade_entries / trade_stops /
+spread_snapshots / shadow_entries, plus `contracts_per_entry` on daily_summaries
+(NOT NULL DEFAULT 1; null-safe `or 1` on write) for 2-contract scaling.
+
+Schema v9 (2026-06-02) adds: ground-truth per-leg execution capture on
+trade_entries for the live go-live — short/long call/put `*_fill_price` and
+`*_mid_at_fill` (real fill vs mid, for live slippage analysis).
+
+Schema v10 (2026-06-12) adds: a first-class `date` column on spread_snapshots
+(the only per-row table that keyed off the full `timestamp` and had no `date`),
+backfilled from the timestamp prefix, with an index — so per-day queries and
+per-day maintenance match every other table (date, entry_number).
+
+Current SCHEMA_VERSION = 17 (see the module constant; this docstring intro
+describes v10 as an example of the migration pattern, not the current version —
+see the dated comment blocks above each MIGRATION_V{N}_SQL for the full history).
 """
 
 import json
@@ -27,8 +47,20 @@ from typing import Any, Callable, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
 
+
+def _describe_exception(e: Exception) -> str:
+    """Render an exception for logging without ever producing a blank string
+    (e.g. sqlite3.OperationalError variants and some stdlib exceptions can
+    have an empty str()). Small local copy of the same helper in
+    shared/alert_service.py — kept local rather than cross-imported since
+    this module (SQLite persistence) has no other reason to depend on the
+    alerting module."""
+    text = str(e)
+    return f"{type(e).__name__}: {text}" if text else type(e).__name__
+
+
 # Schema version this module expects/creates
-SCHEMA_VERSION = 8
+SCHEMA_VERSION = 17
 
 # ============================================================================
 # Schema Migration SQL
@@ -79,8 +111,9 @@ MIGRATION_V5_SQL = [
 ]
 
 # v6 migrations: bid/ask capture for backtest calibration
-# Enables comparing ThetaData's aggregated OPRA quotes to Saxo's single-broker
-# quotes. Each leg's (bid, ask) captured during monitoring (~10s resolution).
+# Enables comparing ThetaData's aggregated OPRA quotes to the broker's
+# single-session quotes (IBKR via calypso-broker; originally Saxo).
+# Each leg's (bid, ask) captured during monitoring (~10s resolution).
 MIGRATION_V6_SQL = [
     "ALTER TABLE spread_snapshots ADD COLUMN short_call_bid REAL",
     "ALTER TABLE spread_snapshots ADD COLUMN short_call_ask REAL",
@@ -103,9 +136,197 @@ MIGRATION_V8_SQL = [
     "ALTER TABLE daily_summaries ADD COLUMN contracts_per_entry INTEGER NOT NULL DEFAULT 1",
 ]
 
+# v9 (2026-06-02): ground-truth execution prices for the LIVE go-live. Per-leg
+# fill prices + the mid each filled against, so real entry slippage
+# (= fill − mid) and exact credit/broker reconciliation are reconstructable.
+# All nullable + additive; historical (dry-run) rows stay NULL, which is correct.
+MIGRATION_V9_SQL = [
+    "ALTER TABLE trade_entries ADD COLUMN short_call_fill_price REAL",
+    "ALTER TABLE trade_entries ADD COLUMN long_call_fill_price REAL",
+    "ALTER TABLE trade_entries ADD COLUMN short_put_fill_price REAL",
+    "ALTER TABLE trade_entries ADD COLUMN long_put_fill_price REAL",
+    "ALTER TABLE trade_entries ADD COLUMN short_call_mid_at_fill REAL",
+    "ALTER TABLE trade_entries ADD COLUMN long_call_mid_at_fill REAL",
+    "ALTER TABLE trade_entries ADD COLUMN short_put_mid_at_fill REAL",
+    "ALTER TABLE trade_entries ADD COLUMN long_put_mid_at_fill REAL",
+]
+
+# v10 (2026-06-12): spread_snapshots gains a first-class `date` column. It was
+# the only per-row table keyed off the full datetime `timestamp` with no `date`,
+# so per-day queries/maintenance had to LIKE/substr the timestamp. The ALTER is
+# additive (existing rows get NULL); ensure_schema backfills date from the
+# timestamp prefix and adds an index. Kept in sync with
+# services/homer/db_manager.py.
+MIGRATION_V10_SQL = [
+    "ALTER TABLE spread_snapshots ADD COLUMN date TEXT",
+]
+
+# v11 (2026-06-15): exit_reason discriminator on trade_stops. Brandon variants
+# route take-profit AND GEX-breach early-closes through the SAME record_stop()
+# path as real stop-losses, so the table conflated wins (TP) with losses. The
+# Analytics "Stops" tab therefore counted profitable take-profits as stop-outs.
+# Values: 'stop_loss' | 'take_profit' | 'gex_breach' | 'early_close'. Additive +
+# nullable — historical rows stay NULL and the dashboard falls back to the
+# net_pnl sign for them. Kept in sync with services/homer/db_manager.py.
+MIGRATION_V11_SQL = [
+    "ALTER TABLE trade_stops ADD COLUMN exit_reason TEXT",
+]
+
+# v12 (2026-06-30): first-class per-ENTRY realized net P&L on trade_entries.
+# Before this the bot recorded per-SIDE stop P&L (trade_stops.net_pnl) and the
+# per-DAY total (daily_summaries.net_pnl) but NO per-entry realized P&L — so the
+# Brandon variants' real per-entry outcome (which closes via TP/breach/overlay/
+# expiry, not the recorded credit+buffer stop) was reconstructable nowhere, and
+# the per-slot edge analyzer (bots/hydra/slot_edge.py) could not rank slots. The
+# strategy now accumulates entry.realized_pnl via _book_realized_pnl (mirroring
+# the exact amount booked to daily_state.total_realized_pnl) and writes it here
+# at settlement, reconciled to sum to the day total. Additive + nullable —
+# historical rows stay NULL. Kept in sync with services/homer/db_manager.py.
+MIGRATION_V12_SQL = [
+    "ALTER TABLE trade_entries ADD COLUMN realized_pnl REAL",
+]
+
+# v13 (2026-07-18): per-DAY unattributed-overlay P&L on daily_summaries. A Brandon
+# defensive-overlay hedge whose hedged entry is ABSENT from daily_state at settle
+# (post-close / cross-day restart) is booked to the day aggregate ONLY — it lands in
+# gross_pnl but on no trade_entries.realized_pnl. Recording that residual here makes
+# the per-entry reconciliation exact everywhere (live guard + slot_edge + audits):
+# sum(trade_entries.realized_pnl) + unattributed_overlay_pnl == gross_pnl. NULL/0 on
+# non-Brandon variants and on any day with no such overlay. Additive + nullable —
+# historical rows stay NULL. Kept in sync with services/homer/db_manager.py.
+MIGRATION_V13_SQL = [
+    "ALTER TABLE daily_summaries ADD COLUMN unattributed_overlay_pnl REAL",
+]
+
+# v14 (2026-07-31): execution_failed discriminator on skipped_entries. Before this,
+# a genuine order-placement FAILURE (broker accepted the order but it never filled
+# after exhausting all retries — e.g. an IBKR paper-engine matching anomaly) was
+# recorded identically to a deliberate strategic SKIP (credit gate, illiquidity,
+# whipsaw, etc.) — or, before the accompanying strategy.py fix, not recorded at all.
+# This column lets the dashboard/Hermes/Clio/slot_edge tell "we chose not to trade"
+# apart from "the broker failed us" without parsing skip_reason text. 0 = skip
+# (default, preserves all historical rows' meaning), 1 = execution failure.
+# Additive + defaulted — historical rows read as 0 (skip), which is correct since
+# this discriminator didn't exist before the entries it would apply to were fixed.
+MIGRATION_V14_SQL = [
+    "ALTER TABLE skipped_entries ADD COLUMN execution_failed INTEGER NOT NULL DEFAULT 0",
+]
+
+# v15 (2026-08-03): structured telemetry for the Brandon delta-target
+# "degraded-data" guard (bots/hydra/brandon/strategy.py — skips an entry when
+# the resolved short strike's delta falls below min_delta_pct_of_target ×
+# target_delta, protecting against picking a near-worthless far-OTM strike off
+# a thinly-hydrated Polygon chain). Before this, the ONLY record of why/how
+# often this fires was free-text in skip_reason + a raw log line — no way to
+# query "how often does this happen" or "what hydration ratio triggers it"
+# without grepping application logs. Found in the 2026-08-03 full-day audit:
+# this guard fired 4 consecutive times on B in one afternoon (previously
+# believed to be rare); investigation concluded it's the guard working
+# CORRECTLY against a hardcoded 80-contract hydration cap on a ~500-strike
+# chain (~16%), not a live data outage — but there was no data to confirm that
+# beyond one day's log grep. This is pure observability: NO trading behavior
+# changes. All four columns are NULL except on the specific degraded-data skip
+# path; every other skip reason (credit gate, GEX accel-zone, etc.) leaves
+# them NULL, same additive/nullable pattern as v13's unattributed_overlay_pnl.
+MIGRATION_V17_SQL = [
+    # v17 (2026-09-11): the mid at the FIRST placement attempt — the price the
+    # strategy DECIDED to trade at, as distinct from the mid at the moment of
+    # fill.
+    #
+    # Without it, execution quality is measured against the fill-time mid, which
+    # silently hides drift while a passive order rests. Concrete case, entry #1
+    # on the day the passive-rung change went live: a long posted at mid $1.05,
+    # did not fill, the market rose, and it filled at $1.15 — where the mid WAS
+    # $1.15, so it scored "flat" while costing $0.10/share ($70 at 7 contracts).
+    #
+    #   fill - mid_at_fill      = spread capture
+    #   mid_at_fill - mid_at_decision = drift while resting
+    #   fill - mid_at_decision  = TOTAL execution cost   <- the number that matters
+    #
+    # Drift is exactly the cost the passive-rung change introduces, so measuring
+    # only spread capture left the instrument blind to the thing it exists to
+    # detect.
+    "ALTER TABLE trade_entries ADD COLUMN short_call_mid_at_decision REAL",
+    "ALTER TABLE trade_entries ADD COLUMN long_call_mid_at_decision REAL",
+    "ALTER TABLE trade_entries ADD COLUMN short_put_mid_at_decision REAL",
+    "ALTER TABLE trade_entries ADD COLUMN long_put_mid_at_decision REAL",
+]
+
+MIGRATION_V15_SQL = [
+    "ALTER TABLE skipped_entries ADD COLUMN hydration_pct REAL",
+    "ALTER TABLE skipped_entries ADD COLUMN achieved_delta REAL",
+    "ALTER TABLE skipped_entries ADD COLUMN target_delta REAL",
+    "ALTER TABLE skipped_entries ADD COLUMN delta_floor REAL",
+]
+
 # v7: shadow entries table — records what OTM-based selection WOULD have chosen
 # at each entry attempt, for retroactive comparison vs credit-based selection.
 # Pure observation — does not affect trading behavior.
+# v16 (2026-09-05): GEX forensics + shadow-gate telemetry. The 2026-09-04 gate
+# audit could not answer a single "what did the profile actually look like when
+# it decided X" question, because gex_shared_cache keeps exactly ONE
+# atomically-overwritten brandon_gex_profile.json — every profile that drove
+# every historical decision is gone. These two tables are the fix, and they are
+# a PREREQUISITE for calibrating any of the gate corrections: without recorded
+# per-refresh state, a shadow disagreement can be counted but never diagnosed.
+#
+# gex_profile_snapshots: one row per GEX profile refresh. `strikes_json` is the
+# full per-strike signed GEX (the raw material — everything else is derivable
+# from it), `clusters_json` the derived clusters WITH width/peak/strength so a
+# reader doesn't have to re-run detection to see what the gate saw.
+CREATE_GEX_SNAPSHOTS_SQL = """
+CREATE TABLE IF NOT EXISTS gex_profile_snapshots (
+    timestamp TEXT NOT NULL,
+    date TEXT NOT NULL,
+    variant TEXT,
+    spot REAL,
+    expiry TEXT,
+    n_strikes INTEGER,
+    chain_total INTEGER,
+    hydrated_count INTEGER,
+    candidates_found INTEGER,
+    hydrate_cap INTEGER,
+    total_abs_gex REAL,
+    n_positive_clusters INTEGER,
+    n_negative_clusters INTEGER,
+    strikes_json TEXT,
+    clusters_json TEXT,
+    PRIMARY KEY (timestamp, variant)
+);
+CREATE INDEX IF NOT EXISTS idx_gex_snapshots_date ON gex_profile_snapshots(date);
+"""
+
+# gex_decisions: one row per real accel-zone decision (strike adjuster or
+# defensive overlay), capturing the LIVE verdict, the qualifying cluster's
+# full shape, and every SHADOW variant's verdict on the same moment. This is
+# the table that will eventually settle whether the sign convention / width
+# floor / windowed normalization corrections should be adopted -- see
+# bots/hydra/brandon/gex_shadow.py. Nothing reads it to make decisions.
+CREATE_GEX_DECISIONS_SQL = """
+CREATE TABLE IF NOT EXISTS gex_decisions (
+    timestamp TEXT NOT NULL,
+    date TEXT NOT NULL,
+    variant TEXT,
+    consumer TEXT,           -- 'adjuster' | 'overlay'
+    entry_number INTEGER,
+    side TEXT,               -- 'call' | 'put'
+    spot REAL,
+    reference_strike REAL,
+    live_action TEXT,        -- SKIP/SHIFT/KEEP for adjuster; True/False for overlay
+    live_adjuster_predicate INTEGER,
+    live_overlay_predicate INTEGER,
+    cluster_low REAL,
+    cluster_high REAL,
+    cluster_peak REAL,
+    cluster_n_strikes INTEGER,
+    cluster_strength_pct REAL,
+    shadow_json TEXT,        -- [{variant, adjuster_predicate, overlay_predicate, n_zones, cluster{...}}, ...]
+    shadow_disagrees INTEGER DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_gex_decisions_date ON gex_decisions(date);
+CREATE INDEX IF NOT EXISTS idx_gex_decisions_disagree ON gex_decisions(shadow_disagrees);
+"""
+
 CREATE_SHADOW_ENTRIES_SQL = """
 CREATE TABLE IF NOT EXISTS shadow_entries (
     date TEXT NOT NULL,
@@ -167,6 +388,11 @@ CREATE TABLE IF NOT EXISTS skipped_entries (
     estimated_put_credit REAL,
     would_have_stopped INTEGER,
     theoretical_pnl REAL,
+    execution_failed INTEGER NOT NULL DEFAULT 0,
+    hydration_pct REAL,
+    achieved_delta REAL,
+    target_delta REAL,
+    delta_floor REAL,
     PRIMARY KEY (date, entry_number)
 );
 """
@@ -217,7 +443,9 @@ class DataRecorder:
             fn()
             return True
         except Exception as e:
-            logger.warning(f"DataRecorder.{operation_name} failed (non-critical): {e}")
+            logger.warning(
+                f"DataRecorder.{operation_name} failed (non-critical): {_describe_exception(e)}"
+            )
             return False
 
     # ========================================================================
@@ -276,6 +504,7 @@ class DataRecorder:
                         contracts_per_entry INTEGER NOT NULL DEFAULT 1);
                     CREATE TABLE IF NOT EXISTS spread_snapshots (
                         timestamp TEXT NOT NULL, entry_number INTEGER NOT NULL,
+                        date TEXT,
                         call_spread_value REAL, put_spread_value REAL,
                         contracts INTEGER NOT NULL DEFAULT 1,
                         PRIMARY KEY (timestamp, entry_number));
@@ -306,6 +535,12 @@ class DataRecorder:
                 # gets stamped anyway. CREATE IF NOT EXISTS is cheap and harmless here.
                 conn.executescript(CREATE_SHADOW_ENTRIES_SQL)
                 conn.executescript(CREATE_SHADOW_INDEX_SQL)
+                # v16: GEX forensics + shadow telemetry. Same unconditional
+                # CREATE IF NOT EXISTS treatment as shadow_entries above —
+                # these are pure-observation tables, cheap to ensure, and a
+                # missing one must never break a schema stamp.
+                conn.executescript(CREATE_GEX_SNAPSHOTS_SQL)
+                conn.executescript(CREATE_GEX_DECISIONS_SQL)
 
                 # Add new columns (catch duplicate column errors)
                 migration_sql = []
@@ -316,6 +551,30 @@ class DataRecorder:
                 if current_version < 8:
                     # v8: per-row contracts column for 2-contract scaling
                     migration_sql += MIGRATION_V8_SQL
+                if current_version < 9:
+                    # v9: per-leg fill prices + mid-at-fill (real execution capture)
+                    migration_sql += MIGRATION_V9_SQL
+                if current_version < 10:
+                    # v10: first-class date column on spread_snapshots
+                    migration_sql += MIGRATION_V10_SQL
+                if current_version < 11:
+                    # v11: exit_reason discriminator on trade_stops
+                    migration_sql += MIGRATION_V11_SQL
+                if current_version < 12:
+                    # v12: per-entry realized P&L on trade_entries
+                    migration_sql += MIGRATION_V12_SQL
+                if current_version < 13:
+                    # v13: per-day unattributed-overlay P&L on daily_summaries
+                    migration_sql += MIGRATION_V13_SQL
+                if current_version < 14:
+                    # v14: execution_failed discriminator on skipped_entries
+                    migration_sql += MIGRATION_V14_SQL
+                if current_version < 15:
+                    # v15: Brandon delta-target degraded-data guard telemetry
+                    migration_sql += MIGRATION_V15_SQL
+                if current_version < 17:
+                    # v17: decision-time mid per leg (drift measurement)
+                    migration_sql += MIGRATION_V17_SQL
 
                 for sql in migration_sql:
                     try:
@@ -323,6 +582,23 @@ class DataRecorder:
                     except sqlite3.OperationalError as e:
                         if "duplicate column" not in str(e).lower():
                             logger.warning(f"Migration SQL failed: {sql} — {e}")
+
+                # v10 backfill + index: populate the new spread_snapshots.date
+                # from the existing timestamp prefix ("YYYY-MM-DD HH:MM:SS" →
+                # "YYYY-MM-DD") for all historical rows, then index it. Idempotent
+                # (only NULL/empty rows are touched). Guarded so it runs once.
+                if current_version < 10:
+                    try:
+                        conn.execute(
+                            "UPDATE spread_snapshots SET date = substr(timestamp, 1, 10) "
+                            "WHERE date IS NULL OR date = ''"
+                        )
+                        conn.execute(
+                            "CREATE INDEX IF NOT EXISTS idx_spread_snapshots_date "
+                            "ON spread_snapshots(date)"
+                        )
+                    except sqlite3.OperationalError as e:
+                        logger.warning(f"v10 spread_snapshots.date backfill failed: {e}")
 
                 # Update version
                 conn.execute(
@@ -381,19 +657,24 @@ class DataRecorder:
         if not snapshots:
             return True
 
+        # v10: derive the date once from the shared timestamp prefix so every
+        # row this batch carries the first-class date column.
+        _date = timestamp[:10] if timestamp else None
+
         def _write():
             with self._connect() as conn:
                 conn.executemany(
                     """INSERT OR IGNORE INTO spread_snapshots
-                    (timestamp, entry_number, call_spread_value, put_spread_value,
+                    (timestamp, entry_number, date, call_spread_value, put_spread_value,
                      short_call_price, long_call_price, short_put_price, long_put_price,
                      short_call_bid, short_call_ask, long_call_bid, long_call_ask,
                      short_put_bid, short_put_ask, long_put_bid, long_put_ask, contracts)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)""",
                     [
                         (
                             timestamp,
                             s["entry_number"],
+                            _date,
                             s.get("call_spread_value"),
                             s.get("put_spread_value"),
                             s.get("short_call_price"),
@@ -445,6 +726,13 @@ class DataRecorder:
                 "config_version", "attempts",
                 # v8 contract count
                 "contracts",
+                # v9 ground-truth execution prices
+                "short_call_fill_price", "long_call_fill_price",
+                "short_put_fill_price", "long_put_fill_price",
+                "short_call_mid_at_decision", "long_call_mid_at_decision",
+                "short_put_mid_at_decision", "long_put_mid_at_decision",
+                "short_call_mid_at_fill", "long_call_mid_at_fill",
+                "short_put_mid_at_fill", "long_put_mid_at_fill",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
@@ -464,6 +752,25 @@ class DataRecorder:
                 conn.commit()
 
         return self._safe_write("record_entry", _write)
+
+    def update_entry_realized_pnl(self, date: str, entry_number: int,
+                                  realized_pnl: float) -> bool:
+        """Set trade_entries.realized_pnl for one settled entry (schema v12).
+
+        UPDATE-by-(date, entry_number) — the same pattern the Greeks follow-up
+        uses. The row is written at entry time with realized_pnl NULL; this fills
+        it in at settlement once the entry's real net P&L is known. Idempotent
+        (a re-run overwrites with the same final value)."""
+        def _write():
+            with self._connect() as conn:
+                conn.execute(
+                    "UPDATE trade_entries SET realized_pnl = ? "
+                    "WHERE date = ? AND entry_number = ?",
+                    (realized_pnl, date, entry_number),
+                )
+                conn.commit()
+
+        return self._safe_write("update_entry_realized_pnl", _write)
 
     # ========================================================================
     # Stop Loss Writes (after position closed, 0-5 per day)
@@ -485,6 +792,8 @@ class DataRecorder:
                 "spx_move_since_entry", "minutes_held", "cascade_gap_seconds",
                 # v8 contract count
                 "contracts",
+                # v11 exit-reason discriminator (stop_loss/take_profit/gex_breach)
+                "exit_reason",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
@@ -519,10 +828,19 @@ class DataRecorder:
                 "theoretical_short_call", "theoretical_long_call",
                 "theoretical_short_put", "theoretical_long_put",
                 "estimated_call_credit", "estimated_put_credit",
+                "execution_failed",
+                # v15: Brandon delta-target degraded-data guard telemetry —
+                # only populated by that specific skip path; NULL otherwise.
+                "hydration_pct", "achieved_delta", "target_delta", "delta_floor",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
-            values = tuple(skip_data.get(c) for c in cols)
+            # execution_failed is NOT NULL DEFAULT 0 (v14) — null-safe like `contracts`
+            # in record_stop, since legacy callers won't pass this key at all.
+            values = tuple(
+                (skip_data.get(c) or 0) if c == "execution_failed" else skip_data.get(c)
+                for c in cols
+            )
 
             with self._connect() as conn:
                 conn.execute(
@@ -585,6 +903,77 @@ class DataRecorder:
         return self._safe_write("record_shadow_entry", _write)
 
     # ========================================================================
+    # v16 (2026-09-05): GEX forensics + shadow-gate telemetry
+    # Pure observation. Never read by any trading decision.
+    # ========================================================================
+
+    def record_gex_snapshot(self, snap: Dict[str, Any]) -> bool:
+        """Persist one GEX profile refresh.
+
+        The 2026-09-04 gate audit hit a wall on every forensic question
+        because gex_shared_cache keeps exactly ONE overwritten profile JSON —
+        the two profiles that decided the 09-04 arm, and every profile from
+        09-01, no longer exist. This makes each refresh durable so future
+        calibration works from recorded state instead of inference.
+
+        Keyed (timestamp, variant) with INSERT OR IGNORE: B and C share a
+        fetch under the cross-process lock and both record it, so the same
+        profile legitimately arrives twice under different variants; a true
+        duplicate (same variant re-recording the same refresh) is ignored.
+        """
+        def _write():
+            cols = [
+                "timestamp", "date", "variant", "spot", "expiry",
+                "n_strikes", "chain_total", "hydrated_count",
+                "candidates_found", "hydrate_cap", "total_abs_gex",
+                "n_positive_clusters", "n_negative_clusters",
+                "strikes_json", "clusters_json",
+            ]
+            placeholders = ", ".join(["?"] * len(cols))
+            col_names = ", ".join(cols)
+            values = tuple(snap.get(c) for c in cols)
+            with self._connect() as conn:
+                conn.execute(
+                    f"INSERT OR IGNORE INTO gex_profile_snapshots ({col_names}) "
+                    f"VALUES ({placeholders})",
+                    values,
+                )
+                conn.commit()
+
+        return self._safe_write("record_gex_snapshot", _write)
+
+    def record_gex_decision(self, dec: Dict[str, Any]) -> bool:
+        """Persist one real accel-zone decision plus every shadow verdict.
+
+        No primary key / no INSERT OR IGNORE on purpose: a variant can
+        legitimately evaluate the SAME entry+side many times in a session
+        (per-tick overlay watch, entry retries), and each evaluation is a
+        distinct observation whose disagreement rate we want to measure.
+        Deduplicating would silently discard exactly the repeated-evaluation
+        instability that the 2026-09-04 razor-edge finding is about.
+        """
+        def _write():
+            cols = [
+                "timestamp", "date", "variant", "consumer", "entry_number",
+                "side", "spot", "reference_strike", "live_action",
+                "live_adjuster_predicate", "live_overlay_predicate",
+                "cluster_low", "cluster_high", "cluster_peak",
+                "cluster_n_strikes", "cluster_strength_pct",
+                "shadow_json", "shadow_disagrees",
+            ]
+            placeholders = ", ".join(["?"] * len(cols))
+            col_names = ", ".join(cols)
+            values = tuple(dec.get(c) for c in cols)
+            with self._connect() as conn:
+                conn.execute(
+                    f"INSERT INTO gex_decisions ({col_names}) VALUES ({placeholders})",
+                    values,
+                )
+                conn.commit()
+
+        return self._safe_write("record_gex_decision", _write)
+
+    # ========================================================================
     # Settlement Writes (once per day after 4 PM)
     # ========================================================================
 
@@ -592,9 +981,20 @@ class DataRecorder:
         """Write daily_summaries row with enrichment fields.
 
         Uses INSERT OR IGNORE — DataRecorder writes first (settlement ~4PM),
-        HOMER writes second (5:30PM). First writer wins. HOMER can UPDATE
-        specific columns (day_type from Claude narrative) after its INSERT
-        is ignored.
+        HOMER writes second (7:30PM, deploy/homer.timer OnCalendar 19:30 ET).
+        First writer wins, so on a normal day the bot's row is the one that
+        persists.
+
+        IMPORTANT: HOMER currently has NO UPDATE path for daily_summaries —
+        services/homer/db_manager.py.insert_daily_summary is also INSERT OR
+        IGNORE, so when the bot's row already exists HOMER's insert is silently
+        dropped. HOMER-only enrichment columns it computes (notably day_type,
+        and realized_volatility) therefore never reach the DB on a normal day
+        and stay NULL; they only land on the rare path where the bot crashed
+        before settlement and HOMER's insert wins. See cross_file_notes /
+        audit finding: HOMER needs an explicit UPDATE (or ON CONFLICT DO
+        UPDATE) for those columns to close this data-loss gap. Do not rely on
+        an UPDATE happening here today — it does not.
         """
         def _write():
             cols = [
@@ -608,6 +1008,8 @@ class DataRecorder:
                 "config_version", "opex_week",
                 # v8 contract count per day
                 "contracts_per_entry",
+                # v13 per-day unattributed-overlay P&L (Brandon aggregate-only hedge)
+                "unattributed_overlay_pnl",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
@@ -691,7 +1093,27 @@ class DataRecorder:
         would_have_stopped: bool,
         theoretical_pnl: float,
     ) -> bool:
-        """Update skipped_entries with hindsight P&L data (post-settlement)."""
+        """Update skipped_entries with hindsight P&L data (post-settlement).
+
+        ⚠️ NEVER CALLED (verified 2026-09-10: zero callers repo-wide, including
+        tests, scripts and the dashboard). The consequence is concrete and worth
+        knowing before you query this table: on variant B, `skipped_entries` holds
+        198 rows and **0** of them have `would_have_stopped` or `theoretical_pnl`
+        populated. Those columns are not sparse — they are structurally empty,
+        and always have been.
+
+        So any analysis of "how did skipped entries turn out" is currently
+        impossible from this table, and a reader who does not know that could
+        easily read the NULLs as "no stop" rather than "never computed".
+
+        KEPT, not deleted, deliberately: this is the write half of the
+        counterfactual the open GEX-veto question actually needs — "would the
+        entries the adjuster vetoed have won?" (43 vetoes vs 38 placed, Fisher
+        p=0.038 favouring the gate, but the dollar EV has never been computed).
+        Wiring it up means computing a theoretical outcome for each skipped
+        entry at settlement and calling this; that is a feature, not a cleanup,
+        so it is not being bolted onto a deploy batch.
+        """
         def _write():
             with self._connect() as conn:
                 conn.execute(
@@ -729,3 +1151,59 @@ class DataRecorder:
                 return row[0] if row else None
         except Exception:
             return None
+
+    def get_last_spx_for_date(self, date_str: str) -> Optional[float]:
+        """The last recorded intraday SPX price for ``date_str`` (a robust proxy
+        for the day's close).
+
+        Used to recover the daily-summary close when the live ``current_price``
+        has decayed to 0 by the time a LATE after-hours summary runs — 0DTE
+        settlement can complete hours after the 4 PM close (IBKR marked variant
+        C's 2026-06-11 legs settled at 9:52 PM ET), and a mid-evening restart
+        drops the in-memory close. ``market_ticks`` is on disk, so it survives
+        both. Returns None if no positive tick was recorded for the date.
+        """
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """SELECT spx_price FROM market_ticks
+                    WHERE timestamp LIKE ? AND spx_price > 0
+                    ORDER BY timestamp DESC LIMIT 1""",
+                    (date_str + "%",)
+                ).fetchone()
+                return row[0] if row else None
+        except Exception:
+            return None
+
+    def get_spx_ohlc_for_date(self, date_str: str):
+        """``(open, high, low, close)`` of the recorded intraday ``spx_price`` for
+        ``date_str`` from ``market_ticks`` — open = first positive tick, close =
+        last. Returns ``(None, None, None, None)`` if no positive tick exists.
+
+        Used to backfill a daily-summary's OHLC when the live ``MarketData`` never
+        captured it — e.g. Strategy E's SPY underlying isn't read via the index
+        (``sec_type=IND``) path, so ``spx_open``/``spx_high`` stay at their ``0.0``
+        reset defaults even though E records a SPY ``spx_price`` every heartbeat.
+        Read-only; no other caller relies on it (a strict addition).
+        """
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """SELECT
+                        (SELECT spx_price FROM market_ticks
+                         WHERE timestamp LIKE :d AND spx_price > 0
+                         ORDER BY timestamp ASC LIMIT 1),
+                        MAX(spx_price),
+                        MIN(spx_price),
+                        (SELECT spx_price FROM market_ticks
+                         WHERE timestamp LIKE :d AND spx_price > 0
+                         ORDER BY timestamp DESC LIMIT 1)
+                       FROM market_ticks
+                       WHERE timestamp LIKE :d AND spx_price > 0""",
+                    {"d": date_str + "%"},
+                ).fetchone()
+            if row and row[0] is not None:
+                return (row[0], row[1], row[2], row[3])
+        except Exception:
+            pass
+        return (None, None, None, None)

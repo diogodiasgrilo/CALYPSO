@@ -112,7 +112,9 @@ class StateFileReader:
             # or current time as last resort — same as the live transition path).
             for num, e in current.items():
                 for side, flag in [("call", "call_side_stopped"), ("put", "put_side_stopped")]:
-                    if e.get(flag) and (num, side) not in existing_keys:
+                    # Skip managed closes (TP/breach/EOD-flatten reuse *_side_stopped
+                    # as a generic "closed" flag) — they are not stops (2026-06-25).
+                    if e.get(flag) and not e.get("early_closed") and (num, side) not in existing_keys:
                         stop_time = e.get(_time_keys[side]) or e.get("entry_time") or _now_et_iso()
                         self._detected_stops.append({
                             "entry_number": num,
@@ -127,7 +129,9 @@ class StateFileReader:
                 for side, flag in [("call", "call_side_stopped"), ("put", "put_side_stopped")]:
                     was_stopped = prev.get(flag, False)
                     is_stopped = e.get(flag, False)
-                    if not was_stopped and is_stopped and (num, side) not in existing_keys:
+                    # Skip managed closes (early_closed reuses *_side_stopped) — not stops.
+                    if (not was_stopped and is_stopped and not e.get("early_closed")
+                            and (num, side) not in existing_keys):
                         # Use real stop timestamp from state file, fall back to current time
                         stop_time = e.get(_time_keys[side]) or _now_et_iso()
                         self._detected_stops.append({

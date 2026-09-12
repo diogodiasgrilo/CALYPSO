@@ -117,7 +117,7 @@ def _build_data_context(
         lines.append('<data source="bot_mode">')
         lines.append("  dry_run: true")
         lines.append("  dry_run_force_normal_day: true")
-        lines.append("  meaning: All FOMC date-based skips (T+1 blackout, Day-2 announcement skip, MKT-038 call-only) are RUNTIME-BYPASSED for this day. Entries placed on what the calendar says is FOMC T+1 are EXPECTED behavior in this mode, NOT a contradiction. Strikes, credits, and stop levels reflect Path-B (real Saxo bid/ask used for credit estimation; no real orders placed).")
+        lines.append("  meaning: All FOMC date-based skips (T+1 blackout, Day-2 announcement skip, MKT-038 call-only) are RUNTIME-BYPASSED for this day. Entries placed on what the calendar says is FOMC T+1 are EXPECTED behavior in this mode, NOT a contradiction. Strikes, credits, and stop levels reflect Path-B (real IBKR bid/ask used for credit estimation; no real orders placed).")
         lines.append("</data>")
         lines.append("")
 

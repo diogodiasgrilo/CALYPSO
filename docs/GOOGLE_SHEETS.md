@@ -1,5 +1,19 @@
 # Google Sheets Logging Setup
 
+> **⚠️ RETIRED (2026-07-18).** The Google Sheets WRITE path is decommissioned and the
+> Looker Studio report is being decommissioned. HYDRA's agents (CLIO/HERMES/HOMER) and
+> the dashboard now read the live variant's `backtesting.db` directly (currently
+> `data/variant_b/backtesting.db`; the canonical reader follows whichever variant holds
+> the live seat via `dashboard/backend/services/variant_readers.py` `live_seat_id()` /
+> `canonical_db_reader()`, so this path moves on the next live-seat swap). All variants run
+> `google_sheets.enabled=false`, and `shared/logger_service.py:GoogleSheetsLogger`
+> force-disables the writer regardless of config (kept as dormant code). The read-side
+> fallback `shared/sheets_reader.py` is retained but unused. See memory
+> `agents_sheets_to_db_migration`. The steps below are **historical** — kept only for
+> reference on how the (now-inactive) Sheets integration was set up.
+
+---
+
 Comprehensive trade logging to Google Sheets for all 3 bots.
 
 Each bot has its own dedicated spreadsheet with strategy-specific worksheets.

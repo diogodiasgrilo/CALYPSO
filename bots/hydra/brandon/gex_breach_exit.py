@@ -1,4 +1,4 @@
-"""GEX breach exit signal — shadow only for the first 4 weeks.
+"""GEX breach exit signal — the LIVE stop in variants B and C.
 
 Brandon: "if we break through this entire cluster, I am going to have to sell …
 likely a reversal or stop out." The thesis is that a sustained breach of the
@@ -11,9 +11,11 @@ must persist for `confirmation_seconds` (default 90s) to be confirmed —
 matches HYDRA's existing MKT-036 confirmation pattern, filtering out single-
 tick noise.
 
-For the first 4 weeks of variant B/C, the strategy logs `would_close` events
-to shadow_entries without acting on them. After comparison to actual
-credit+buffer stop outcomes, the rule may be promoted to a live exit.
+In variants B/C this breach exit is the PRIMARY (live) stop — it acts on a
+confirmed breach. HYDRA's credit+buffer stop runs in parallel as the shadow
+in those variants (`hydra_stop_shadow`: computed every tick, not acted on,
+first fire per side per day Telegrammed for head-to-head comparison). This
+is the inverse of variant A, where credit+buffer is live.
 """
 
 from __future__ import annotations
@@ -52,8 +54,11 @@ def evaluate_breach(
     side: "call" or "put". Caller passes the decel walls relevant to that side
         (call → walls above entry spot; put → walls below).
     spot_now: current SPX.
-    decel_walls: positive-gamma clusters captured at entry. Empty tuple = no
-        breach signal possible.
+    decel_walls: positive-gamma clusters re-read from the current GEX profile
+        each tick (the caller recomputes these live; the profile itself rides
+        the shared-cache ~3-min TTL, so the wall set can change intraday rather
+        than being a fixed entry-time snapshot). Empty tuple = no breach signal
+        possible.
     state: per-side state from the previous tick.
     now: current timestamp.
     confirmation_seconds: how long the breach must persist before would_close

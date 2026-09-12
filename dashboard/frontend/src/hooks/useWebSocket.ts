@@ -2,6 +2,15 @@
 
 import { useEffect, useRef, useCallback } from "react";
 import { useHydraStore } from "../store/hydraStore";
+import { useSelectedSnapshotStore } from "../components/dashboard/selectedSnapshotStore";
+
+/** True when the dashboard is currently showing a NON-primary strategy.
+ *  StrategyDashboard publishes the polled snapshot ONLY for a non-primary
+ *  selection (null on the primary), so a non-null snapshot here means "not the
+ *  primary" — exactly the cross-strategy-toast guard (audit AUD-3-F1). */
+function isViewingNonPrimary(): boolean {
+  return useSelectedSnapshotStore.getState().snapshot !== null;
+}
 
 const MAX_RECONNECT_DELAY = 30_000;
 /** If no message received for this long, declare connection dead and reconnect. */
@@ -47,8 +56,10 @@ export function useWebSocket() {
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
-    const apiKey = localStorage.getItem("calypso-api-key") || "";
-    const url = `${protocol}//${host}/ws/dashboard?api_key=${apiKey}`;
+    // Session cookie rides along automatically (browsers always attach
+    // matching cookies to same-origin WebSocket handshakes) — no secret in
+    // the URL, unlike the old ?api_key= scheme.
+    const url = `${protocol}//${host}/ws/dashboard`;
 
     const ws = new WebSocket(url);
     wsRef.current = ws;
@@ -87,14 +98,21 @@ export function useWebSocket() {
             break;
           case "stop_events":
             applyStopEvents(msg.data);
-            // Toast notification for new stops
-            for (const stop of msg.data) {
-              if (stop.stop_time) {
-                addToast({
-                  type: "stop",
-                  title: `Stop Triggered`,
-                  message: `Entry #${stop.entry_number} ${stop.side} side stopped`,
-                });
+            // Toast notification for new stops — the WS stream tracks the
+            // PRIMARY strategy only. Suppress these toasts while the user is
+            // viewing a DIFFERENT strategy on the dashboard, so a primary-C
+            // stop doesn't pop while the body shows E (audit AUD-3-F1). The
+            // stopEvents themselves are still applied (harmless; the primary
+            // view reads them). null/unset selection = primary = show toasts.
+            if (!isViewingNonPrimary()) {
+              for (const stop of msg.data) {
+                if (stop.stop_time) {
+                  addToast({
+                    type: "stop",
+                    title: `Stop Triggered`,
+                    message: `Entry #${stop.entry_number} ${stop.side} side stopped`,
+                  });
+                }
               }
             }
             break;
@@ -120,10 +138,19 @@ export function useWebSocket() {
       }
     };
 
-    ws.onclose = () => {
-      setConnectionStatus("disconnected");
+    ws.onclose = (event) => {
       wsRef.current = null;
       if (heartbeatTimer.current) clearTimeout(heartbeatTimer.current);
+      // 4001 = ws/router.py's explicit "Not authenticated" close (session
+      // expired/revoked, checked BEFORE accept()) — not a network blip.
+      // Retrying forever here just re-fails identically every ~30s (a real
+      // stale tab did this for hours). Stop and let LoginGate re-check auth
+      // and send the user back through login instead.
+      if (event.code === 4001) {
+        setConnectionStatus("auth_expired");
+        return;
+      }
+      setConnectionStatus("disconnected");
       scheduleReconnect();
     };
 

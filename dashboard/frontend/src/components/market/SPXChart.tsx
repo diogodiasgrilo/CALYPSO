@@ -1,18 +1,71 @@
-import { useEffect, useRef, useMemo } from "react";
+import { useEffect, useRef, useMemo, useState } from "react";
 import {
   createChart,
   createSeriesMarkers,
   CandlestickSeries,
+  LineSeries,
   type IChartApi,
   type ISeriesApi,
   type Time,
   ColorType,
   CrosshairMode,
 } from "lightweight-charts";
-import { useHydraStore, type HydraEntry } from "../../store/hydraStore";
+import { useHydraStore, type HydraEntry, type OHLCBar } from "../../store/hydraStore";
 import { colors } from "../../lib/tradingColors";
+import { withCandleContinuity } from "../../lib/candles";
 
-/** Parse ET timestamp → epoch seconds (Lightweight Charts renders as-if-UTC → shows ET labels).
+type SeriesType = "candle" | "line";
+// Generic series handle — markers + price lines work on both candle and line.
+type AnySeries = ISeriesApi<"Candlestick"> | ISeriesApi<"Line">;
+
+/** Decide how to draw the price track from the data's density.
+ *  Candlesticks need several samples/minute to show a body+wick; a feed that
+ *  samples ~1×/min produces all-doji bars (open=high=low=close) that render as
+ *  ugly flat crosses. When most bars are degenerate we draw a clean line of
+ *  closes instead — honest and continuous at any sampling rate. Dense feeds
+ *  (e.g. variant A at ~4-8×/min) keep real candlesticks. */
+function chooseSeriesType(bars: OHLCBar[]): SeriesType {
+  if (bars.length < 5) return "candle";
+  const dojis = bars.filter(
+    (b) => b.high === b.low && b.open === b.close && b.high === b.open
+  ).length;
+  return dojis / bars.length > 0.5 ? "line" : "candle";
+}
+
+function makeSeries(chart: IChartApi, type: SeriesType): AnySeries {
+  if (type === "line") {
+    return chart.addSeries(LineSeries, {
+      color: colors.info,
+      lineWidth: 2,
+      priceLineVisible: false,
+      lastValueVisible: true,
+    });
+  }
+  return chart.addSeries(CandlestickSeries, {
+    upColor: colors.profit,
+    downColor: colors.loss,
+    borderUpColor: colors.profit,
+    borderDownColor: colors.loss,
+    wickUpColor: colors.profitMuted,
+    wickDownColor: colors.lossMuted,
+  });
+}
+
+/** Format a chart Time (epoch that ENCODES the ET wall-clock as-UTC, produced by
+ *  parseET) as HH:MM in Eastern, regardless of the viewer's browser timezone.
+ *  Lightweight Charts otherwise renders tick/crosshair labels in the browser's
+ *  LOCAL zone; reading the UTC components of the as-UTC epoch returns the
+ *  original ET wall-clock, so the market clock shows correctly everywhere. */
+function fmtChartTimeET(time: Time): string {
+  const d = new Date((time as number) * 1000);
+  const hh = String(d.getUTCHours()).padStart(2, "0");
+  const mm = String(d.getUTCMinutes()).padStart(2, "0");
+  return `${hh}:${mm}`;
+}
+
+/** Parse an ET timestamp → epoch seconds that ENCODES the ET wall-clock as-UTC
+ *  (display is forced to ET by fmtChartTimeET via the chart's tickMark/time
+ *  formatters — do NOT rely on Lightweight Charts' default local rendering).
  *  Handles full ISO ("2026-04-07T12:03:01-04:00"), datetime ("2026-04-07 12:03:01"),
  *  and time-only ("12:03:08") formats. Time-only uses today's date. */
 function parseET(ts: string, fallbackDate?: string): number {
@@ -32,32 +85,125 @@ function parseET(ts: string, fallbackDate?: string): number {
   return 0;
 }
 
-/** Stable hash of entry fields relevant to markers/price lines. */
+/** Stable hash of entry fields relevant to markers/price lines. Includes each
+ *  overlay's placed_at so a hedge appearing mid-day (with no other entry field
+ *  changing) still triggers a marker/price-line rebuild. */
 function entriesHash(entries: HydraEntry[]): string {
   return entries.map(e =>
-    `${e.entry_number}|${e.entry_time}|${e.call_side_stopped}|${e.put_side_stopped}|${e.call_side_expired}|${e.put_side_expired}|${e.call_side_skipped}|${e.put_side_skipped}|${e.short_call_strike}|${e.short_put_strike}`
+    `${e.entry_number}|${e.entry_time}|${e.call_side_stopped}|${e.put_side_stopped}|${e.call_side_expired}|${e.put_side_expired}|${e.call_side_skipped}|${e.put_side_skipped}|${e.short_call_strike}|${e.short_put_strike}|${(e.overlays ?? []).map(o => o.placed_at).join(",")}`
   ).join("~");
 }
 
-export function SPXChart() {
+/** Build one chart marker per Brandon defensive-overlay hedge placement
+ *  (a debit spread before 12:30 ET, a butterfly after — see EntryCard.tsx's
+ *  overlay block for the same data rendered as a card). Amber to match the
+ *  entry card's overlay accent color; positioned by which IC side the hedge
+ *  is defending, mirroring the stop-marker convention below. */
+function hedgeMarkersFromEntries(entries: HydraEntry[]) {
+  const out: { time: Time; position: "aboveBar" | "belowBar"; color: string; shape: "square"; text: string }[] = [];
+  for (const e of entries) {
+    for (const ov of e.overlays ?? []) {
+      if (!ov.placed_at) continue;
+      const t = parseET(ov.placed_at);
+      if (t <= 0) continue;
+      out.push({
+        time: t as Time,
+        position: ov.threatened_side === "put" ? "belowBar" : "aboveBar",
+        color: colors.warning,
+        shape: "square",
+        text: `⚡H${e.entry_number}`,
+      });
+    }
+  }
+  return out;
+}
+
+/** Derive belowBar stop markers from entries' per-side *_stop_time fields.
+ *  Used in the polled (non-primary) path where there is no WS stopEvents stream;
+ *  the snapshot entries carry the stop times directly. The primary path still
+ *  uses the live WS stopEvents (richer, transition-detected). */
+function stopEventsFromEntries(entries: HydraEntry[]): StopEventLike[] {
+  const out: StopEventLike[] = [];
+  for (const e of entries) {
+    // A managed close (TP/breach/EOD-flatten) reuses *_side_stopped as a generic
+    // "closed" flag — it is NOT a stop, so it must not draw a red "S" stop marker
+    // (2026-06-25). Genuine credit+buffer stops never set early_closed.
+    if (e.early_closed) continue;
+    if (e.call_side_stopped && e.call_stop_time) {
+      out.push({ entry_number: e.entry_number, side: "call", stop_time: e.call_stop_time });
+    }
+    if (e.put_side_stopped && e.put_stop_time) {
+      out.push({ entry_number: e.entry_number, side: "put", stop_time: e.put_stop_time });
+    }
+  }
+  return out;
+}
+
+type StopEventLike = { entry_number: number; side: string; stop_time: string };
+
+interface SPXChartProps {
+  /** When provided, the candle/line bars come from THIS array (the polled
+   *  snapshot's OHLC) instead of the WS store — for a non-primary IC view.
+   *  Omitted (undefined) → read the WS store, byte-identical to the old behavior. */
+  ohlc?: OHLCBar[];
+  /** When provided, entry markers + strike lines come from THESE entries (the
+   *  polled snapshot's entries) instead of the WS store. Stop markers are then
+   *  derived from the entries' *_stop_time fields (no WS stop stream off-primary). */
+  entries?: HydraEntry[];
+  /** Fallback date for time-only stop timestamps, when in prop mode. */
+  date?: string | null;
+}
+
+export function SPXChart({ ohlc: ohlcProp, entries: entriesProp, date: dateProp }: SPXChartProps = {}) {
   const containerRef = useRef<HTMLDivElement>(null);
   const chartRef = useRef<IChartApi | null>(null);
-  const candleSeriesRef = useRef<ISeriesApi<"Candlestick"> | null>(null);
+  const seriesRef = useRef<AnySeries | null>(null);
+  const seriesTypeRef = useRef<SeriesType | null>(null);
   const priceLinesRef = useRef<ReturnType<ISeriesApi<"Candlestick">["createPriceLine"]>[]>([]);
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   const markersRef = useRef<any>(null);
   const prevEntriesHashRef = useRef("");
   const prevStopCountRef = useRef(0);
   const prevShowStrikesRef = useRef(false);
+  const prevSeriesVersionRef = useRef(0);
+  // Bumped whenever the price series is recreated (candle↔line) so the markers/
+  // price-lines effect re-attaches them to the new series.
+  const [seriesVersion, setSeriesVersion] = useState(0);
 
-  const todayOHLC = useHydraStore((s) => s.todayOHLC);
-  const hydraEntries = useHydraStore((s) => s.hydraState?.entries);
-  const stateDate = useHydraStore((s) => s.hydraState?.date);
-  const stopEvents = useHydraStore((s) => s.stopEvents);
+  // Hooks are always called (Rules of Hooks); a prop, when present, overrides
+  // the corresponding WS-store value. No prop → behave EXACTLY as before.
+  const storeOHLC = useHydraStore((s) => s.todayOHLC);
+  const storeEntries = useHydraStore((s) => s.hydraState?.entries);
+  const storeDate = useHydraStore((s) => s.hydraState?.date);
+  const storeStopEvents = useHydraStore((s) => s.stopEvents);
   const showStrikes = useHydraStore((s) => s.showStrikes);
   const toggleStrikes = useHydraStore((s) => s.toggleStrikes);
 
-  const entries = useMemo(() => hydraEntries ?? [], [hydraEntries]);
+  const usingProps = entriesProp !== undefined;
+  const todayOHLC = ohlcProp ?? storeOHLC;
+  const stateDate = usingProps ? (dateProp ?? null) : storeDate;
+  const entries = useMemo(
+    () => entriesProp ?? storeEntries ?? [],
+    [entriesProp, storeEntries],
+  );
+  const stopEvents = useMemo(
+    () => {
+      const raw = usingProps ? stopEventsFromEntries(entries) : storeStopEvents;
+      // A managed close (Brandon TP/GEX-breach, MKT-047 EOD flatten) sets
+      // early_closed and is NOT a credit+buffer stop — it must not draw a red "S"
+      // stop marker (2026-06-25 intent). stopEventsFromEntries already drops these,
+      // but storeStopEvents is an append-only WS cache: within a session it is only
+      // replaced by a reconnect's full snapshot, so a stop event captured during the
+      // flatten's multi-field state write lingers as a stale marker (e.g. C's 7-10
+      // EOD-flattened call side). Cross-check the authoritative early_closed flag so
+      // the WS path drops it too. (2026-07-10)
+      const managedClosed = new Set(
+        entries.filter((e) => e.early_closed).map((e) => e.entry_number),
+      );
+      return raw.filter((ev) => !managedClosed.has(ev.entry_number));
+    },
+    [usingProps, entries, storeStopEvents],
+  );
 
   // Create chart on mount
   useEffect(() => {
@@ -69,6 +215,10 @@ export function SPXChart() {
         textColor: colors.textSecondary,
         fontFamily: "Inter, 'SF Mono', 'Fira Code', monospace",
         fontSize: 11,
+      },
+      // Force the crosshair time label to Eastern (market clock).
+      localization: {
+        timeFormatter: (t: Time) => fmtChartTimeET(t),
       },
       grid: {
         vertLines: { color: colors.borderDim },
@@ -87,21 +237,15 @@ export function SPXChart() {
         borderColor: colors.borderDim,
         timeVisible: true,
         secondsVisible: false,
+        // Force axis tick labels to Eastern (market clock), not browser-local.
+        tickMarkFormatter: (time: Time) => fmtChartTimeET(time),
       },
       handleScroll: { vertTouchDrag: false },
     });
 
-    const candleSeries = chart.addSeries(CandlestickSeries, {
-      upColor: colors.profit,
-      downColor: colors.loss,
-      borderUpColor: colors.profit,
-      borderDownColor: colors.loss,
-      wickUpColor: colors.profitMuted,
-      wickDownColor: colors.lossMuted,
-    });
-
     chartRef.current = chart;
-    candleSeriesRef.current = candleSeries;
+    // The price series is created lazily in the data effect below, where its
+    // type (candle vs line) is chosen from the data's density.
 
     // Handle resize
     const observer = new ResizeObserver((resizeEntries) => {
@@ -118,82 +262,138 @@ export function SPXChart() {
       observer.disconnect();
       chart.remove();
       chartRef.current = null;
-      candleSeriesRef.current = null;
+      seriesRef.current = null;
+      seriesTypeRef.current = null;
     };
   }, []);
 
-  // Update candlestick data when OHLC changes
+  // Update price data when OHLC changes; pick candle vs line from data density.
   useEffect(() => {
-    if (!candleSeriesRef.current || todayOHLC.length === 0) return;
+    if (!chartRef.current || todayOHLC.length === 0) return;
 
-    const data = todayOHLC.map((bar) => ({
-      time: parseET(bar.timestamp) as Time,
-      open: bar.open,
-      high: bar.high,
-      low: bar.low,
-      close: bar.close,
-    }));
+    const desired = chooseSeriesType(todayOHLC);
 
-    candleSeriesRef.current.setData(data);
-    chartRef.current?.timeScale().scrollToRealTime();
+    // (Re)create the series if it doesn't exist or the chosen type changed.
+    if (!seriesRef.current || seriesTypeRef.current !== desired) {
+      if (seriesRef.current) {
+        markersRef.current?.detach();
+        markersRef.current = null;
+        for (const line of priceLinesRef.current) {
+          try { seriesRef.current.removePriceLine(line); } catch { /* gone */ }
+        }
+        priceLinesRef.current = [];
+        chartRef.current.removeSeries(seriesRef.current);
+      }
+      seriesRef.current = makeSeries(chartRef.current, desired);
+      seriesTypeRef.current = desired;
+      setSeriesVersion((v) => v + 1); // force markers/lines to re-attach
+    }
+
+    if (desired === "line") {
+      const data = todayOHLC.map((bar) => ({
+        time: parseET(bar.timestamp) as Time,
+        value: bar.close,
+      }));
+      (seriesRef.current as ISeriesApi<"Line">).setData(data);
+    } else {
+      // Carry-forward continuity so a flat (single-tick, late-day idle) minute
+      // draws a connected candle body instead of a floating dash/"cross".
+      const data = withCandleContinuity(todayOHLC).map((bar) => ({
+        time: parseET(bar.timestamp) as Time,
+        open: bar.open,
+        high: bar.high,
+        low: bar.low,
+        close: bar.close,
+      }));
+      (seriesRef.current as ISeriesApi<"Candlestick">).setData(data);
+    }
+    chartRef.current.timeScale().scrollToRealTime();
   }, [todayOHLC]);
 
   // Update markers and price lines only when entries/stops actually change
   useEffect(() => {
-    if (!candleSeriesRef.current) return;
+    if (!seriesRef.current) return;
 
     const currentHash = entriesHash(entries);
     const currentStopCount = stopEvents.length;
 
-    // Skip if nothing changed (OHLC updates won't trigger marker rebuild)
+    // Skip if nothing changed (OHLC updates won't trigger marker rebuild) —
+    // but always rebuild when the series was recreated (candle↔line), since the
+    // new series starts with no markers/price lines attached.
     const strikesChanged = showStrikes !== prevShowStrikesRef.current;
-    if (currentHash === prevEntriesHashRef.current && currentStopCount === prevStopCountRef.current && !strikesChanged) {
+    const seriesChanged = seriesVersion !== prevSeriesVersionRef.current;
+    if (!seriesChanged && currentHash === prevEntriesHashRef.current && currentStopCount === prevStopCountRef.current && !strikesChanged) {
       return;
     }
     prevEntriesHashRef.current = currentHash;
     prevStopCountRef.current = currentStopCount;
     prevShowStrikesRef.current = showStrikes;
+    prevSeriesVersionRef.current = seriesVersion;
 
     // Build entry markers (exclude fully-skipped entries where both sides were never placed)
     const markers = entries
       .filter((e) => e.entry_time && !isNaN(new Date(e.entry_time).getTime()) && !(e.call_side_skipped && e.put_side_skipped))
-      .map((e) => ({
-        time: parseET(e.entry_time!) as Time,
-        position: "aboveBar" as const,
-        color:
-          e.call_side_stopped && e.put_side_stopped
-            ? colors.loss
-            : e.call_side_stopped || e.put_side_stopped
+      .map((e) => {
+        // Prefer close_reason: a Brandon TP/breach sets *_side_stopped as a
+        // generic "closed" marker, so flag-inference alone would paint a
+        // profitable take-profit red.
+        const reason = (e.close_reason || "").toUpperCase();
+        const color =
+          reason === "TP"
+            ? colors.profit
+            : reason === "BREACH"
               ? colors.warning
-              : colors.info,
-        shape: "arrowDown" as const,
-        text: `E${e.entry_number}`,
-      }));
+              : e.call_side_stopped && e.put_side_stopped
+                ? colors.loss
+                : e.call_side_stopped || e.put_side_stopped
+                  ? colors.warning
+                  : colors.info;
+        return {
+          time: parseET(e.entry_time!) as Time,
+          position: "aboveBar" as const,
+          color,
+          shape: "arrowDown" as const,
+          text: `E${e.entry_number}`,
+        };
+      });
 
     // Build stop markers (stop_time may be time-only "12:03:08" from DB)
     const stopMarkers = stopEvents
       .filter((s) => s.stop_time)
-      .map((s) => ({
-        time: parseET(s.stop_time, stateDate) as Time,
-        position: "belowBar" as const,
-        color: colors.loss,
-        shape: "circle" as const,
-        text: `S${s.entry_number}${s.side === "call" ? "C" : "P"}`,
-      }))
+      .map((s) => {
+        // A Brandon TP/breach also writes trade_stops rows, so color the close
+        // markers by the parent entry's close_reason — a take-profit's markers
+        // shouldn't be painted red like a real stop.
+        const parent = entries.find((e) => e.entry_number === s.entry_number);
+        const reason = (parent?.close_reason || "").toUpperCase();
+        const color =
+          reason === "TP" ? colors.profit
+            : reason === "BREACH" ? colors.warning
+              : colors.loss;
+        return {
+          time: parseET(s.stop_time, stateDate ?? undefined) as Time,
+          position: "belowBar" as const,
+          color,
+          shape: "circle" as const,
+          text: `S${s.entry_number}${s.side === "call" ? "C" : "P"}`,
+        };
+      })
       .filter((m) => (m.time as number) > 0);
 
-    const allMarkers = [...markers, ...stopMarkers].sort(
+    const hedgeMarkers = hedgeMarkersFromEntries(entries);
+
+    const allMarkers = [...markers, ...stopMarkers, ...hedgeMarkers].sort(
       (a, b) => (a.time as number) - (b.time as number)
     );
 
     // Detach previous markers before creating new ones (LWC v5 stacking fix)
     markersRef.current?.detach();
     markersRef.current = allMarkers.length > 0
-      ? createSeriesMarkers(candleSeriesRef.current, allMarkers)
+      ? createSeriesMarkers(seriesRef.current, allMarkers)
       : null;
 
     // Update price lines
-    const series = candleSeriesRef.current;
+    const series = seriesRef.current;
     for (const line of priceLinesRef.current) {
       series.removePriceLine(line);
     }
@@ -232,8 +432,30 @@ export function SPXChart() {
           priceLinesRef.current.push(line);
         }
       });
+
+      // Brandon defensive-overlay hedge leg strikes — dashed amber, distinct
+      // from the solid/dotted red IC strike lines above. A butterfly has up
+      // to 4 legs at up to 3 distinct strikes; label by entry + leg index so
+      // overlapping legs at the same strike don't collide silently.
+      entries.forEach((e) => {
+        (e.overlays ?? []).forEach((ov, ovIdx) => {
+          ov.legs.forEach((leg, legIdx) => {
+            if (!(leg.strike > 0)) return;
+            const line = series.createPriceLine({
+              price: leg.strike,
+              color: colors.warning,
+              lineWidth: 1,
+              lineStyle: 2, // dashed
+              axisLabelVisible: false,
+              axisLabelColor: colors.warning,
+              title: `H${e.entry_number}${ovIdx > 0 ? `.${ovIdx + 1}` : ""}L${legIdx + 1}`,
+            });
+            priceLinesRef.current.push(line);
+          });
+        });
+      });
     }
-  }, [entries, stopEvents, showStrikes]);
+  }, [entries, stopEvents, showStrikes, stateDate, seriesVersion]);
 
   return (
     <div>

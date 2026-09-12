@@ -18,7 +18,12 @@ IMPORTANT: Alerts are sent AFTER actions complete, with ACTUAL results.
 Benefits:
     - Accurate: Alerts contain real outcomes, not predictions
     - Non-blocking: Bot doesn't wait for Telegram/Gmail API (saves 1-2s per alert)
-    - Reliable: Pub/Sub retries for 7 days, dead-letter queue captures failures
+    - Reliable once published: Pub/Sub retries delivery to the Cloud Function
+      for 7 days, and a subscription-side dead-letter queue captures failures
+      AFTER that point. This does NOT cover a publish-time failure (the
+      message never reaching the topic at all, e.g. a client-side timeout) —
+      that case is handled locally by send_alert's own retry + the
+      data/failed_alerts.jsonl dead-letter fallback (see send_alert).
     - Auditable: Full trail in Cloud Logging
     - Scalable: Add new alert channels without changing bot code
 
@@ -28,13 +33,17 @@ Timezone:
     DST transitions (EST ↔ EDT) are handled automatically via pytz.
 
 Alert Priorities:
-    CRITICAL: Telegram + Email (circuit breaker, emergency exit, naked positions)
-    HIGH: Telegram + Email (stop loss, max loss, position issues)
-    MEDIUM: Telegram + Email (position opened, profit target, daily summaries)
-    LOW: Telegram + Email (informational, startup/shutdown)
+    CRITICAL: Telegram + Email (circuit breaker, emergency exit, naked positions,
+              daily halt, ITM risk close, critical intervention)
+    HIGH:     Telegram only (stop loss, max loss, position issues)
+    MEDIUM:   Telegram only (position opened, profit target, daily summaries)
+    LOW:      Telegram only (informational, startup/shutdown)
 
 Note: All priority levels send to Telegram for immediate visibility.
-      Email provides a permanent record with rich HTML formatting.
+      Only CRITICAL also sends email (see _should_send_email) — narrowed from
+      HIGH/MEDIUM/LOW-also-email on 2026-08-28 at the operator's request (the
+      live variant alone was generating 4-8+ emails/day into a personal inbox
+      for every stop loss, position close, and daily summary).
 
 Usage:
     from shared.alert_service import AlertService, AlertPriority
@@ -52,9 +61,13 @@ Usage:
     )
 """
 
+import fcntl
 import json
 import logging
 import os
+import re
+import threading
+import time
 from datetime import datetime, timezone
 from enum import Enum
 from typing import Any, Dict, Optional
@@ -68,13 +81,38 @@ US_EASTERN = pytz.timezone('America/New_York')
 
 logger = logging.getLogger(__name__)
 
+# Dead-letter file for alerts that failed to publish even after retry — see
+# AlertService._write_dead_letter. Module-level (not computed inline) so
+# tests can monkeypatch it to a tmp path.
+FAILED_ALERTS_PATH = os.path.join(
+    os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "data", "failed_alerts.jsonl"
+)
+
+# Bounded wait for the dead-letter file's flock — see _write_dead_letter.
+# Best-effort record of an already-failed alert; skipping it on contention
+# beats blocking the caller (which can be the main trading loop).
+DEAD_LETTER_LOCK_TIMEOUT_S = 2.0
+
+
+def describe_exception(e: Exception) -> str:
+    """Render an exception for logging without ever producing a blank string.
+
+    Some common exceptions here (notably ``concurrent.futures.TimeoutError``,
+    raised by ``Future.result(timeout=...)`` on Pub/Sub publish timeout) have
+    an empty ``str(e)`` — a bare f"...: {e}" then logs nothing useful about
+    WHY an alert failed. Always prefix the exception type so the log line is
+    diagnosable even when the message body is empty.
+    """
+    text = str(e)
+    return f"{type(e).__name__}: {text}" if text else type(e).__name__
+
 
 class AlertPriority(Enum):
     """Alert priority levels determining delivery channels."""
     CRITICAL = "critical"  # Telegram + Email
-    HIGH = "high"          # Telegram + Email
-    MEDIUM = "medium"      # Telegram + Email (except POSITION_OPENED → Telegram only)
-    LOW = "low"            # Telegram only (except DAILY_SUMMARY and agent reports → both)
+    HIGH = "high"          # Telegram only (was + Email before 2026-08-28)
+    MEDIUM = "medium"      # Telegram only (was + Email before 2026-08-28)
+    LOW = "low"            # Telegram only
 
 
 class AlertType(Enum):
@@ -124,7 +162,7 @@ class AlertType(Enum):
     EMERGENCY_CLOSE = "emergency_close"      # Emergency position close event
     DATA_QUALITY = "data_quality"            # Data quality issue (stale quotes, invalid P&L)
 
-    # Market Status Events (Telegram + Email)
+    # Market Status Events (Telegram only — none of these are CRITICAL, see _should_send_email)
     MARKET_OPENING_SOON = "market_opening_soon"  # 1h, 30m, 15m countdown
     MARKET_OPEN = "market_open"                   # Market just opened
     MARKET_CLOSED = "market_closed"               # Market just closed
@@ -139,6 +177,7 @@ class AlertType(Enum):
 
     # Entry Events
     ENTRY_SKIPPED = "entry_skipped"  # Entry skipped (credit gate, VIX gate, illiquidity, etc.)
+    ENTRY_EXECUTION_FAILED = "entry_execution_failed"  # Order placement exhausted all retries — broker/API failure, not a strategic skip
 
     # Variant comparison (1v1 dry-run experiment) — fires once at end-of-day
     # from variant A only. Variant B never fires (alerts.enabled=false in
@@ -158,6 +197,7 @@ DEFAULT_PRIORITIES = {
     AlertType.MAX_LOSS: AlertPriority.HIGH,
     AlertType.WING_BREACH: AlertPriority.HIGH,
     AlertType.ROLL_FAILED: AlertPriority.HIGH,
+    AlertType.ENTRY_EXECUTION_FAILED: AlertPriority.HIGH,  # order accepted but never filled after retries — distinct from a routine skip
     AlertType.DELTA_BREACH: AlertPriority.HIGH,
     AlertType.API_ERROR: AlertPriority.HIGH,
     AlertType.PREMARKET_GAP: AlertPriority.HIGH,  # Big gap affects positions
@@ -210,6 +250,11 @@ class AlertService:
     """
 
     PUBSUB_TOPIC = "calypso-alerts"
+    # Bound for close()'s background transport-close thread — a class
+    # attribute (not a bare literal) so tests can monkeypatch it to a tiny
+    # value instead of needing to wait out the real 5s to prove the bound
+    # actually applies. See close()'s docstring.
+    CLOSE_TIMEOUT_S = 5.0
 
     def __init__(self, config: Dict[str, Any], bot_name: str):
         """
@@ -224,6 +269,12 @@ class AlertService:
         self._publisher = None
         self._topic_path = None
         self._initialized = False
+        # Monotonic timestamp of the last (re-)init attempt. Lets send_alert
+        # retry a failed publisher construction (e.g. a transient GCP
+        # auth/network hiccup at process start) on a cooldown instead of
+        # staying permanently local-only for the process's whole life. See
+        # the lazy-reinit block in send_alert.
+        self._last_init_attempt: float = 0.0
         self._dry_run = os.environ.get("ALERT_DRY_RUN", "").lower() == "true"
 
         # Alert configuration from config file
@@ -232,13 +283,55 @@ class AlertService:
         self._phone_number = alert_config.get("phone_number", "")
         self._email = alert_config.get("email", "")
 
+        # ── Anti-spam gate state (see _apply_alert_gate) ──────────────────────
+        # The single chokepoint that makes the alert stream un-spammable by
+        # construction: identical alerts collapse within a per-priority window,
+        # each alert TYPE is rate-limited by a token bucket, and a global email
+        # ceiling caps any burst. Added 2026-06-11 after a retry-loop flooded
+        # the inbox with dozens of duplicate CRITICAL/HIGH emails. All state is
+        # in-process (per bot instance) and guarded by a lock because the
+        # Telegram daemon thread and the main loop both call send_alert.
+        self._gate_lock = threading.Lock()
+        self._dedup_last: Dict[str, float] = {}        # fingerprint -> last-send monotonic ts
+        self._dedup_suppressed: Dict[str, int] = {}    # fingerprint -> #suppressed since last send
+        self._type_buckets: Dict[Any, Dict[str, float]] = {}  # alert_type -> token bucket
+        self._email_times: list = []                   # monotonic ts of recent EMAILS (ceiling)
+
+        # Dedicated lock for the lazy-reinit block below — deliberately NOT
+        # _gate_lock. _apply_alert_gate acquires _gate_lock on EVERY send_alert
+        # call; _initialize() can block for an unbounded time (GCP credential/
+        # metadata-server discovery inside pubsub_v1.PublisherClient() has no
+        # explicit timeout). Reusing _gate_lock here would mean a stuck reinit
+        # on one thread blocks every OTHER thread's send_alert — including a
+        # concurrent CRITICAL alert from the Telegram poller thread on variant
+        # A — on the anti-spam gate, which has nothing to do with reinit.
+        self._reinit_lock = threading.Lock()
+
+        # Cache for the direct-Telegram bypass (see _attempt_telegram_bypass /
+        # shared/telegram_direct.py) — only ever populated on a SUCCESSFUL
+        # credential fetch. Stays None on a failed fetch so a later bypass
+        # trigger retries rather than treating a transient Secret Manager
+        # blip as a permanent failure.
+        self._telegram_creds_cache: Optional[Dict[str, Any]] = None
+
         self._initialize()
 
     def _initialize(self) -> None:
-        """Initialize Pub/Sub publisher if running on GCP."""
+        """Initialize Pub/Sub publisher if running on GCP.
+
+        L-C2: the publisher is initialized even when alerts are DISABLED so the
+        severity bypass in ``send_alert`` can still deliver CRITICAL/HIGH events
+        (a disabled config must never silence an emergency on the live-order
+        variant). Routine LOW/MEDIUM alerts are still suppressed at the
+        ``send_alert`` gate — only the publisher setup is no longer skipped.
+        """
         if not self._enabled:
-            logger.info("Alert service disabled in config")
-            return
+            logger.info(
+                "Alert service: routine alerts DISABLED in config "
+                "(CRITICAL/HIGH still delivered via severity bypass)"
+            )
+            # Intentionally fall through to publisher init below so the bypass
+            # path has a working Pub/Sub channel for emergencies.
 
         if self._dry_run:
             logger.info("Alert service running in DRY RUN mode (ALERT_DRY_RUN=true)")
@@ -268,7 +361,104 @@ class AlertService:
                 "google-cloud-pubsub not installed. Run: pip install google-cloud-pubsub"
             )
         except Exception as e:
-            logger.error(f"Failed to initialize Pub/Sub publisher: {e}")
+            logger.error(f"Failed to initialize Pub/Sub publisher: {describe_exception(e)}")
+
+    def close(self) -> None:
+        """Best-effort teardown of the Pub/Sub publisher's gRPC channel.
+
+        Part of the 2026-08-18 shutdown-hang investigation: strategy
+        processes were observed taking 44-82+ seconds (sometimes past the
+        100s systemd TimeoutStopSec, needing a forced SIGKILL) to actually
+        exit after logging a complete graceful-shutdown sequence, with
+        lingering child threads named grpc_global_tim/event_engine/
+        lifeguard — grpc-core's process-global timer/poller/watchdog
+        threads, lazily spawned by the first channel any client library
+        constructs (Secret Manager at startup, this publisher — built even
+        when alerts are config-disabled, see the L-C2 comment in
+        _initialize). Those three threads are process-wide singletons only
+        torn down by grpc's own internal shutdown sequence at real
+        interpreter exit, NOT per-channel — closing this one publisher
+        cannot eliminate them. What it DOES do, correctly: releases this
+        channel's own connection/subchannel state promptly instead of
+        leaving it to Channel.__del__, which deliberately does not close
+        the channel (upstream grpc/grpc#12531) — real, achievable cleanup,
+        called once from main.py's shutdown sequence right before the
+        final "Shutdown complete" log line. Safe to call multiple times or
+        when the publisher was never constructed.
+
+        Round-1 adversarial review (2026-08-18) caught that the first
+        version of this method called transport.close() with NO timeout —
+        breaking this codebase's own established convention for every
+        other potentially-hanging client-library call (Sheets/Secret
+        Manager 10s, ib_oauth 30s — see CLAUDE.md's "Bot frozen" section)
+        and running unconditionally on the exact shutdown path this
+        investigation exists to unblock. If transport.close() itself ever
+        stalled, it would block BEFORE log_shutdown_diagnostics even runs.
+        Fixed to match shared/logger_service.py's _sheets_call_with_timeout
+        pattern: run the close on a daemon thread, bound the wait, give up
+        (but let the thread keep running in the background) past the
+        timeout rather than block shutdown on it.
+
+        Snapshots self._publisher into a local BEFORE clearing the
+        instance attribute, so a concurrent send_alert() that already read
+        the (still-valid-at-the-time) publisher reference keeps using its
+        own snapshot rather than crashing on a None — narrows, though
+        doesn't fully eliminate, the unsynchronized-access window a
+        reviewer flagged (low severity, not reachable today: this is
+        called exactly once, single-threaded, at the very end of
+        run_bot()'s shutdown sequence — see main.py). Full locking wasn't
+        added: it would need to wrap every send_alert() publish call too,
+        and this class's only other lock (_reinit_lock) is deliberately
+        non-blocking to avoid pileup on a possibly-hung reinit — reusing
+        it here for a blocking acquire would change its behavior for a
+        currently-unreachable race, which is a bigger, riskier change than
+        this fix warrants."""
+        publisher = self._publisher
+        self._publisher = None
+        self._initialized = False
+        if publisher is None:
+            return
+
+        result: list = [None]
+
+        def _do_close():
+            try:
+                # 2026-09-06: stop() BEFORE transport.close(). The publisher
+                # runs a background commit thread per sequencer
+                # (Thread-CommitBatchPublisher); closing the transport out from
+                # under an in-flight commit is what produced the truncated
+                # "Exception in thread Thread-CommitBatchPublisher" traceback
+                # observed on 2026-09-05. stop() flushes outstanding batches and
+                # refuses new publishes, so the commit thread finishes cleanly
+                # instead of being amputated mid-RPC. Cosmetic — that traceback
+                # was a CONSEQUENCE of shutdown, never its cause (the thread is
+                # daemon=True and cannot block interpreter exit; six variants
+                # that never publish at all hung identically on 2026-09-03).
+                # Still inside the bounded daemon thread below, so a stop() that
+                # blocks on flush cannot extend shutdown past CLOSE_TIMEOUT_S.
+                try:
+                    publisher.stop()
+                except RuntimeError:
+                    pass  # already stopped — stop()/close() are idempotent here
+                except Exception as e:  # noqa: BLE001 — never fatal on shutdown
+                    logger.debug(
+                        f"AlertService.close(): publisher.stop() failed "
+                        f"(non-fatal): {e}"
+                    )
+                publisher.transport.close()
+            except Exception as e:  # noqa: BLE001 — never fatal, see docstring
+                result[0] = e
+
+        thread = threading.Thread(target=_do_close, daemon=True)
+        thread.start()
+        thread.join(timeout=self.CLOSE_TIMEOUT_S)
+        if thread.is_alive():
+            logger.warning(
+                f"AlertService.close(): publisher transport close timed out "
+                f"after {self.CLOSE_TIMEOUT_S}s (non-fatal)"
+            )
+        elif result[0] is not None:
+            logger.debug(f"AlertService.close(): publisher transport close failed (non-fatal): {result[0]}")
 
     def send_alert(
         self,
@@ -298,16 +488,53 @@ class AlertService:
         Returns:
             bool: True if alert was published successfully
         """
-        if not self._enabled:
-            logger.debug(f"Alert skipped (disabled): {alert_type.value} - {title}")
-            return False
-
-        # Get priority from mapping if not specified
+        # Resolve priority FIRST so the disabled-gate can honor a severity bypass.
         if priority is None:
             priority = DEFAULT_PRIORITIES.get(alert_type, AlertPriority.MEDIUM)
 
+        # L-C2 severity bypass: when alerts are disabled we still publish
+        # CRITICAL/HIGH. On the live-order (paper) variant, a naked short, a
+        # failed emergency close, or a tripped breaker must never be silenced
+        # just because alerts.enabled=false. LOW/MEDIUM stay suppressed.
+        if not self._enabled and priority not in (AlertPriority.CRITICAL, AlertPriority.HIGH):
+            logger.debug(
+                f"Alert skipped (disabled, {priority.value}): {alert_type.value} - {title}"
+            )
+            return False
+
         # Determine delivery channels based on priority and alert type
         send_email = self._should_send_email(alert_type, priority)
+
+        # ── Anti-spam gate (the single chokepoint every call site passes) ─────
+        # Collapses identical alerts within a per-priority window, rate-limits
+        # each alert TYPE via a token bucket, and caps total emails per window.
+        # No matter what loop or retry storm fires upstream, the inbox can never
+        # be flooded again. NEVER_SUPPRESS types (halt/naked/breaker/emergency)
+        # bypass this entirely. Uses the RAW details for the fingerprint so
+        # entry-number / side keep distinct real events distinct.
+        #
+        # FAIL-OPEN: a bug in the gate must never SILENCE a real alert. On any
+        # gate exception we let the alert through unchanged (risk a duplicate,
+        # never a missed emergency). The gate can only ever make us send LESS;
+        # this guarantees a gate fault degrades to the old behaviour, not to
+        # silence.
+        try:
+            allow, send_email, gate_note = self._apply_alert_gate(
+                alert_type, priority, title, details, send_email
+            )
+        except Exception as e:  # pragma: no cover - defensive
+            logger.error(
+                "Alert gate error (failing open, alert sent): %s", describe_exception(e)
+            )
+            allow, gate_note = True, ""
+        if not allow:
+            logger.info(
+                "Alert gated [%s] %s: %s", priority.value, title, gate_note
+            )
+            return False
+        if gate_note:
+            # Surviving alert tells the user how many similar ones it stands in for.
+            message = f"{message}\n\n{gate_note}"
 
         # Normalize contracts defensively — `or 1` handles None, 0, and missing
         # (same null-safe pattern adopted in Phase 1 recovery paths). Live entries
@@ -325,6 +552,32 @@ class AlertService:
         enriched_details = dict(details) if details else {}
         enriched_details.setdefault("contracts", effective_contracts)
 
+        # ── Additive display fields (Phase 7) ────────────────────────────────
+        # NEW payload keys that ride alongside (never replace) the frozen
+        # alert-wire `bot_name`. The Cloud Function PREFERS these for the
+        # Telegram title / email subject and FALLS BACK to `bot_name` when
+        # absent (older payloads / other bots). `bot_name` itself — the
+        # anti-spam dedup partition key and the monitor-log column — is
+        # UNCHANGED (audit AUD-1-H1): it stays self.bot_name in the payload
+        # below, the fingerprint still keys on it, routing is untouched.
+        # The taxonomy is stdlib-only so importing it here adds no deps.
+        display_name = group_label = None
+        try:
+            from shared import strategy_taxonomy as _tax
+            _vid = _tax.variant_id()
+            # Only attach when THIS process's alert-wire name is the HYDRA-family
+            # variant name the taxonomy resolves to (e.g. self.bot_name "HYDRA_C"
+            # == taxonomy.bot_name("c")). A non-HYDRA AlertService (a legacy
+            # IRON_FLY/DELTA_NEUTRAL instance with HYDRA_VARIANT_ID unset) would
+            # otherwise be mislabeled "HYDRA Baseline" — so we leave the fields
+            # off and the CF falls back to bot_name unchanged.
+            if self.bot_name == _tax.bot_name(_vid):
+                _m = _tax.meta(_vid)
+                display_name = _m.display_name
+                group_label = _tax.group(_vid).label
+        except Exception as e:  # pragma: no cover - defensive; never block an alert
+            logger.debug("Alert display-name resolution skipped: %s", describe_exception(e))
+
         # Build alert payload
         payload = {
             "bot_name": self.bot_name,
@@ -341,6 +594,12 @@ class AlertService:
                 "email_address": self._email
             }
         }
+        # Additive only — omit keys entirely if resolution failed so the CF
+        # fallback (to bot_name) triggers cleanly rather than rendering None.
+        if display_name:
+            payload["display_name"] = display_name
+        if group_label:
+            payload["group_label"] = group_label
 
         # Format log message
         priority_emoji = {
@@ -368,85 +627,459 @@ class AlertService:
             logger.info(f"DRY RUN - Would publish: {json.dumps(payload, indent=2)}")
             return True
 
-        # Local mode - just log
-        if not self._initialized or not self._publisher:
+        # Lazy re-init: a publisher that failed to construct (e.g. a transient
+        # GCP auth/network hiccup at process start, or a prior publish-time
+        # outage) must not stay permanently local-only for the rest of this
+        # process's life. Retry at most once a minute — cheap, self-healing.
+        #
+        # Guarded by _reinit_lock (NOT _gate_lock — see its definition in
+        # __init__), and the acquire is NON-BLOCKING: _initialize() can hang
+        # for an unbounded time (GCP metadata-server discovery has no
+        # explicit timeout), and a blocking acquire here would mean every
+        # thread that sees _initialized=False piles up waiting for the SAME
+        # possibly-hung call — including the Telegram poller thread on
+        # variant A trying to send an unrelated CRITICAL alert. If another
+        # thread is already mid-reinit, just fall through to the
+        # not-initialized branch below instead of waiting for it.
+        if (
+            not self._initialized
+            and not self._dry_run
+            and is_running_on_gcp()
+            and self._reinit_lock.acquire(blocking=False)
+        ):
+            try:
+                if (
+                    not self._initialized
+                    and time.monotonic() - self._last_init_attempt > 60
+                ):
+                    self._last_init_attempt = time.monotonic()
+                    logger.info("Retrying Pub/Sub publisher initialization...")
+                    self._initialize()
+            finally:
+                self._reinit_lock.release()
+
+        # Local mode - Pub/Sub was never initialized (not on GCP — the
+        # expected, harmless case for local dev — or a sustained outage the
+        # lazy-reinit above hasn't recovered from yet). Round-3 review
+        # (2026-08-04) caught that this branch used to return early without
+        # ever writing a dead-letter record or attempting the CRITICAL/HIGH
+        # Telegram bypass below — silently dropping exactly the alerts the
+        # bypass exists to protect (a Pub/Sub outage that prevents the
+        # client from even CONSTRUCTING is a more severe case of the same
+        # "Pub/Sub is down" scenario a per-publish-call failure covers, and
+        # the original code only handled the latter). Fixed to fall through
+        # to the same dead-letter + bypass logic used below. In local dev
+        # (not on GCP) this is harmless and fast: _write_dead_letter just
+        # writes locally, and the bypass's own credential fetch short-
+        # circuits immediately via the same not-on-GCP check.
+        # Snapshot into a local now, rather than re-reading self._publisher
+        # inside the retry loop below — narrows (though per close()'s own
+        # docstring, doesn't fully eliminate) the unsynchronized window a
+        # 2026-08-18 adversarial review flagged: a concurrent close() could
+        # otherwise flip self._publisher to None mid-loop, turning a
+        # would-have-succeeded publish into a crash-then-caught AttributeError
+        # instead of just using the reference this call already committed to.
+        publisher = self._publisher
+        if not self._initialized or not publisher:
             logger.info(f"Alert logged (Pub/Sub not available): {json.dumps(payload)}")
+            self._write_dead_letter(payload, priority, "Pub/Sub not initialized/available")
+            if priority in (AlertPriority.CRITICAL, AlertPriority.HIGH):
+                self._attempt_telegram_bypass(display_title, message)
             return False
 
-        # Publish to Pub/Sub
+        # Publish to Pub/Sub. CRITICAL/HIGH get one retry (2 attempts total) —
+        # this alert may be the last thing a process does before shutting
+        # down (e.g. an emergency-exit alert), so it's worth a bounded second
+        # try rather than losing it to a single transient timeout. MEDIUM/LOW
+        # get one attempt only, keeping the common case (routine
+        # bot_started/bot_stopped alerts fired on every restart) at today's
+        # latency.
+        #
+        # This sleep is deliberately NOT wired to shared.ib_retry.SHUTDOWN_EVENT
+        # (the 2026-08-03 shutdown-hang fix's cooperative-abort mechanism):
+        # unlike an IBKR session/market retry, continuing to retry a CRITICAL/
+        # HIGH alert during shutdown has real safety value (it's often the
+        # alert telling an operator something needs attention), so aborting it
+        # the instant shutdown begins would defeat the point.
+        #
+        # Worst case here is ~11s (2×5s timeout + a 1s gap). This is bounded,
+        # but NOT a comfortable margin: it CAN stack, within the same shutdown
+        # sequence, with a single non-abortable in-flight order-family retry's
+        # documented ~55s worst case (shared/ib_retry.py — order placement is
+        # deliberately excluded from shutdown-abort) if a close/entry was mid-
+        # flight when SIGTERM arrived — 55s + 11s = 66s.
+        #
+        # ON TOP OF THAT (2026-08-04 golden-loop pass, round-1 review): a
+        # failed CRITICAL/HIGH publish also triggers _attempt_telegram_bypass
+        # below, adding up to ~20s more worst case (10s Secret Manager fetch
+        # on a cache miss + 10s for the Telegram POST's own 2×5s retry;
+        # capped at 20s, not 30s, because the double-fetch bug round-1 review
+        # caught was fixed — the bypass now fetches credentials at most once
+        # per attempt). Grand total worst case: 66s + 20s = 86s (hydra units)
+        # / 63s(broker's own order-family worst case) + 11s + 20s = 94s
+        # (calypso-broker, which also constructs its own AlertService for
+        # breaker/warmup alerting). TimeoutStopSec raised accordingly — see
+        # bots/hydra/__init__.py version history (2026-08-03 and 2026-08-04
+        # entries) for the full numbers and the deploy/*.service values.
+        max_attempts = 2 if priority in (AlertPriority.CRITICAL, AlertPriority.HIGH) else 1
+        last_error: Optional[Exception] = None
+        for attempt in range(1, max_attempts + 1):
+            try:
+                data = json.dumps(payload).encode("utf-8")
+                future = publisher.publish(self._topic_path, data)
+                message_id = future.result(timeout=5)  # Wait up to 5 seconds per attempt
+
+                logger.debug(f"Alert published to Pub/Sub with message ID: {message_id}")
+                return True
+
+            except Exception as e:
+                last_error = e
+                # 2026-08-18 shutdown-hang investigation: a future.result()
+                # timeout here originally also called future.cancel(), on
+                # the theory that an abandoned publish RPC stays "in
+                # flight" and contributes to the process's slow/hung exit.
+                # Round-1 adversarial review caught that this doesn't hold:
+                # google.cloud.pubsub_v1.publisher.futures.Future.cancel()
+                # is hard-overridden to always `return False` and do
+                # nothing — verified against the actual installed library
+                # source, confirmed to be a no-op in every case, not just
+                # the already-completed one the removed comment hedged
+                # about. Removed rather than left in place inert — a
+                # future reader trusting that comment would wrongly rule
+                # out "abandoned publish future" as already handled. See
+                # AlertService.close() for what IS achievable here.
+                if attempt < max_attempts:
+                    logger.warning(
+                        f"Pub/Sub publish attempt {attempt}/{max_attempts} failed "
+                        f"({describe_exception(e)}) — retrying"
+                    )
+                    time.sleep(1)
+
+        error_desc = describe_exception(last_error)
+        logger.error(f"Failed to publish alert to Pub/Sub: {error_desc}")
+        # Still log the alert locally
+        logger.warning(f"Alert content (failed to publish): {json.dumps(payload)}")
+        self._write_dead_letter(payload, priority, error_desc)
+
+        # Last resort: Pub/Sub is the ONLY delivery path above, so a Pub/Sub
+        # outage silences even a CRITICAL alert unless something bypasses it
+        # entirely. CRITICAL/HIGH only — MEDIUM/LOW already stop at the
+        # dead-letter record, matching every other priority-gated behavior in
+        # this method (retry count, email routing, NEVER_SUPPRESS).
+        if priority in (AlertPriority.CRITICAL, AlertPriority.HIGH):
+            self._attempt_telegram_bypass(display_title, message)
+
+        return False
+
+    def _attempt_telegram_bypass(self, title: str, message: str) -> None:
+        """Pub/Sub-independent last resort for a CRITICAL/HIGH alert whose
+        normal publish+retry both failed. See shared/telegram_direct.py for
+        why this is a separate module rather than a 4th duplicate of the
+        Telegram-send pattern already in bots/hydra/telegram_commands.py /
+        services/homer/main.py / cloud_functions/alert_processor/main.py.
+
+        Never raises — this runs inside the failure path of send_alert
+        itself; a bug here must not mask the original publish failure
+        already logged and dead-lettered above it.
+        """
         try:
-            data = json.dumps(payload).encode("utf-8")
-            future = self._publisher.publish(self._topic_path, data)
-            message_id = future.result(timeout=5)  # Wait up to 5 seconds
+            from shared.telegram_direct import send_telegram_direct
+            from shared.secret_manager import get_telegram_credentials
 
-            logger.debug(f"Alert published to Pub/Sub with message ID: {message_id}")
-            return True
+            if self._telegram_creds_cache is None:
+                self._telegram_creds_cache = get_telegram_credentials()
 
+            # Round-1 review (2026-08-04) caught a real bug here: passing a
+            # still-None cache straight into send_telegram_direct would have
+            # made IT fetch credentials again internally (send_telegram_direct
+            # fetches fresh whenever credentials=None), doubling the Secret
+            # Manager timeout exposure on exactly the failure path the
+            # worst-case shutdown accounting cares most about. Short-circuit
+            # instead: if we already know credentials aren't available, don't
+            # attempt the Telegram POST at all — one fetch attempt, not two.
+            if self._telegram_creds_cache is None:
+                logger.error(
+                    "Bypass Telegram alert ALSO failed (no credentials) — "
+                    "alert is only in the dead-letter file "
+                    "(data/failed_alerts.jsonl)"
+                )
+                return
+
+            if send_telegram_direct(
+                message, title=title, credentials=self._telegram_creds_cache
+            ):
+                logger.warning(
+                    "Bypass Telegram alert delivered (Pub/Sub unavailable)"
+                )
+            else:
+                logger.error(
+                    "Bypass Telegram alert ALSO failed — alert is only in "
+                    "the dead-letter file (data/failed_alerts.jsonl)"
+                )
         except Exception as e:
-            logger.error(f"Failed to publish alert to Pub/Sub: {e}")
-            # Still log the alert locally
-            logger.warning(f"Alert content (failed to publish): {json.dumps(payload)}")
-            return False
+            logger.error(f"Telegram bypass attempt raised: {describe_exception(e)}")
+
+    def _write_dead_letter(
+        self, payload: Dict[str, Any], priority: AlertPriority, error: str
+    ) -> None:
+        """Append a durable, independent record of a lost alert.
+
+        Last line of defense after publish + retry both failed: the alert
+        already didn't reach Pub/Sub, so this must not itself depend on
+        Pub/Sub, and must never raise — a broken dead-letter write must not
+        mask or replace the original publish failure already logged by the
+        caller. One JSON line per failure in data/failed_alerts.jsonl,
+        independent of any single bot's log file (which rotates and is easy
+        to miss) and readable without journalctl/GCP access.
+
+        This ONE file is shared by every process that constructs an
+        AlertService (variants A-E and calypso-broker) — and a real Pub/Sub
+        outage (the scenario this file exists for) tends to hit them all at
+        once, making concurrent writers more likely than usual, not less. An
+        flock() around the write prevents interleaved partial JSON lines from
+        multiple processes corrupting the file; it's a best-effort advisory
+        lock (POSIX-only, matches this codebase's Debian-VM deploy target —
+        no Windows support anywhere in this repo) released automatically when
+        the file closes even if something raises in between.
+
+        The lock acquire is bounded (LOCK_NB + a short polling timeout), NOT
+        a plain blocking flock() — this can be called synchronously from the
+        main trading loop, and an unbounded blocking lock acquire would hang
+        the loop indefinitely if some other writer were stuck holding it
+        (paused process, degraded disk — a live process dying, even via
+        SIGKILL, releases its flock immediately, so only a genuinely stuck-
+        but-alive holder is a risk, but "no watchdog on a blocking call" is
+        exactly the class of bug this codebase has fixed everywhere else it
+        appears — see the CLAUDE.md "Bot frozen" troubleshooting entry).
+        Matches the established LOCK_EX|LOCK_NB polling pattern already used
+        by shared/token_coordinator.py's _acquire_lock. On a timeout, skip
+        the write (still hits the outer except below, which just logs a
+        warning) rather than block.
+        """
+        try:
+            record = {
+                "timestamp": datetime.now(US_EASTERN).isoformat(),
+                "bot_name": self.bot_name,
+                "priority": priority.value,
+                "alert_type": payload.get("alert_type"),
+                "title": payload.get("title"),
+                "error": error,
+                "payload": payload,
+            }
+            os.makedirs(os.path.dirname(FAILED_ALERTS_PATH), exist_ok=True)
+            with open(FAILED_ALERTS_PATH, "a") as f:
+                locked = False
+                deadline = time.monotonic() + DEAD_LETTER_LOCK_TIMEOUT_S
+                while time.monotonic() < deadline:
+                    try:
+                        fcntl.flock(f.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                        locked = True
+                        break
+                    except OSError:
+                        time.sleep(0.1)
+                if not locked:
+                    raise TimeoutError(
+                        f"could not acquire dead-letter file lock within "
+                        f"{DEAD_LETTER_LOCK_TIMEOUT_S}s"
+                    )
+                try:
+                    f.write(json.dumps(record) + "\n")
+                finally:
+                    fcntl.flock(f.fileno(), fcntl.LOCK_UN)
+        except Exception as e:
+            logger.warning(
+                f"Could not write dead-letter record for failed alert: {describe_exception(e)}"
+            )
 
     # =========================================================================
     # DELIVERY CHANNEL ROUTING
     # =========================================================================
 
-    # Alert types that ALWAYS get email regardless of priority
-    _EMAIL_ALWAYS = {
-        AlertType.DAILY_SUMMARY,       # End-of-day P&L record
-        AlertType.STOP_LOSS,           # Financial record
-        AlertType.EMERGENCY_EXIT,      # Financial record
-        AlertType.CIRCUIT_BREAKER,     # Needs paper trail
-        AlertType.CRITICAL_INTERVENTION,
-        AlertType.NAKED_POSITION,
+    # 2026-08-28: email narrowed to CRITICAL-only (operator request — B alone
+    # was generating 4-8+ emails/day: every stop loss, every position close,
+    # every profit-target close, the daily summary, plus rarer HIGH/MEDIUM
+    # events, all landing in a personal inbox). Replaces the old per-type
+    # _EMAIL_ALWAYS / _TELEGRAM_ONLY override lists (removed — this is now a
+    # pure priority check, so there's no separate list to keep in sync with
+    # DEFAULT_PRIORITIES). Telegram is UNCHANGED — every alert still goes
+    # there at its normal priority; this only narrows the second, noisier
+    # channel. CRITICAL today = CIRCUIT_BREAKER, CRITICAL_INTERVENTION,
+    # DAILY_HALT, NAKED_POSITION, EMERGENCY_EXIT, ITM_RISK_CLOSE — the
+    # genuine can't-miss-this set. To restore a type to email, raise its
+    # DEFAULT_PRIORITIES entry to CRITICAL rather than special-casing it here
+    # (keeps "what emails" answerable by reading one table, not two).
+
+    # =========================================================================
+    # ANTI-SPAM GATE TUNABLES (see _apply_alert_gate)
+    # =========================================================================
+
+    # Alert TYPES that bypass content-dedup and the token bucket entirely — a
+    # halted bot, a naked short, a tripped breaker, an emergency exit, or an
+    # operator-intervention call must ALWAYS get through. They still count
+    # toward the email ceiling (so it reflects reality) but the ceiling never
+    # suppresses THEM.
+    _NEVER_SUPPRESS = {
         AlertType.DAILY_HALT,
-        AlertType.ITM_RISK_CLOSE,
-        AlertType.SLIPPAGE_ALERT,      # Fill quality record
-        AlertType.DATA_QUALITY,        # Used by ARGUS health failures
+        AlertType.NAKED_POSITION,
+        AlertType.CRITICAL_INTERVENTION,
+        AlertType.CIRCUIT_BREAKER,
+        AlertType.EMERGENCY_EXIT,
     }
 
-    # Alert types that are Telegram-only (no email needed)
-    _TELEGRAM_ONLY = {
-        AlertType.POSITION_OPENED,     # 6/day — routine, clutters inbox
-        AlertType.BOT_STARTED,         # Informational — glance and move on
-        AlertType.BOT_STOPPED,         # Informational — glance and move on
-        AlertType.CONNECTION_RESTORED, # Transient event
-        AlertType.VIGILANT_EXITED,     # Back to safe zone — transient
-        AlertType.MARKET_OPENING_SOON, # Countdown — transient
-        AlertType.MARKET_OPEN,         # Transient
-        AlertType.MARKET_CLOSED,       # Transient
-        AlertType.MARKET_HOLIDAY,      # Informational
-        AlertType.MARKET_EARLY_CLOSE,  # Informational
-        AlertType.POSITION_SNAPSHOT,   # 30-min dashboard — Telegram glance
-        AlertType.ENTRY_SKIPPED,       # Entry skipped — informational
-        AlertType.VARIANT_COMPARISON_DAILY,  # End-of-day A vs B — Telegram glance
+    # Identical-alert suppression window per priority. The FIRST alert of a
+    # given fingerprint always sends; repeats inside the window are collapsed
+    # (counted, then rolled up on the next send). A genuinely new event
+    # (different entry / side / wording) has a different fingerprint and is
+    # never blocked by this.
+    _DEDUP_WINDOWS_S = {
+        AlertPriority.CRITICAL: 300,    # 5 min
+        AlertPriority.HIGH: 600,        # 10 min
+        AlertPriority.MEDIUM: 1800,     # 30 min
+        AlertPriority.LOW: 3600,        # 60 min
     }
+
+    # Per-type token bucket: a burst of _BUCKET_CAPACITY, then one refill every
+    # _BUCKET_REFILL_S. Catches a storm of same-TYPE alerts whose titles differ
+    # just enough to dodge content-dedup (e.g. a loop that embeds a live price).
+    _BUCKET_CAPACITY = 3.0
+    _BUCKET_REFILL_S = 600.0            # +1 token / 10 min
+
+    # Hard global ceiling on EMAILS across a rolling window. Over the ceiling,
+    # non-NEVER_SUPPRESS alerts downgrade to Telegram-only (they still deliver,
+    # email is just capped). The backstop that bounds any conceivable burst.
+    _EMAIL_CEILING = 12
+    _EMAIL_CEILING_WINDOW_S = 900       # 15 min
+
+    # Volatile tokens stripped before fingerprinting so a looping alert whose
+    # only difference is a dollar amount / price / percentage collapses to one.
+    _VOLATILE_TOKEN_RE = re.compile(
+        r'\[\d+c\]'                       # [Nc] contract prefix
+        r'|\$\s?-?\d[\d,]*(?:\.\d+)?'     # $1,234.50 / $-1200
+        r'|-?\d+\.\d+%?'                  # 7190.0 / 12.5%
+        r'|\b\d+%'                        # 50%
+    )
 
     def _should_send_email(self, alert_type: AlertType, priority: AlertPriority) -> bool:
         """
         Determine if an alert should also be sent via email.
 
-        Routing logic:
-        - CRITICAL/HIGH priority: always both channels
-        - Alert types in _EMAIL_ALWAYS: always both channels
-        - Alert types in _TELEGRAM_ONLY: Telegram only
-        - Everything else (MEDIUM/LOW): both channels (safe default)
+        2026-08-28: email narrowed to CRITICAL-only — see the comment above
+        this class's old _EMAIL_ALWAYS/_TELEGRAM_ONLY definitions (removed)
+        for the full rationale. ``alert_type`` is intentionally unused now
+        (kept as a parameter for call-site compatibility and because a
+        future per-type carve-out, if ever wanted, belongs here) — every
+        routing decision is driven by ``priority`` alone, which already
+        reflects DEFAULT_PRIORITIES (or an explicit override the caller
+        passed). Telegram delivery is separate and unaffected by this method
+        — every alert still reaches Telegram at its normal priority.
         """
-        # CRITICAL and HIGH always get email
-        if priority in (AlertPriority.CRITICAL, AlertPriority.HIGH):
+        return priority == AlertPriority.CRITICAL
+
+    # =========================================================================
+    # ANTI-SPAM GATE
+    # =========================================================================
+
+    def _alert_fingerprint(
+        self,
+        alert_type: AlertType,
+        title: str,
+        details: Optional[Dict[str, Any]],
+    ) -> str:
+        """Stable identity for an alert, ignoring volatile $/price/% tokens but
+        KEEPING the entry-number / side so distinct real events stay distinct.
+
+        Two stops on entry #1 and entry #2 fingerprint differently (kept). The
+        SAME stop re-fired by a loop fingerprints identically (collapsed).
+        """
+        norm = self._VOLATILE_TOKEN_RE.sub('#', (title or '').lower())
+        norm = re.sub(r'\s+', ' ', norm).strip()
+        tag = ''
+        if details:
+            en = details.get('entry_number')
+            if en is not None:
+                tag += f'|e{en}'
+            sd = details.get('side')
+            if sd is not None:
+                tag += f'|s{sd}'
+        return f'{self.bot_name}|{alert_type.value}|{norm}{tag}'
+
+    def _take_type_token(self, alert_type: AlertType, now: float) -> bool:
+        """Token-bucket admission for one alert TYPE (called under _gate_lock).
+        Returns True if a token was available, False if the type is bursting."""
+        b = self._type_buckets.get(alert_type)
+        if b is None:
+            b = {'tokens': self._BUCKET_CAPACITY, 'last': now}
+            self._type_buckets[alert_type] = b
+        b['tokens'] = min(
+            self._BUCKET_CAPACITY,
+            b['tokens'] + (now - b['last']) / self._BUCKET_REFILL_S,
+        )
+        b['last'] = now
+        if b['tokens'] >= 1.0:
+            b['tokens'] -= 1.0
             return True
+        return False
 
-        # Explicit email-always types
-        if alert_type in self._EMAIL_ALWAYS:
-            return True
+    def _apply_alert_gate(
+        self,
+        alert_type: AlertType,
+        priority: AlertPriority,
+        title: str,
+        details: Optional[Dict[str, Any]],
+        send_email: bool,
+    ):
+        """The single anti-spam chokepoint. Returns (allow, send_email, note).
 
-        # Explicit Telegram-only types
-        if alert_type in self._TELEGRAM_ONLY:
-            return False
+        allow=False  → drop the alert entirely (duplicate within the priority
+                       window, or the TYPE is over its token-bucket burst).
+        send_email   → possibly downgraded to False when the global email
+                       ceiling is hit (Telegram still delivers).
+        note         → roll-up string ("+N similar suppressed") to append to the
+                       surviving alert, or '' .
 
-        # Default: send email (safe fallback for unknown alert types)
-        return True
+        Design: content-dedup (layer 1) applies to EVERY alert, including
+        _NEVER_SUPPRESS, because it only collapses byte-identical repeats — the
+        FIRST occurrence always sends and a distinct event (different
+        entry/side/wording) fingerprints differently, so a real critical is
+        never dropped. This is what protects against a tight pre-halt loop of
+        CRITICAL_INTERVENTION / NAKED_POSITION re-firing identically every tick.
+        _NEVER_SUPPRESS only exempts a type from the per-type token bucket
+        (layer 2) and the global email ceiling (layer 3), so a halted bot /
+        naked short / breaker / emergency exit always emails even in a storm.
+        """
+        never = alert_type in self._NEVER_SUPPRESS
+        now = time.monotonic()
+        with self._gate_lock:
+            # ── Layer 1: content dedup (ALL alerts) ──────────────────────────
+            fp = self._alert_fingerprint(alert_type, title, details)
+            window = self._DEDUP_WINDOWS_S.get(priority, 600)
+            last = self._dedup_last.get(fp)
+            if last is not None and (now - last) < window:
+                self._dedup_suppressed[fp] = self._dedup_suppressed.get(fp, 0) + 1
+                return (False, send_email,
+                        f"duplicate within {window}s "
+                        f"(#{self._dedup_suppressed[fp]} suppressed)")
+            # New, or window expired: record send time + capture rollup count.
+            suppressed_rollup = self._dedup_suppressed.pop(fp, 0)
+            self._dedup_last[fp] = now
+
+            # ── Layer 2: per-type token bucket (skipped for never-suppress) ──
+            if not never and not self._take_type_token(alert_type, now):
+                return (False, send_email,
+                        f"type {alert_type.value} over burst rate")
+
+            # ── Layer 3: global email ceiling (never-suppress always emails) ─
+            if send_email:
+                cutoff = now - self._EMAIL_CEILING_WINDOW_S
+                self._email_times = [t for t in self._email_times if t >= cutoff]
+                if len(self._email_times) >= self._EMAIL_CEILING and not never:
+                    send_email = False  # downgrade to Telegram-only; email capped
+                else:
+                    self._email_times.append(now)
+
+            note = (f"(+{suppressed_rollup} similar suppressed since last)"
+                    if suppressed_rollup else '')
+            return (True, send_email, note)
 
     # =========================================================================
     # CONVENIENCE METHODS FOR COMMON ALERTS
@@ -973,7 +1606,7 @@ class AlertService:
         )
 
     # =========================================================================
-    # MARKET STATUS ALERTS (Telegram + Email)
+    # MARKET STATUS ALERTS (Telegram only — none of these are CRITICAL, see _should_send_email)
     # =========================================================================
 
     def market_opening_soon(
@@ -983,7 +1616,7 @@ class AlertService:
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
         """
-        Send market opening countdown alert (LOW - Telegram + Email).
+        Send market opening countdown alert (LOW - Telegram only).
 
         Called at 1h, 30m, 15m before market open.
         """
@@ -1013,7 +1646,7 @@ class AlertService:
         spy_price: Optional[float] = None,
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Send market open notification (LOW - Telegram + Email)."""
+        """Send market open notification (LOW - Telegram only)."""
         extra = details or {}
         if vix_level is not None:
             extra["vix"] = vix_level
@@ -1038,7 +1671,7 @@ class AlertService:
         day_change_pct: Optional[float] = None,
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Send market closed notification (LOW - Telegram + Email)."""
+        """Send market closed notification (LOW - Telegram only)."""
         extra = details or {}
         if spy_close is not None:
             extra["spy_close"] = spy_close
@@ -1063,7 +1696,7 @@ class AlertService:
         next_open_date: str,
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Send market holiday notification (LOW - Telegram + Email)."""
+        """Send market holiday notification (LOW - Telegram only)."""
         extra = details or {}
 
         return self.send_alert(
@@ -1080,7 +1713,7 @@ class AlertService:
         close_time: str,
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
-        """Send early close day warning (LOW - Telegram + Email)."""
+        """Send early close day warning (LOW - Telegram only)."""
         extra = details or {}
 
         return self.send_alert(
@@ -1101,7 +1734,7 @@ class AlertService:
         details: Optional[Dict[str, Any]] = None
     ) -> bool:
         """
-        Send big pre-market gap alert (HIGH - Telegram + Email).
+        Send big pre-market gap alert (HIGH - Telegram only).
 
         This is for significant overnight/premarket moves that will affect positions.
         """

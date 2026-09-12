@@ -1,0 +1,110 @@
+[Unit]
+Description=CALYPSO broker — single shared IBKR session service (ibind OAuth 1.0a)
+# Owns the ONE IBKR brokerage session; HYDRA A/B/C reach it over loopback so
+# they don't fight over the one-session-per-username limit. See
+# docs/migration/BROKER_SESSION_SERVICE_DESIGN.md.
+After=network-online.target
+Wants=network-online.target
+# Crash-loop limiter (these are [Unit] directives — ignored in [Service]).
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/opt/calypso"
+Environment="GCP_PROJECT=calypso-trading-bot"
+# Loopback-only bind (single-tenant VM). Override here if ever needed.
+Environment="CALYPSO_BROKER_HOST=127.0.0.1"
+Environment="CALYPSO_BROKER_PORT=8788"
+# Global IBKR request-rate cap (req/s) across this one shared session. IBKR's
+# Web API limit is ~10 req/s per authenticated session. 8 (20% headroom) was
+# EMPIRICALLY TOO THIN — it 429'd at the 2026-06-01 10:45 ET entry window when
+# B+C resolved chains concurrently: the gate spaces STARTS on broker time, but
+# ThreadPool+TLS+WAN jitter re-clusters them so 9-10 ARRIVE at IBKR inside one
+# rolling second. 5 (50% headroom) absorbs that re-clustering; the entry burst
+# is short so the extra drain costs only ~1-2s/window. Paired with the global
+# chain-concurrency semaphore (CALYPSO_IBKR_CHAIN_CONCURRENCY) that caps the
+# cross-bot secdef fan-out. Read by shared.ib_client._RateGate.
+Environment="CALYPSO_IBKR_MAX_RPS=5"
+Environment="CALYPSO_IBKR_CHAIN_CONCURRENCY=4"
+
+# ─── IBKR OAuth 1.0a credentials ────────────────────────────────────────────
+# This broker is the single OAuth identity / session owner: all three hydra*
+# strategy units now set Environment="CALYPSO_BROKER_URL=http://127.0.0.1:8788"
+# (committed in their unit files) so each runs as a BrokerClient proxy and opens
+# NO direct IBKR session — eliminating the one-session-per-username eviction war.
+# The hydra* units still carry their own LoadCredentialEncrypted= entries as a
+# now-UNUSED fallback (they only matter on the direct-IBClient branch, which the
+# committed CALYPSO_BROKER_URL disables); that cleanup is deferred — see
+# docs/migration/PROJECT_STATUS.md.
+LoadCredentialEncrypted=ibkr_consumer_key:/etc/calypso/ibkr/consumer_key.cred
+LoadCredentialEncrypted=ibkr_access_token:/etc/calypso/ibkr/access_token.cred
+LoadCredentialEncrypted=ibkr_access_token_secret:/etc/calypso/ibkr/access_token_secret.cred
+LoadCredentialEncrypted=ibkr_signature_pem:/etc/calypso/ibkr/signature.pem.cred
+LoadCredentialEncrypted=ibkr_encryption_pem:/etc/calypso/ibkr/encryption.pem.cred
+LoadCredentialEncrypted=ibkr_dhparam_pem:/etc/calypso/ibkr/dhparam.pem.cred
+
+ExecStart=/opt/calypso/.venv/bin/python -m services.broker.main
+
+# A full restart cleanly re-runs connect() (fresh LST + Tickler) — also the
+# fallback if the daily re-auth loop ever can't recover.
+Restart=always
+RestartSec=30
+TimeoutStartSec=120
+
+# Graceful stop: the FastAPI shutdown hook (_shutdown_broker,
+# services/broker/main.py) sets shared.ib_retry.SHUTDOWN_EVENT so any
+# in-flight session/market/portfolio/history-family retry aborts within ~1
+# tick instead of completing its backoff schedule (2026-08-03 fix — see that
+# module for the incident this closes: 84 processes SIGKILLed when SIGTERM
+# landed mid OAuth-rehandshake), joins the maintenance thread, THEN runs
+# ib.disconnect() (stop Tickler + logout) so the IBKR session is released
+# cleanly rather than left competing.
+# 110s (was 30s, bumped 90s on 2026-08-03, bumped again 2026-08-04 when the
+# direct-Telegram bypass alert channel added new worst-case blocking time):
+# the 'orders' family is DELIBERATELY NEVER abortable (shared/ib_retry.py —
+# aborting an in-flight order retry risks a naked/partial leg), and its own
+# documented worst case is ~63s (RetryPolicy: 6 attempts, ~46s of backoff +
+# the final attempt). calypso-broker also constructs its own AlertService
+# for breaker/warmup alerting (IBKRAlertHooks) — a CRITICAL/HIGH alert whose
+# Pub/Sub publish fails adds ~11s of retry, then _write_dead_letter's bounded
+# file-lock wait (2s, DEAD_LETTER_LOCK_TIMEOUT_S), then (2026-08-04) up to
+# ~20s more for the Telegram bypass (10s Secret Manager credential fetch on
+# a cache miss + 10s for send_telegram_direct's own retry — 10s assumes
+# GCP_PROJECT is set, which this unit already does, above, so
+# is_running_on_gcp()/get_project_id() skip their own metadata-server
+# round-trips — see shared/alert_service.py and bots/hydra/__init__.py
+# version history for the full derivation). Total: 63 + 11 + 2 + 20 = 96s.
+# 110s gives ~14s real margin above that, generous since this is the single
+# shared IBKR session owner.
+KillSignal=SIGTERM
+TimeoutStopSec=110
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=calypso-broker
+
+# ─── Sandboxing (defense-in-depth for a brokerage-credential service) ───────
+# PrivateDevices=yes gives this service — the ONE process holding all decrypted
+# OAuth private keys — a private /dev with only the safe pseudo nodes (null,
+# zero, full, random, urandom, tty); physical devices are hidden, so even a
+# code-execution bug can't read /dev/tpm0 or hardware RNG directly.
+# NB: the broader ProtectDevices=yes is SILENTLY IGNORED on this host's Debian
+# systemd 252 build (verified: `systemctl show -p ProtectDevices` returns empty
+# and `systemd-analyze verify` reports "Unknown key"), so we use the supported
+# PrivateDevices=yes for the same /dev isolation. Verify with
+# `systemd-analyze security calypso-broker`.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+PrivateDevices=yes
+ReadWritePaths=/opt/calypso
+
+[Install]
+WantedBy=multi-user.target

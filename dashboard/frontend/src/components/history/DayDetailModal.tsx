@@ -12,12 +12,14 @@ type DetailTab = "overview" | "replay";
 export function DayDetailModal({
   date,
   summary,
+  strategyId = "",
   allDates,
   onNavigate,
   onClose,
 }: {
   date: string;
   summary: DaySummary | null;
+  strategyId?: string;
   allDates: string[];
   onNavigate: (date: string) => void;
   onClose: () => void;
@@ -35,8 +37,13 @@ export function DayDetailModal({
     setStops([]);
     setBars([]);
 
+    // Entries/stops are scoped to the picked variant so the tables match the
+    // header cards (which come from /api/metrics/daily?strategy_id=…). The SPX
+    // OHLC chart is intentionally variant-agnostic (same index, densest source);
+    // only its entry/stop markers — which ride on `entries`/`stops` — need scoping.
+    const sid = encodeURIComponent(strategyId);
     Promise.all([
-      fetch(`/api/hydra/entries?date_str=${date}`).then((r) => r.json()),
+      fetch(`/api/hydra/entries?date_str=${date}&strategy_id=${sid}`).then((r) => r.json()),
       fetch(`/api/market/ohlc?date_str=${date}`).then((r) => r.json()),
     ])
       .then(([entryData, ohlcData]) => {
@@ -46,7 +53,7 @@ export function DayDetailModal({
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, [date]);
+  }, [date, strategyId]);
 
   // Navigation
   const sortedDates = useMemo(
@@ -168,7 +175,7 @@ export function DayDetailModal({
           )}
 
           {detailTab === "replay" && (
-            <SessionReplay date={date} />
+            <SessionReplay date={date} strategyId={strategyId} />
           )}
         </div>
       </div>

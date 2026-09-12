@@ -1,0 +1,606 @@
+"""StrangleStrategy tests (modularity driver, S-series).
+
+Pins the strangle's 2-leg strike selection and that it's wired as an
+undefined-risk strategy (requires_protective_wings=False) that's still a
+concrete, instantiable strategy via the item-4b contract.
+"""
+from __future__ import annotations
+
+import sys
+from pathlib import Path
+from types import SimpleNamespace
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from unittest.mock import MagicMock
+
+import pytest
+
+from bots.hydra.base_strategy import ConfigError, MEICStrategy
+from bots.hydra.order_types import BuySell
+from bots.hydra.strangle_strategy import StrangleStrategy
+from bots.hydra.strategy import HydraIronCondorEntry, HydraStrategy
+
+
+def _strat(spx, vix, *, target_delta=8, increment=5):
+    s = StrangleStrategy.__new__(StrangleStrategy)
+    s.current_price = spx
+    s.current_vix = vix
+    s.target_delta = target_delta
+    s.strike_increment = increment
+    return s
+
+
+class TestDryRunGate:
+    """Audit S-HIGH-3: the strangle must refuse non-dry-run construction until
+    hardened, so a stray strategy.name='strangle' on a live variant can't arm
+    un-stopped naked-short trading."""
+
+    def _patch_super_init(self, monkeypatch):
+        # Lightweight super().__init__ that only sets dry_run (avoids the heavy
+        # real HydraStrategy construction; we're testing the strangle's gate).
+        def fake_init(self, *a, **k):
+            self.dry_run = k.get("dry_run", False)
+        monkeypatch.setattr(HydraStrategy, "__init__", fake_init)
+
+    def test_refuses_non_dry_run(self, monkeypatch):
+        self._patch_super_init(monkeypatch)
+        with pytest.raises(ConfigError):
+            StrangleStrategy(None, {}, None, dry_run=False)
+
+    def test_allows_dry_run(self, monkeypatch):
+        self._patch_super_init(monkeypatch)
+        s = StrangleStrategy(None, {}, None, dry_run=True)
+        assert isinstance(s, StrangleStrategy)
+
+
+class TestRealConstructionSmoke:
+    """Constructs through the REAL HydraStrategy.__init__ (no monkeypatch stub,
+    no __new__ bypass) — every other test in this file uses one of those two
+    shortcuts. This category of gap let a real bug (GhauriMeanReversionStrategy
+    crashing on every real construction — 2026-08-27, see bots/hydra/__init__.py
+    version history) ship completely undetected in a sibling variant; these are
+    the equivalent regression tests for Strangle so the same gap doesn't hide
+    here too, even though Strangle's own real construction is currently clean."""
+
+    def test_real_construction_with_minimal_config_does_not_raise(self):
+        broker = MagicMock()
+        s = StrangleStrategy(broker, {"strategy": {}}, MagicMock(), dry_run=True)
+        assert isinstance(s, StrangleStrategy)
+        assert s.dry_run is True
+
+    def test_real_construction_with_shipped_variant_g_config_does_not_raise(self):
+        """Reproduces the exact conditions of a real VM deploy: the actual
+        checked-in config_variant_g.json, not a synthetic minimal config."""
+        import json
+        config_path = (
+            Path(__file__).resolve().parents[1]
+            / "bots" / "hydra" / "config" / "config_variant_g.json"
+        )
+        with open(config_path) as f:
+            config = json.load(f)
+        broker = MagicMock()
+        s = StrangleStrategy(broker, config, MagicMock(), dry_run=True)
+        assert isinstance(s, StrangleStrategy)
+        assert s.dry_run is True
+        assert s.BOT_NAME == "STRANGLE"
+
+
+class TestContract:
+    def test_is_undefined_risk(self):
+        assert StrangleStrategy.requires_protective_wings is False
+
+    def test_is_concrete_strategy(self):
+        # Inherits HydraStrategy's hook implementations → no abstract methods left.
+        assert StrangleStrategy.__abstractmethods__ == frozenset()
+
+
+class TestStrikeSelection:
+    def test_two_naked_shorts_no_wings(self):
+        s = _strat(7465.0, 18.0)
+        e = HydraIronCondorEntry(entry_number=1)
+        assert s._calculate_strikes(e) is True
+        assert e.short_call_strike > 7465.0
+        assert e.short_put_strike < 7465.0
+        assert e.long_call_strike == 0.0
+        assert e.long_put_strike == 0.0
+
+    def test_symmetric_otm(self):
+        s = _strat(7465.0, 18.0)
+        e = HydraIronCondorEntry(entry_number=1)
+        s._calculate_strikes(e)
+        # 7465 is on the 5-grid → symmetric distance on both sides.
+        assert (e.short_call_strike - 7465.0) == (7465.0 - e.short_put_strike)
+
+    def test_strikes_on_configured_grid(self):
+        s = _strat(7463.0, 18.0, increment=10)
+        e = HydraIronCondorEntry(entry_number=1)
+        s._calculate_strikes(e)
+        assert e.short_call_strike % 10 == 0
+        assert e.short_put_strike % 10 == 0
+
+    def test_higher_vix_pushes_strikes_further_otm(self):
+        e_low = HydraIronCondorEntry(entry_number=1)
+        e_high = HydraIronCondorEntry(entry_number=2)
+        _strat(7465.0, 14.0)._calculate_strikes(e_low)
+        _strat(7465.0, 28.0)._calculate_strikes(e_high)
+        # Higher VIX → wider OTM → short call further above spot.
+        assert e_high.short_call_strike >= e_low.short_call_strike
+
+    def test_no_price_returns_false(self):
+        s = _strat(0.0, 18.0)
+        assert s._calculate_strikes(HydraIronCondorEntry(entry_number=1)) is False
+
+
+class TestSimulateEntry:
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s.contracts_per_entry = 1
+        s._get_todays_expiry = lambda: "2026-06-08"
+        s._get_option_uic = lambda strike, right, expiry: 111 if right == "Call" else 222
+        s._read_option_quote = lambda uic: {"mid": 1.5}
+        return s
+
+    def test_books_two_naked_shorts(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.short_call_strike, e.short_put_strike = 7600.0, 7300.0
+        assert s._simulate_entry(e) is True
+        assert e.short_call_uic == 111 and e.short_put_uic == 222
+        # premium 1.5 × 100 × 1 contract per side
+        assert e.call_spread_credit == 150.0 and e.put_spread_credit == 150.0
+        assert e.total_credit == 300.0
+        assert e.is_complete is True
+
+    def test_dry_ids_assigned_to_shorts_only(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.short_call_strike, e.short_put_strike = 7600.0, 7300.0
+        s._simulate_entry(e)
+        assert e.short_call_position_id.startswith("DRY_") and e.short_call_position_id.endswith("_SC")
+        assert e.short_put_position_id.startswith("DRY_") and e.short_put_position_id.endswith("_SP")
+        # no long legs
+        assert e.long_call_position_id is None and e.long_put_position_id is None
+
+    def test_unrealized_pnl_is_naked_short_shaped(self):
+        # With longs priced 0, the IC entry model collapses to the strangle's
+        # economics: pnl = credit - cost_to_buy_back_the_two_shorts.
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.short_call_strike, e.short_put_strike = 7600.0, 7300.0
+        s._simulate_entry(e)
+        # shorts now cost 0.80 each to close (price dropped from 1.5)
+        e.short_call_price, e.short_put_price = 0.80, 0.80
+        # credit 300 - (0.80+0.80)*100 = 300 - 160 = 140
+        assert e.unrealized_pnl == 140.0
+
+    def test_no_expiry_returns_false(self):
+        s = self._strat()
+        s._get_todays_expiry = lambda: None
+        assert s._simulate_entry(HydraIronCondorEntry(entry_number=1)) is False
+
+
+class TestStopLevels:
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s.contracts_per_entry = 1
+        s.call_stop_buffer = 75.0
+        s.put_stop_buffer = 175.0
+        return s
+
+    def test_per_side_credit_basis(self):
+        # Each naked leg stops on ITS OWN credit + buffer — NOT total credit.
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.call_spread_credit = 150.0
+        e.put_spread_credit = 200.0
+        s._calculate_stop_levels_hydra(e)
+        assert e.call_side_stop == 150.0 + 75.0   # per-side call
+        assert e.put_side_stop == 200.0 + 175.0   # per-side put
+        # Contrast: the IC base would stop BOTH sides on total credit (350 + buf).
+        # The strangle deliberately does not — proving the per-strategy exit policy.
+
+    def test_min_stop_floor_applies_per_side(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.call_spread_credit = 10.0   # below the 50 floor
+        e.put_spread_credit = 200.0
+        s._calculate_stop_levels_hydra(e)
+        assert e.call_side_stop == 50.0 + 75.0    # floored to 50
+        assert e.put_side_stop == 200.0 + 175.0
+
+    def test_contracts_scale_buffer_and_floor(self):
+        s = self._strat()
+        s.contracts_per_entry = 2
+        e = HydraIronCondorEntry(entry_number=1)
+        e.call_spread_credit = 300.0
+        e.put_spread_credit = 400.0
+        s._calculate_stop_levels_hydra(e)
+        assert e.call_side_stop == 300.0 + 75.0 * 2
+        assert e.put_side_stop == 400.0 + 175.0 * 2
+
+
+class TestExecuteEntry:
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s._get_todays_expiry = lambda: "2026-06-08"
+        s._register_position = lambda entry, leg: None
+        s._unwind_partial_entry = MagicMock()
+        return s
+
+    def _entry(self):
+        e = HydraIronCondorEntry(entry_number=1)
+        e.short_call_strike, e.short_put_strike = 7600.0, 7300.0
+        e.strategy_id = "strangle_test"
+        return e
+
+    def test_sells_two_shorts_no_longs(self):
+        s = self._strat()
+        placed = []
+
+        def fake_place(*, strike, put_call, buy_sell, expiry, external_ref):
+            placed.append((put_call, buy_sell))
+            return {"position_id": f"P_{put_call}", "uic": 1,
+                    "fill_price": 1.5, "mid_at_fill": 1.5, "credit": 150.0}
+
+        s._place_option_order = fake_place
+        e = self._entry()
+        assert s._execute_entry(e) is True
+        assert ("Call", BuySell.SELL) in placed and ("Put", BuySell.SELL) in placed
+        assert all(bs == BuySell.SELL for _, bs in placed)  # no protective BUYs
+        assert e.call_spread_credit == 150.0 and e.put_spread_credit == 150.0
+        assert e.is_complete is True
+        assert e.long_call_position_id is None and e.long_put_position_id is None
+
+    def test_partial_fill_unwinds_and_aborts(self):
+        s = self._strat()
+
+        def fake_place(*, strike, put_call, buy_sell, expiry, external_ref):
+            if put_call == "Put":  # second leg fails
+                return None
+            return {"position_id": "P_C", "uic": 1, "fill_price": 1.5,
+                    "mid_at_fill": 1.5, "credit": 150.0}
+
+        s._place_option_order = fake_place
+        e = self._entry()
+        assert s._execute_entry(e) is False
+        s._unwind_partial_entry.assert_called_once()
+        filled = s._unwind_partial_entry.call_args[0][0]
+        assert any(leg[0] == "short_call" for leg in filled)  # the filled short was unwound
+
+    def test_missing_strikes_returns_false(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.strategy_id = "x"  # strikes default 0
+        assert s._execute_entry(e) is False
+
+
+class TestInitiateEntry:
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s._next_entry_index = 0
+        s.dry_run = True
+        s.contracts_per_entry = 1
+        s.commission_per_leg = 1.15
+        s.current_price = 7465.0
+        s.current_vix = 18.0
+        s.target_delta = 8
+        s.strike_increment = 5
+        s.call_stop_buffer = 75.0
+        s.put_stop_buffer = 175.0
+        s.daily_state = SimpleNamespace(
+            entries=[], entries_completed=0, entries_skipped=0,
+            entries_failed=0, total_credit_received=0.0, total_commission=0.0,
+        )
+        # Gate helpers → all pass by default.
+        s._has_orphaned_orders = lambda: False
+        s._check_market_halt = lambda: (False, "")
+        s._check_buying_power = lambda: (True, "ok")
+        s._check_whipsaw_filter = lambda: None
+        s.fomc_t1_skip_enabled = False
+        s._force_normal_day = lambda: False
+        # Placement (dry) → set credits + succeed.
+        def fake_sim(entry):
+            entry.call_spread_credit = 150.0
+            entry.put_spread_credit = 150.0
+            return True
+        s._simulate_entry = fake_sim
+        # Heavy bookkeeping → no-ops.
+        s._save_state_to_disk = lambda: None
+        s._log_entry = lambda e: None
+        s._record_entry_to_db = lambda e: None
+        s._record_skipped_entry = lambda *a, **k: None
+        # 2026-07-31: _record_failed_entry (execution-failure recording/alert
+        # fix) is a real inherited HydraStrategy method now exercised by the
+        # placement-failure path below — wire its dependencies so it runs for
+        # real rather than needing another blanket no-op stub.
+        s._data_recorder = MagicMock()
+        s.alert_service = MagicMock()
+        s._record_shadow_entry = lambda **kw: None
+        return s
+
+    def test_successful_entry_books_everything(self):
+        s = self._strat()
+        result = s._initiate_entry()
+        assert "placed: STRANGLE" in result
+        assert len(s.daily_state.entries) == 1
+        assert s.daily_state.entries_completed == 1
+        assert s.daily_state.total_credit_received == 300.0
+        assert s.daily_state.total_commission == 2 * 1.15 * 1   # two naked legs
+        assert s._next_entry_index == 1
+        e = s.daily_state.entries[0]
+        assert e.is_complete is True
+        assert e.short_call_strike > 7465.0 and e.short_put_strike < 7465.0
+        assert e.call_side_stop > 0 and e.put_side_stop > 0     # per-side stops computed
+
+    def test_stamps_contracts_for_multi_contract(self):
+        # Audit S-HIGH-1: entry.contracts must be set from contracts_per_entry,
+        # else credits/commission/stops/reconciliation desync at >1 contract.
+        s = self._strat()
+        s.contracts_per_entry = 5
+        s._initiate_entry()
+        assert s.daily_state.entries[0].contracts == 5
+        assert s.daily_state.total_commission == 2 * 1.15 * 5
+
+    def test_buying_power_gate_skips(self):
+        s = self._strat()
+        s._check_buying_power = lambda: (False, "no margin")
+        result = s._initiate_entry()
+        assert "skipped" in result and "no margin" in result
+        assert s.daily_state.entries == []
+        assert s.daily_state.entries_skipped == 1
+        assert s._next_entry_index == 1
+
+    def test_halt_delays_without_advancing_index(self):
+        s = self._strat()
+        s._check_market_halt = lambda: (True, "halt detected")
+        result = s._initiate_entry()
+        assert "delayed" in result
+        assert s._next_entry_index == 0     # a delay must NOT advance the slot
+        assert s.daily_state.entries == []
+
+    def test_placement_failure_counts_failed(self):
+        # 2026-07-31: before the execution-failure fix, a placement failure was
+        # a complete blind spot — no DB row, no dashboard detail, no alert (see
+        # tests/test_entry_execution_failure.py for the full incident writeup).
+        # This test now pins the FIXED behavior end-to-end through Strangle's
+        # (simpler, single-attempt) entry path, not just the counter bump.
+        s = self._strat()
+        s._simulate_entry = lambda e: False
+        result = s._initiate_entry()
+        assert "failed" in result
+        assert s.daily_state.entries_failed == 1
+        assert s._next_entry_index == 1
+        # The failure is now recorded, not silently dropped.
+        assert len(s.daily_state.entries) == 1
+        recorded = s.daily_state.entries[0]
+        assert recorded.execution_failed is True
+        assert recorded.call_side_skipped is True
+        assert recorded.put_side_skipped is True
+        assert s._data_recorder.record_skipped_entry.called
+        (db_kwargs,), _ = s._data_recorder.record_skipped_entry.call_args
+        assert db_kwargs["execution_failed"] == 1
+        assert s.alert_service.send_alert.called
+        _, alert_kwargs = s.alert_service.send_alert.call_args
+        assert alert_kwargs["priority"].name == "HIGH"
+
+
+class TestSettlement:
+    """Verify the inherited dry-run settlement books a 2-naked-leg strangle
+    correctly at long=0 (both sides expire worthless → keep full premium)."""
+
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s.dry_run = True
+        s.broker = None
+        s.contracts_per_entry = 1
+        s.daily_state = SimpleNamespace(entries=[], total_realized_pnl=0.0)
+        s._get_todays_expiry = lambda: "2026-06-08"
+        s._get_option_uic = lambda strike, right, expiry: 111 if right == "Call" else 222
+        s._read_option_quote = lambda uic: {"mid": 1.5}
+        return s
+
+    def test_both_sides_expire_worthless_book_full_credit(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.short_call_strike, e.short_put_strike = 7600.0, 7300.0
+        e.strategy_id = "strangle_test"
+        s._simulate_entry(e)  # books 150 credit per naked short, DRY ids
+        s.daily_state.entries.append(e)
+
+        booked = s._process_expired_credits()
+
+        assert e.call_side_expired is True and e.put_side_expired is True
+        assert booked == 300.0           # full credit kept (both legs OTM at expiry)
+        # long legs were never touched (no wings)
+        assert e.long_call_uic in (None, 0) and e.long_put_uic in (None, 0)
+
+
+class TestStrangleStopFires:
+    """S-CRIT-1: the strangle's stop MUST fire. The base full-IC sanity guard
+    rejected every tick (long_*_price permanently 0); the override validates the
+    short legs only, so _check_stop_losses reaches _execute_stop_loss."""
+
+    def _entry(self, *, sc_price, sp_price, call_stop, put_stop):
+        e = HydraIronCondorEntry(entry_number=1)
+        e.contracts = 1
+        e.short_call_strike, e.short_put_strike = 7600.0, 7300.0
+        e.long_call_strike = e.long_put_strike = 0.0
+        e.short_call_price, e.short_put_price = sc_price, sp_price
+        e.long_call_price = e.long_put_price = 0.0
+        e.call_side_stop, e.put_side_stop = call_stop, put_stop
+        e.call_only = e.put_only = False
+        e.call_side_stopped = e.put_side_stopped = False
+        e.call_side_expired = e.put_side_expired = False
+        e.call_side_skipped = e.put_side_skipped = False
+        return e
+
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s.dry_run = True
+        s.price_based_stop_points = None
+        s.buffer_decay_start_mult = None
+        s.buffer_decay_hours = None
+        s.stop_confirmation_enabled = False
+        s._batch_update_entry_prices = MagicMock()
+        s._execute_stop_loss = MagicMock(return_value="STOPPED")
+        s._check_cushion_recovery = MagicMock(return_value=None)
+        s._log_safety_event = MagicMock()
+        return s
+
+    def test_validate_pnl_sanity_passes_with_priced_shorts(self):
+        s = self._strat()
+        e = self._entry(sc_price=10, sp_price=5, call_stop=500, put_stop=500)
+        ok, _ = s._validate_pnl_sanity(e)
+        assert ok is True  # base would return False at long_*_price == 0
+
+    def test_validate_pnl_sanity_rejects_zero_short(self):
+        s = self._strat()
+        e = self._entry(sc_price=0, sp_price=5, call_stop=500, put_stop=500)
+        ok, _ = s._validate_pnl_sanity(e)
+        assert ok is False  # DATA-004 still protects against a zero short price
+
+    def test_stop_fires_through_check_stop_losses(self):
+        s = self._strat()
+        # call_spread_value = 10 * 100 * 1 = 1000 >= 1.5 * 500 → MKT-046 severity
+        # bypass fires immediately and reaches _execute_stop_loss.
+        e = self._entry(sc_price=10, sp_price=1, call_stop=500, put_stop=100000)
+        s.daily_state = SimpleNamespace(active_entries=[e])
+        result = s._check_stop_losses()
+        assert result == "STOPPED"
+        s._execute_stop_loss.assert_called_once()
+        assert s._execute_stop_loss.call_args[0][1] == "call"
+
+
+class TestNakedStopCloseCostUsesRealAsk:
+    """2026-08-28 audit finding: a naked strangle stop always fell to the
+    pessimistic spread-mid×1.10 fallback, even when a live real ask was
+    available on the SAME tick, because the "use real bid/ask" branch in
+    MEICStrategy._execute_stop_loss (base_strategy.py) required
+    long_{side}_bid is not None — and a naked side's long leg has no conid,
+    so _batch_update_entry_prices never populates its bid at all (always
+    None, structurally, not a transient data gap). On variant G's real
+    2026-08-28 stop this overstated the loss by ~14% ($88.25 booked vs.
+    ~$77.50 a real-ask-based estimate). Fixed by treating a long_{side}_strike
+    of 0 (no wing at all) as a legitimate "no long leg to subtract", not a
+    missing-quote case — while leaving the IC-family (a real wing exists,
+    strike > 0) requiring a real long_bid exactly as before."""
+
+    def _naked_entry(self, *, short_ask, short_price, credit):
+        e = HydraIronCondorEntry(entry_number=1)
+        e.contracts = 1
+        e.short_call_strike = 7795.0
+        e.long_call_strike = 0.0  # naked — no wing, by design
+        e.short_call_ask = short_ask
+        e.short_call_price = short_price
+        e.long_call_price = 0.0
+        # Deliberately NOT setting long_call_bid at all — matches production,
+        # where _batch_update_entry_prices never quotes a leg with no uic.
+        e.call_spread_credit = credit
+        e.call_side_stop = 132.50
+        e.put_side_stopped = False
+        return e
+
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s.dry_run = True
+        s.commission_per_leg = 1.15
+        s.daily_state = SimpleNamespace(
+            call_stops_triggered=0, put_stops_triggered=0, double_stops=0,
+            total_commission=0.0,
+        )
+        s._book_realized_pnl = MagicMock()
+        s._log_stop_loss = MagicMock()
+        s._queue_stop_alert = MagicMock()
+        s._save_state_to_disk = MagicMock()
+        s._flush_batched_alerts = MagicMock()
+        return s
+
+    def test_real_ask_used_when_side_is_structurally_naked(self):
+        s = self._strat()
+        e = self._naked_entry(short_ask=1.35, short_price=1.325, credit=57.50)
+
+        MEICStrategy._execute_stop_loss(s, e, "call")
+
+        # Real-ask close cost: (1.35 - 0) * 100 * 1 = $135.00 — NOT the
+        # mid×1.10 fallback ($1.325 * 1.10 * 100 = $145.75).
+        s._book_realized_pnl.assert_called_once()
+        net_loss_booked = -s._book_realized_pnl.call_args[0][0]
+        assert net_loss_booked == pytest.approx(135.00 - 57.50)  # = 77.50
+        assert e.actual_call_stop_debit == pytest.approx(135.00)
+
+    def test_a_real_wing_still_requires_a_real_bid_unchanged(self):
+        """Negative control: this fix must NOT change behavior for a side
+        that genuinely has a long wing (the IC family, A/B/C/F) — a missing
+        long_bid there is still treated as a transient data gap, exactly as
+        before this fix, and still falls to the mid×1.10 fallback."""
+        s = self._strat()
+        e = self._naked_entry(short_ask=1.35, short_price=1.325, credit=57.50)
+        e.long_call_strike = 7805.0  # a real wing exists now
+        # long_call_bid still never set -> genuinely no quote this tick.
+
+        MEICStrategy._execute_stop_loss(s, e, "call")
+
+        net_loss_booked = -s._book_realized_pnl.call_args[0][0]
+        # Unchanged fallback: 1.325 * 1.10 * 100 = 145.75
+        assert net_loss_booked == pytest.approx(145.75 - 57.50)
+        assert e.actual_call_stop_debit == pytest.approx(145.75)
+
+
+class TestNakedSettlement:
+    """S-HIGH-2 + item 7: a naked short finishing ITM books a LOSS (credit −
+    intrinsic), not a full-credit profit, and intrinsic is not capped at a
+    nonexistent spread width."""
+
+    def _strat(self):
+        s = StrangleStrategy.__new__(StrangleStrategy)
+        s.dry_run = True
+        return s
+
+    def test_itm_naked_call_books_loss(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.contracts = 1
+        e.short_call_strike = 6800.0
+        e.long_call_strike = 0.0
+        e.call_spread_credit = 2000.0
+        # SPX settles 100pt above the short → 100pt intrinsic = $10,000.
+        booked, worthless = s._settlement_booked_pnl(e, "call", settlement_level=6900.0)
+        assert worthless is False
+        assert booked == pytest.approx(-8000.0)  # 2000 credit − 10000 intrinsic
+
+    def test_otm_naked_call_books_full_credit(self):
+        s = self._strat()
+        e = HydraIronCondorEntry(entry_number=1)
+        e.contracts = 1
+        e.short_call_strike = 6800.0
+        e.long_call_strike = 0.0
+        e.call_spread_credit = 2000.0
+        booked, worthless = s._settlement_booked_pnl(e, "call", settlement_level=6700.0)
+        assert worthless is True
+        assert booked == pytest.approx(2000.0)  # OTM → full credit kept
+
+
+class TestHeartbeatDoesNotClaimFullIC:
+    """2026-08-29 audit-follow-up (cosmetic): a strangle has no long wings, so
+    HydraStrategy's shared 'E1-EN: full IC' heartbeat line (written for a
+    4-leg iron condor) misdescribes this 2-leg naked structure. Mirrors the
+    identical GhauriMeanReversionStrategy fix from the 2026-08-28 audit
+    (tests/test_ghauri_strategy.py::TestHeartbeatDoesNotClaimFullIC) — Strangle
+    was found to have the same gap, unfixed, one day later."""
+
+    def test_strangle_overrides_the_flag_to_false(self):
+        assert StrangleStrategy._show_ic_schedule_in_heartbeat is False
+
+    def test_strangle_omits_the_full_ic_schedule_line(self, monkeypatch):
+        from bots.hydra.base_strategy import MEICStrategy
+        monkeypatch.setattr(MEICStrategy, "get_detailed_position_status", lambda self: [])
+        inst = StrangleStrategy.__new__(StrangleStrategy)
+        inst.market_data = SimpleNamespace(spx_open=100.0, vix_open=15.0)
+        inst.current_price = 105.0
+        inst._current_trend = None
+        inst.vix_gate_enabled = False
+
+        lines = HydraStrategy.get_detailed_position_status(inst)
+
+        assert not any("full IC" in line or "Up-day" in line or "Down-day" in line for line in lines)

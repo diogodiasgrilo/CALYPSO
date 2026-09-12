@@ -11,6 +11,10 @@ WorkingDirectory=/opt/calypso
 Environment="GCP_PROJECT=calypso-trading-bot"
 Environment="PYTHONUNBUFFERED=1"
 Environment="PYTHONPATH=/opt/calypso"
+# CLIO makes ONE large generation (max_tokens=12288 vs ~62k input chars) that
+# needs minutes; the 120s shared default times out → APITimeoutError → exit 1
+# (every weekly run since late March failed this way). Give that one call 600s.
+Environment="CALYPSO_CLAUDE_TIMEOUT_S=600"
 
 ExecStart=/opt/calypso/.venv/bin/python -m services.clio.main
 
@@ -25,5 +29,6 @@ ProtectSystem=strict
 ProtectHome=true
 ReadWritePaths=/opt/calypso/intel /opt/calypso/.git
 
-# Larger timeout for deep analysis + git operations + API retries
-TimeoutStartSec=600
+# Must exceed the 600s Claude request timeout (above) + git + overhead so systemd
+# doesn't SIGTERM the unit before the long generation completes.
+TimeoutStartSec=1200

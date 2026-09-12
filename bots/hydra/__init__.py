@@ -1,8 +1,12 @@
 """
-HYDRA 0DTE Trading Bot
+HYDRA 0DTE Trading Bot — IBKR Web API
 
 Multi-Entry Iron Condors (SPX 0DTE) with credit gates, progressive OTM
 tightening, and hold-to-expiry. Based on Tammy Chambless's MEIC strategy.
+
+Broker: Interactive Brokers Web API (ibind OAuth 1.0a, no gateway).
+Account: paper only on this branch. Saxo Bank has been removed end-to-end
+— see Version History 2.0.0-rc.1 and `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 
 Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars.
 The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged and stored for analysis
@@ -32,6 +36,3717 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-12 The counterfactual writer finally has a caller, and the backup that
+  guards it was wrong in three ways. `DataRecorder.update_skipped_entry_backtest`
+  writes `would_have_stopped` / `theoretical_pnl` onto a skipped entry and had
+  ZERO callers repo-wide since it was added — 198 rows, 0 populated — so the GEX
+  veto question ("were the entries the adjuster vetoed worth skipping?") had no
+  data behind it no matter how much analysis was thrown at it.
+  `scripts/analyze_skipped_entry_outcomes.py --apply` is now that caller.
+
+  THE CALLER IS THE SCRIPT, NOT SETTLEMENT — a deliberate reversal of what
+  docs/NEXT_STEPS.md had planned. Both inputs (the proposed strikes, the day's
+  market_ticks) are persisted, so the computation is not time-sensitive; putting
+  it in the settlement path would add a failure mode to the LIVE trading process
+  to compute a number nobody needs before the next morning. No bot code changed
+  here, and no strategy or broker restart is required.
+
+  WHAT IT WRITES IS MODELLED AND MUST BE READ THAT WAY. The breach is measured
+  (did SPX cross the proposed short AFTER the skip time — bounded below by the
+  skip, since a pre-skip move cannot breach a position opened later). The dollars
+  assume B's acting A2 %-of-width stop, so every run prints the model it used. A
+  row with no modellable outcome is left NULL, never 0 — a 0 reads as a breakeven
+  breach, which is strictly better than reality and would flatter the veto.
+
+  THE BACKUP HAD THREE DEFECTS, each found by testing rather than by reading:
+    1. `shutil.copy2` is NOT safe on a WAL database. `DataRecorder` and
+       `dc_recorder` both set `PRAGMA journal_mode=WAL` (persistent on the file),
+       so committed rows can sit in the `-wal` sidecar. Copying the `.db` alone
+       silently drops them — in test, the copy was not merely short, it was
+       unreadable. sqlite3's online backup API checkpoints into one consistent
+       file and works while another connection holds the DB open, which
+       backfill_overlay_residual.py does.
+    2. An UN-timestamped name meant a second `--apply` overwrote the good backup
+       with a copy of the already-modified database — destroying the original at
+       exactly the moment it is wanted.
+    3. A SECOND-granularity timestamp still collides: two runs in the same second
+       share a filename and clobber each other anyway. Milliseconds plus a
+       never-overwrite guard closes it.
+  All three lived in two OTHER scripts too (backfill_overlay_residual.py,
+  backfill_lost_calendars.py), which had been backing up WAL databases with
+  copy2. One correct implementation now serves all three: `shared/db_backup.py`
+  (operator tooling — NOT imported by HYDRA or calypso-broker).
+
+  TEST NOTE, worth remembering: the first version of these tests was source-text
+  assertions, and two mutants survived it — swapping the writer's arguments (which
+  would put the breach flag in the P&L column) and deleting the "unmodellable"
+  filter (whose substring happened to appear elsewhere in the file, so the
+  assertion passed for the wrong reason). Both were killed only by rewriting the
+  tests to run the script against a real database and read the rows back.
+
+- 2026-09-10 (thirteenth same-day change) Historical analyzers pooled
+  incomparable eras. `slot_edge.analyze_slots` and `stop_shadow.analyze` both
+  read EVERY row with no date floor, so on variant B they mixed two different
+  experiments:
+      before 2026-07-24 : dry-run shadow, 10 contracts, 4-slot, SIMULATED fills
+      after  2026-07-24 : LIVE paper seat, 7 contracts, 7-slot, REAL fills
+  Ranking slots across that boundary produces a confident-looking answer to a
+  question nobody asked. NOT hypothetical — the 2026-09-02 decision to cut B's
+  11:15 slot was taken on pooled data and had to be reversed.
+  New `bots/hydra/analysis_eras.py` holds both boundaries so they cannot drift:
+  a constant copied into two analyzers diverges silently, and the failure mode
+  is a plausible number over incomparable data, not a crash. Both default to
+  the live-era floor; `since=""` (CLI `--since all`) disables it deliberately,
+  because studying the pre-swap era on purpose is legitimate — doing it BY
+  ACCIDENT is not. Every report prints its window: a number without its window
+  is not interpretable.
+  THE SUBTLE PART, and the reason this was not a five-minute change: the two
+  floors must COMPOSE. `since` is a REGIME floor (which experiment);
+  PER_ENTRY_RELIABLE_SINCE (2026-07-02) is a DATA floor (when per-entry
+  realized_pnl became trustworthy). slot_edge's cross-check compares summed
+  per-entry P&L against summed day totals. Flooring the ENTRY set at 07-24
+  while still summing DAY totals from 07-02 reports a "drift" exactly equal to
+  the P&L in the gap — a fabricated reconciliation failure caused purely by
+  mismatched windows. The cross-check now uses max(since, DATA floor), and both
+  the headline totals and the stops query honour the regime floor so every
+  number in a report describes ONE window.
+  Also floors stop_shadow's spread_snapshots and trade_stops, not just entries:
+  a floored entry set with unfloored stops would attribute pre-swap stops to
+  live-era entries.
+  Tests: 19 new, 7 existing updated. The existing ones now pass `since=""`
+  EXPLICITLY with a note, rather than having their fixture dates quietly shifted
+  — the point is that the default changed, and hiding that in a fixture would
+  defeat the purpose.
+  THREE OF MY OWN NEW TESTS WERE VACUOUS on the first pass: they read
+  `res.get("xcheck_drift", res.get("drift"))`, and NEITHER key exists — so they
+  got None, skipped the assertion under `if drift is not None`, and passed while
+  testing nothing. The real keys are `scored_total_xcheck` /
+  `daily_gross_xcheck`. This is the third instance today of a test that passes
+  while exercising nothing; recorded because the pattern keeps recurring.
+  FIVE mutations verified to fail the tests — ignoring the floor (2), reverting
+  the cross-check to the data floor alone (2), dropping the data floor from the
+  composition (1), stop_shadow defaulting to no floor (2), and flooring
+  stop_shadow's entries but not its stops (1).
+  Full suite 3351 passed.
+- 2026-09-10 (twelfth same-day change) Two fixes that both became MORE urgent
+  because of changes made earlier today.
+  1. ORDER-011 — MKT-033 booked NOTHING when it could not read a closing price.
+  `_try_sell_long_leg` detects a long leg sold externally. When the closing
+  execution was unreadable it marked the leg sold, set
+  `*_long_sold_revenue = 0.0`, and — the actual defect — never called
+  `_book_realized_pnl` AT ALL. The long's value was deleted from realized P&L
+  outright. A long option someone paid for is essentially never worth exactly
+  zero, so this understated P&L by the whole remaining value of the leg.
+  WHY TODAY: the opening-vs-closing filter added to `get_closed_position_price`
+  (ninth change) deliberately returns None whenever it cannot distinguish a
+  closing execution from an opening one. Correct — but it means this branch is
+  now reached MORE often. Fixing the lookup without fixing its fallback would
+  have traded a wrong number for a missing one.
+  Now estimates from the live bid (the price the long could actually have been
+  sold at), books it with commission, and labels it an ESTIMATE in both the log
+  and a distinct LONG_SOLD_EXTERNAL_ESTIMATED safety event so it can never be
+  mistaken for a fill. FAILS CLOSED on a stale/non-real-time quote or a
+  non-positive bid — an estimate off a delayed quote is not better than no
+  estimate — and in that case logs CRITICAL that P&L is understated rather than
+  going quiet. A readable execution still wins; the estimate is only a fallback.
+  2. Every IbkrClient was retained for the life of the process. ibind's
+  `auto_register_shutdown` defaults TRUE, and `register_shutdown_handler()`
+  runs on EVERY construction. It does two harmful things for a long-lived
+  reconnecting process:
+    (a) `atexit.register(_close_handler)` where the handler closes over `self`
+        — atexit pins the client, its requests Session and its connection pool
+        forever. calypso-broker re-auths daily and on every session fault, so a
+        broker up for weeks holds weeks' worth of dead clients.
+    (b) it captures the CURRENT SIGINT/SIGTERM handlers and installs its own
+        chaining to them, so each new client captures the PREVIOUS client's
+        handler. One SIGTERM then walks a chain N deep after N reconnects — and
+        it overwrites CALYPSO's own signal handlers, in the process that owns
+        the IBKR session.
+  We need none of it: `disconnect()` already calls `close()` explicitly and
+  main.py installs its own signal handlers. The atexit half cannot even fire in
+  the strategy processes, which exit through `os._exit()` in `_hard_exit()`
+  (2026-09-05) — os._exit bypasses atexit entirely. The accumulation bought
+  nothing. Now `auto_register_shutdown=False`.
+  `disconnect()` also sets `self._client = None`. close() shut the session down
+  but left the object reachable, so a FAILED reconnect left a closed client in
+  place with `_connected` already False. `_require_connected` already treats
+  `client is None` as not-connected and raises cleanly, so nothing downstream
+  sees an AttributeError.
+  Tests: 18 new. FOUR mutations verified to fail them — reverting MKT-033 to
+  booking nothing (5 fail), accepting a non-real-time quote i.e. failing open
+  (1), re-enabling auto_register_shutdown (1), and keeping the stale client
+  reference on disconnect (1). One test pins ibind's upstream behaviour so the
+  workaround gets re-examined rather than carried forever if ibind changes.
+  Full suite 3313 passed.
+  DEPLOY: shared/ib_client.py — broker restarts FIRST.
+- 2026-09-10 (eleventh same-day change) Three verified audit items, shipped
+  together. None changes trading logic.
+  1. UNWIND ORDER — close SHORT legs FIRST. The unwind runs because an entry
+  failed part-way, so what is held is an arbitrary subset of the four legs, and
+  the dangerous subset is always one containing a short without its protective
+  long. Every close here is a market order that can fail or be delayed, so the
+  ORDER decides how long undefended short exposure survives. Closing longs
+  first strips protection off shorts still open; if a later short close then
+  fails, the account holds a NAKED short — exactly the state
+  `_handle_naked_short` exists to clean up after. Ordering only: every leg is
+  still closed, failures handled as before, and sorted() is stable so legs
+  within each group keep their relative order.
+  2. SLOT ANALYZER — `CANONICAL_SLOTS` was MISSING "12:45". B has run a 7-slot
+  grid ending at 12:45 since the 2026-07-24 swap, so every 12:45 entry was
+  silently bucketed as "other" and dropped from per-slot scoring. Not cosmetic:
+  12:45 is B's BEST live-era slot (+$293/trade, the closest strikes of any slot
+  at 26.5pt, and the only slot the hedge's 12:30 cutoff made unhedgeable) — the
+  slot most worth measuring was the one being discarded. Any slot_edge output
+  produced before today is missing it entirely.
+  3. AGENT TIMERS — HERMES (19:00 ET) and HOMER (19:30 ET) both fired roughly
+  THREE HOURS BEFORE settlement completed, every trading day. Measured
+  SETTLEMENT_COMPLETE times from the bots' own logs (variants B and C):
+  09-03 21:45, 09-04 22:32/22:37, 09-08 22:30, 09-09 22:15 — worst 22:37 ET.
+  0DTE SPX is PM-settled and IBKR's position feed clears hours after the 16:00
+  close, so "after the close" was nowhere near sufficient. Consequence: the
+  daily execution analysis AND the trading journal HOMER commits to git were
+  both built on unsettled numbers, indefinitely. Moved to 23:00 / 23:30 ET,
+  preserving the 30-minute ordering and staying before midnight (HOMER detects
+  missing trading days by calendar date, so a next-date run would look like a
+  skipped day). Both files' Description ALREADY said "post-settlement" — the
+  intent was right and the schedule simply never matched it, which is why this
+  went unnoticed: the file documented the behaviour it did not have.
+  FOLLOW-UP worth considering separately: a fixed clock time is still a guess
+  against a variable event. HERMES/HOMER could refuse to run when the state
+  file shows settlement incomplete. That is a code change, deliberately not
+  bundled here.
+  Tests: 28 new. FIVE mutations verified to fail them — removing the sort (2
+  fail), INVERTING it to longs-first (3), removing 12:45 (3), reverting hermes
+  to 19:00 (4), and putting homer before hermes (4). Full suite 3295 passed.
+- 2026-09-10 (tenth same-day change) Entry rung 1 never had a pricing POLICY —
+  it had an arithmetic accident. Capability landed, DEFAULT OFF everywhere; no
+  variant's behaviour changes until one opts in.
+  MEASURED ON B (2026-07-24..09-09, 65 live entries, 7 contracts): total fill
+  gap $1,817.62, of which the LONG legs are $1,575.07 (86.7%) — long_call
+  $815.01, long_put $760.06. That is ~38% of B's $4,687.65 net, about $79 per
+  trading day.
+  TWO SEPARATE DEFECTS, both in round_to_spx_tick:
+  (1) BUY uses math.ceil. On a $0.05 book the mid is ALWAYS a half-tick, so the
+  limit lands exactly on the ask — every long leg is a taker, deterministically.
+  31 of 34 rung-1 long limits parsed from raw logs were exactly the ask; the 3
+  exceptions were $0.10 books where ceil(mid)==mid.
+  (2) SELL uses round(), and on a half-tick the result is decided by FLOAT NOISE
+  plus banker's rounding: 0.575/0.05 is 11.499999999999998 (rounds down, lands
+  on the bid, CROSSES) while 0.675/0.05 is 13.5 (banker's rounds to 14, lands on
+  the ask, RESTS). Across the 58 one-tick books below $3 the sell limit crosses
+  67% and rests 33%, with no trading intent behind the split at all. This second
+  defect was flagged "unclaimed" by the audit and is confirmed here.
+  So the fix is NOT "flip a rounding mode" — it is replacing an accident with a
+  decision. `rung_limit_no_cross`: BUY -> highest tick at or below mid; SELL ->
+  lowest tick at or above mid. On a one-tick book that is exactly "join the
+  touch"; on a WIDER book it lands INSIDE the spread, a price improvement over
+  resting at the touch rather than a concession. Applied ONLY to the two
+  0%-slippage rungs. The escalation rungs (5%, 10%, MARKET) are MEANT to cross
+  and are untouched.
+  WHY THE DOWNSIDE IS BOUNDED: if a passive rung does not fill, the existing
+  ladder escalates to 5% -> 10% -> MARKET, i.e. to exactly today's behaviour.
+  The cost of being wrong is TIME (up to ~60s more per leg) plus the quote decay
+  and partial-fill exposure that come with it — not a worse price floor. That
+  partial-fill path pays the spread TWICE on the unwind and fired twice on
+  2026-09-09, so the time cost is real, not theoretical.
+  WHY IT IS NOT SHADOWED ON C, contrary to the original plan: a dry-run variant
+  NEVER REACHES the pricing ladder. `_initiate_entry` routes to
+  `_simulate_entry`, and `_place_option_order` has a hard dry-run gate that logs
+  SAFETY-DRY-01 and returns None. Enabling this on C would produce exactly zero
+  data. Only a variant that actually places orders can answer the fill-rate
+  question, so the shadow plan was abandoned rather than run for show.
+  Tests: 404. FIVE mutations verified to fail them — swapping floor/ceil so both
+  sides cross (237 fail), dropping the epsilon (51), ignoring the $3 tick
+  threshold (1), defaulting the gate ON (1), and bypassing the tested config
+  reader with an inline copy (1).
+  TWO OF THOSE MUTATIONS SURVIVED THE FIRST ATTEMPT, and both were real test
+  defects rather than equivalent mutants:
+  * the epsilon test hand-picked 0.05/0.50/1.00/2.95/3.00/4.20/10.00 — every one
+    EXACTLY representable in binary, so it could not detect the epsilon being
+    removed. The prices that actually carry float error are 0.15/0.30/0.60/0.70/
+    1.15/4.30... Now parametrised over EVERY tick from $0.05 to $12.00.
+  * the config test re-implemented the .get() chain in its own fixture, so it
+    passed while the production default was mutated to True — it was testing its
+    own copy, not the shipped code. The read is now a module-level
+    `deliberate_rung_pricing_enabled()` that the test calls directly, plus a
+    wiring guard asserting __init__ uses it rather than a second inline copy.
+  Full suite 3267 passed.
+- 2026-09-10 (ninth same-day change) `get_closed_position_price` must not
+  mistake an OPENING execution for a CLOSING one. Ships in the SAME batch as
+  the accountId fix, and that pairing is the point.
+  WHY NOW. The function matched on (conid, side) and then took the MOST RECENT
+  match. That was harmless only because /iserver/account/trades returned
+  nothing on this account — which the previous entry fixes. The moment the
+  endpoint answers, this function goes live-fire. Deploying the accountId fix
+  alone would have converted a dormant defect into an active one.
+  WHY (conid, side) IS SYSTEMATICALLY WRONG HERE, not occasionally wrong: on a
+  Brandon variant the butterfly hedge's long leg is pinned at the threatened
+  short's OWN strike BY CONSTRUCTION. Its OPENING buy therefore shares conid
+  AND side with the short's CLOSING buy. 2026-09-04 had exactly that: Call
+  7740, 7/7 @ $2.00.
+  AND "MOST RECENT WINS" IS NOT A TIE-BREAK, IT IS THE TRAP. The hedge is
+  placed LATER than the leg it defends, so recency selects precisely the wrong
+  execution every time. An existing test — `test_most_recent_execution_wins` —
+  asserted that behaviour; it is now skipped with the reasoning recorded, and
+  replaced by one asserting refusal on the same fixture data.
+  WHAT DOES NOT FIX IT, recorded because it is the obvious idea: filtering to
+  "executions after the leg opened". The hedge post-dates the leg it defends,
+  so it passes cleanly. `not_before` is implemented and wired because it is
+  strictly additive (an execution predating the open certainly is not its
+  close), but it is NOT the mechanism.
+  THE MECHANISM IS REFUSING TO GUESS. Prefer an explicit open/close marker
+  when IBKR supplies one (several documented spellings probed; absence treated
+  as UNKNOWN, never as a default — the field is doc-sourced, unverifiable
+  until the endpoint answers). Then a quantity hint, but only when it isolates
+  exactly ONE candidate. Still ambiguous -> return None and log CRITICAL.
+  A wrong close price is far worse than none: no price leaves the P&L unbooked
+  and loud, while a wrong price books a plausible number that NOTHING
+  downstream can catch, because the in-process reconcile is circular by
+  construction.
+  Both call sites now pass the hints — MKT-033 long salvage and the L-M3
+  external close. `contracts` was hoisted above the L-M3 lookup since it is
+  now an input to it, not just an output consumer.
+  Note `_to_epoch_ms` returns None on an unparseable timestamp, and callers
+  must read that as "no cutoff" rather than "cutoff of zero" — otherwise a bad
+  timestamp would silently disable the filter it was meant to apply.
+  Tests: 31 new + 2 rewritten. Mutations verified to fail them: removing the
+  ambiguity refusal (4 fail), ignoring the open/close marker (10), dropping
+  not_before (6), disabling the quantity hint (2). A fifth mutation
+  (`len(exact) == 1` -> `>= 1`) survived and was confirmed EQUIVALENT rather
+  than a test gap — with >= 1 a multi-match still leaves len(matches) > 1 and
+  refuses on the next line, so no path differs. Full suite 2863 passed.
+- 2026-09-10 (eighth same-day change) /iserver/account/trades was never dead —
+  we just never told IBKR WHICH ACCOUNT. One missing kwarg, months of wrong
+  conclusions.
+  THE SYMPTOM that misled everyone: probing the endpoint over a 7-day window
+  containing dozens of real paper fills returned ZERO rows. No error, no
+  exception, a clean empty list. That silence is why it was written up as a
+  paper-account limitation — including in CLAUDE.md and in this file's own
+  entry from earlier today, which said so in as many words.
+  THE ACTUAL CAUSE, traced end to end: (1) we construct
+  `IbkrClient(use_oauth=True, oauth_config=...)` with NO account_id; (2)
+  `$IBIND_ACCOUNT_ID`, ibind's env fallback, is set nowhere in the deploy; (3)
+  so ibind's own `self.account_id` is None; (4) ibind's `trades()` does
+  `if account_id is None: account_id = self.account_id` — still None; (5) its
+  `params_dict(optional=...)` DROPS empty optionals, so the request goes out
+  with `days` and no `accountId`; (6) IBKR answers with an empty list.
+  THE TELL, which is what actually found it: every OTHER IBClient method
+  already passes `account_id=self.account_id` — ELEVEN call sites. The two
+  `trades()` calls were the only ones that did not. An asymmetry that stark is
+  worth more than any amount of reasoning about what IBKR "probably" does on
+  paper accounts.
+  WHAT THIS RE-OPENS. `get_closed_position_price` — the documented F5
+  closed-position fill-price authority — reads this same endpoint, so it has
+  been returning None on EVERY lookup. Its emptiness was also the only thing
+  that stopped the L-M3 double-book from firing on 2026-09-04. That is exactly
+  why the L-M3 guard had to land FIRST (previous entry, deployed 09:19 ET
+  today) and this second: repairing the endpoint without the guard in place
+  would have turned a real -$1,225 day into -$2,485.
+  STILL UNVERIFIED, DELIBERATELY: that the fix makes records actually appear.
+  The mechanism is proven by code-read, not by observation — the endpoint
+  cannot be re-probed until the broker restarts, and the broker must not
+  restart during RTH. Confirm after tonight's restart by calling
+  `get_day_executions(days=7)` and checking for a non-empty list; only then
+  update the "dead endpoint" language in CLAUDE.md and the F5 docs. If it is
+  STILL empty, the paper-limitation theory returns with one more variable
+  eliminated.
+  Also note ibind's own docstring advice on this endpoint: "It is advised to
+  call this endpoint once per session." We call it per lookup. Not changed
+  here; worth revisiting if it proves rate-sensitive.
+  Tests: 9 new, including a guard that any FUTURE `self._client.trades` call
+  site must also pass account_id — the omission being fixed is precisely the
+  kind that gets reintroduced. Mutation (removing the kwarg from both sites =
+  the pre-fix state) fails 4 of them.
+  DEPLOY: touches shared/ib_client.py, which calypso-broker IMPORTS and whose
+  bytecode it holds until restarted. Broker restarts FIRST, then the
+  strategies. NOT during market hours.
+- 2026-09-10 (seventh same-day change) L-M3: the external-close path could
+  book a side's P&L that another path had ALREADY booked. Three vectors, all
+  closed. Ships with two stale-doc corrections in the same batch.
+  THE INCIDENT. 2026-09-04 on B (the live seat): entry #4's call side expired
+  worthless and settlement booked +$140.00 at 16:00:24 ET. After a later
+  restart, `_reconcile_recovered_entries_with_broker` reached
+  `_handle_position_discrepancies`, saw the conid gone, and tried to book the
+  SAME side again — logging "L-M3: E#4 call short vanished but its close price
+  is unreadable" at 22:37:24.
+  IT WAS SAVED BY AN UNRELATED BUG. The only reason it did not double-book is
+  that IBKR's /iserver/account/trades returns ZERO rows on this paper account,
+  so the close price came back None. Do NOT treat that as a safety net: it is
+  the accident that hid the defect, and a live account plausibly removes it.
+  IT WOULD NOT HAVE BEEN A MERE DUPLICATE. `get_closed_position_price` applies
+  NO opening-vs-closing filter — it takes any same-side execution at the conid
+  in a days=1 window. Conid 907878374 had a real BUY that day: the Brandon
+  butterfly's own long leg, 7/7 @ $2.00. On a Brandon variant that is
+  SYSTEMATIC, not incidental — the butterfly is pinned at the threatened short
+  strike by construction. The second booking would have been
+  $140 - ($2.00 x 100 x 7) = -$1,260, turning a real -$1,225 day into -$2,485.
+  ROOT CAUSE: two booking paths with DISJOINT idempotency flags. The external
+  path gated on ONE flag, `{side}_side_pnl_booked_external`, which no other
+  close path sets. Settlement gated on `*_side_expired` / `*_side_skipped` /
+  `*_side_pivot_closed` / `*_genuine_stop` and never looked at the external
+  flag. Neither could see the other, and the day still "reconciled" because
+  that check compares two numbers both descended from `_book_realized_pnl`.
+  VECTOR 2, PREVIOUSLY UNNOTICED: `{side}_side_pnl_booked_external` was set by
+  setattr and written NOWHERE. Every other disposition flag is persisted to
+  hydra_state.json; this one was not, so a restart resurrected it as False and
+  the external path could re-book its OWN prior booking. Now persisted in the
+  same atomic os.replace save as total_realized_pnl — same reasoning as
+  brandon_overlay_booked: a guard restored without the total it protects is
+  worse than no guard. Absent key defaults False = pre-fix behaviour = safe.
+  VECTOR 3, PREVIOUSLY UNNOTICED (the mirror image): settlement re-booked the
+  FULL CREDIT on top of an external booking whenever close_reason was already
+  TP/BREACH, because that makes `*_genuine_stop` False. Settlement's guard now
+  excludes `*_side_pnl_booked_external` on both sides.
+  ORDER OF OPERATIONS IS LOAD-BEARING. The guard reads the side's PRIOR
+  disposition BEFORE `setattr(entry, f"{side}_side_stopped", True)` — that
+  write would otherwise destroy the evidence the guard needs and make
+  prior_stopped always True, silently blocking every legitimate external
+  booking. A mutation hoisting the setattr fails 4 tests.
+  THE CARVE-OUT THAT MUST NOT BE SIMPLIFIED: the stopped clause is
+  `prior_stopped and close_reason not in ("TP","BREACH")`, not a bare
+  `prior_stopped`. A Brandon TP/BREACH that closed 0 legs (the 06-04 orphan)
+  sets *_side_stopped but books NOTHING, so it must stay bookable. This mirrors
+  settlement's own `*_genuine_stop` predicate exactly so the two paths agree on
+  what "already booked" means instead of each guessing.
+  The skip is LOGGED, naming which flag fired. A silent skip is how this hid.
+  Tests: 20 new. FIVE mutations verified to fail them — reverting to the
+  single-flag guard (8 fail), bare prior_stopped (1), hoisting the setattr (4),
+  dropping settlement's clause (1), dropping the persistence (1). Includes a
+  NEGATIVE CONTROL that a genuinely-vanished unbooked side is still booked: a
+  guard that blocks legitimate bookings loses real money and would be worse
+  than the bug. Full suite 2821 passed.
+  ALSO IN THIS BATCH (no behaviour change):
+  * strategy_taxonomy display_name "Brandon Narrow (6-slot)" -> "(7-slot)". B
+    restored 11:15 on 2026-09-09; the label is the alert identity on the only
+    variant that places real orders. Verified against the live VM config, which
+    also corrected the config's own stale "11:15 REMOVED" prose. Recorded the
+    standing rule from the 2026-09-10 permutation test (whole per-slot effect
+    p=0.569; 11:15's entire -$875 was ONE stop on 08-28): no slot moves again
+    until it has >=70 live-era hedge-free entries.
+  * CLAUDE.md's Fill-prices section named two functions that DO NOT EXIST and
+    never did on this branch — `_get_close_fill_price` and
+    `_deferred_stop_fill_lookup` (zero defs, zero refs repo-wide). The real
+    `_spawn_async_fill_correction` is a DELIBERATE no-op (FIX #75) because
+    place_and_wait_for_fill already polls to a terminal state. Corrected, with
+    a note not to "restore" a deferred path on the strength of the old text,
+    and the dead-endpoint caveat recorded next to source 3.
+- 2026-09-10 (sixth same-day change) An INDEPENDENT P&L check — the first one
+  in this codebase that is not circular.
+  THE PROBLEM. Every existing reconciliation compares two numbers descended
+  from the SAME accumulator: `_book_realized_pnl` increments
+  `daily_state.total_realized_pnl` and `entry.realized_pnl` in one statement
+  pair, and `daily_summaries.gross_pnl` derives from that same total. They
+  cannot disagree by construction, so they can only catch a booking site that
+  forgot `entry=`. A WRONG booked amount, a MISSING booking and a DOUBLE
+  booking are ALL invisible to them — and all three have bitten this codebase.
+  EXECUTIONS WERE THE FIRST CHOICE AND DO NOT WORK ON THIS ACCOUNT. Added
+  `IBClient.get_day_executions` (allowlisted) and probed live: IBKR's
+  `/iserver/account/trades` returns ZERO records over a 7-day window that
+  contained dozens of real paper fills — no error, empty list, endpoint called
+  correctly. Recorded here because it also means `get_closed_position_price`,
+  which reads the same endpoint and is documented as the F5 fill-price
+  authority, is very likely returning nothing on paper too. Worth its own
+  investigation. The method is kept: it is read-only, it is the right anchor on
+  a live account, and it returns the raw record so the shape can be discovered
+  when it does start reporting.
+  WHAT WORKS INSTEAD: IBKR publishes its own realized P&L in the account ledger
+  (`get_balance()` -> `raw_ledger.USD.realizedpnl`), and `get_balance` was
+  already allowlisted. That figure shares no code path with ours.
+  `_reconcile_pnl_against_broker` runs at settlement, right after the
+  in-process reconcile, and logs the drift.
+  LIVE SEAT ONLY. A dry-run variant places no orders, so the broker's realized
+  P&L reflects OTHER variants' activity — comparing a simulated P&L against it
+  would alarm on every close. Returns `{"skipped": "dry_run"}`.
+  SEMANTICS DELIBERATELY UNVERIFIED, AND SAID SO. It is not established whether
+  IBKR's `realizedpnl` is net of commission, nor exactly when it resets — it
+  read 0.0 on a flat pre-market account, consistent with a daily reset but not
+  proof of one. So the drift is computed against BOTH our gross and our net and
+  the log says which is closest; the first real trading day will show which
+  tracks. It LOGS and does NOT alert until then, so an unverified comparison
+  cannot cry wolf on the live seat.
+  Skip reasons are returned distinctly (`dry_run` / `no_realizedpnl_field` /
+  `error`) rather than a bare None. That is not cosmetic: a bare None made
+  "IBKR gave us no field" indistinguishable from "the call raised", and a test
+  written against it PASSED while the guard was mutated away — because
+  float(None) raised into the error handler and produced the same None. The
+  distinct reasons are what make the guard testable at all.
+  Tests: 10 new + a broker contract case (the suite enforces one per allowlisted
+  method — a good guard that caught the omission). Three mutations verified to
+  fail them.
+- 2026-09-10 (fifth same-day change) ROOT-CAUSE the overlay attribution gap:
+  persist the aggregate-only total instead of re-deriving it.
+  The earlier entry called this "attribute by entry_number rather than object
+  identity". THAT DIAGNOSIS WAS WRONG — `_brandon_settle_hedges` already looks
+  the entry up by entry_number (brandon/strategy.py:2594). The real failure is
+  that the entry is ABSENT from `daily_state.entries` entirely at settle
+  (post-close / cross-day restart), which is a legitimate state, and the
+  aggregate-only booking that follows is correct.
+  THE ACTUAL BUG is one level down: `_unattributed_overlay_pnl()` DERIVED the
+  gap from `_brandon_hedge_settlements`, which is NOT persisted — so the very
+  restart that CAUSES an aggregate-only booking is the one that loses the record
+  of it. The scalar failed in exactly the situation it was built for. That is
+  why 2026-07-07's column read 0.0 against a real -$2,532.58, and why the column
+  had never held a non-zero value in B's entire history.
+  FIX: accumulate `_brandon_unattributed_overlay` at the booking site, where the
+  fact is known, and persist it in hydra_state.json alongside
+  `_brandon_overlay_booked` — the guard it belongs with, written in the SAME
+  save (a guard restored without its amount is the 2026-07-18 failure mode in
+  reverse). Reset it on the new-day reset, immediately after the guard: it is a
+  PER-DAY total, and left running it would carry yesterday's overlay into today
+  and manufacture drift on a clean day. The old derivation is retained as a
+  fallback for objects built before the field existed.
+  Read with `is not None`, NOT truthiness: 0.0 is falsy, and falling through to
+  the derivation on a legitimate zero could resurrect a stale in-process
+  settlement the daily reset had correctly cleared.
+  DEFECT I INTRODUCED AND THE SUITE CAUGHT — recorded because the lesson is
+  more valuable than the fix: the first version accumulated with a bare
+  `self._brandon_unattributed_overlay += s.total_pnl`. That sits INSIDE the
+  ATOMIC BOOK + GUARD block, whose entire documented contract is "pure
+  arithmetic only, no logging/Telegram/I/O of any kind, so nothing here can
+  raise partway through and leave a booked amount without its guard". A bare
+  `+=` raises AttributeError on any object lacking the field — which is exactly
+  a raise between a booking and the guard flip, i.e. the reproduced double-count
+  of 2026-08-20 that this block was restructured to prevent. Two existing tests
+  in test_realized_pnl_recording.py failed on it. Now uses getattr with a
+  default so it cannot raise. When a comment says a block must not raise, adding
+  an attribute access to it is not a small change.
+  Tests: 9 new. Three mutations verified to fail them. Also worth recording: the
+  truthiness mutation initially PASSED, because the test used an empty
+  settlement list so both branches returned 0.0. Rebuilt so the branches
+  disagree — stored 0.0 against a stale -$1,960 settlement — which is the real
+  hazard. A test that passes against the bug is worse than no test.
+- 2026-09-10 (fourth same-day change) ORDER-010 round-trip PRICE P&L on failed
+  entries, and the 2026-07-07 overlay residual back-filled.
+  UNWIND PRICE P&L. When an entry fails part-way, `_unwind_partial_entry`
+  closes the legs that did fill. Since 2026-08-20 it booked the round-trip
+  COMMISSION — but the code's own note conceded that "market-order slippage on
+  this round trip is NOT separately tracked". That slippage is real money: each
+  leg was a genuine broker fill on the way IN and again on the way OUT, at a
+  market order, so the round trip almost always loses the spread. Leaving it
+  unbooked understated the true cost of a failed entry in BOTH the day
+  aggregate and the per-entry number. NOT hypothetical — this path fired TWICE
+  on 2026-09-09 on the live seat (failures at leg 3 and leg 4, unwinding 2 and
+  3 legs). Now books `(open - close)` for shorts and `(close - open)` for longs,
+  x100 x contracts, from `entry.legs[name].fill_price` and the close's own
+  `fill_price`. Wrapped so a booking failure can never cost us the close —
+  closing the leg matters more than measuring it — and a missing price logs a
+  WARNING and still books the commission.
+  OVERLAY RESIDUAL. slot_edge had reported an unexplained "$2,533 attribution
+  miss" over its reliable window. Measured per-day: the WHOLE residual is ONE
+  DAY — 2026-07-07, gross 392.42 vs entries 2,925.00, drift -2,532.58. Every
+  other day reconciles to exactly $0.00. Cause: overlay P&L is normally
+  attributed to the entry it defended (correct by design), but the settler
+  looks that entry up by OBJECT IDENTITY, so a restart between placing the
+  hedge and settling it drops the link and books aggregate-only. The v13 column
+  `unattributed_overlay_pnl` exists to record exactly this — and had NEVER
+  carried a non-zero value in B's history, so slot_edge's overlay adjustment
+  was a permanent no-op. Back-filled via scripts/backfill_overlay_residual.py
+  (dry-run by default, backs up first); residual after adjustment is $0.00 and
+  slot_edge's drift warning is now correctly silent.
+  DAY-LEVEL ONLY, deliberately: which entry the hedge belonged to is
+  permanently lost, and guessing would be worse than leaving it unattributed.
+  The root cause — attribute by entry_number rather than object identity — is a
+  separate strategy-side change and is NOT done here.
+  NAKED-SHORT CLOSE — now booked too (same-day follow-up). The earlier note
+  here said this needed a uic->entry lookup; it did not. All three call sites
+  already have `entry` in scope, so `_handle_naked_short` simply takes it as an
+  optional argument. Optional, not required, so a missing entry can never block
+  an emergency close — it logs a WARNING and closes anyway.
+  It also now RETURNS whether the position was confirmed closed, and the callers
+  drop that leg from `filled_legs` on success. That matters: the naked leg is in
+  `filled_legs` too, so without it `_unwind_partial_entry` fires a SECOND close
+  at an already-flat position.
+  The gap was specifically on SUCCESS. On failure the leg stays in filled_legs
+  and the unwind closes and books it; on success the position was already flat,
+  the unwind's close could not fill, and the P&L was simply lost. A test pins
+  that a FAILED close returns False, so the two paths can never both skip it.
+  Variant G is untouched — `requires_protective_wings=False` still returns
+  early, since it holds naked shorts by design.
+  Tests: 10 new (tests/test_unwind_roundtrip_pnl_2026_09_10.py). Two mutations
+  verified to fail them, including the short/long sign flip — the error most
+  likely to be made here and the one that would silently invert every unwound
+  long's P&L.
+- 2026-09-10 (third same-day change) slot_edge refuses to score the era whose
+  stop records are SIGN-FLIPPED — the analyzer had been publishing -$21,045
+  against an actual +$40,277.
+  ROOT CAUSE, found by tracing rather than guessing: before commit 4ce94e5
+  (2026-07-14), `_record_stop_to_db` guarded on
+  `if actual_close_cost and credit:` — a FALSY test. In dry-run
+  `_close_position_with_retry` returns no fill (SAFETY-DRY-04), so
+  `side_close_cost` is 0.0, which is falsy, so a profitable Brandon
+  take-profit fell through to the placeholder `-(stop_level - credit)` and was
+  persisted as a large PHANTOM LOSS. Variant B was dry-run for its entire
+  pre-swap life and its dominant exit is TP at 80% credit — a PROFIT — so most
+  pre-v12 B rows sit in trade_stops as roughly minus-the-stop-level.
+  strategy.py:6208's own comment names the case: B's 07-13 E3 booked
+  -(2000-500) = -1500 instead of +500.
+  slot_edge's `reconstruct_entry_pnl` trusted `trade_stops.net_pnl` verbatim,
+  so it inherited the phantom losses wholesale. It already had a
+  `_PER_ENTRY_RELIABLE_SINCE = 2026-07-02` constant but used it ONLY for the
+  cross-check, never to gate what it SCORED. Now scoring requires BOTH a
+  non-NULL v12 `realized_pnl` AND a date in the reliable era; everything else
+  counts as `unscored` and is excluded from every mean, CI and verdict.
+  Verified on B's live DB: the headline moves -$21,045 -> +$17,062, exactly the
+  sum of the trustworthy rows, and the reconstruction fallback count drops to 0.
+  NOT REPAIRABLE, deliberately not attempted: the true close cost was never
+  captured in dry-run, so the correct value does not exist in the DB. Marking
+  the era unscored is the honest treatment. `reconstruct_entry_pnl` is retained
+  for its unit tests and for any future non-dry-run backfill.
+  THIS COST A REAL DECISION. A per-slot analysis run on the contaminated
+  full-history output this week produced a conclusion that had to be discarded.
+  With scoring gated, 11:45 reads +$191 rather than negative.
+  ALSO ESTABLISHED, and it corrects something stated earlier: the post-swap
+  "exact 0.00 reconciliation" between sum(trade_entries.realized_pnl) and
+  daily_summaries.gross_pnl is NOT independent validation. `_book_realized_pnl`
+  (base_strategy.py:3960-3962) increments `daily_state.total_realized_pnl` and
+  `entry.realized_pnl` in the SAME statement pair, and gross_pnl derives from
+  that same accumulator — so the two cannot disagree by construction. It can
+  only catch a booking site that forgot to pass `entry=`. Treat it as an
+  internal consistency check, never as proof of correctness. A genuinely
+  independent check would reconcile against broker-side truth (IBKR
+  /iserver/account/trades executions, or the account cash delta), which shares
+  no code path.
+  STILL OPEN (not fixed here — an emergency path on the live seat deserves its
+  own pass): `_handle_naked_short` (base_strategy.py:3646-3742) closes a real
+  position via `_close_leg_order` and books NO realized P&L at all — neither
+  per-entry nor to the day aggregate. It affects both equally, so it produces
+  no drift between them and the consistency check above cannot see it.
+- 2026-09-10 (second same-day change) Phase-0 remainder: concurrency source,
+  entry guards, edge era filter, and the metrics sync the back-fill needed.
+  CONCURRENCY SOURCE. Losing a calendar from the sidecar silently FREED the
+  concurrency slot — D opened a fresh calendar the next session, all three
+  times. `_dc_open_calendar_count()` now takes max(in-memory, DB-unfinished).
+  IMPORTANT: the obvious fix — "count real broker positions instead", which is
+  what the original scope item said — would have been a SERIOUS REGRESSION. D
+  and E are dry-run-locked, so `get_positions()` returns nothing for them; the
+  count would read 0 forever and the cap would STOP BINDING ENTIRELY. The DB is
+  the only source that knows about a dry-run calendar. When a real-order path
+  exists, add the broker count as a THIRD term of the max(), never a
+  substitute. A test pins that the broker is not consulted.
+  A lost position now keeps occupying its slot until resolved, which with
+  `_dc_detect_lost_positions`' HIGH alert closes the loop: lost -> alerted ->
+  slot blocked -> operator back-fills -> slot frees.
+  ENTRY GUARDS. `grep -n assert double_calendar_strategy.py` returned NOTHING
+  before today. Added: inverted strikes abort the entry (call at or below put
+  is not a double calendar — reachable when the delta picker degrades on a thin
+  chain, the same failure class as B/C picking ~0.5-delta strikes on
+  2026-07-17); and `_validate_dc_dte_window` rejects short_dte_min < 1 at
+  construction. That second one is a coexistence guard, not hygiene: a 0DTE
+  near leg would put D on the SAME EXPIRY as the 0DTE variants sharing this
+  account, and identical strike + expiry = identical conid, which IBKR MERGES.
+  ERA FILTER. `analyze_calendar_edge(since=...)` / `--since`, defaulting to
+  DEFAULT_MULTIDAY_ERA_START = 2026-07-20, the first multi-day-hold entry.
+  Everything earlier ran under `eod_close_if_no_transform: true` at full-touch
+  fills — 19 trades, 0 wins, -$4,877.40 — and measures a config, not a
+  strategy. The boundary date is INCLUSIVE; a test pins that.
+  METRICS SYNC — closing a loose end the 2026-09-09 back-fill created. Writing
+  dc_outcomes alone was NOT enough: hydra_metrics.json derives from
+  daily_summaries in a DIFFERENT database (backtesting.db), which the back-fill
+  never touched. D read -$6,129.05 in metrics against -$6,458.40 in
+  dc_outcomes — two lifetime figures for one strategy. The back-fill script now
+  also adds each lost position's P&L to the daily_summaries row for the day it
+  was last seen, so _reconcile_cumulative_metrics_from_db self-heals
+  cumulative_pnl at the next settlement with no new machinery. Idempotency is
+  explicit via a `dc_metrics_adjustments` ledger keyed on strategy_id, because
+  the two halves can be (and were) applied in separate runs.
+  Tests: 17 new (tests/test_calendar_phase0_remainder_2026_09_10.py); three
+  mutations verified to fail them.
+- 2026-09-10 IBKR percent-suffixed field parsing — the one-line bug that cost a
+  year of a wrong premise.
+  `IBClient._parse_quote_row`'s inner `f()` did a bare `float(v)` inside a
+  try/except that swallowed ValueError. IBKR returns implied volatility
+  (field 7633) as a PERCENT-SUFFIXED STRING — '11.8%' — so `float('11.8%')`
+  raised and `iv` silently became None on every read. No percent-stripping
+  existed anywhere in the repo.
+  WHAT IT COST: we concluded IBKR does not return IV for SPXW at all. That
+  conclusion is recorded in the 2026-06-15 VM-probe note in this very file, and
+  it became NO-GO REASON 2 in docs/migration/D_GOLIVE_SCOPE_AND_AUDIT.md —
+  "the edge signal is unobservable; D trades its own edge blind" — used to argue
+  against building strategy D. It is FALSE. A 2026-09-09 probe of D's own open
+  position returned all four legs with live IV and a complete term structure
+  (call front-back +1.6 vol pts, put +2.1, both front > back, the favourable
+  calendar condition). Correct that VM-probe note and that NO-GO reason.
+  A percent string now converts to a FRACTION (11.8% -> 0.118). Choosing the
+  unit was free: no consumer has ever received a non-None value.
+  VERIFIED BEFORE SHIPPING that this activates NO dormant decision path —
+  gex_provider takes its IV from POLYGON not IBKR (so B's live GEX subsystem is
+  untouched); the `iv` surfaced by strategy.py's _read_option_greeks has no
+  consumers at all; and calendar _dc_read_iv feeds only
+  _dc_probe_two_expiry_data, which has zero runtime call sites. The fix stops
+  discarding data; it changes no decision.
+  DELIBERATELY NOT FIXED: IBKR also decorates PRICE fields with a leading 'C'
+  (close) or 'H' (halted) — 'C7638.04' — which this parser likewise turns into
+  None. Real second bug, but changing price parsing would alter
+  after-hours/settlement behaviour on the LIVE seat, the same class of change
+  behind the 2026-07-06 stale-SPX phantom. A test pins that prefixes still
+  return None so the omission is a recorded decision, not mistaken coverage.
+  DEPLOY: shared/ib_client.py is imported by calypso-broker, which holds loaded
+  bytecode until restarted — broker FIRST, verify /health, then the strategies.
+  Tests: 13 new (tests/test_ib_iv_percent_parse_2026_09_10.py); the mutation
+  that reverts the percent handling fails 5 of them.
+- 2026-09-09 (third same-day change) Vanished-position watchdog + the
+  LOST_FROM_TRACKING back-fill (Phase 0.6).
+  THE INCIDENT: a calendar lives in two places — dc_open_trades.json
+  (authoritative for monitoring) and dc_calendar_entries (the record) — and is
+  only FINISHED when it also gets a dc_outcomes row. Five positions fell out of
+  the sidecar without one, so they stopped being monitored and were never
+  booked as a win or a loss: D's dctm_20260618_001 ($2,290 debit),
+  dctm_20260803_001 ($950), dctm_20260813_001 ($1,590); E's spydc_20260722_001
+  and spydc_20260805_001. D's lifetime excluded three whole positions; E was
+  missing two of its five entries — 40% of its record. Every one was found by
+  manual audit, never by an alarm. Losing a position also FREED THE CONCURRENCY
+  SLOT, so a fresh calendar opened the next session — in a real-order world
+  that silently doubles exposure.
+  The write-ordering race behind them was fixed 2026-08-18
+  (_reset_for_new_day's re_save_needed) and ALL FIVE predate that fix, so this
+  is a DETECTOR, not the fix: _dc_detect_lost_positions() runs after the
+  sidecar load and alerts HIGH on any entry the DB has open that the sidecar
+  does not hold. The open position is correctly NOT flagged (negative control).
+  BACK-FILL: scripts/backfill_lost_calendars.py, dry-run by default, books each
+  lost entry as terminal_state='LOST_FROM_TRACKING' with its LAST OBSERVED
+  MARK. Read that literally — the position was never closed and nobody knows
+  what it would have settled at. Attribution of historical marks is by TIME
+  WINDOW (pre-v3 snapshots carry no strategy_id), sound only because
+  dc_max_concurrent=1; the script refuses to run if it sees overlapping entries.
+  Measured: D -$398.75 across 3, E -$76.00 across 2 — FAR smaller than the
+  "worst case -$10,959" a 2026-09-06 analysis projected by assuming the whole
+  debit was lost. Corrected: D -6,059.65 -> -6,458.40, E -109.00 -> -185.00
+  (dc_outcomes sums; D's -6,129.05 headline also carries commission).
+  CRITICAL PREREQUISITE, caught before writing any row: dc_edge segmented ONLY
+  on "did it transform", so a LOST_FROM_TRACKING row would have landed in
+  calendar_mvl — the TRUSTWORTHY segment — and contaminated the single number
+  that answers "does D's calendar leg have an edge". Booking them without that
+  filter would have been worse than leaving them out. dc_edge now has a third
+  segment, lost_untracked, excluded from the verdict and carrying an explicit
+  "NEVER CLOSED" caveat. A test proves a fabricated +$5,000 lost row cannot
+  move the verdict.
+  Tests: 9 new (tests/test_lost_calendar_watchdog_2026_09_09.py). Three
+  mutations verified to fail them.
+- 2026-09-09 (second same-day change) Calendar schema v3 — record EVERY
+  transform-gate evaluation, and give snapshots a trade identity.
+  THE GAP: D's transform gate is the strategy's whole thesis (the calendar leg
+  is 0-for-23). Only the evaluations that FIRED were ever persisted: 2 rows, in
+  the entire history of the strategy. Everything else went to a rotating log.
+  So the central question was being answered from a 2-of-8 binary while the
+  distance-to-gate was computed and thrown away.
+  CORRECTION, verified after this shipped — the commit message for c645b8e and
+  an earlier version of this entry both said the gate is "evaluated on every
+  monitoring tick, order 600 times per trade". THAT IS WRONG.
+  double_calendar_strategy.py:606 gates the call on
+  `pnl_move_pct >= dc_profit_trigger_pct` (7.5%), so _dc_attempt_transform only
+  runs once a position is ALREADY up 7.5% from its opening mark. The "~4,700
+  evaluations" figure quoted from the 2026-09-06 forensic does not describe
+  this call site.
+  This does NOT reduce the table's value — the evaluations worth recording are
+  exactly the ones near the gate, and the P&L trajectory below the trigger is
+  already in dc_calendar_snapshots. But it does change WHEN data appears, and
+  how much: expect tens of rows around a transform decision, not hundreds per
+  trade. For scale, only 23 of 50,292 calendar-phase snapshots (0.05%) ever
+  showed raw pnl/debit >= +7.5% — though that understates the gate's own
+  measure, which is move-from-entry and therefore ~15 points higher because
+  opening_pnl carries the birth toll.
+  ALSO: dc_max_concurrent defaults to 1 and D currently holds an open
+  TRANSFORMED position (dctm_20260901_001, short expiry 2026-09-11), so D will
+  not open a new calendar — and this table will not receive its first row —
+  until that position settles.
+  NEW TABLE dc_transform_attempts — one row per evaluation, outcome in
+  {fired, below_threshold, arb_rejected, incomplete_quotes}, carrying the
+  credit, the threshold, the margin, all six modelled leg prices, and the
+  credit at agg=0 AND agg=1. That last part matters: it makes the gate
+  recomputable offline at ANY fill aggressiveness, which is the input that
+  decides this strategy and has never been validated against a real order.
+  A test pins the interpolation identity against the acting credit.
+  ATTRIBUTION: dc_calendar_snapshots gains strategy_id + entry_date. It only
+  carried entry_number, which is ALWAYS 1 on D and E (verified against the
+  live DBs — the distinct set is literally [1]), so 59,305 D rows and 69,660 E
+  rows could not be tied to a specific trade except by guessing from
+  timestamps.
+  OVERWRITE GUARD: a UNIQUE index on dc_outcomes.strategy_id. The PK is
+  (entry_date, entry_number) and INSERT OR REPLACE keys on it; with
+  entry_number pinned at 1 that silently overwrites if two entries ever share
+  an entry_date. Additive (an index, not a table rebuild). No collision has
+  occurred, but the concurrency slot HAS been freed early three times by the
+  vanished-position bug, which is exactly the path that would cause one.
+  ALSO FOUND: E has lost 2 of its 5 entries from tracking (spydc_20260722_001,
+  spydc_20260805_001 have no dc_outcomes row) on top of D's 3. Proportionally
+  worse than D. The watchdog for this is still TODO (Phase 0.6).
+  Telemetry is fire-and-forget throughout — a recording failure must never
+  cost a trade (precedent: 2026-09-03, when a recording-path guard froze a
+  live position's P&L for a whole session).
+  Tests: 13 new (tests/test_dc_transform_attempts_2026_09_09.py). Four
+  mutations verified to fail them. NOTE: the mutation run initially produced a
+  spurious result because rapid file-swapping left a stale __pycache__ entry
+  whose mtime matched — the same class of gotcha as the deploy rule about
+  clearing bytecode. Re-run with cache clearing between mutations.
+- 2026-09-09 Strategy D Phase 0.1/0.3 — charge commissions in the risk-free
+  gate, and stop the transformer firing on arbitrage-impossible quotes.
+  WHY THIS IS THE WHOLE BALLGAME FOR D: D's calendar leg is 0-for-23
+  (scripts/analyze_calendar_edge.py --variant d: mean net return-on-debit
+  -24.95%, CI95 [-29.75%, -20.15%], 0W/23L). Every dollar D has ever made came
+  from the "risk-free transform", so that gate IS the strategy's thesis.
+  DEFECT 1 — the gate charged NO commission. Worst-case IC value at expiry is
+  exactly wing*100*n and the threshold was exactly net_debit + wing*100*n, so
+  worst-case realized P&L was exactly $0 BEFORE fees: zero margin by
+  construction, and any omitted cost makes the real outcome negative. On top of
+  that the transformer's own 4 legs (sell 2 longs, buy 2 wings) booked zero
+  commission ANYWHERE, and dc_edge derives commission from close_commission —
+  which is $0 for a transform that settles at expiry — so D's only winner was
+  scored entirely fee-free. risk_free_threshold() now adds open_commission +
+  4 * commission_per_leg * contracts (8 legs; SPXW is European cash-settled so
+  a held-to-expiry IC pays no closing commission). The rate is stamped on the
+  entry at open so the threshold cannot be computed without it. Entries that
+  never stamped it reproduce the old threshold exactly, so historical rows are
+  unchanged.
+  MEASURED (scripts/rescore_d_transforms.py, new): both transforms still clear,
+  but they are not comparable. dctm_20260818_001 — D's ONLY settled winner —
+  goes from "risk-free by $11.50" to $2.30, which is 0.16% of its own credit,
+  i.e. indistinguishable from zero under a fill model that has never met a real
+  order. dctm_20260901_001 keeps $154.20 (9.89%). So D's record is one genuine
+  transform and one that is noise, not two wins.
+  DEFECT 2 — no arb sanity on the transform's inputs, AND IT HAD ALREADY FIRED.
+  _CAL_ARB_EPS guards only the CALENDAR phase inside _dc_refresh_marks; the
+  transform gate checked nothing and read its legs in THREE separate quote
+  batches. The wing enters transform_credit with a MINUS sign, so a stale or
+  too-cheap wing inflates the credit in exactly the direction that fires a bad
+  transform. Real case: dctm_20260901_001 transformed into a 7580/7575 put
+  vertical — 5pt wide, a $500 ceiling — recording put_spread_credit $538.40
+  (the next snapshot confirms short_put 49.15 vs long_put 43.766 = 5.384).
+  At least $38.40 of that trade's $154.20 margin is not obtainable.
+  Now: all six legs are read in ONE atomic batch, each side is checked against
+  the wing width before the gate, and the booked side credits are clamped to
+  the vertical's ceiling.
+  ALSO: the [DCTM-RISKFREE] log no longer claims "max loss $0" — it prints the
+  actual margin over a fee-inclusive threshold and names the unvalidated fill
+  aggressiveness. evaluate_risk_free()'s docstring now states plainly that it
+  is NOT an independent check (the gate tests the same inequality on the same
+  numbers); it is the hook for a real post-fill verification later, and the
+  transform now fails CLOSED if the two ever disagree.
+  Tests: 12 new (tests/test_d_riskfree_commissions_and_arb_2026_09_09.py).
+  Four mutations verified to fail them. NOTE FOR FUTURE READERS: the first
+  version of the 09-01 regression test passed even with the arb guard deleted —
+  it used cheap longs, so the CREDIT gate rejected it and the test proved
+  nothing. It is now constructed so the credit gate demonstrably passes
+  ($1,560 vs a $1,395 threshold) and only the arb guard can reject it.
+- 2026-09-07 Calendar schema v2 — record every mark at MID and FULL TOUCH, so
+  the fill assumption stops being unfalsifiable. Also sets E's fill model.
+  THE PROBLEM: dc_calendar_snapshots v1 stored only the post-haircut leg price
+  and discarded the bid/ask that produced it. That made it IMPOSSIBLE to answer
+  the one question that decides D and E — "what would this have done at a
+  different fill assumption?" The 2026-09-06 forensic needed exactly that and
+  could not do it: it found D had run 19 trades at full touch (agg=1.0) because
+  `dry_run_fill_model: 0.5` was written as a bare scalar under the
+  double_calendar sub-block, a form the pre-0043298 reader silently ignored
+  until 2026-07-20 — and ~74% of D's -$4,877 same-day-era loss was that modeled
+  crossing cost, at double the intended setting, unrecoverable after the fact.
+  THE FIX: `_dc_fill_price` gains `agg`/`slip` overrides so the same quote can
+  be priced at mid (0,0) and full touch (1,0) alongside the acting fill. Two new
+  helpers, `_dc_calendar_value_at` / `_dc_net_debit_at`, mirror
+  CalendarEntry.calendar_value and the entry-debit computation exactly. Both
+  endpoints are recorded, making ANY aggressiveness an exact linear
+  interpolation: value(a) = mid + a * (touch - mid). Pinned by a test.
+  SCHEMA: DCDataRecorder 1 -> 2, additive ALTER TABLE migration (this DB holds
+  D's and E's entire history and must never be rewritten). New columns:
+  dc_calendar_snapshots += mid_calendar_value, touch_calendar_value, fill_agg,
+  fill_slip; dc_calendar_entries += mid_net_debit, touch_net_debit. Pre-v2 rows
+  keep NULL, deliberately NOT 0.0 — the information was never captured, and 0.0
+  would read as "the calendar was worth nothing at mid".
+  RECORD-ONLY: the detail is computed AFTER the mark-sanity guard and wrapped so
+  a failure can never affect a trading decision. A test asserts _dc_refresh_marks
+  still commits marks and returns True when the helper raises — the 2026-09-03
+  incident (1,138 rejected marks in one session) is the precedent for why a
+  recording path must never be able to freeze a live position's P&L.
+  VARIANT E: had NO fill-model key anywhere, so it fell through to the code
+  default of 1.0 while D ran at 0.5 — meaning the two members of the
+  calendar_multiday comparability group were simulated under DIFFERENT cost
+  assumptions, making the D-vs-E head-to-head (the whole point of the group)
+  invalid. Set to 0.5 to match D. Chosen for CONSISTENCY, not accuracy: neither
+  value has ever been validated against a real fill. Schema v2 makes the choice
+  re-derivable rather than baked in.
+  ALSO: scripts/probe_calendar_spread.py — a READ-ONLY probe that quotes a live
+  D-style SPX calendar and reports the real spread and the round-trip cost at
+  each aggressiveness, to check the forensic's 14.3%-of-debit figure against a
+  live chain. Places no orders. It cannot answer whether a limit order near mid
+  would FILL — only a real order can.
+  Tests: 20 new (tests/test_dc_mid_touch_recording_2026_09_07.py). Five
+  mutations verified to fail it: reusing the liquidation actions for the entry
+  debit, coalescing NULL to 0.0, dropping the migration, letting the
+  record-only failure abort the mark refresh, and ignoring the agg override.
+- 2026-09-06 (third same-day change) STATE-004 restart-gap backstop.
+  THE GAP: `_reset_for_new_day()` — where the overnight-position check lives —
+  only fires when a RUNNING process observes the ET date change under it. On a
+  day where no process survives across ET midnight (VM reboot, crash storm, a
+  deploy straddling midnight), `main.py:run_bot` seeds `last_day = today` and
+  `strategy.py` stamps `daily_state.date = today` unconditionally at startup,
+  so the reset never runs and STATE-004 is silently skipped for that day.
+  Real in code; LATENT in production — all 7 units logged "Resetting for new
+  trading day" on every date from Aug 14 to Sep 6, so the gap has never yet
+  cost an actual check.
+  HONEST VALUE FRAMING (found by the adversarial review, recorded here so the
+  next reader doesn't over-rate this): the missed check is NOT an unexamined
+  blind spot. `_check_hourly_reconciliation`'s orphan sweep runs on the FIRST
+  market-hours tick (`_last_reconciliation_time` is None) and fires
+  logger.critical + a CRITICAL alert ~2 minutes after the open on a genuine
+  overnight leg. So the real delta this buys is halt-BEFORE-the-open instead
+  of CRITICAL-alert-AFTER-it — worth having, not a hole being plugged.
+  THE FIX: the check body moved to `_run_overnight_position_check()`, which
+  returns CLEAN / POSITIONS_CONFIRMED / READ_FAILED rather than deciding
+  policy. `_reset_for_new_day` keeps its historical policy byte-for-byte
+  (including halting on a failed read — the statements after it wipe
+  daily_state). A new pre-market hook `run_overnight_check_if_owed()` runs the
+  same check from main.py when owed. `overnight_check_date` is persisted and
+  restored (same-day only) so the check runs at most once per ET day across
+  restarts; it is stamped ONLY on the clean path, so a halt or a read failure
+  leaves it owed and re-derived.
+  THE REVIEW'S BLOCKING FINDING, and why READ_FAILED must not halt on the hook
+  path: a green broker `/health` only proves the SESSION family is up.
+  `get_positions` runs on the independent PORTFOLIO family with its own
+  circuit breaker, shared by all 7 processes through the one broker. The naive
+  design (lift the body verbatim, keep its read-failure latch) would halt the
+  live seat — no entries AND no stop monitoring — for a whole session on a
+  FLAT pre-market account, clearable only by another restart, on exactly the
+  day a restart just happened. The hook now logs WARNING + a MEDIUM
+  DATA_QUALITY alert and leaves the check owed to retry.
+  WINDOW: `OVERNIGHT_CHECK_WINDOW_END_ET = 09:20`. The check reads the WHOLE
+  account (no symbol/variant filter), so it must complete before ANY variant
+  can legitimately hold a position. The fleet floor is 09:30, NOT B's 09:45 —
+  variant F sets `entry_times = [09:30]` and is event-triggered from the open.
+  09:20 leaves ~10 min over the check's own ~4-minute worst-case retry budget.
+  The same market-closed branch also runs at 16:30 with 0DTE legs legitimately
+  open, which is why the guard is "before the window ends", not "market
+  closed". Two tests pin this invariant.
+  NOT TO BE CONFUSED WITH the separate, still-unbuilt work of SCOPING
+  STATE-004 to per-variant conids for D/E coexistence — that one is a go-live
+  gate that cannot bind until D/E have an execution path at all (see the same
+  date's correction in docs/NEXT_STEPS.md), and two design attempts at it were
+  adversarially refuted. This change is about WHEN the check runs, not WHAT it
+  scopes to.
+  Tests: 22 new (tests/test_state004_restart_gap_2026_09_06.py) + the 13
+  existing STATE-004 tests still green (one assertion updated: the clean path
+  now saves twice — once for the stamp, once at the end of the reset).
+  Three mutations verified to fail the new suite: halting on READ_FAILED,
+  dropping the stamp, and nesting the restore inside the Brandon `hasattr`
+  guard (which would restore on B/C only and re-alert A/D/E/F/G every restart).
+- 2026-09-06 (second same-day change) GEX width floor SHIPPED LIVE —
+  `gex_provider.MIN_CLUSTER_STRIKES = 2` is now the default everywhere, one
+  day after landing as an opt-in parameter.
+  WHY IT SHIPPED INSTEAD OF STAYING SHADOWED, which is the point worth
+  recording: it was MEASURED inert for B's live entry selection rather than
+  assumed to be. Across all 44 real BRANDON-GEX-ADJ SKIPs in the log-retention
+  window the cited zone widths were 30(x1), 75(x4), 110, 145, 205(x2),
+  210(x3), 250(x5), 270(x3), 295(x2), 330, 335(x4), 350, 355, 375(x2),
+  380(x4), 385(x4), 395, 400(x3), 405 — the NARROWEST is 30pt = 7 contiguous
+  strikes at SPX's 5pt increment. A floor of 2 changes none of them. Removing
+  clusters can only ever reduce SKIPs, and every SKIP that fired cited a
+  cluster that survives the floor, so the historical veto record is unchanged
+  by construction. What the floor removes is (a) the FUTURE case the live
+  2026-09-04 profile proves is real — NEG[7715-7715], one strike, 16.94%, the
+  single strongest negative cluster on that board, which simply never happened
+  to align with a strike we were selling — and (b) the sole source of the
+  defensive overlay's put-side confirmations (relevant only if the hedge ever
+  returns; it is disabled on B).
+  This corrects an over-cautious call from 2026-09-05, when all three audit
+  corrections were lumped together as "wait for the shadow". They are not
+  equivalent: shadowing a change that is provably inert delays nothing and
+  teaches nothing. The discipline that should have been applied, and is now:
+  a change that MOVES BEHAVIOUR AND LACKS EVIDENCE gets shadowed; a
+  CORRECTNESS FIX WITH NO BEHAVIOUR CHANGE ships. The other two corrections
+  are correctly classified — `windowed` normalization genuinely moves which
+  entries are vetoed and stays shadowed, and the sign flip already has a
+  verdict of DO NOT FLIP from the 2026-09-06 research.
+  Kept as a named module constant, not a config knob: this is a correctness
+  floor ("a wall is not one point"), not a tunable — same treatment as
+  `_CAL_ARB_EPS` in calendar_strategy_base. Revert = set it to 1.
+  The shadow arm was INVERTED accordingly: `width_floor` became
+  `legacy_no_floor` (min_cluster_strikes=1), so production keeps measuring
+  whether the now-live floor ever actually bites. If that arm never disagrees
+  with `live`, inertness is confirmed in production and the arm can retire.
+  Tests updated from pinning the legacy default to pinning the live one, plus
+  a regression pin on the exact inertness property that justified shipping
+  (a 7-strike/30pt cluster — the narrowest real SKIP ever cited — must pass
+  untouched). Negative-control-verified: reverting the constant to 1 fails 4
+  tests. NOTE for whoever runs these next: clear __pycache__ after changing
+  this constant — stale bytecode made the restore look like a failure here.
+- 2026-09-06 Shutdown hang FIXED, and its cause corrected on the record.
+  SYMPTOM: after a graceful shutdown completed and logged, processes sat until
+  systemd's 100s TimeoutStopSec and were SIGKILLed (2026-08-31 during RTH;
+  2026-09-03 all seven units in the same second; 2026-09-05 on B).
+  THE CAUSE WAS MISATTRIBUTED. The 2026-09-05 "Exception in thread
+  Thread-CommitBatchPublisher" traceback made Pub/Sub look responsible. It is
+  not: that thread is daemon=True (verified in the DEPLOYED library at
+  pubsub_v1/publisher/_batch/thread.py:239) and daemon threads cannot block
+  threading._shutdown(); and on 2026-09-03 six of the seven hung units
+  (A/C/D/E/F/G) never publish and had no such thread at all. Every thread in
+  the SHUTDOWN-DIAG lines is a daemon. The real blocker is CPython
+  interpreter finalization (Py_FinalizeEx) with grpc-core's process-global
+  native threads (grpc_global_tim / event_engine / lifeguard) resident —
+  which AlertService.close() has correctly documented since 2026-08-18 as
+  process-wide singletons that CANNOT be torn down per-channel. That is
+  precisely why every previous channel-closing mitigation failed: it was
+  addressing something that was never going to be sufficient.
+  FIX A (bots/hydra/main.py) — _hard_exit() calls os._exit() under the
+  __main__ guard, strictly AFTER main()/run_bot()'s graceful shutdown has
+  returned, so no bot logic is skipped. Preconditions VERIFIED, not assumed:
+  zero atexit handlers anywhere in shared/ bots/ services/ (now pinned by an
+  AST scanner test, with its own negative control); DataRecorder commits per
+  write; _save_state_to_disk is tmp + os.replace; logging handlers flush per
+  record and logging.shutdown() + stream flushes run before the exit.
+  main()'s own sys.exit(1) paths are preserved via an explicit SystemExit
+  catch — without that, every error exit would report a clean 0 to systemd.
+  FIX B (shared/alert_service.py) — publisher.stop() before
+  transport.close(), inside the existing bounded daemon thread. Cosmetic:
+  closing the transport under an in-flight commit is what truncated that
+  traceback. Not a cause.
+  FIX C (bots/hydra/brandon/gex_provider.py) — pool.shutdown(wait=False)
+  became (wait=False, cancel_futures=True). This is a SEPARATE latent hang
+  introduced by the 2026-09-01 deadline work: concurrent.futures registers
+  every executor in _threads_queues and _python_exit joins those workers with
+  NO timeout, so wait=False alone does not deregister them — a hydration
+  worker blocked in a Polygon call at SIGTERM would hang exit on its own.
+  FIX D (shared/logger_service.py) — the unbounded self.log_queue.join() on
+  the shutdown path is now a bounded poll (5s, matching the thread join
+  immediately below it). If the consumer thread died or wedged, that join
+  blocked shutdown forever, BEFORE _hard_exit could ever be reached.
+  IMPACT: removes a ~155s window (100s TimeoutStopSec + 30s RestartSec + ~25s
+  startup) with no stop monitoring on the live 7c seat. Honest scope note: the
+  exposure has never actually been realized on B — the one RTH kill
+  (2026-08-31 11:44 ET) did not include it. New tests:
+  tests/test_shutdown_hard_exit_2026_09_06.py (10). Negative-control-verified
+  against the real files (atexit scanner catches a planted handler; reverting
+  the __main__ guard fails 5 tests). AFTER SEVERAL CLEAN RESTARTS, consider
+  lowering TimeoutStopSec from 100s toward ~40s — but NOT below the 88s
+  worst-case APPLICATION-phase math already documented in deploy/hydra.service.
+- 2026-09-05 GEX gate: correctness fixes, full forensic instrumentation, and a
+  SHADOW gate. Follows the 2026-09-04 audit (7 agents + 2 adversarial
+  verifiers, both of which passed the conclusion at high confidence) that
+  found the accel-zone gate structurally broken rather than mistuned. FIVE
+  defects, all verified against live code and live data:
+    BUG 1 (width)  — a run of ONE strike qualified as a "gamma wall". Its
+      strike_low == strike_high == peak_strike, so the peak-locality test is
+      satisfied trivially. On the live 2026-09-04 profile the only negative
+      cluster clearing 0.10 was a single strike at 16.94%, and it was the
+      sole source of every put-side overlay confirmation on record.
+    BUG 2 (normalization) — cluster strength is scored against the |GEX| of
+      the WHOLE chain, which on a 0DTE book inverts the threshold's meaning:
+      the genuine 345pt call wing scored 9.25% and FAILED the 0.10 gate while
+      one ATM strike scored 16.94% and PASSED. No value of accel_min_pct can
+      repair that — the units are wrong, not the number.
+    BUG 3 (sign convention) — gex_provider assumes dealers SHORT calls /
+      LONG puts, the INVERSE of published SpotGamma (long calls / short
+      puts), while the docstring called it "the standard SpotGamma
+      convention". That mislabel cost real investigation time. The inversion
+      puts essentially all "accel" clusters ABOVE spot (live: 76 pos / 1 neg
+      below spot vs 57 neg / 7 pos above), leaving the put branch near-blind:
+      0 confirmations in 843 watch ticks inside 25pt of a short, while all
+      three real put-side stop-losses in the same window went undefended.
+      gex_strike_adjuster's own docstring has described this hemisphere
+      collapse since 2026-05-13; accel_peak_locality_pts is a MITIGATION for
+      it, not an independent feature.
+    BUG 4 (predicate divergence) — the adjuster asks "does a cluster CONTAIN
+      the proposed short", the overlay asks "is there a cluster entirely
+      BEYOND spot". `use_adjuster_gex_gate: true` shares THRESHOLDS, not the
+      predicate. A spot-straddling cluster therefore aborts an entry while
+      the overlay reports no accel zone on either side (seen live 2026-09-04
+      10:15 and 10:46 ET). Undocumented until now, and invisible in prod.
+    BUG 5 — the SHIFT branch has never fired in 17 sessions across B and C;
+      the adjuster is a call-side veto only.
+  LIVE IMPACT, which is the part that matters and dwarfs the hedge question:
+  over 18 sessions the adjuster vetoed 43 entries while B PLACED 39. Every
+  veto aborts the whole condor (require-both-sides), and all 43 had already
+  cleared the MKT-011 credit gate. Two sessions were wiped out entirely
+  (2026-08-25, 6 aborts; 2026-08-27, 7 aborts) with zero entries, $0.00, and
+  nothing ever close to threatened. At B's ~$90/entry that is ~$3,900 of
+  forgone credit — the same order as the period's entire realized P&L.
+  WHAT SHIPPED HERE (deliberately NOT a behavior flip):
+    1. `bots/hydra/brandon/gex_provider.py` — `_detect_clusters` gains
+       `min_cluster_strikes` (width floor) and `normalization_window_pts`
+       (local normalization basis, with a <3-strike fallback to whole-chain
+       so a degenerate window can't become a near-zero denominator that
+       passes everything). GEXCluster gains `n_strikes` / `strength_pct` /
+       `width_pts` — previously NO consumer could tell a 345pt wall from a
+       single-strike artifact without re-deriving clusters by hand. BOTH new
+       parameters DEFAULT TO LEGACY BEHAVIOR; the live gate is byte-identical
+       until someone opts in. Added `GEXProfile.with_flipped_sign_convention()`
+       (a pure negation of every strike's signed GEX — the alternate
+       convention needs no re-fetch). Module docstring rewritten to state the
+       convention honestly and flag it as the open question it is.
+    2. `bots/hydra/brandon/gex_shadow.py` (NEW) — scores 5 variants (`live`,
+       `legacy_no_floor`, `windowed`, `flipped_sign`, `all_fixes`) against every
+       real decision, reporting BOTH predicates so BUG 4's disagreement rate
+       becomes measurable. NOTHING ACTS ON IT. Peak-persistence deliberately
+       not shadowed (it needs a prior profile; folding it in would make a
+       disagreement uninterpretable) — so a shadow False is conclusive and a
+       shadow True is an upper bound.
+    3. Schema v16 — `gex_profile_snapshots` (one row per refresh, full
+       per-strike GEX + derived clusters) and `gex_decisions` (one row per
+       real decision + every shadow verdict). This is the PREREQUISITE for
+       calibrating anything: gex_shared_cache keeps ONE atomically-
+       overwritten profile JSON, so before this every profile that drove
+       every historical decision was gone, which is precisely why the
+       2026-09-04 audit could not reconstruct a single past decision's
+       inputs. Decisions are deliberately NOT deduplicated (repeated
+       evaluation of the same side is the razor-edge signal, not noise);
+       snapshots ARE deduped per (timestamp, variant) since B and C share a
+       fetch and both record it.
+    4. Wired into all three real decision points (adjuster call side,
+       adjuster put side, overlay watch). Every path is exception-swallowed:
+       telemetry must never be able to abort a trade. New
+       `BRANDON-GEX-SHADOW` log line fires ONLY on disagreement.
+    5. Docs — `defensive_overlay._has_accel_zone_on_side` now documents the
+       predicate divergence; `accel_peak_locality_pts` made EXPLICIT at its
+       existing 25.0 default in B's and C's configs (no behavior change) —
+       the audit found it set in NEITHER config, so live trading ran an
+       untuned default asserted on 2026-05-13 and never derived.
+  EXPLICITLY DEFERRED, pending shadow data: flipping the sign convention,
+  adopting the windowed normalization, adopting the width floor in the live
+  gate, reviving SHIFT, and the 43-vs-39 abort-rate policy question. Each
+  changes which entries B places and must be decided on recorded evidence,
+  not argument. Note also that every butterfly win on record predates a
+  config change (trigger 25 -> 15pt, then the 2026-09-02 arming-gate
+  promotion), so the historical record describes rules that no longer exist.
+  New tests: `tests/test_gex_shadow_and_cluster_fixes_2026_09_05.py` (34
+  tests — legacy-behavior preservation first and hardest, the three
+  corrections, shadow scoring, v16 tables incl. the upgrade path from a v15
+  DB, dedup semantics, and the non-fatal property of every telemetry path).
+  Both cluster fixes negative-control-verified against the real file. This
+  branch is IBKR PAPER only — an earlier draft of this analysis called it
+  "live money", which a verifier correctly flagged as overstated.
+- 2026-09-04 Brandon AFTERNOON BUTTERFLY hedge DISABLED on B (live seat).
+  `strategy.brandon.defensive_overlay.butterfly_enabled: false`. With
+  `debit_spread_enabled` already false (2026-08-25), no overlay hedge can now
+  fire on B at all — but `enabled` is deliberately LEFT TRUE so the
+  BRANDON-OVERLAY-WATCH distance-from-short telemetry keeps logging (the whole
+  `_brandon_check_overlay` call, and therefore that logging, is gated on
+  `enabled` at brandon/strategy.py:1042).
+  DECIDED ON: the hedge risks MORE than the loss it defends. Every butterfly
+  debit actually paid — $1,925 / $1,960 / $2,065 / $2,240 (hedge_placements,
+  DB-verified) — exceeds an IC side's loss, which the A2 %-of-width stop
+  already bounds at 0.40 x 5pt x 100 x 7c = ~$1,400 nominal (observed live
+  stops: $1,190 / $1,215 / $1,295 / $1,610 / $1,785). Adding a ~$2,000
+  max-loss position to defend a ~$1,400 already-bounded loss roughly DOUBLES
+  exposure on a threatened entry; the IC's left tail was already truncated by
+  the stop, so the hedge's one legitimate job (converting an unbounded tail
+  into a bounded one) was already done, for free. Supporting evidence: no
+  price/EV veto exists anywhere in `evaluate_overlay` (2026-08-31 deployed
+  $6,230 of debit in one afternoon against ICs that took $315 of actual
+  damage); the structure is 3.57:1 max payoff vs the 6-8:1 a 0DTE-butterfly
+  specialist source considers workable, at a ~10-15% pin rate; and the source
+  strategy (Brendan Johns, via a SINGLE unaudited Theta Profits interview —
+  the codebase's "Brandon" is a misnaming) specifies hedging in TWO SENTENCES
+  with no trigger, sizing, strike, or exit rule, so ~80% of this overlay was
+  authored locally and should be judged on its own merits, not its pedigree.
+  Live-era record (30 DB-verified days, 2026-07-24 -> 09-03): the overlay
+  contributed +$1,880 and B made +$4,284.80 with it vs +$2,404.80 without —
+  but including 2026-09-04's -$1,960 the whole program goes NET NEGATIVE
+  (~-$80 over 31 days), and it REDUCED winning days 16 -> 14 while raising
+  losing days 4 -> 6. Butterfly-only: +$3,815 settled, +$1,855 incl. 09-04.
+  Already-disabled morning debit spread, for the record: 0 wins / 8 losses
+  (-$1,935) on B and 0/4 on C — 0-for-11 combined; that kill was correct.
+  EXPLICITLY NOT THE REASON (and refuted in adversarial review, recorded here
+  so it is not resurrected): the claim that the butterfly is "guaranteed worth
+  zero in the tail" / positively correlated with the IC is FALSE. The IC's
+  loss LOCKS at the touch (the stop fires) while the butterfly settles at 4pm,
+  so in a poke-and-revert — the dominant loss mode for a stop-based 0DTE IC —
+  it genuinely can pay. On 2026-09-01 E#5's put stopped at -$1,610 and SPX
+  closed 7630.30; a fly pinned where it would have armed was worth ~+$1,500.
+  Relatedly, 3 of the 4 "blowup days the hedge ignored" were MORNING events
+  outside the butterfly window entirely (debit-spread territory), so the
+  butterfly's tail record is n=1 and that one leans FOR it.
+  OPEN QUESTION this deliberately does NOT foreclose: whether the ARMING GATE
+  is miscalibrated. It stood down at 1.42pt from a short on 2026-09-01
+  (gex_confirmed=False all the way in) and then armed on 2026-09-04 when every
+  IC finished 10pt+ OTM. Keeping `enabled: true` preserves the distance-at-tick
+  trail needed to answer that at zero cost and zero risk. Also note EVERY
+  butterfly win predates a config change (trigger 25 -> 15pt, then the
+  2026-09-02 arming-gate promotion), so the historical record describes
+  decision rules that no longer exist; post-promotion real-money record is
+  0 wins / 1 loss.
+  Method: 7-agent workflow (B history, C history, code mechanics, web research)
+  + 2 adversarial verifiers, BOTH of which refuted parts of the first-pass
+  analysis — one found a missed $490 morning-hedge loss on 2026-07-24 (win-only
+  detection query; corrected figures used above), the other falsified the
+  structural argument as described. The recommendation was re-argued on cost
+  asymmetry, which survives both. New tests:
+  `TestVariantBOverlayStructuresDisabled` in
+  `tests/test_brandon_strategy_integration.py` pins all three flags — important
+  because config_variant_*.json carries skip-worktree on the VM, which does NOT
+  prevent a `git pull` fast-forward from silently re-arming a real-money hedge
+  (verified 2026-08-19). Negative-control-verified. REVERSIBLE: set
+  `butterfly_enabled: true`.
+- 2026-09-03 Two bugs found in a routine daily audit of 2026-09-02 (D/E, all
+  variants), fixed same day:
+    1. D's mark-sanity guard (`CalendarStrategyBase._dc_refresh_marks`, the
+       2026-07-10 calendar-arbitrage check) applied unconditionally regardless
+       of `dc_phase` — correct for the CALENDAR phase it was built for
+       (different expiries per leg, so "long >= near short" genuinely holds),
+       but WRONG once TRANSFORMED, when both call legs (and both put legs)
+       move to the SAME expiry and become a plain debit vertical, where the
+       further-OTM long strike legitimately prices BELOW the short strike
+       every tick. This rejected 1,138 consecutive real, correct marks for
+       D's transformed `dctm_20260901_001` across the entire 2026-09-02
+       session (~1 every 20s, the whole RTH day) — not a P&L bug (the guard
+       kept the position's prior stale mark rather than acting on it, so
+       nothing wrong got booked), but its live unrealized P&L was frozen for
+       a full session. Fixed by gating the check on
+       `entry.dc_phase == DCPhase.CALENDAR`. New tests in
+       `tests/test_calendar_fill_model.py::TestRefreshMarkSanityGuard`
+       reproduce the exact real 2026-09-02 quote values (call long-short=
+       -2.85, put=-1.40) and confirm they're now accepted once transformed,
+       while an explicit regression test pins the original CALENDAR-phase
+       protection is unchanged. Negative-control-verified against the real
+       file (phase gate removed → both new tests fail as expected).
+    2. `log_daily_summary()` (`bots/hydra/base_strategy.py`) unconditionally
+       logged "Daily summary logged to Google Sheets" whenever
+       `self.trade_logger` was truthy, without checking whether a write
+       actually happened — since `google_sheets.enabled=false` on every
+       variant (post Sheets->DB migration), this fired every day on every
+       variant, always false. Traced one level deeper:
+       `TradeLoggerService.log_daily_summary` (`shared/logger_service.py`)
+       had no `return` in either branch (implicit `None` always), discarding
+       the real success/failure signal `GoogleSheetsLogger.log_daily_summary`
+       already reports. Fixed both: the service method now returns the real
+       result (`False` when disabled, propagated bool when enabled); the
+       caller gates its log line on that return value (INFO when it actually
+       logged, DEBUG when it didn't). Purely cosmetic — no dollar or
+       behavioral impact, found while auditing E's log for the calendar
+       fix above. New tests: `tests/test_sheets_log_message_accuracy_2026_09_03.py`
+       (5 tests, source-level wiring checks given the heavy mock surface of
+       `log_daily_summary` itself). Negative-control-verified.
+  Both found and fixed same-day via a 7-variant parallel daily-audit workflow
+  (also used to verify the 2026-09-02 metrics-drift fix + B's 11:15 slot
+  removal — see those entries below — both held up cleanly on their first
+  live day, including a real self-heal correction caught in the act: A's
+  total_stops 161->157, B's 19->34 with double_stops 0->8). Full suite 2577
+  passed throughout (2572 prior + 5 new; the calendar-fill-model additions
+  land inside the existing file's count).
+- 2026-09-01 GEX hydration cap fix (Brandon B/C) — raised 80 -> 250, added
+  a wall-clock deadline, made a binding cap alertable.
+  Root cause: `bots/hydra/brandon/gex_provider.py`'s two-pass Polygon fetch
+  (chain snapshot for OI, then individual per-contract calls to hydrate
+  greeks/IV, since Polygon's Starter tier omits both from the bulk
+  endpoint) capped the per-contract hydration pass at a hardcoded 80
+  contracts. Found while investigating a real 2026-09-01 put-side stop on
+  B: the defensive-hedge's GEX-confirmation check logged `gex_confirmed=
+  False` continuously for 2+ hours while a real threat developed. Traced
+  to the cap — live-checked against the real SPX chain (spot ~7630): 195
+  real, liquid (OI>=50), near-the-money (±5% of spot) contracts qualified,
+  but only 80 (41%) got hydrated. An un-hydrated contract contributes
+  EXACTLY ZERO to the GEX picture (no partial/discounted contribution, no
+  IV fallback — a stale module docstring claiming otherwise was also
+  fixed) and is also ineligible for delta-target strike selection. Not new
+  that day — a 2026-07-17 incident (already documented in this file, see
+  the DEGRADED-DATA FLOOR entry) hit an even more extreme version of the
+  same gap (80/1000 raw chain) and caused real damage: 3 phantom $0-credit
+  entries on B, churn on C. That incident's fix added a floor guard, but
+  only for the entry-time delta-target picker — the accel-zone strike
+  adjuster and the defensive-hedge's GEX-confirmation gate, both live
+  consumers of the same undersized profile, were never protected, and the
+  coverage gap itself was never made visible (logged at INFO only, no
+  comparison to the real candidate count, no alert).
+  Fix (`bots/hydra/brandon/gex_provider.py`, `bots/hydra/brandon/strategy.py`):
+    1. `max_contracts_to_hydrate` raised 80 -> 250 (~28% headroom over the
+       195-candidate peak observed), now config-driven via
+       `strategy.brandon.gex.max_contracts_to_hydrate` (config_variant_b/c.json)
+       instead of a bare literal, matching every sibling GEX knob.
+    2. `GEX_HYDRATE_WORKERS` raised 8 -> 12 and a new
+       `GEX_HYDRATE_DEADLINE_S = 15.0` wall-clock deadline added on the
+       hydration pass itself — this fetch runs SYNCHRONOUSLY in the
+       entry-time decision path (force_refresh=True), so an unbounded
+       `pool.map()` at the raised cap risked stalling an entry decision up
+       to 160s on a genuinely bad Polygon day (up from today's already-
+       uncapped 50s at the old cap/worker count). Whatever hasn't
+       completed by the deadline is abandoned — same disposition as an
+       ordinary per-call failure (un-hydrated, contributes zero GEX), not
+       a crash or a raised exception. Implemented by submitting futures
+       explicitly and calling `pool.shutdown(wait=False)` rather than a
+       `with ThreadPoolExecutor(...) as pool:` block — the latter's
+       `__exit__` blocks until EVERY submitted call finishes regardless of
+       how long `concurrent.futures.wait(..., timeout=...)` was told to
+       wait, silently defeating the deadline (verified via negative
+       control — reverting to the `with` form makes the deadline test
+       fail exactly as expected).
+    3. `fetch_polygon_chain_with_greeks()` now returns
+       `(contracts, candidates_found)` instead of a bare list —
+       `candidates_found` is the real pre-cap count of contracts that
+       passed the OI+spot-window filter. Logged alongside the existing
+       chain/hydrated counts, and when it exceeds the cap, fires a
+       MEDIUM-priority `DATA_QUALITY` alert via the same
+       `_brandon_send_telegram` pattern already used for the 2026-07-17
+       incident's guard — static/generic title (numbers only in the
+       message body/details, not the title) so AlertService's dedup
+       fingerprint collapses repeats instead of alerting fresh every
+       3-minute refresh cycle while the condition persists.
+  Explicitly out of scope (deferred, not forgotten): no degraded-data
+  floor/guard added to the accel-zone adjuster or the hedge's GEX-
+  confirmation gate itself (mirroring the delta-target picker's existing
+  floor) — fixing the root cause plus adding real visibility should
+  substantially close the gap; a decision-layer guard is better scoped to
+  a follow-up if the raised cap still gets exceeded on an unusually liquid
+  day (which the new alert will now actually surface). `spot_window_pct`
+  (5%) and `oi_threshold` (50) also left untouched — narrowing the window
+  would change `total_abs_gex` (the denominator every cluster-strength
+  threshold divides by, shared by the strike adjuster, the hedge gate, AND
+  the GEX breach-exit), a live decision-logic change that doesn't belong
+  riding alongside a pure infrastructure fix.
+  Design independently reviewed before implementation (changed the cap
+  size from an initial 200 to 250, added the wall-clock deadline that
+  wasn't in the original draft, caught that the fix needs a function
+  signature change rather than just a log line, confirmed severity was
+  worse than initially estimated — zero contribution, not discounted).
+  New tests: `tests/test_gex_hydration_cap_2026_09_01.py` (11 tests: raised
+  default pinned two ways — the function default AND the separate
+  strategy-config-read default that actually matters in production, since
+  a negative control found the function-default check alone wouldn't have
+  caught a reverted config-read line; the wall-clock deadline actually
+  bounds the wait and logs; the alert fires only when genuinely binding,
+  not at/under the cap). Existing tests updated for the new return
+  signature across `tests/test_brandon_gex_provider.py`,
+  `tests/test_gex_fetch_reliability_and_guard.py`, and
+  `tests/test_brandon_strategy_integration.py`. Every sub-fix
+  negative-control-verified against the real production files (config
+  default reverted, alert logic removed, deadline restructuring reverted
+  to the old blocking `with` form) — all three failed exactly as expected.
+  Full suite 2555 passed throughout.
+- 2026-09-02 Fleet-wide metrics/DB drift audit — two real bugs closed, plus a
+  one-time historical remediation. Found while answering a routine "has D/E
+  made money" question: E's `hydra_metrics.json` showed a -$2,599.20 lifetime
+  loss; the real, `dc_outcomes`-verified result was only about -$151 (~17x
+  overstated). Traced to two independent bugs, one calendar-only and one
+  fleet-wide:
+    1. CALENDAR DOUBLE-COUNTING (D/E). A carried multi-day calendar's
+       `total_pnl` re-includes the still-OPEN position's live unrealized
+       mark on EVERY day it's held (`_get_total_saxo_pnl` sums
+       `active_entries`, and `CalendarStrategyBase._reset_for_new_day`
+       re-attaches a carried entry to `daily_state.entries` on every reset —
+       intentional, for the carry mechanic itself). `_book_daily_cumulative`
+       and `_record_daily_summary_to_db` both booked that inflated value as
+       if it were a fresh day's result, so the SAME open trade's running
+       mark got counted again for every day it stayed open. Fixed via a new
+       overridable `_cumulative_tracking_pnl(summary, net_pnl)` hook on
+       `MEICStrategy` (`bots/hydra/base_strategy.py`) — a no-op for
+       A/B/C/F/G (same-day strategies, where `total_pnl` already IS today's
+       own result) — overridden in `CalendarStrategyBase`
+       (`bots/hydra/calendar_strategy_base.py`) to book $0 on a pure hold
+       day and the real close P&L (net of that day's commission) only on
+       the day a position actually closes. Wired into both the in-memory
+       cumulative-metrics booking (`base_strategy.py:log_daily_summary`)
+       and the DB write (`strategy.py:_record_daily_summary_to_db`) so
+       `daily_summaries.gross_pnl`/`net_pnl` stop re-corrupting on every
+       future settlement too — the existing 2026-07-20 self-heal
+       (`_reconcile_cumulative_metrics_from_db`) then keeps `daily_returns`/
+       `cumulative_pnl` correct automatically from here on, same as it
+       already did for the non-calendar variants.
+    2. total_stops NEVER COVERED BY THE 2026-07-20 SELF-HEAL (all variants).
+       That fix only ever re-derived `cumulative_pnl`/`daily_returns`/
+       win-loss from the DB — `total_stops`/`double_stops` kept the exact
+       same "increment once, idempotent-by-date, never revisited" fragility
+       that caused the original drift. Confirmed live on C: metrics file
+       said 7 stops, `trade_stops` actually held 29 rows. Root cause of the
+       gap's SIZE: Brandon's take-profit/GEX-breach exits and the shared
+       MKT-018/047 early-close/flatten path all close a position through
+       `_close_entry_early` (writes a real `trade_stops` row via
+       `_record_stop_to_db`), never through `_execute_stop_loss` (the only
+       place that increments the in-memory counters). Fixed by extending
+       `_reconcile_cumulative_metrics_from_db` (`strategy.py`) to also
+       re-derive `total_stops`/`double_stops` from `trade_stops`, using the
+       "genuine stop" definition `shared/sheets_db_shim.py` already
+       established (`exit_reason IN ('stop_loss','gex_breach')` — excludes
+       take-profit wins and early-close/EOD flattens; a legacy NULL
+       `exit_reason` — pre-v11 rows, written before Brandon's TP/breach
+       paths existed — falls back to `net_pnl < 0`). Self-corrects on the
+       next real settlement for every variant; no manual remediation
+       needed (unlike bug 1, there was no already-reported-to-the-user
+       wrong number riding on it).
+    Also aligned `dashboard/backend/services/db_reader.py`'s
+    `get_cumulative_overrides` total_stops query to the same canonical
+    definition (was a raw unfiltered `COUNT(*)`, overcounting in the
+    opposite direction from the bot's undercount) — guarded behind a
+    `PRAGMA table_info` check so a DB predating the v11 `exit_reason`
+    column (or a bare test schema) degrades to the `net_pnl < 0` fallback
+    instead of raising `sqlite3.Error` on the missing column and silently
+    blanking every OTHER field in the same combined query too (`_query`'s
+    broad except swallows any SQL error into an empty result) — a real
+    regression this rewrite would otherwise have introduced, caught by its
+    own test suite before deploy.
+    One-time historical remediation (D/E only — bug 2 needed none): with
+    both services stopped, `daily_summaries.gross_pnl`/`net_pnl` rewritten
+    from `dc_outcomes` (authoritative per-trade ledger) — a close date gets
+    `dc_outcomes.realized_pnl` minus that day's already-recorded commission
+    delta, every other date zeroed — then `hydra_metrics.json`'s
+    `daily_returns`/`cumulative_pnl` re-derived by hand using the identical
+    algorithm `_reconcile_cumulative_metrics_from_db` runs on every
+    settlement (done manually once so the correction was visible
+    immediately rather than waiting for that night's close). This also
+    fixed a separate, pre-existing, already-partially-fixed issue found
+    along the way: D's 2026-07-10 `daily_summaries` row still held the
+    stale pre-mark-sanity-guard phantom stop (-$797.40), never corrected
+    after `dc_outcomes` itself was fixed to the real -$117.40 (see the
+    2026-07-10 entry below); the uniform "trust dc_outcomes" remediation
+    rule fixed this for free. D: cumulative_pnl
+    -$8,899.85 -> -$6,129.05 (34 of 55 daily_summaries rows corrected). E:
+    -$2,599.20 -> -$109.00 (50 of 56 rows corrected) — E's real lifetime
+    result was near-flat, not a meaningful loss.
+    New tests: `tests/test_metrics_drift_fix_2026_09_02.py` (16 tests
+    covering the hook's default/override behavior, the two wiring call
+    sites, and the extended self-heal's stop-definition filtering —
+    including a legacy-NULL-exit_reason fallback case and a case proving a
+    total_stops-only mismatch alone still triggers a save even when
+    cumulative_pnl is already correct, which the pre-fix self-heal would
+    have missed entirely). `tests/test_dashboard_cumulative_baseline.py`
+    gained a canonical-filter regression test plus two existing fixtures'
+    bare-bones `trade_stops` schemas widened to match what a real table has
+    always had (`net_pnl`), exposing the missing-column regression above.
+    Every sub-fix negative-control-verified against the real production
+    files (the calendar hook override removed, the total_stops self-heal
+    extension neutered) — both failed exactly as expected. Full suite 2572
+    passed, 15 skipped, throughout.
+- 2026-08-31 STATE-004 permanent-halt fix + fleet-wide halt detection.
+  Root cause: at 09:30:29 ET a ~20-27s calypso-broker reconnect blip (the
+  broker's own session-auth recovered normally within seconds — this was
+  purely a strategy-layer overreaction) caused `_reset_for_new_day()`'s
+  overnight-position check to catch one failed `_read_open_positions`
+  call and latch `_critical_intervention_required=True` PERMANENTLY, no
+  retry. That flag is checked FIRST in `_run_strategy_check_internal`, so
+  it froze market-data updates, entry logic, and everything else for A,
+  C, D, E, F (5 of 7 live variants) for ~6 hours until a manual restart.
+  A and C silently sat out their entire trading day (zero entries). The
+  dashboard's SPX chart also rendered as a flat blue line instead of
+  candlesticks for the affected variants — not a separate bug, a correct,
+  honest downstream consequence: the chart's `chooseSeriesType()` (see
+  dashboard/frontend/src/components/market/SPXChart.tsx) draws a plain
+  line when >50% of visible 1-min bars are "dojis" (open=high=low=close),
+  which every bar was during the ~2h16m freeze.
+  Fix (bots/hydra/strategy.py):
+    1. New `_read_open_positions_for_new_day_reset()` — bounded retry
+       (STATE004_MAX_ATTEMPTS=4, STATE004_RETRY_DELAY_S=20s between
+       attempts, matching main.py's own BROKER_OUTAGE_RECHECK_S
+       precedent) before the except block's existing (unchanged)
+       CRITICAL-log + alert + permanent-latch on final exhaustion — that
+       terminal behavior is CORRECT and stays; only the missing retry
+       budget was the bug. A bare "stop halting on first failure" fix
+       without this would have been WORSE than today: main.py's call
+       site sets `last_day = today` unconditionally regardless of
+       success, so a bare failure would leave the bot silently stuck in
+       DAILY_COMPLETE forever with zero retry and zero alert.
+    2. Confirm-before-alarm on the adjacent "genuine overnight positions
+       found" branch: a single re-check (not a loop) before latching, so
+       a transitional/misleading non-empty read during a reconnect blip
+       doesn't false-alarm. On a re-check failure, falls through treating
+       the original read as confirmed (fail closed, matches strict=True's
+       existing house philosophy) — and now logs a WARNING naming that
+       ambiguity explicitly (an adversarial post-implementation audit
+       caught this as a silent `except: pass` with zero log trace in the
+       first draft; fixed, test now asserts the log line fires).
+    3. The halt flag is now persisted to the state file
+       (`critical_intervention` / `critical_intervention_reason` in
+       `_save_state_to_disk`'s `state_data`, key name matching
+       `get_dashboard_metrics()`'s existing key; read via `getattr` with
+       safe defaults since not every partial-construction/test path has
+       these attributes set) — previously invisible outside the
+       in-process flag, which is why ARGUS (running every 15 min the
+       whole time) never caught it. Explicitly NOT wired into the
+       restore-on-restart path — "restart clears the halt" stays the
+       unchanged operational convention; this is persist-for-visibility
+       only. `_save_state_to_disk()` is also now called explicitly at
+       both latch points, closing the ~10s window before main.py's
+       periodic save would otherwise catch it.
+  Covers ALL 7 variants with this ONE base-class fix — confirmed every
+  variant override (`calendar_strategy_base.py` D/E, `ghauri_strategy.py`
+  F, `brandon/strategy.py` B/C) calls `super()._reset_for_new_day()` as
+  its first line with no wrapping try/except; G doesn't override the
+  method at all.
+  ARGUS (`services/argus/health_check.sh`), separately:
+    - Fixed a real bash bug in `is_market_hours()` — `date +"%H"` is
+      zero-padded, and `[[ ]]` arithmetic parses a leading-zero operand
+      as octal, so "08"/"09" threw `value too great for base` every
+      8:00-8:59 and 9:00-9:59 ET hour (no `set -e`, so it silently
+      misbehaved rather than crashing) — exactly the hour of this
+      incident. `is_trading_session()` already had the correct `10#`
+      fix; ported it over.
+    - Added a per-variant `critical_intervention` check reading the new
+      state-file field — unconditional, not gated on trading-session
+      hours, since a halt matters at any hour. Failure text is
+      unambiguously prefixed `CRITICAL_INTERVENTION: <unit> HALTED —
+      <reason>` so it can't be mistaken for routine noise (disk space,
+      stale log) when skimming the alert inbox.
+    - Extended variant coverage from {A, B, C} to all 7 (A-G) — D, E, F,
+      G previously had ZERO ARGUS coverage of any kind. D and G are
+      dry-run-locked (no real orders) but still make the real broker
+      overnight-position call, so they were just as exposed to this bug.
+      Refactored the duplicated B/C-only block into a loop.
+  A one-time, non-blocking staged fire drill (deliberately trip STATE-004
+  on a dry-run-locked variant post-deploy, confirm the real alert/log
+  pipeline on the live VM) is still open — see the plan file for context;
+  not required before this fix ships.
+  Also investigated but NOT part of this fix: today's original incident's
+  own CRITICAL alert produced zero trace anywhere in the journal despite
+  the code provably executing all the way through — exhaustively ruled
+  out log-level filtering, logger shadowing, custom filters, anti-spam
+  gate suppression, Pub/Sub-availability short-circuiting, and journald
+  rate-limiting via code reading. A two-layer reproduction test
+  (tests/test_state004_overnight_check_2026_08_31.py, mirroring
+  tests/test_alert_send_failure_logging_2026_08_04.py +
+  tests/test_alert_publish_reliability.py's patterns) drove the REAL
+  AlertService code and the CRITICAL alert line fired cleanly — proving
+  the Python code is correct in isolation, so the incident's silence was
+  environment/infra-specific to that host that morning, not an
+  application bug. ARGUS's new fleet-wide check means the fleet no longer
+  depends solely on that one alert-delivery path succeeding regardless.
+  Plan + 2 Explore agents + 1 independent design-review agent + 1
+  independent adversarial post-implementation audit (found 2 real gaps,
+  both fixed: the missing version-history entry you're reading now, and
+  the silent except-swallow in item 2 above). Full suite 2545+ passed
+  throughout; negative-control-verified for every sub-fix.
+- 2026-08-29 Two minor cosmetic/doc gaps found by the 2026-08-28 fleet audit,
+  fixed on operator approval:
+  1. G (bots/hydra/strangle_strategy.py) now overrides
+     `_show_ic_schedule_in_heartbeat = False`, mirroring F/Ghauri's identical
+     fix from the day before. Without it, G's heartbeat inherited HYDRA's
+     "E1-EN: full IC" schedule line, which reads `self._base_entry_count` —
+     an attribute G's `__init__` never sets (G reuses HYDRA's scheduled-entry
+     gating but is a 2-leg naked strangle, not a scheduled 4-leg IC), so the
+     line would have raised AttributeError the first time it executed live.
+     Log/cosmetic only, caught before it ever fired in production. 2 new
+     tests (tests/test_strangle_strategy.py::TestHeartbeatDoesNotClaimFullIC),
+     negative-control confirmed both fail with the exact AttributeError
+     without the fix.
+  2. shared/alert_service.py: 13 stale "Telegram + Email" references (module
+     docstring's Alert Priorities block, the AlertPriority enum comments, 2
+     section-header comments, 6 convenience-method docstrings) left over from
+     before the 2026-08-28 CRITICAL-only email change — corrected to
+     "Telegram only" (or removed where no longer accurate). Comments/
+     docstrings only, no behavior change; the 3 remaining "Telegram + Email"
+     mentions (CRITICAL cases) are still accurate and left as-is.
+  Full suite re-run clean after both fixes.
+- 2026-08-28 (fourth same-day change) Alert email narrowed to CRITICAL-only
+  (shared/alert_service.py) — operator request after B alone (the only
+  variant with alerts.enabled=true) was generating 4-8+ emails/day into a
+  personal inbox: every stop loss, every position close, every profit-
+  target close, the daily summary. Replaced the old per-type
+  _EMAIL_ALWAYS/_TELEGRAM_ONLY override lists (in place since 2026-06-11)
+  with a pure priority check — email now fires only for CRITICAL (circuit
+  breaker, critical intervention, daily halt, naked position, emergency
+  exit, ITM risk close), everything else stays Telegram-only. Telegram
+  itself is completely unaffected — every alert still reaches it at its
+  normal priority; only the second, noisier channel was narrowed. 5 tests
+  rewritten to pin the new behavior (3 of the 4 old ones asserted the now-
+  removed exceptions and would have been actively wrong to keep); negative-
+  control run confirmed 4 of the 5 fail without the fix. Also updated
+  CLAUDE.md's Alert System table, which was already stale (never reflected
+  the 2026-06-11 override lists in the first place). Full suite 2530
+  passed.
+- 2026-08-28 (third same-day change) MKT-046 disable extended from B to C,
+  F, and G. Rationale: MKT-046's 10s confirmation wait is confirmed NOT
+  part of Tammy Chambless's or Sandvand's original MEIC research anywhere
+  in this codebase — it's a CALYPSO-only addition (v1.23.0) applied
+  uniformly across every HYDRA-family variant, not something tied to any
+  one variant's specific design. Given that, and given C's own history
+  (queried the same day) independently confirmed the identical result to
+  B's (6/6 delayed stops closed worse, 0 better, $718.55 additional cost),
+  disabling it was extended to every variant sharing the actual MKT-046
+  mechanism (A, C, F, G) rather than requiring each one's own multi-month
+  stop history first — reasonable since A/C/F/G carry zero real-money risk
+  either way (only B is live). Checked F (Ghauri) and G (Strangle) first
+  for any dependency on the confirmation window specifically: Ghauri's
+  trail-to-breakeven adjusts the STOP LEVEL over time, a separate
+  mechanism from the confirmation TIMING, no conflict; Strangle has no
+  MKT-046-specific code at all, pure inherited default. D and E
+  deliberately NOT touched — they have their own separate, entirely
+  different "MKT-046 analogue" in calendar_strategy_base.py /
+  double_calendar_strategy.py that has not been investigated and
+  shouldn't be assumed to behave the same way. No new code — this reuses
+  the exact mkt046_confirm_seconds config key + _check_stop_with_
+  confirmation logic already implemented and tested for B; only the 3
+  variant config samples changed, plus the code comment describing the
+  rollout scope. Full suite reconfirmed green (config-only change, no new
+  behavior to test beyond what the original 6 tests already cover).
+- 2026-08-28 (second same-day change) MKT-046 anti-spike confirmation
+  disabled on B, following the same investigate-then-act pattern as the
+  2026-08-27 morning-hedge disable. Prompted by a real live loss that day
+  (Entry #4 put, -$1,785) prompting a "did the confirmation delay help or
+  hurt, historically" study, mirroring the earlier hedge study's rigor.
+  Pulled B's FULL trade_stops history (104 stops, 2026-06-03 to today) +
+  tick-level spread_snapshots (back to 2026-05-07) directly from the DB —
+  not log-scraping, which only goes back 8 days. Found: of 16 stops where
+  the 10s confirmation delay was actually exercised, 13 closed at a WORSE
+  price for having waited, 0 closed better, 3 were flat — $3,075 total
+  price drift specifically attributable to the wait (separate from $4,165
+  of ordinary execution slippage that would exist regardless). Zero cases,
+  across the entire post-A2 period (2026-07-24 onward, 40 entries), where
+  a breach reached the stop trigger and the position was never actually
+  stopped that day. Cross-checked C (same MKT-046 mechanism): 6/6 delayed
+  stops also closed worse, $718.55 additional cost, 0 better — same result,
+  independent sample. Findings independently re-derived via a second, raw
+  SQL query (exact match) and stress-tested for confounders before acting:
+  confirmed the 2 blank-exit_reason 2026-06-11 rows are a genuine early-
+  period column-population gap (exit_reason wasn't recorded before
+  2026-06-24), not a different stop type contaminating the sample; checked
+  the settlement_hold (0.7x-width, last-20min) override couldn't have
+  masked any "avoided" cases (moot — zero were found either way); confirmed
+  MKT-046 already has an unrelated >=2x severity bypass (fires instantly,
+  no wait) that scopes this whole analysis to the 1-2x marginal-breach band
+  specifically, not all breaches. Real complication surfaced and disclosed
+  before acting: MKT-046's own documented origin (docs/HYDRA_STRATEGY_
+  SPECIFICATION.md) cites it as fixing a historical "80% of false call
+  stops" problem — the most likely reconciliation is that the separate
+  2026-06-10 L-C2b wide-quote clamp fix (base_strategy.py's
+  call_spread_value/put_spread_value) already fixed the underlying phantom-
+  value problem independently, making MKT-046's own 10s wait now largely
+  redundant on top of it — consistent with 100% of the post-clamp-era
+  sample showing no benefit. Implemented as a new per-variant config key
+  (strategy.mkt046_confirm_seconds, default 10.0 preserving every other
+  variant's exact current behavior unchanged) replacing a hardcoded
+  MKT046_MIN_CONFIRM_SECONDS=10 constant in
+  HydraStrategy._check_stop_with_confirmation; B's config sets it to 0
+  (still requires the breach on 2 consecutive ticks, not a same-tick
+  instant stop — matches the method's own docstring-described original
+  intent of "two consecutive heartbeat cycles"). 6 new tests (config-read
+  defaults/override, real 0s-vs-10s timing behavior through the actual
+  unmocked method, negative control confirming the severity-bypass and
+  breach-recovery paths are untouched) + negative-control run (reverted,
+  confirmed the timing test fails without the fix). Full suite 2529 passed.
+- 2026-08-28 First-live-day fleet audit (7-agent workflow covering A-G +
+  fleet infra, deep dive on B/F/G, adversarial verification on the two most
+  consequential findings) turned up 2 real bugs + 2 cosmetic issues, all
+  fixed same-day, THE GOLDEN LOOP (audit, implement, negative-control test
+  per fix, full-suite verify):
+  (1) [medium] calendar_strategy_base.py check_after_hours_settlement()
+  crashed 43x overnight (00:00-09:29 ET) on D with "CalendarEntry object has
+  no attribute call_only" — it fell through to HydraStrategy's 0DTE-shaped
+  settlement path (_process_expired_credits, which assumes
+  HydraIronCondorEntry) whenever a calendar variant had zero open positions,
+  new as of D's Aug-18 position settling overnight. Caught by main.py's
+  broad except (never crashed the bot) but polluted the log with a
+  misleading "positions still open" line. Fixed: never delegate to super()
+  here — _dc_settle_due (called just above) is already this class's own
+  complete settlement mechanism; there was nothing for the base path to
+  legitimately do.
+  (2) [high] base_strategy.py _execute_stop_loss's dry-run real-bid/ask
+  close-cost branch required `long_bid is not None` — a condition written
+  for the iron-condor family that a naked strangle (G, no long legs, ever)
+  can never satisfy, so every G stop silently fell to the pessimistic
+  spread-mid×1.10 fallback even with a live fresh ask sitting right there
+  the same tick. Overstated G's real 2026-08-28 stop loss by ~14% ($88.25
+  booked vs. ~$77.50 real-ask-based). The stop DECISION itself was verified
+  independently twice as genuinely correct (real SPX move, correct trigger
+  formula, correct MKT-046 confirmation) — only the booked dollar amount was
+  wrong. Fixed by recognizing long_{side}_strike == 0 as "structurally no
+  wing" (correctly zero, not a data gap) rather than requiring a long_bid
+  that can never exist; IC-family behavior (a real wing, missing bid this
+  tick) is unchanged — pinned by a negative-control test.
+  (3) [cosmetic] strategy.py's "logged to Sheets" entry log line was stale
+  (Sheets writes are disabled repo-wide) — reworded to not claim a specific
+  destination.
+  (4) [cosmetic] HydraStrategy's shared heartbeat printed "E1-EN: full IC"
+  for Ghauri (F), whose entries are EM-boundary-touch triggered, never
+  clock-scheduled — misleading, not a trading-logic issue. Added
+  _show_ic_schedule_in_heartbeat (default True, unchanged for every other
+  variant), overridden False on Ghauri to omit the line entirely.
+  Also fixed on the VM (not a code change): hydra_variant_e had
+  UnitFileState=disabled (wouldn't survive a reboot, inconsistent with every
+  other unit) — re-enabled without restarting the running process. And
+  corrected CLAUDE.md's stale "cap 110pt" MKT-027 doc line to the live VM's
+  actual 75pt (verified against a real 2026-08-28 A entry).
+  Full suite 2523 passed. D/E/F/G/A/C restarted same-day; B (live, open
+  positions + more scheduled entries) deferred to its own after-hours
+  window per the established restart-only-when-flat discipline.
+- 2026-08-27 (second same-day change) Variant G — wired StrangleStrategy
+  (already-built, already-tested code from earlier this week; was registered
+  in bots/hydra/registry.py but had no taxonomy entry, config, or systemd
+  unit, so it had never actually run) as a new dry-run-locked variant: added
+  a new solo, non-comparable GroupMeta ("undefined_risk_0dte" — a naked
+  strangle's undefined risk makes it structurally incomparable to ic_0dte's
+  defined-risk ICs, even though both are premium-selling/credit strategies;
+  deliberately NOT comparable=True and NO group-comparison renderer built,
+  since there's nothing to compare against with one member — flip both
+  together if/when a second undefined-risk strategy is added) + StrategyMeta
+  ("g", structure_family="strangle" — a genuinely NEW value, not a reuse of
+  "iron_condor" like F, since a strangle's legs are ALWAYS naked with no long
+  wing at all, unlike F's true one-sided IC subset; still routes through the
+  existing ic_state dashboard reader since entries use the same
+  HydraIronCondorEntry shape, just without History/Analytics capabilities
+  that assume real IC wings). Added config_variant_g.json + hydra_variant_g.service
+  (modeled on F's), a dashboard/backend/config.py settings block, and a small
+  EntryCard.tsx fix (a strangle's "short/0" strike display read as a broken
+  spread — now shows "short (naked)"). Applied the lesson from the SAME-DAY
+  Ghauri construction bug directly: ran a real-construction smoke test
+  (real config, mocked broker, no __init__ bypass) locally before touching
+  the VM — construction was clean on the first attempt (Strangle, unlike
+  Ghauri, reuses HydraStrategy's _parse_entry_times/_should_attempt_entry
+  unchanged, so it never had that category of gap) — and added the same
+  real-construction regression test class to test_strangle_strategy.py,
+  which had the identical monkeypatch/__new__-only test coverage gap Ghauri's
+  test file had, just never triggered. Full suite 2516 passed, frontend
+  typecheck clean. Deployed to the VM, verified running with zero errors.
+- 2026-08-27 Variant F (Ghauri) real-construction crash fix, found during
+  first VM deploy attempt: GhauriMeanReversionStrategy's _parse_entry_times
+  override never set self.vix_gate_enabled/_vix_gate_resolved/_vix_gate_start_slot/
+  vix_medium_threshold/vix_high_threshold — attributes HydraStrategy.__init__
+  itself (not just the 7 methods this class overrides) reads unconditionally
+  right after calling _parse_entry_times(). 100% reproducible crash on every
+  real construction; every one of the 26 pre-existing Ghauri tests either
+  monkeypatched HydraStrategy.__init__ into a no-op or bypassed __init__
+  entirely via __new__, so the gap was invisible to the test suite and only
+  surfaced when hydra_variant_f.service was actually started on the VM
+  (crash-looped via Restart=always before being caught and stopped). Fixed
+  by having _parse_entry_times replicate the base's vix-gate attribute
+  initialization (config-driven, always False for this variant). Added 2
+  real-construction regression tests (empty-minimal config + the actual
+  shipped config_variant_f.json) that never bypass __init__ — the
+  category of test coverage that was missing, not just the one attribute.
+  Full suite 2514 passed. Service then verified starting cleanly on the VM.
+- 2026-08-25 (second same-day change) Brandon defensive-overlay: disable
+  the morning debit-spread hedge on B and C, keep the afternoon butterfly
+  (THE GOLDEN LOOP: plan, 2-agent adversarial audit-before via the earlier
+  same-day design discussion, implementation, tests-with-code incl. a
+  verified negative-control run, 2-agent adversarial audit-after). Follows
+  directly from a P&L reconstruction done after the hedge fixes above
+  landed: querying every B entry where realized_pnl > total_credit
+  (mathematically only possible with an external/hedge contribution, since
+  a plain IC can never earn more than 100% of its own credit) found the
+  morning debit spread has a clean, consistently-losing real-dollar record
+  with zero offsetting wins anywhere in the data — Aug 19 (-$765 combined,
+  flipping a would-be +$154 IC-only day into -$611) and Aug 24 (-$525,
+  reconciling exactly to the number an earlier same-day chat-only
+  investigation found). The afternoon butterfly's one clearly-attributable
+  large outcome (Jul 21, dry-run — B wasn't live yet) was a genuine win:
+  SPX closed within ~2.6pts of the butterfly's pin strike, the exact
+  scenario the structure exists to exploit, not a pricing artifact. A
+  second, smaller butterfly-or-debit-spread win was also found (Aug 14,
+  ~$2,296) but its structure type couldn't be confirmed from available
+  data. The one butterfly event independently confirmed since (Aug 19,
+  previously an unresolved loose thread — see below) settled for a trivial
+  -$28. Full sourcing for every number above (log lines, SQL queries, exact
+  methodology) — not just an unlocatable "audit" reference — is written up
+  in docs/postmortems/2026-08-25_brandon_hedge_pnl_reconstruction.md, added
+  specifically because a convergence audit (see below) correctly flagged
+  that these figures had no durable, checkable source.
+  Fix: `bots/hydra/brandon/defensive_overlay.py`'s `OverlayConfig` gained
+  independent `debit_spread_enabled`/`butterfly_enabled` switches (both
+  default True — unchanged legacy behavior for any config that doesn't set
+  them), threaded through `evaluate_overlay`: when the applicable window's
+  structure is disabled, it returns None rather than falling back to
+  propose the OTHER structure at the wrong time of day — the two are not
+  interchangeable (the source interview ties debit spreads to "earlier in
+  the session" and butterflies to "later in the day"). `strategy.py` reads
+  the two new config keys and threads them into the sole `OverlayConfig(...)`
+  construction site in `_brandon_check_overlay`. Both config_variant_b.json
+  and config_variant_c.json set `debit_spread_enabled: false`,
+  `butterfly_enabled` left at its default (unchanged) — this is a REAL,
+  intentional live-behavior change on B, not gated/staged like the
+  confirmation-delay/GEX-gate work above, since it's a straightforward
+  disable of a mechanism with a fully evidenced losing record, not new,
+  unproven logic.
+  KNOWN TRADE-OFF (surfaced by audit-after, not a bug): from an entry's
+  open until butterfly_cutoff (12:30 ET default), a threatened position now
+  has NO overlay hedge of either kind — previously the debit spread was
+  always live in that window. The credit+buffer stop remains the backstop
+  throughout regardless; this trade-off follows directly from the decision
+  to cut the morning structure, not from an implementation gap.
+  Also fixed (same audit-after pass): the BRANDON-OVERLAY-WATCH log
+  computed and logged `gex_confirmed=True/False` even on a window whose
+  structure is disabled — misleading, since the hedge can never fire there
+  regardless of GEX. Now logs "<structure> DISABLED for this window" instead
+  when applicable, skipping the (now-pointless) GEX-confirmation computation.
+  RESOLVED LOOSE THREAD: while investigating the butterflies' historical
+  record, tracked down a previously-unexplained gap — B's 2026-08-19 E#5 put
+  butterfly (fully filled, 3 legs, no partial/unwind) never produced a
+  BRANDON-OVERLAY-SETTLED log line, and its cost never reached B's official
+  P&L. Root cause: the exact bug already described in this file's
+  2026-08-20 entry (multiple same-entry hedges collapsing into one
+  settlement, with one hedge's separate identity silently vanishing from
+  the log) — already fixed the next day, not a live issue. Real financial
+  size was trivial regardless: SPX closed 157pts from the butterfly's pin,
+  so the ~$28 entire structure cost simply expired worthless and was never
+  captured in that day's total.
+  CONVERGENCE-AUDIT PASS (same day, after deploy — a fresh, 3-agent
+  re-review of BOTH of today's Brandon changes combined, explicitly told
+  not to trust either change's own earlier audit verdicts, run specifically
+  because "audit once, fix once" is not the same as "converged"). Found and
+  fixed two real, pre-existing bugs plus the documentation gap addressed
+  above:
+  (1) `_brandon_open_hedge_recorder` never created `DATA_DIR` before
+  opening the SQLite file, unlike every other per-variant DB opener in this
+  codebase (`HydraStrategy.__init__`'s `DataRecorder` setup,
+  `_brandon_save_hedge_state`). On a genuinely fresh variant install,
+  `sqlite3.connect()` would raise, `BrandonHedgeRecorder.__init__` would
+  catch it and permanently set `self._conn = None` for the process
+  lifetime — hedge recording silently and permanently disabled until the
+  next restart. Low practical risk today (B/C's `data/variant_{b,c}/` dirs
+  have existed since February) but a real, demonstrable inconsistency.
+  Fixed with the identical `os.makedirs(DATA_DIR, exist_ok=True)` call the
+  other openers already use.
+  (2) MORE SERIOUS, PRE-EXISTING (not introduced by either of today's
+  changes, but found while auditing them): `_brandon_load_hedge_state`
+  restored `self._brandon_hedge_legs` from the sidecar JSON on a same-day
+  restart, but never reconstructed `self._brandon_overlay_placed` — the
+  anti-double-fire guard `_brandon_check_overlay` checks before considering
+  a new hedge. So after ANY same-day restart (including the ones used to
+  deploy today's own changes), a side that already had a real, live,
+  already-placed hedge would look "never placed" — if that side was still
+  within `trigger_distance_pts` and GEX still confirmed, the bot could have
+  placed a SECOND, duplicate hedge on top of a real, already-open position.
+  Today's own restarts were safe only because B/C were confirmed flat (0
+  active entries) at restart time — the gap itself was live and unrelated
+  to that luck. Fixed: `_brandon_load_hedge_state` now also adds
+  `(leg.entry_number, leg.threatened_side)` to `_brandon_overlay_placed`
+  for every restored leg. Provably one-directional-safe: a restored key can
+  only ever suppress a redundant placement, never suppress one that should
+  legitimately fire.
+  Both fixes verified with real negative-control test runs (reverted each
+  fix, confirmed the new tests fail; restored, confirmed they pass) —
+  tests/test_brandon_hedge_recorder_2026_08_25.py::TestOpenHedgeRecorderCreatesDataDir,
+  tests/test_brandon_hedge_state_restart_dedup_2026_08_25.py. Full suite
+  green after both fixes. The interaction-sweep and live-safety re-audit
+  legs of this same convergence pass found no further issues in the
+  already-deployed confirm_seconds/use_adjuster_gex_gate/debit_spread_enabled
+  logic itself — B's live decision path was independently re-traced end to
+  end and confirmed byte-identical to pre-8/25 behavior except for the one
+  intended change (debit spread never proposed).
+- 2026-08-25 Brandon defensive-overlay hedge fixes (THE GOLDEN LOOP: plan,
+  adversarial audit-before with 3 independent reviewers, implementation,
+  tests-with-code, adversarial audit-after). Prompted by the 2026-08-24
+  full-strategy audit (hedge cost real money on both B and C defending a
+  threat that evaporated) plus a 2026-08-19 9-event historical replay
+  (0-of-9 hedge firings ever defended a side that was actually breached).
+  Four changes, all in bots/hydra/brandon/{strategy.py,defensive_overlay.py}
+  + a new bots/hydra/brandon/hedge_recorder.py — B and C run the identical
+  file, so items 2-3 below are config-gated (see the staging note) rather
+  than code-gated:
+  (1) C's dry-run hedge-leg pricing switched from a flat-18%-IV
+  Black-Scholes model (+ a compensating flat ±$0.25/leg spread-crossing
+  hack, itself now removed) to REAL broker quotes at the mid — the same
+  convention every other simulated leg in this codebase already uses
+  (base_strategy._estimate_entry_credit_ib's `_mid(conid)` pattern). The
+  audit found the old model diverged from B's real fill by 4.4x on an
+  identical structure. hedge_position.estimate_fill_price is now a
+  fallback ONLY for a leg whose live quote is genuinely unavailable
+  (logged, so the rare fallback path is visible). Ships active on both B
+  and C immediately — naturally isolated to the dry-run branch, zero
+  effect on B's live orders.
+  (2) A confirmation delay before the hedge actually places
+  (defensive_overlay.confirm_seconds, new self._brandon_overlay_trigger_
+  first_seen_at pending-timer dict) — the hedge previously fired on the
+  very first qualifying monitoring tick with no persistence check, unlike
+  every other trigger-sensitive path in this codebase. Mirrors
+  _brandon_check_pctwidth_shadow_stop's confirm-then-fire pattern
+  (strategy.py ~line 1560) — NOT MKT-046, which an earlier design draft
+  reached for and adversarial review caught as the wrong precedent: the
+  critical detail is that self._brandon_overlay_placed is added to ONLY
+  inside the elapsed>=confirm_seconds branch, never before — adding it
+  on the first qualifying tick (as the original draft would have done)
+  would let the existing dedup check permanently block re-evaluation of
+  that (entry, side), so the pending timer could never reach its
+  threshold and the hedge would silently never fire again. A severity
+  bypass (defensive_overlay.severity_bypass_distance_pts, new logic, no
+  in-file precedent — mirrors the INTENT of MKT-046's L-M6 "≥2x stop
+  fires immediately" rule) skips the delay entirely when the threat is
+  already inside a tighter distance band, so a genuinely fast real
+  breach doesn't wait it out.
+  (3) The hedge's own GEX-confirmation gate (defensive_overlay._has_
+  accel_zone_on_side) gained the SAME peak-locality gate
+  (accel_peak_locality_pts) and 2-independent-reads persistence gate
+  (accel_peak_persistence_enabled/_tolerance_pts) the strike adjuster
+  already has (gex_strike_adjuster.AdjusterConfig) — reusing that
+  already-tested logic, not reimplementing it. The adversarial audit
+  found the hedge's original check had NO locality gate at all (just a
+  flat 0.05 min-strength threshold, vs. the adjuster's 0.10 for the
+  identical concept) — meaning a single wide same-sign GEX cluster could
+  rubber-stamp confirmation for any threatened short on that side
+  regardless of how far the actual peak sat, plausibly the real reason
+  behind the 0-of-9 replay result (bumping the threshold alone would
+  have treated a symptom, not the cause). The overlay's OWN persistence-
+  gate rotation (_brandon_overlay_rotate_prior_gex_profile, a NEW
+  dedicated `_brandon_overlay_prior_gex_profile` pointer) is deliberately
+  separate from the strike adjuster's `_brandon_prior_gex_profile`: that
+  pointer only rotates once per entry decision, so reusing it for the
+  hedge (which checks on every monitoring tick, all day) would compare a
+  live threat against a potentially hours-stale entry-time read and fail
+  persistence confirmation almost always between entries — a correctness
+  bug caught during implementation, not a shared-state optimization.
+  Also fixed a second, unrelated hardcoded 0.05 (defensive_overlay.
+  _choose_butterfly_pin's decel-wall pin selection) to read
+  self.brandon_decel_min_pct instead of a bare literal — ships on both
+  immediately (values coincide today; this only removes a future silent-
+  drift risk).
+  STAGING (2 and 3): both change the SAME shared pre-fork code path
+  (evaluate_overlay / _brandon_check_overlay's OverlayConfig
+  construction) that B and C call identically before any dry-run/live
+  split — B's config keeps confirm_seconds=0 / use_adjuster_gex_gate=
+  false (the exact behavior-preserving defaults), C's config turns both
+  on for a dry-run trial. This distinction matters because brandon_
+  accel_min_pct / accel_peak_locality_pts / accel_peak_persistence_
+  enabled are ALREADY live-tuned, non-default values on both B and C (0.1
+  / persistence ON) for the strike adjuster — simply reusing them for the
+  hedge unconditionally, as an earlier design draft assumed was a
+  "no-op" (same reasoning error the original plan made before audit),
+  would actually have been an immediate live behavior change on B, not
+  inert. Mirrors the project's own established pattern of proving a new
+  mechanism on C before ever touching B's live decisions (the narrow-
+  spread %-of-width stop's ~2-week A2-SHADOW trial).
+  (4) Durable hedge-history tracking — bots/hydra/brandon/hedge_
+  recorder.py (BrandonHedgeRecorder), a new isolated per-variant DB
+  (data/variant_<id>/brandon_hedges.db) modeled directly on dc_
+  recorder.py's pattern for Strategy D/E, NOT an extension of the shared
+  backtesting.db (which would add two Brandon-only tables to A/D/E's
+  databases too, for no benefit, and cuts against the documented
+  "Brandon-hedge precedent" for per-variant isolation this file's own
+  history already established for D). Two tables (hedge_placements — one
+  row per leg, hedge_settlements — one row per settled hedge), written
+  fire-and-forget from _brandon_place_overlay (both dry-run and live
+  branches) and the BRANDON-OVERLAY-SETTLED site — a recording failure
+  never affects trading logic, same convention as every other recorder
+  in this codebase. Before this, hedge history lived only in the daily-
+  wiped brandon_hedge_legs.json sidecar and the log file.
+  AUDIT-AFTER FINDING (same day, caught by adversarial review of the
+  implemented diff, before any deploy): item 3's persistence-gate
+  rotation (_brandon_overlay_rotate_prior_gex_profile) originally
+  advanced a SINGLE pointer on first touch of a new fetched_at — but
+  _brandon_check_overlay runs every ~2-5s monitoring tick, for every
+  active entry (up to 7 concurrent slots on B), while a GEX profile only
+  refetches every ~180s. Only the very first call after a fresh fetch
+  got a real "prior != current" comparison; every later call that tick
+  and every tick until the NEXT refresh saw prior==current and got
+  force_unconfirmed=True — starving persistence confirmation almost
+  permanently once enabled, which would have defeated the entire point
+  of C's staged trial (use_adjuster_gex_gate=True +
+  accel_peak_persistence_enabled=True) had it shipped. Fixed to a true
+  2-slot ring buffer (_brandon_overlay_current_gex_profile /
+  _brandon_overlay_prior_gex_profile) that only advances on a genuinely
+  NEW fetch, so the prior stays valid for the full lifetime of the
+  current profile across every entry and every tick. Regression tests
+  added (tests/test_brandon_overlay_confirmation_2026_08_25.py,
+  TestOverlayGexProfileRotation +
+  TestPersistenceGateSurvivesMultipleEvaluationsOnSameProfile) and
+  verified via negative control (temporarily reverted to the buggy
+  rotation — 3 of 4 new tests failed as expected, including the direct
+  end-to-end reproduction; restored the fix, all pass). Full suite:
+  2484 passed, 0 failed after the fix.
+- 2026-08-21 full-day audit LOW/INFO follow-ups (THE GOLDEN LOOP, 1 review
+  round + 1 investigation). Same-day full-strategy execution audit for
+  2026-08-21 (itself CLEAN — confirmed the prior night's MKT-047 deploy held
+  up correctly in every scenario the day produced) surfaced 3 minor items;
+  closed all 3:
+  (1) base_strategy.py / strategy.py — the stop-loss "Stop loss executed"
+  summary log line printed the static/undecayed buffer level (e.g. $317.50)
+  instead of the actual MKT-042-decayed trigger that caused the breach (e.g.
+  $405.76, already shown correctly one line above in the STOP-DETAIL/
+  MKT-046 output) — display-only, DB/state/P&L math were already correct
+  (a 2026-08-20 fix already recorded the decayed value into
+  trade_stops.trigger_level, but only for that DB column, not this line).
+  Fixed with a new `display_trigger_level` parameter on the shared
+  MEICStrategy._execute_stop_loss (base_strategy.py) that changes ONLY the
+  final returned string; HydraStrategy's override now computes
+  `effective_trigger_level` BEFORE calling super() (verified safe —
+  _get_effective_stop_level depends only on entry state + the wall clock,
+  nothing super() mutates) and reuses the same value for both the existing
+  DB write and the new display parameter. The sibling MKT-025 short-only-
+  stop branch (currently dormant — short_only_stop=false on every tracked
+  config) had the identical bug in its own separately-implemented return
+  string; fixed for completeness, reusing its own already-computed
+  effective_trigger_level. Review confirmed this has ZERO observable effect
+  on B tonight — B runs narrow_spread_stop.enabled=true (A2 %-of-width
+  mode), under which _get_effective_stop_level short-circuits to the same
+  static value stop_level already equals, so the fix's visible effect is
+  confined to A and C's shadow logs. Also flagged (documented, not fixed):
+  the Telegram/email alert body and the (globally-disabled) Sheets log still
+  source the static level for the same event — pre-existing, unaffected by
+  this diff, a candidate for a future full-accuracy pass.
+  (2) base_strategy.py — `_estimate_entry_credit_ib` returned unrounded
+  floats, so an economically-exact credit (e.g. mid 0.15 - mid 0.10 =
+  $0.05/share = $5.00 total) could land as a float artifact like
+  4.999999999999993 and miss a credit-gate `>=` threshold it should clear by
+  noise alone. Real incident: variant C's Entry #1 put credit missed the
+  MKT-029 fallback-acceptance branch this way (made no difference that day —
+  the call side was independently vetoed). Fixed by rounding both
+  estimated_call_credit/estimated_put_credit to the cent at the point of
+  computation, mirroring the pre-existing rounding already applied a few
+  lines below for the MKT-048 fillable-credit stash. Review brute-forced
+  ~14,400 realistic penny/nickel-tick bid/ask combinations and confirmed the
+  true noise-free credit is always an exact $0.50 multiple given IBKR's
+  option-tick quantization — round-half-to-even ties are not a reachable
+  risk here; round() only ever cleans up ~1e-13 IEEE-754 noise. Review also
+  found (documented, not fixed) the identical unrounded-credit pattern in
+  MKT-020/MKT-022's progressive OTM-tightening scans — currently dead code
+  on B and C (both set brandon_disable_progressive_tightening=true), only
+  reachable on A (dry-run-shadow, no real orders); worth the same fix if
+  tightening is ever re-enabled on a live variant. A MEDIUM-severity version
+  of this same finding was raised then adversarially REFUTED for
+  overclaiming "live, reachable... real paper money" risk — correctly
+  downgraded once B/C's config gating was traced.
+  (3) D's "unexplained near-nightly restart pattern" (flagged as an audit
+  LOW item, not a confirmed bug) — investigated and fully explained by
+  benign causes, no code/config fix needed. Every one of 7 restarts in a
+  2-week lookback traces to a `sudo systemctl restart...` audit line from
+  the operator account within 1-2 minutes prior (routine post-deploy
+  restarts and debug sessions) — no autonomous crash-loop, no timer, no
+  cron, no OOM kill anywhere in the window. The one ungraceful SIGKILL
+  (2026-08-18, all 5 units simultaneously, not D-specific) is the same
+  fleet-wide grpc-core client-teardown shutdown-hang first flagged
+  2026-08-03 and already root-caused + mitigated the very next morning in
+  commit 3bce8940 — likely the incident that motivated that fix. Zero
+  SIGKILLs have recurred on any hydra unit since.
+  10 new tests in tests/test_audit_minor_fixes_2026_08_21.py, both code
+  fixes negative-controlled (reverted, confirmed RED, restored, confirmed
+  GREEN). 1 review round (2 reviewers + verify pass on every finding): both
+  fixes PASS, 5 findings confirmed (all INFO/LOW, no defects — reassuring
+  observations + this version-history reminder + documented adjacent gaps),
+  1 MEDIUM finding adversarially refuted (see above). Full suite: 2393
+  passed, 15 skipped.
+- MKT-047 EOD-flatten continuous re-check + dry-run cost correction
+  (2026-08-20, THE GOLDEN LOOP, 2 review rounds). Prompted by the same-day
+  full-strategy execution audit, which surfaced two real production
+  incidents:
+  (1) strategy.py — new _eod_flatten_dry_run_correct(entry, side_name) fixes
+  a dry-run zero-cost booking bug on A/C: in dry-run, _close_position_with_
+  retry (SAFETY-DRY-04) never produces a simulated fill price for an early
+  close, so the side's FULL credit was booked as if it closed for free.
+  Mirrors Brandon's existing TP/breach correction pattern (fall back to the
+  pre-close spread-value mark). Real incident: variant A's day flipped from
+  a reported +$24.85 to a true ~-$40/-$55; C overstated by ~$490 (+$619.50
+  reported vs ~+$129.50 true). Wired into both the primary
+  _execute_eod_flatten sweep and the new re-check below.
+  (2) strategy.py — new _check_eod_flatten_recheck() closes a real near-miss
+  on B (live paper money): the primary MKT-047 sweep decides once, at 15:50
+  ET, whether each side is safe to ride to free expiry — two short puts
+  measured 11pt OTM at that single check and were left riding, but SPX
+  drifted and the cushion shrank to 0.84pt (near-ATM) at 15:57:30 before
+  recovering to 1.4pt by close. No loss resulted, but nothing re-evaluated
+  the decision as price kept moving. The new function re-watches every side
+  left riding on every tick (reusing the existing ~2-12s monitoring cadence)
+  from the moment the primary sweep fires until close, closing a side that
+  drifts back within the cushion and applying the dry-run cost correction
+  above.
+  Round-1 review (3 reviewers) found 2 HIGH + 3 MEDIUM/LOW issues before
+  this could ship: a 90s failed-close cooldown that only cleared on eventual
+  success, not on recovery — a side that failed, went briefly safe, then
+  drifted back at-risk within the same 90s window stayed silently
+  unprotected; the per-entry retry loop had no wall-clock bound across
+  multiple entries in one tick, letting several stuck legs compound serially
+  and starve every other entry's safety check for up to the full ~10min
+  window; a hardcoded now.hour>=16 market-closed bound that ignored
+  early-close (1:00pm ET) days; a new _eod_side_is_live_short helper missing
+  the pivot_closed exclusion already present in the pre-existing
+  _eod_flatten_can_skip_side gate; and a trade_stops DB write-ordering gap
+  (inherited from Brandon's pre-existing correction pattern, does not affect
+  real P&L, documented not fixed). Fixed: clear the cooldown the instant a
+  side is observed OTM-safe again, not only on a later successful close; a
+  60s per-tick wall-clock budget (time.monotonic) so a stuck leg can only
+  block one tick, not compound across entries within it; mins_to_close now
+  computed via shared.market_hours.get_market_close_time(now), matching the
+  existing pattern in _place_marketable_close; pivot_closed added to
+  _eod_side_is_live_short.
+  Round-2 review (3 reviewers + independent verification of every finding)
+  confirmed all 4 round-1 remediations hold, but surfaced one new real HIGH
+  finding via a dedicated interaction-focused pass: the two HIGH fixes above
+  compound ACROSS ticks, not just within one — a persistently
+  oscillating/failing early entry, repeatedly re-armed by the clear-on-safe
+  fix, can dominate the 60s budget on many consecutive ticks (fixed
+  iteration order restarts from the front every tick), starving a later,
+  unrelated entry of its own recheck coverage for a meaningful fraction of
+  the ~10min window — reopening HIGH#2's own anti-starvation intent. Fixed
+  with a round-robin iteration order (_eod_recheck_next_start_idx): each
+  tick starts where the previous tick left off, so an entry that blows the
+  budget gets pushed to the back of the queue instead of perpetually
+  occupying the front. Two other round-2 claims (an alert-spam risk from the
+  clear-on-safe retry cadence; an intermittent full-suite test flake) were
+  independently adversarially verified and refuted — the alert path already
+  goes through AlertService's existing content-dedup gate, and the flake
+  claim could not be reproduced (0/3 full-suite runs, 0/1 targeted prefix
+  run, 10/10 isolated runs) and had no plausible mechanism given the test's
+  full determinism/isolation.
+  30 new/updated tests in tests/test_eod_flatten_recheck_and_dryrun_fix_
+  2026_08_20.py — every fix (both original + all 5 remediations)
+  independently negative-controlled (reverted, confirmed RED, restored,
+  confirmed GREEN). Full suite: 2383 passed, 15 skipped. Deploy note: NOT
+  yet deployed as of this entry — B is live and trading; deferred to the
+  next confirmed-flat window.
+- Full-strategy execution audit follow-up fixes (2026-08-20, THE GOLDEN LOOP,
+  2 review rounds). Prompted by a comprehensive audit of every variant's full
+  2026-08-19 trading day plus independent re-verification of everything
+  deployed the night before. P&L itself was correct everywhere (every
+  variant's ledger reconciled exactly); these fixes close real tracking/
+  attribution/analytics gaps found in that audit, all on variant B (the live
+  seat) except A1:
+  (1) base_strategy.py — a failed entry's leg-in that gets safely unwound
+  (_unwind_partial_entry) or an ORDER-010 accumulated partial that gets
+  market-flattened (_flatten_accumulated_partial) now books the round-trip's
+  commission (2x commission_per_leg x quantity — open, never booked since the
+  entry never completed, + this close) into daily_state.total_commission.
+  Previously invisible entirely; the reported day cost understated the true
+  economic cost of a failed attempt. Real 2026-08-19 incident: variant B
+  entry #6's ~25-contract round trip.
+  (2) brandon/strategy.py — _brandon_settle_hedges() now groups
+  _brandon_hedge_legs by placed_at (shared exactly across every leg of one
+  _brandon_place_overlay() call) before settling, so an entry that receives
+  TWO independent hedge placements hours apart (e.g. a call debit spread
+  morning, a put butterfly afternoon) settles as two correctly-labeled
+  HedgeSettlements instead of one merged, mislabeled record (aggregate $ was
+  always right; structure/threatened_side attribution was not). Real
+  2026-08-19 incident: variant B entry #5 (4 real placements, only 3
+  BRANDON-OVERLAY-SETTLED lines). Round-1 adversarial review found and fixed
+  a genuine atomicity regression this refactor introduced (booking could
+  complete for one group while a later group's logging/Telegram raised
+  before the entry-level guard was set, risking a double-book on a same-day
+  restart) — restructured into a pure-compute phase (settle_hedge, no side
+  effects), then an atomic book+guard phase (pure arithmetic, zero I/O), then
+  logging/Telegram strictly after. Empirically reproduced and closed.
+  (3) brandon/strategy.py — _expected_position_quantities() and
+  _get_current_position_size() now exclude entries already in
+  _brandon_overlay_booked (settled). _brandon_hedge_legs is intentionally
+  NEVER cleared of settled legs (the dashboard's brandon_hedge_legs.json
+  sidecar reader needs them to keep showing settled hedges after close — see
+  the dashboard fix below), but a settled hedge's real IBKR position no
+  longer exists — without this exclusion, every same-day restart after a
+  hedge settled logged a permanent POS-003 "ambiguous, leaving for manual
+  review" warning indistinguishable from a genuinely stuck leg. Round-2
+  review confirmed this is safe on the normal path (an entry can't reach
+  _brandon_overlay_booked before POS-004's broker-confirmed-flat check
+  passes, since that check reuses this same method) and flagged one DORMANT
+  gap for the future: MKT-018 early-close (disabled on every variant today)
+  has no broker-confirmation wait and Brandon doesn't flatten hedge legs in
+  that path — documented in the code, not fixed (not reachable while
+  early_close_enabled stays false).
+  (4) strategy.py — _execute_stop_loss()'s non-short-only branch now records
+  the MKT-042-decayed _get_effective_stop_level() value (what the live
+  trigger check actually fires against) into trade_stops.trigger_level,
+  instead of the static entry-time base level — any stop firing inside the
+  ~4h decay window (most 0DTE stops) had this DB column off by the decay
+  multiplier, feeding wrong data into buffer-calibration/slot_edge/HERMES
+  analysis. Real 2026-08-19 incident: variant A entry #2 put (DB showed
+  $405, log showed the stop fired against an effective ~$530 trigger).
+  Round-1 review found the initial version leaked the decayed value into
+  _record_stop_to_db()'s net_pnl fallback too (used when actual_close_cost
+  is unknown), diverging from daily_state.total_realized_pnl (which stays
+  static, booked separately inside super()._execute_stop_loss()) — fixed by
+  adding a dedicated effective_trigger_level parameter that feeds ONLY the
+  trigger_level column; the original stop_level parameter keeps its exact
+  prior meaning and net_pnl-fallback behavior. Round-2 review found the same
+  gap, still unclosed, in the MKT-025 short_only_stop branch (currently
+  dormant — false on every tracked config) — closed for completeness.
+  (5) CLAUDE.md — corrected two stale claims found during the audit: the
+  documented B/C stop formula (credit+buffer) is no longer what actually
+  fires on B, which has run the A2 %-of-width override since the 2026-07-24
+  swap; and skip-worktree does NOT block a git pull's fast-forward from
+  overwriting config_variant_*.json content (only suppresses git status/
+  diff/add from flagging local edits) — empirically confirmed the same
+  night when a routine pull silently (and harmlessly, this time) applied a
+  tracked value to the VM's live B/C configs.
+  Also same night: 2 real dashboard display bugs fixed and deployed (see the
+  entry below this one) plus verification that the 2026-08-19 shutdown-hang
+  fix genuinely works (3-6s clean restarts vs the prior 58-84s, once
+  properly exercised by a restart that actually loaded the fixed code).
+  15+ new/updated tests across tests/test_failed_entry_commission_tracking_
+  2026_08_20.py, tests/test_brandon_strategy_integration.py, tests/
+  test_brandon_overlay_live_sizing_2026_07_21.py, tests/
+  test_stop_db_decay_recording_2026_08_20.py, and a fixture fix in tests/
+  test_preflight_audit_fixes.py — every negative control independently
+  re-verified by BOTH review rounds, not just the author. Full suite: 2353
+  passed, 15 skipped. Deploy note: NOT yet deployed as of this entry — B is
+  live and trading; deferred to the same night's safe window (B flat).
+- Brandon defensive-overlay hedge tightening + PII fix-forward (2026-08-19,
+  THE GOLDEN LOOP, 2 review rounds). Prompted by a live-day review of B/C's
+  overlay hedge history: an event replay found the hedge (debit-spread pre-
+  12:30 ET / butterfly after) was arming well before real danger on B/C's
+  narrow 5-10pt spreads, and never once defended a side that was actually
+  breached. Two changes, both scoped to the defensive_overlay layer only —
+  the credit+buffer stop-loss and the independent GEX-fallback stop
+  promotion are untouched:
+  (1) brandon/strategy.py:_brandon_check_overlay() — OverlayConfig's
+  require_gex_confirmation was `(profile is not None)`, an unreviewed
+  default from the original 2026-05-05 commit that let a hedge fire on
+  distance alone whenever the Polygon GEX profile was simply present,
+  without an actual accel-zone confirming real danger. Changed to always
+  `True`. Does not weaken Polygon-outage protection — that path already
+  runs through the separately-tested _brandon_alert_gex_fallback stop
+  promotion, independent of this overlay.
+  (2) config_variant_b.json / config_variant_c.json — trigger_distance_pts
+  25 -> 15pt. See each file's _comment_trigger_distance_pts for the full
+  rationale and confidence caveat (LOW-MEDIUM; small event sample).
+  Added BRANDON-OVERLAY-WATCH instrumentation (60s-throttled per side) that
+  logs distance-at-tick + gex_confirmed whenever price is within 2x the
+  trigger distance, so a future replay has real recorded data instead of
+  inferred bounds. Round-1 review found 4 real issues, all fixed: missing
+  put-side test coverage for the GEX-confirmation fix; no config-wiring
+  test proving the JSON value actually reaches the strategy; the new WATCH
+  log had no throttle (would spam every tick near a threatened strike);
+  gex_confirmed could read misleadingly. Round-2 re-verified all fixes
+  independently and found none further. 13 new tests across
+  tests/test_brandon_strategy_integration.py, negative-controlled
+  throughout (each fix reverted in isolation, confirmed red, restored,
+  confirmed green) — 100/100 passing in that file, full suite 2331
+  passed/15 skipped. Bundled in the same commit: a PII fix-forward —
+  bots/hydra/config/config_variant_{b,c}.json's alerts.email had been
+  overwritten from the "your@email.com" placeholder to a real address by
+  an autonomous on-VM commit (HOMER's git auto-commit, a known gotcha —
+  see the operator memory) that reached origin; restored the placeholder
+  going forward per an explicit operator decision (fix-forward only, not a
+  history rewrite — this is a private repo and an email address, not a
+  credential). Deploy note: NOT yet deployed as of this entry — bundled
+  with the shutdown-hang hardening below, both deferred to the same safe
+  window (B flat or market closed).
+- Strategy-process shutdown-hang investigation + client-hygiene hardening
+  (2026-08-19, THE GOLDEN LOOP, 2 review rounds). Root-caused the recurring
+  "SIGTERM logs 'Shutdown complete' but the process doesn't actually exit
+  for 44-82+s, needing a forced SIGKILL" symptom first flagged 2026-08-03
+  (broker-side fixed then; strategy-process side left open). Workflow-driven
+  investigation (code audit + live VM evidence + grpcio-internals research)
+  found: the lingering grpc_global_tim/event_engine/lifeguard child threads
+  seen at SIGKILL time are grpc-core PROCESS-GLOBAL singletons, lazily
+  spawned by the first channel any client library constructs (Secret
+  Manager, used by every variant at startup; Pub/Sub, constructed even on
+  alert-DISABLED D/E per AlertService's L-C2 comment) — confirmed via
+  grpcio 1.80.0's own compiled source strings that these can only be torn
+  down by grpc's internal shutdown sequence at real interpreter exit, not
+  by closing an individual channel. The "abandoned Pub/Sub publish future"
+  theory was checked against real logs and does NOT fully explain it alone
+  (D hit the identical hang with zero Pub/Sub calls that day, alerts
+  disabled). Shipped as honest, real client-hygiene hardening — NOT a
+  proven elimination of the underlying grpc-core teardown latency:
+  AlertService.close() (new) releases the Pub/Sub publisher's channel
+  promptly on a bounded background thread (CLOSE_TIMEOUT_S=5s, matching
+  shared/logger_service.py's _sheets_call_with_timeout convention), called
+  from bots/hydra/main.py's shutdown sequence via two new testable helpers
+  (close_alert_service_safely, log_shutdown_diagnostics — the latter logs
+  live Python thread names + /proc/self/status's native thread count right
+  before "Shutdown complete", filling the exact evidence gap that made
+  this investigation need a full forensic pass instead of a log read).
+  shared/secret_manager.py's get_secret()/update_secret() now release
+  their per-call SecretManagerServiceClient the same way. Round-1
+  adversarial review (3 reviewers) found 6 real issues, ALL fixed: (1) an
+  initial future.cancel() "fix" was a hard no-op for Pub/Sub futures
+  (verified against the installed library source) — removed rather than
+  left in place implying a mitigation that doesn't exist; (2)
+  AlertService.close()'s close call initially had no timeout, breaking
+  this codebase's own bounded-blocking-call convention — fixed; (3) an
+  unsynchronized self._publisher read-then-use (TOCTOU) — narrowed via a
+  local snapshot; (4) HIGH — the initial secret_manager fix used the
+  client as a context manager, and a close-time exception AFTER a
+  successful RPC propagated past the pending return, reporting a real
+  secret fetch/update as a failure (reproduced empirically) — fixed by
+  moving the close into an explicit `finally` that can never override an
+  already-decided RPC outcome; (5) matching test-coverage gap — closed;
+  (6) the new helpers were only wired into run_bot()'s main-loop finally:
+  block, not its ~6 earlier startup-failure early-return paths — fixed,
+  all now call both helpers (passing None for `strategy` where it isn't
+  in scope yet). Round-2 review re-verified all 6 fixes independently
+  (fresh code reads + empirical repro, not just re-reading round-1's
+  claims) and found ONE more real issue via a fresh sweep:
+  _close_secret_manager_client's own threading.Thread()/.start() calls
+  were unguarded, so a failure to even spawn the close thread (e.g. OS
+  thread exhaustion) reproduced the identical success-masked-as-failure
+  bug through a different trigger — fixed by wrapping the spawn itself.
+  25 new tests (tests/test_shutdown_hang_grpc_cleanup_2026_08_18.py),
+  negative-controlled throughout both rounds (each specific fix reverted
+  in isolation, confirmed the matching test goes red, restored, confirmed
+  green) — caught 2 real bugs in the tests THEMSELVES along the way (a
+  simulated-hang duration shorter than the bound being tested, silently
+  passing either way; the process-wide `time` module patch from an
+  existing autouse fixture silently neutering a time.sleep()-based hang
+  simulation) before they could ship as false-confidence coverage. Full
+  suite: see the run immediately after this entry for the final count.
+  Deploy note: NOT yet deployed as of this entry — 2026-08-19 is a live
+  trading day with variant B (the live paper seat) holding real open
+  positions; deploy deliberately deferred to a safe window (B flat or
+  market closed), never a mid-session restart with positions open.
+- Calendar (D/E) daily-reset sidecar race + phantom-activity EOD summary
+  (2026-08-18, THE GOLDEN LOOP). Investigated the previously-unresolved
+  "D's dc_open_trades.json came back empty" loose thread (proven not caused
+  by the 2026-08-17 pnl_history deploy, but never root-caused) and found two
+  distinct real bugs in calendar_strategy_base.py, both applying to D and E:
+  BUG A (write-ordering race): CalendarStrategyBase._reset_for_new_day()
+  re-attaches any carried multi-day position AFTER calling
+  super()._reset_for_new_day() — but the base reset ends with its own
+  _save_state_to_disk() call, made while daily_state.entries is still the
+  freshly-emptied list (the carry re-append hasn't run yet). Via this
+  class's _save_state_to_disk() override, that also writes dc_open_trades
+  .json EMPTY. Harmless if a later same-day save re-persists the (correctly
+  repopulated in-memory) state first; but a restart landing in that window
+  reads the empty sidecar on boot and permanently drops the position from
+  tracking, no further monitoring ever. Confirmed this exact sequence
+  produced the observed 2026-08-17->18 empty file (its mtime lands on the
+  reset that also logged the [CAL-CARRY] carry-forward for it). FIX: track
+  re_save_needed = bool(carried) and call _save_state_to_disk() again at
+  the end of _reset_for_new_day(), once daily_state.entries is correct.
+  BUG B (phantom EOD summary): main.py's had_trading_activity gate included
+  `len(daily_state.entries) > 0`, which is always true for as long as ANY
+  multi-day position is carried (re-attached every reset) — it can never
+  distinguish "holding a position, nothing new today" from real activity.
+  Observed: at 00:00:36 ET on 2026-08-18, 14 seconds after the midnight
+  reset, this falsely read True purely because D's carried Aug-13 calendar
+  was in daily_state.entries — triggering log_daily_summary() to book the
+  position's stale reset-moment unrealized mark (-$323.75) into
+  hydra_metrics.json as a fabricated "realized" result for a day that had
+  not started trading, corrupting D's cumulative track record for that
+  date (needs a separate manual data reconciliation on the VM; not
+  self-healing since the position was never actually settled). FIX:
+  extracted the check into MEICStrategy._had_trading_activity_today()
+  (base_strategy.py, byte-identical default logic — A/B/C unaffected) and
+  overrode it in CalendarStrategyBase to require either nonzero realized
+  P&L/entries_completed, or at least one entry whose entry_time falls on
+  TODAY — a carried-only entry no longer counts. main.py now calls
+  strategy._had_trading_activity_today() instead of re-inlining the check.
+  14 new tests (tests/test_calendar_carry_and_activity_gate_2026_08_18.py),
+  including a real end-to-end test that writes/reads the actual sidecar
+  file. Negative-controlled: 13 of 14 correctly fail with both fixes
+  reverted (the 14th is a no-carry no-op check, correctly unaffected).
+  Full suite: 2294 passed (was 2280), 15 skipped.
+- Fix #84's final-pnl_history-point moved to log_daily_summary() (2026-08-17).
+  B's dashboard "today" card showed +$78.40 for the whole evening after the
+  true settled total was -$76.60 — exactly the -$155.00 combined loss on two
+  Brandon defensive-overlay hedges (entries #3/#4) that settled a few seconds
+  AFTER the point had already been written. ROOT CAUSE: Fix #84 wrote the
+  "final" _pnl_history point inside check_after_hours_settlement() (strategy.
+  py), which main.py calls BEFORE log_daily_summary() — but for a Brandon
+  variant, log_daily_summary() is what settles the hedges (_brandon_settle_
+  hedges folds their P&L into total_realized_pnl before calling super()), so
+  the point captured a pre-hedge-settlement snapshot nothing ever corrected.
+  The real Telegram/email alert and DB daily_summaries row were NEVER wrong —
+  both are built later, inside log_daily_summary()'s own get_daily_summary()
+  call, after hedge settlement. Only the dashboard's in-memory pnl_history
+  curve had this staleness bug.
+  FIX: removed both Fix #84 call sites from check_after_hours_settlement()
+  (strategy.py, ~line 13043 area); added the final-point write to base_
+  strategy.py's log_daily_summary() (MEICStrategy — every concrete strategy
+  reaches this via super()) instead, positioned right after net_pnl/
+  commission are computed and using that SAME net_pnl the alert/Sheets/DB row
+  already report. Since a subclass's own settlement work always runs BEFORE
+  its super().log_daily_summary() call reaches this method's body, the point
+  can no longer be written ahead of any subclass-specific settlement step —
+  not just Brandon's, whatever future ones get added too. Same-minute points
+  now overwrite instead of appending a duplicate (matches the regular
+  heartbeat-driven pnl_history updater's existing convention).
+  Applies to all five variants (A/B/C/D/E all reach the shared base method);
+  in practice only B/C's Brandon hedges can trigger the staleness this fixes.
+  6 new tests (tests/test_pnl_history_settlement_ordering_2026_08_17.py),
+  negative-controlled (5 of 6 correctly fail with the fix reverted — the 6th
+  covers a zero-expired-credit path that was already a no-op pre-fix). Full
+  suite: 2275 passed (was 2269), 15 skipped.
+- GEX accel-zone peak persistence gate (2026-08-12, THE GOLDEN LOOP). Ships
+  INERT — accel_peak_persistence_enabled defaults False in both AdjusterConfig
+  and the strategy config-read; config_variant_b.json/config_variant_c.json
+  are NOT edited by this change, so this deploy is a behavioral no-op on both
+  live B and shadow C. Flipping it on is a deliberate, separate follow-up
+  (C first, observe, then B) — see below.
+  CONTEXT: a workflow-driven forensic investigation (source-read + 45-day DB
+  baseline + per-event GEX/price detail + price-action counterfactual) into
+  B/C's 3-consecutive-zero-entry-day streak (2026-08-10 -> 08-12) found the
+  cause: the GEX accel-zone strike-veto — which can abort an ENTIRE entry via
+  require-both-sides — fires off a single, unsmoothed GEX-profile read.
+  Stable-peak days (08-10) correctly predicted a real pin; drifting-peak days
+  (08-11, early 08-12, peak moving 15-40pt between entry-slot reads) did not
+  — SPX moved away and never returned. ~1-in-3 hit rate across the week's 18
+  events. Not new to this week either: the mechanism has been the dominant
+  skip cause fleet-wide since one_sided_entries_enabled=false shipped
+  2026-07-16 (C ran an even longer 6-day solo dead streak 07-17->07-24 at
+  HIGHER VIX, ruling out "low VIX explains it").
+  AUDIT-BEFORE (verified directly against source, not assumed): gex_provider.
+  py's _detect_clusters/_flush_cluster recompute GEXCluster.peak_strike fresh
+  from scratch on every build_profile() call — zero persistence anywhere.
+  gex_strike_adjuster.py's AdjusterConfig.accel_peak_locality_pts defaults
+  25.0, unoverridden in either config_variant_b.json or config_variant_c.json.
+  strategy.py's _brandon_get_gex_profile has a 3-min TTL cache; _calculate_
+  strikes (delta-target picker) is the ONLY call site using force_refresh=
+  True, meaning exactly one genuinely-fresh Polygon read happens per entry-
+  slot attempt (B's slots are 30 min apart — well beyond the TTL and Polygon's
+  own ~15-min update cadence, so consecutive entry slots are genuinely
+  independent reads). _brandon_apply_strike_adjuster's call-side
+  require-both-sides abort used to `return` immediately, so the put side
+  never even ran — zero log evidence of what it would have decided.
+  DESIGN: adjust_call_strike/adjust_put_strike gain a `prior_profile` param
+  and two new AdjusterConfig fields (accel_peak_persistence_enabled=False,
+  accel_peak_persistence_tolerance_pts=10.0). When enabled and a prior read
+  is supplied, an in-locality accel-zone SKIP only fires if `prior_profile`
+  ALSO shows a covering accel cluster (same expiry) whose peak is within
+  tolerance of the current peak — otherwise the decision falls through to the
+  existing decel/SHIFT check, then KEEP, exactly as if this accel zone
+  weren't in locality range at all (no bolt-on "downgrade to KEEP" branch
+  needed — a bare `continue` reuses the function's existing fallthrough).
+  A third `force_unconfirmed` param (added in round 3, see below) makes that
+  same fallthrough reachable even with `prior_profile=None`, for the case
+  where the only "prior" available IS the current read itself (see round 3).
+  strategy.py tracks `self._brandon_prior_gex_profile` (per-variant, in-
+  memory, unpersisted — B and C run different entry-slot grids, so "the
+  previous read" is inherently a per-variant concept; a restart or the first
+  slot of the day simply runs with no prior, falling back to today's single-
+  read behavior for that one slot). SECONDARY FIX: the call-side
+  require-both-sides abort no longer `return`s immediately — an
+  `already_aborted` flag now lets the put side still evaluate + log (never
+  mutate) after a call-side abort, closing the observability gap.
+  REVIEW — 3 rounds, all with independent adversarial verification of every
+  finding (not just asserted):
+  Round 1 (3 parallel dimension reviewers — correctness, live-trading
+  blast-radius, test-coverage — each finding independently re-derived by a
+  fresh verifier) found and fixed: (a) HIGH — a self-comparison bug. The
+  rotation guard only stopped the POINTER (self._brandon_prior_gex_profile)
+  from being reassigned on a repeat sighting of the same profile; it did NOT
+  stop that already-rotated pointer from being read back out and handed to
+  the confirm check as `prior_profile` against the very profile it was set
+  from — a real self-comparison (trivially "confirmed" at 0pt drift,
+  indistinguishable in the log/reason string from a genuine independent
+  second read). Reproducible via an entry retry reusing the same
+  force-refresh cache write (ENTRY_RETRY_DELAY_SECONDS=15s < the 30s
+  force-refresh sibling-reuse window), or via any of _brandon_get_gex_
+  profile's stale-fallback branches (failure cooldown, spot<=0, fetch
+  exception) returning the same cached profile. Fixed in round 1: `prior_
+  profile` is nulled to None whenever its fetched_at matches the current
+  profile's — a prior that IS the current read is not an independent read.
+  (Refined in round 3 below — nulling to None alone turned out to conflate
+  this case with "no prior has ever been read," which needs different
+  handling; `force_unconfirmed` is the final mechanism.) (b) LOW — a
+  misleading "no matching accel zone in prior read" log message when a
+  covering cluster WAS found but on a mismatched expiry; split into an
+  explicit 3-way branch. (c) MEDIUM test-coverage gaps — missing put-side
+  mirrors for two call-side tests, no exact-tolerance-boundary test, no
+  dual-side (call+put simultaneously) integration test, and the existing
+  same-fetched_at rotation test only asserted the pointer (trivially true
+  either way), never the actual confirm-check outcome — all closed with new
+  tests, including a precise unittest.mock.patch.object spy test asserting
+  prior_profile=None is what actually gets PASSED to the adjuster on a
+  same-fetched_at reuse (the mechanism-level proof, since the SKIP/KEEP
+  ACTION alone can coincide between "self-confirmed" and "no-prior-
+  available" when the peak is in locality either way).
+  Round 2 (fresh independent reviewer, no knowledge of round 1's findings,
+  + independent verification) converged on the round-1 mechanism: traced
+  every return path of _brandon_get_gex_profile by hand and confirmed the
+  fetched_at-based guard is generically correct across all of them;
+  confirmed the new tests genuinely exercise what they claim (no
+  tautological asserts); found only a trivial unresolved forward-reference
+  type hint (GEXCluster referenced but not imported in gex_strike_adjuster.
+  py — fixed) and a version-history pointer gap. No logic defects.
+  Round 3: triggered by a SEPARATE follow-up review (a 3-lens interaction
+  check — breach-exit, defensive overlay, and a full state-assumption sweep
+  across bots/hydra/brandon/ — run specifically to clear the feature for its
+  first real activation, accel_peak_persistence_enabled=true on variant C
+  only) whose adversarial verifier, while confirming all three lenses clear,
+  independently surfaced a real gap the three lenses themselves weren't
+  scoped to catch: round 1's "null to None whenever fetched_at matches" fix
+  made a same-profile ENTRY RETRY (ENTRY_RETRY_DELAY_SECONDS=15s, comfortably
+  inside the 30s force-refresh sibling-reuse window, so a retry 15s later
+  reads back its own prior write) collapse to prior_profile=None — which the
+  adjuster treats identically to "no prior has EVER been read," the
+  intentional legacy-SKIP path for the genuinely first evaluation of a day.
+  Fail-safe in direction (skews toward MORE skipping, never toward placing
+  something a clean read would have blocked) but it silently reverted some
+  retried entries to pre-persistence-gate behavior while looking identical
+  in the logs to a genuine decision — directly undermining the point of the
+  C-only observation trial this flip exists to run. Fixed: a new
+  `force_unconfirmed: bool = False` param on adjust_call_strike/
+  adjust_put_strike, set by the caller specifically for the same-fetched_at
+  case, distinct from `prior_profile=None`. It routes straight to
+  "unconfirmed" (fall through to SHIFT/KEEP with a distinct log detail:
+  "re-evaluating the same GEX read as before — no new independent
+  confirmation available yet") without touching prior_profile at all,
+  leaving the true "no prior ever" first-of-day path untouched. A follow-up
+  fresh-eyes round on this specific fix (single reviewer + independent
+  verifier) converged: threading verified symmetric across call/put, all 4
+  combinations of (persistence enabled/disabled) x (force_unconfirmed
+  True/False) traced and confirmed correct, no AttributeError path, both
+  strategy.py call sites verified correct, the retry-timing premise
+  re-verified against current source (not stale) — no new logic defects.
+  5 SEPARATE NEGATIVE CONTROLS actually run across all 3 rounds (sabotage ->
+  confirm RED -> restore -> confirm GREEN), not just asserted: the
+  persistence-confirmation check itself; the prior-profile rotation
+  ordering (reproducing the round-1 self-comparison bug by re-deriving
+  prior_profile AFTER rotating instead of before); the put-side
+  observability fix (restoring the old early-return); the round-1 fix
+  itself (disabling the fetched_at-nulling guard, confirmed the spy test
+  goes red); and the round-3 force_unconfirmed fix (reproducing the exact
+  retry-collapse-to-SKIP bug, confirmed both the mechanism-level spy
+  assertion and a new outcome-level test — an entry that should KEEP on
+  retry instead SKIPs — go red, then green on restore).
+  Full suite: 2239 passed / 15 skipped / 0 failed (was 2234 after round 2,
+  2228 after round 1, 2208 before this feature).
+  New/extended tests: tests/test_brandon_gex_strike_adjuster.py (21 new,
+  36 total) and tests/test_brandon_strategy_integration.py (10 new, 87
+  total).
+  NOT DONE, DELIBERATELY: accel_peak_locality_pts (the 25pt buffer) itself
+  is untouched — the same distance range produced both this week's one
+  correct veto and its incorrect ones, so shrinking it would trade one
+  error type for another without fixing the actual (unsmoothed-single-read)
+  defect. one_sided_entries_enabled is untouched — every skip this week was
+  call-side; loosening require-both-sides would produce put-only entries,
+  the exact pattern the onesided_entry_negative_expectancy memory documents
+  as net-negative. No 3-read/2-of-3 confirmation window — a simple 2-reads-
+  agree gate is the right first step; a longer window would push the
+  earliest possible confirmed veto to ~1 hour into the session for
+  marginal, currently-unvalidatable robustness gain against an 18-23-event
+  forensic sample. config_variant_b.json/config_variant_c.json are NOT
+  edited here — flipping accel_peak_persistence_enabled on is a deliberate,
+  separate, auditable follow-up: C first (zero live risk), observe
+  entries-taken vs. SKIP-avoided over a handful of trading days, then B.
+- Direct-Telegram bypass for CRITICAL/HIGH alerts (2026-08-04, THE GOLDEN
+  LOOP). Closes the gap the SAME-DAY "alert-delivery reliability hardening"
+  entry below explicitly deferred ("NOT DONE, DELIBERATELY: a fully
+  independent bypass-Pub/Sub channel") — that fix made Pub/Sub publish
+  failures retry + dead-letter, but every path still depended on Pub/Sub
+  itself; a real Pub/Sub outage would still silence a CRITICAL/HIGH alert
+  completely. User: "let's fix it properly... that is how we should do
+  every single feature or fix on this project too" — referring to THE
+  GOLDEN LOOP, ported the same day from the Adventist Intelligence project
+  (`feedback_golden_loop.md`): plan -> AUDIT-BEFORE -> implement -> test
+  (with explicit negative-control proof) -> AUDIT-AFTER (4 rounds here, not
+  3 — round 3 found something non-cosmetic) -> converge. This entry is
+  written in that shape.
+  AUDIT-BEFORE (done before writing a line of code, not assumed): the
+  codebase already talks to the Telegram Bot API directly in THREE places —
+  bots/hydra/telegram_commands.py's command-poller reply (variant-A-only,
+  unusable as a bypass from B/C/D/E), services/homer/main.py's
+  send_telegram_alert (closest shape — standalone, no poller coupling),
+  cloud_functions/alert_processor/main.py's own send (IS the Pub/Sub path
+  itself). None share code. shared/secret_manager.py had getters for every
+  OTHER credential type but no get_telegram_credentials(). Conclusion: add
+  ONE new getter + ONE new small module, don't write a 4th duplicate, don't
+  refactor the other 3 (live, working, unrelated code paths — out of scope).
+  IMPLEMENT: shared/secret_manager.py gained get_telegram_credentials()
+  (byte-identical pattern to get_saxo_credentials() etc.). New module
+  shared/telegram_direct.py: send_telegram_direct(message, title,
+  credentials=None) -> bool, POSTs directly to api.telegram.org, Markdown-
+  then-plaintext-on-non-200 fallback (mirrors HOMER's proven pattern), 5s
+  timeout/attempt, never raises. shared/alert_service.py::AlertService
+  gained _attempt_telegram_bypass, called from send_alert's failure tail for
+  CRITICAL/HIGH only, right after _write_dead_letter — credentials cached
+  on the instance (only on success, so a transient fetch failure retries
+  next trigger rather than being treated as permanent).
+  4 ROUNDS OF REVIEW FOUND AND FIXED REAL BUGS (this is what AUDIT-AFTER is
+  for):
+  Round 1 — (a) a double-fetch bug: the original wiring passed a still-None
+  credential cache straight into send_telegram_direct, which would then
+  re-fetch internally, doubling Secret Manager timeout exposure on exactly
+  the failure path the worst-case accounting cares about most. Fixed to
+  short-circuit (skip the Telegram POST attempt entirely) if the one fetch
+  attempt already failed. (b) a bot-token leak risk: a `requests` connection
+  exception can embed the token in the URL it's raised from; telegram_
+  direct.py's except block now redacts it before logging (the SAME risk
+  bots/hydra/telegram_commands.py's _TokenRedactingFilter was built to close
+  for that module — this is a second instance of the identical lesson, not
+  covered by that filter since it's instance-based and this is a stateless
+  function). (c) recomputed + corrected the shutdown-margin accounting
+  (TimeoutStopSec raised 75s->95s hydra units / 90s->110s broker at this
+  point in the review).
+  Round 2 — found the round-1 "95s" figure still undercounted two terms:
+  _write_dead_letter's own 2s bounded flock wait, and (bigger) that the 5
+  hydra*.service units — unlike calypso-broker.service — never set
+  GCP_PROJECT, so shared/secret_manager.py's is_running_on_gcp()/
+  get_project_id() were paying ~3s of metadata-server HTTP round-trips
+  before EVERY Secret Manager fetch on those units, not just this bypass.
+  Fixed properly, not just re-documented: added Environment="GCP_PROJECT=
+  calypso-trading-bot" to all 5 hydra*.service files, matching the broker's
+  own already-proven-in-production setting — this actually removes the
+  latency system-wide rather than just accounting around it. TimeoutStopSec
+  raised again to 100s (hydra units, 88s worst case) / confirmed 110s
+  (broker, 96s worst case) still held.
+  Round 3 — found something non-cosmetic: the "Pub/Sub client never
+  initialized at all" branch in send_alert (not on GCP, or a sustained
+  outage the lazy-reinit hasn't recovered from) used to return early WITHOUT
+  ever writing a dead-letter record or attempting the bypass — a MORE severe
+  case of the exact "Pub/Sub is down" scenario this whole feature exists
+  for, silently unprotected by it. Fixed: that branch now falls through to
+  the same dead-letter-write + CRITICAL/HIGH-bypass logic as the publish-
+  exception tail. Also caught a stale "95s" left in one comment by an
+  earlier edit pass that didn't match the actual 100s directive four lines
+  later — corrected.
+  Round 4 — converged, no new findings. Independently reproduced the full
+  suite pass count and confirmed no stray dead-letter files were left by
+  the test run.
+  Every fix above was proven, not just asserted: THREE separate negative
+  controls were actually run during this work (not hypothetical) — the
+  bypass call itself disabled -> 6 tests red, restored -> green; the
+  credential short-circuit fix disabled -> the specific test for it red
+  (showing the double-fetch), restored -> green; the round-3
+  never-initialized fix disabled -> its 2 new tests red, restored -> green.
+  Full suite: 2208 passed / 15 skipped / 0 failed (was 2182 before this
+  feature, climbing from 2153 across the whole 2026-08-04 alert-reliability
+  day of work). New test file: tests/test_alert_telegram_bypass.py (26
+  tests).
+  NOT DONE, DELIBERATELY: telegram_commands.py's and HOMER's existing
+  Telegram-send call sites are NOT refactored to use the new shared module
+  (scope discipline — live, working, unrelated code paths). Email is not
+  given a second bypass channel (Telegram-only; email already shares the
+  same Cloud Function as Telegram in the normal path, and Telegram is the
+  higher-value "operator's phone, immediate visibility" target).
+- Alert-delivery reliability hardening (2026-08-04). While checking for
+  anything left half-dug from the 2026-08-03 audit, live logs showed a NEW
+  bug on every strategy restart that night: `shared/alert_service.py`'s
+  Pub/Sub publish-failure handler logged `f"Failed to publish alert to
+  Pub/Sub: {e}"`, but the underlying call (`future.result(timeout=5)`) raises
+  a bare `concurrent.futures.TimeoutError()` on timeout — which stringifies
+  to `""` — so the log line was `"Failed to publish alert to Pub/Sub: "` with
+  nothing after the colon. Confirmed via 30-day history this recurs (5x/30d
+  fleet-wide), not a one-off. User's directive, verbatim: "I wanna do it
+  properly... this is going to be a world class product used by a lot of
+  people in the future... make the basics 100% correct" — same rigor as the
+  2026-08-03 fixes: plan -> implement -> test -> adversarial review to
+  convergence (3 rounds; rounds 1-2 found 8 real issues across the surface
+  the fix touched, round 3 converged clean).
+  CORE FIX (`shared/alert_service.py`): a `describe_exception(e)` helper
+  (`f"{type(e).__name__}: {text}" if text else type(e).__name__` — never
+  blank) applied at every exception-log site in the file. Publish failures on
+  CRITICAL/HIGH now get ONE retry (2 attempts total, ~11s worst case) before
+  giving up — this alert may be the last thing a process does before shutting
+  down (e.g. an emergency-exit alert), so it's worth the bounded second try;
+  MEDIUM/LOW stay at 1 attempt (keeps the common case — routine
+  bot_started/bot_stopped alerts on every restart — at the old latency). A
+  publisher that failed to construct at process start (`_initialized=False`)
+  no longer stays permanently local-only for the process's life: `send_alert`
+  now lazily retries `_initialize()` on a 60s cooldown. Alerts that still
+  fail after the retry budget get a durable, independent record appended to
+  `data/failed_alerts.jsonl` (`FAILED_ALERTS_PATH`) — greppable without
+  journalctl/GCP access, so a lost alert isn't purely a line in a log file
+  that rotates.
+  ADVERSARIAL REVIEW FOUND AND FIXED REAL BUGS IN THE FIX ITSELF (this is the
+  point of the process): (1) the lazy-reinit block originally reused the
+  pre-existing `_gate_lock` (acquired by `_apply_alert_gate` on EVERY
+  send_alert call) while holding it across `_initialize()` — an UNBOUNDED
+  call (GCP metadata-server discovery has no timeout). A hung reinit on one
+  thread would have blocked every OTHER thread's alerts, including a
+  concurrent CRITICAL alert from the Telegram poller thread on variant A.
+  FIXED: dedicated `_reinit_lock`, acquired NON-BLOCKING
+  (`acquire(blocking=False)`) — if another thread is already mid-reinit, the
+  caller falls straight through to local-log-only instead of waiting on a
+  possibly-hung call. Proven with a real multi-threaded test (not mocked):
+  thread A stuck in a faked hanging `_initialize()`, thread B (same instance)
+  returns in <1s instead of blocking. (2) `_write_dead_letter`'s
+  `fcntl.flock()` was originally a plain BLOCKING call with no timeout — this
+  file is shared by every process that constructs an AlertService (variants
+  A-E and calypso-broker), and a real Pub/Sub outage (the scenario this file
+  exists for) tends to hit them all near-simultaneously, and the write can
+  fire synchronously from the main trading loop. FIXED to match this
+  codebase's own established `LOCK_EX|LOCK_NB` polling pattern
+  (`shared/token_coordinator.py`'s `_acquire_lock`) with a 2.0s bound
+  (`DEAD_LETTER_LOCK_TIMEOUT_S`) — skips the write on contention rather than
+  blocking. Proven with a real 12-thread concurrent-write test asserting the
+  file stays fully parseable, not just that flock() was called. (3) the
+  shutdown-margin comment originally claimed the ~11s CRITICAL/HIGH retry
+  worst case was "well inside" the 2026-08-03 TimeoutStopSec budgets —
+  corrected to an honest accounting: it CAN stack with a single non-abortable
+  order-family retry's ~55s worst case within the same shutdown sequence
+  (55+11=66s of the 75s hydra-unit budget), leaving materially less headroom
+  than the original comment implied, though the remaining shutdown steps are
+  fast/local/no-further-network-calls so this should still be sufficient —
+  not closed to zero risk, just accurately described now. Deliberately NOT
+  wired to `shared.ib_retry.SHUTDOWN_EVENT` (unlike IBKR session/market
+  retries): continuing to retry a CRITICAL/HIGH alert during shutdown has
+  real safety value (it's often the alert telling an operator something
+  needs attention), so aborting it the instant shutdown begins would defeat
+  the point — this is a deliberate difference from the 2026-08-03 pattern,
+  not an oversight.
+  SAME BUG CLASS, FOUND ELSEWHERE BY REVIEW, NOT THE ORIGINAL SWEEP: 4 sites
+  in `bots/hydra/base_strategy.py`/`strategy.py` where a CRITICAL/HIGH
+  alert's OWN send-failure was logged at `logger.debug` (invisible in
+  production) and mislabeled "(non-fatal)" — an untracked orphan broker leg,
+  a deferred settlement booking, a failed short buy-back, and (found by
+  round-1 review, not the original sweep) a STUCK EMERGENCY CLOSE
+  (`_emergency_close_alert_once`) — arguably the most severe of the four, on
+  the escalation path for a live unhedged/stuck position. All 4 now
+  `logger.error` + `describe_exception`, matching 5 other "alert send failed"
+  sites in the same two files that already used warning/error (these were
+  regressions from that established convention, not intentional design).
+  ROUND-2 REVIEW FOUND THE ENTIRE `bots/hydra/brandon/strategy.py` MODULE —
+  the code that runs LIVE on variant B and dry-run-shadow on C — had NEVER
+  BEEN CHECKED (the original sweep and round 1 both stopped at
+  base_strategy.py/strategy.py). Fixed 5 sites: the chokepoint
+  `_brandon_send_telegram` that every single Brandon alert call routes
+  through (the fix that actually matters — includes CRITICAL alerts like the
+  overlay-partial-fill naked-position warning), 3 call sites whose own
+  try/except around that chokepoint is dead code today (the chokepoint never
+  raises) but fixed for consistency/defense-in-depth, and one adjacent
+  non-alert site (`log_daily_summary`'s settlement-booking except block) with
+  the identical blank-message + misleading "(non-fatal)" pattern on a real
+  P&L-mismatch risk (same class as the 2026-07-21 dashboard/cumulative
+  mismatch documented elsewhere in this file).
+  Also fixed: `services/argus/notify.py` (ARGUS's own health-check alert
+  delivery) and `shared/data_recorder.py`'s `_safe_write` (wraps
+  record_entry/record_stop/record_daily_summary — real trade-record
+  persistence), same blank-`str(e)` pattern, diagnostics-only.
+  NOT DONE, DELIBERATELY (AT THE TIME): a fully independent (bypass-Pub/Sub)
+  delivery channel (e.g. direct Telegram API as a last resort when Pub/Sub
+  itself is down) — confirmed ARGUS shares the same Pub/Sub-dependent path
+  today, so it can't watchdog a full Pub/Sub outage either. Genuinely
+  valuable, but expands the alert-delivery attack surface and secrets
+  footprint; deserved its own discussion, not a decision folded into this
+  fix. **SHIPPED LATER THE SAME DAY** — see the "Direct-Telegram bypass for
+  CRITICAL/HIGH alerts" entry ABOVE this one; this note is kept for the
+  historical record of the decision, not as a current gap. `data/
+  failed_alerts.jsonl` has no retention sweep (unlike `pre_start_snapshot.sh`'s
+  50-snapshot cap) — deliberately: this file grows only on genuine Pub/Sub
+  failures (~5/30 days fleet-wide historically, each a few KB), an entirely
+  different growth profile from a per-restart snapshot file; flagged, not
+  forgotten. (Still true even with the bypass channel — the bypass reduces
+  how OFTEN a lost alert needs the dead-letter file as its only record, it
+  doesn't change the file's own growth profile.)
+  Full suite: 2182 passed / 15 skipped / 0 failed (was 2153 before this fix).
+  New test files: test_alert_publish_reliability.py (18, incl. 2 real
+  multi-threaded concurrency tests), test_alert_send_failure_logging_
+  2026_08_04.py (7), test_alert_diagnostics_argus_and_data_recorder_
+  2026_08_04.py (3), test_brandon_alert_failure_logging_2026_08_04.py (6).
+- Three fixes from a full-day, all-5-strategy audit (2026-08-03). A deep-dive
+  audit (5 parallel agents, every entry for the day checked against DB+logs+
+  state) found zero wrong trading decisions but surfaced 3 real issues, fixed
+  to varying degrees of completeness based on confidence in the root cause and
+  risk on live-trading code — implemented against a written plan, then 3
+  rounds of adversarial review (found and closed 4 real issues across rounds
+  1-2, converged clean on round 3).
+  (1) CALENDAR DASHBOARD P&L BUG (D/E, schema-neutral, display-only) — FULLY
+  FIXED. `_save_state_to_disk`'s `pnl_history` builder (`strategy.py`) used the
+  credit-vertical formula (`call_spread_credit - call_spread_value`, written
+  for A/B/C) unmodified for `CalendarEntry` (D/E), whose fields mean something
+  structurally different (a calendar is a debit purchase, not a credit sale).
+  Confirmed live: dashboard showed -$164 on E's open position; real P&L
+  (`dc_calendar_snapshots` DB / `dc_open_trades.json` sidecar / heartbeat log,
+  all agreeing) was -$8 — wrong in BOTH open phases (CALENDAR and TRANSFORMED),
+  accidentally correct only in CLOSED. FIX: `isinstance(entry, CalendarEntry)`
+  branch adds `entry.unrealized_pnl` (the existing, correct, phase-aware
+  formula already used everywhere else calendar P&L is shown) instead, with a
+  fresh/marks-not-loaded-yet guard mirroring the pre-existing IC pattern. No
+  consumer changes needed (traced every reader of `pnl_history`; D/E's live
+  dashboard already bypasses this field via the sidecar, but the underlying
+  state-file data was objectively wrong and any future feature reading it
+  would have silently inherited the bug). New tests reproduce the actual -$164
+  vs -$8 incident numbers and pin a byte-identical non-regression test for the
+  untouched A/B/C math (which had no direct test before either).
+  (2) BROKER + STRATEGY-PROCESS SHUTDOWN HANG — BROKER FULLY FIXED, STRATEGY
+  PROCESSES CONSERVATIVELY MITIGATED, ROOT CAUSE STILL OPEN. Today's deploy
+  restart needed a forced SIGKILL across `calypso-broker` (84 processes) and
+  `hydra`/`hydra_variant_{b,d,e}` — first occurrence in 2+ weeks of restarts.
+  Broker root cause PROVEN: `_on_shutdown`'s `maintain_thread.join(timeout=30)`
+  couldn't interrupt an in-flight `ensure_connected()` retry backoff (a plain
+  `time.sleep()`, ~63s documented worst case) — landed exactly while the
+  broker was mid OAuth-rehandshake. FIX: `shared/ib_retry.py` gained a
+  process-wide `SHUTDOWN_EVENT` + `ShutdownRequested` exception + a new
+  `abortable_on_shutdown` flag on `retry_with_backoff` (default True); the
+  sleep between retry attempts is now `SHUTDOWN_EVENT.wait(delay)` instead of
+  `time.sleep(delay)`, aborting within one tick once the event fires.
+  `shared/ib_client.py:_ib_call` passes `abortable_on_shutdown=(family !=
+  "orders")` — order placement/cancel/modify is DELIBERATELY NEVER abortable
+  (bailing mid order-retry risks a naked/partial leg, strictly worse than a
+  slow shutdown); every other family (session/market/portfolio/history/oauth)
+  is fast-abortable, which is what actually fixes the broker (`ensure_connected`
+  is family='session'). `_on_shutdown`'s body was extracted to a standalone,
+  directly-testable `_shutdown_broker()` (`services/broker/main.py`) that sets
+  `SHUTDOWN_EVENT` before joining; also added a specific `except
+  ib_retry.ShutdownRequested: ... break` in the maintenance loop so a
+  deliberate shutdown-abort can't be miscounted as a real re-auth failure and
+  fire a false "session re-auth FAILED" alert (caught in round-1 review).
+  STRATEGY PROCESSES (hydra/A, B, C, D, E): unlike the broker, these talk to
+  IBKR only via `BrokerClient` (HTTP proxy, no `retry_with_backoff` of their
+  own) and were NOT stuck in any order-placement retry at restart time (fleet
+  was flat) — the exact mechanism that made them need SIGKILL is NOT fully
+  root-caused. Deliberately did not guess at a fix inside the order-placement/
+  emergency-close retry loops on a live-trading process without solid
+  evidence. Instead: (a) `TimeoutStopSec` raised on all 6 units — broker
+  30s->90s (comfortably above the ~63s non-abortable orders-family worst
+  case), hydra*.service 30s->75s (above the 55s worst case for a SINGLE
+  in-flight order HTTP call on a 7-contract B/C entry: `place_and_wait_for_
+  fill`'s `min(30+3*(qty-1),45)=45s` server-side timeout + `BrokerClient`'s
+  +10s pad). ROUND-2 REVIEW CAVEAT, STILL OPEN: this only bounds a single
+  HTTP call — a full iron-condor entry can leg in up to 4 legs x 5 retry rungs
+  each (`base_strategy.py`'s `PROGRESSIVE_RETRY_SEQUENCE`) with no
+  shutdown-flag check between rungs/legs, so `TimeoutStopSec=75` does NOT
+  guarantee a graceful stop if SIGTERM lands mid-entry-placement — it narrows
+  the window materially (75s vs the old 30s, and vs the true worst case of
+  session-hangs that used to compound across MULTIPLE calls) without closing
+  it completely. Do not treat this as a closed fix for the strategy-process
+  side. (b) `bots/hydra/main.py`'s `signal_handler` now logs a best-effort
+  diagnostic snapshot (strategy state, in-progress entry number) on SIGTERM —
+  read-only, try/except-wrapped, cannot affect shutdown behavior — so a
+  recurrence's logs pinpoint the cause instead of requiring another round of
+  journalctl archaeology.
+  (3) B/C DELTA-TARGET "DEGRADED-DATA" GUARD — TELEMETRY ADDED, NO BEHAVIOR
+  CHANGE (BY DESIGN). The guard (`brandon/strategy.py`, 4δ floor vs an 8δ
+  target, added 2026-07-18 after a real -$138 phantom-loss incident) fired 4x
+  in one afternoon on B, previously believed rare. Investigation: NOT a bug —
+  the ~16% chain-hydration ratio observed is the near-deterministic output of
+  a hardcoded `max_contracts_to_hydrate=80` cap on a ~500-strike chain, and a
+  quiet/trending low-VIX session routinely pushes the 8δ target outside that
+  window. This is a live-trading risk-parameter question (loosen the floor?
+  raise the hydration cap and accept more Polygon load? leave it?), not
+  something to decide unilaterally mid-fix — so this ships PURE TELEMETRY,
+  zero behavior change. Schema v15 (`skipped_entries`: `hydration_pct`,
+  `achieved_delta`, `target_delta`, `delta_floor`, all nullable, populated only
+  on this specific skip path). ROUND-1 REVIEW CAUGHT A REAL BUG IN THE
+  TELEMETRY ITSELF: hydration counts were first tracked as a per-instance
+  counter, updated only on a fresh Polygon fetch — but the skip site always
+  calls `_brandon_get_gex_profile(force_refresh=True)`, which can return a
+  SIBLING VARIANT's just-cached profile (B and C share entry slots) without
+  updating that counter, so `hydration_pct` could silently describe a
+  DIFFERENT decision than the one it was attached to (or be stale/None) while
+  the delta/target/floor fields were fine. FIXED properly, not patched around:
+  `chain_total`/`hydrated_count` are now fields ON `GEXProfile` itself
+  (`gex_provider.py`), stamped via `dataclasses.replace()` the moment a fresh
+  fetch completes, before the profile is stored/cached anywhere — every reuse
+  path (in-process TTL cache, cross-process shared-cache file, sibling-variant
+  reuse under the fetch lock) now automatically carries correct counts with
+  it, by construction, with no separate bookkeeping. `gex_shared_cache.py`'s
+  JSON save/load updated to persist the two fields (`.get(...,0)`
+  backward-compat for pre-2026-08-03 cache files).
+  Full suite: 2153 passed / 15 skipped / 0 failed. New/updated test files:
+  test_pnl_history_calendar_fix.py, test_delta_target_telemetry_v15.py,
+  test_ib_retry.py (+7), test_ib_client.py (+1), test_broker_shutdown_hang_
+  fix.py, test_main_sigterm_diagnostic.py, test_brandon_degraded_delta_guard_
+  2026_07_18.py (+6), test_brandon_gex_shared_cache.py (+2).
+- Entry-execution-FAILURE recording + alerting (2026-07-31, live incident on
+  variant B). Entry #3 exhausted all order-placement retries — IBKR's paper
+  matching engine accepted a market order but never filled it (confirmed via a
+  direct broker query: the order was genuinely accepted, not rejected, and sat
+  with zero fill despite a live moving 5-cent-wide market; a documented IBKR
+  paper-API reliability issue, not a HYDRA logic bug) — and the failure
+  produced ZERO operator-visible signal: no DB row, no dashboard detail (the
+  entry-slot card rendered as a blank "window passed", indistinguishable from a
+  slot that never happened), no alert — only a raw log line and an incremented
+  in-memory counter (`daily_state.entries_failed`) nothing surfaced. FIX: new
+  `_record_failed_entry` (HydraStrategy) reuses `_record_skipped_entry`'s
+  plumbing (append to `daily_state.entries`, `skipped_entries` DB row) but sets
+  a new `execution_failed` field/DB column (schema v14, additive
+  `skipped_entries.execution_failed INTEGER NOT NULL DEFAULT 0`) and alerts via
+  a new `AlertType.ENTRY_EXECUTION_FAILED` at explicit `priority=HIGH` — never
+  inherited/LOW, since LOW/MEDIUM alerts are silently dropped when a variant's
+  `alerts.enabled=false` (the severity bypass in `shared/alert_service.py` only
+  lets HIGH/CRITICAL through regardless). Wired into the 4 retries-exhausted
+  sinks: `strategy.py` (the live path — covers A directly, B/C by inheritance
+  through Brandon's override), `double_calendar_strategy.py` (D) and
+  `spy_double_calendar_strategy.py` (E) with `send_alert=False` (their configs
+  document "dry-run path emits none" as an intentional no-paging invariant —
+  DB visibility only, no Telegram), and `strangle_strategy.py` (unused). D/E/
+  Strangle also pass `used_retry_loop=False` (they place in a single attempt,
+  no retry ladder — the message correctly says "on the first attempt" instead
+  of claiming a retry count that never happened). Dashboard: a new "FAILED"
+  disposition (backend `_entry_disposition`, checked before "SKIPPED" — a
+  failure sets both `call_side_skipped`/`put_side_skipped=True` too, for
+  backward-compat with existing "no real position" checks) rendered as a
+  visually distinct red card/badge/dot across every surface that previously
+  computed skip status independently and would otherwise have silently
+  collapsed a failure into a routine skip: `EntryCard.tsx`, `EntryTimeline.tsx`,
+  `Comparison.tsx`, `EntryGrid.tsx`, the iOS Scriptable widget, and the
+  `/api/widget` backend. HERMES's daily analyst (`services/hermes/
+  data_collector.py`) also checks `execution_failed` first in both
+  `_classify_outcome` and its `entry_type` classification — before this fix it
+  would have narrated the failure as a clean, uneventful $0 "put_only" trade.
+  Found and fixed via 3 rounds of adversarial review (8 findings total across
+  rounds 1-2, converged clean on round 3) after implementing against a written
+  plan. +26 tests: 4 new files (test_entry_execution_failure.py,
+  test_execution_failed_v14.py, test_calendar_execution_failure.py,
+  test_hermes_execution_failed_classification.py) plus updates to
+  test_strangle_strategy.py and test_dashboard_variant_buffer_margin.py. Full
+  suite 2056 passed / 15 skipped / 0 failed.
+- Skipped-entry reasons rewritten for humans (2026-07-22). The dashboard
+  skip-reason strings carried backend jargon (MKT-011 / MKT-032 / MKT-010 /
+  Downday-035 / Upday-035 / "require-both-sides: one-sided (GEX-skip)
+  suppressed") that means nothing to a non-operator. Rewrote every user-facing
+  `_record_skipped_entry` reason to say WHY in plain English + show the actual
+  minimums: the credit gate now reads "Not enough premium … call spread $X
+  (need ≥ $min), put spread $Y (need ≥ $min). Skipped (credit gate)."; the
+  require-both-sides skip explains one-sided = negative expectancy / naked-short
+  tail risk and names the cause (credit gate vs GEX accel-zone skip); illiquid
+  wings + conditional-no-trigger similarly de-jargoned. Backend logs keep their
+  MKT codes; only the display strings changed. Also RE-ENABLED C's defensive
+  overlays (config) now that the sizing fix below is deployed — C runs the full
+  Brandon strategy again (loads at its next restart).
+- Defensive-overlay LIVE placement over-placement fix + atomicity (2026-07-21,
+  found while auditing the B<->C live-paper swap). Overlay leg `quantity` is
+  ALREADY scaled to contracts_per_entry (a butterfly is 10/20/10 = 40 for a
+  10-lot variant). The live path looped `for q in range(leg.quantity)` and each
+  `_place_option_order` placed contracts_per_entry contracts → it attempted
+  leg.quantity × contracts_per_entry (400 on a 40-contract butterfly). The
+  max_contracts_per_underlying cap then truncated it mid-structure into a naked
+  short with NO unwind. It DID fire once in production — on C, 2026-06-10: the
+  overlay placed contracts_per_entry × intended qty (98 vs 14 contracts, i.e.
+  C's 7-fold) and C's overlays were DISABLED that day as the mitigation (config
+  `_comment_disabled`: "re-enable only after the sizing fix"). It has not
+  recurred only because C's overlays stayed OFF and B is dry-run — this IS that
+  long-awaited sizing fix. FIX: `_place_option_order`/`_place_option_order_ib`
+  gained an optional `quantity` (None ⇒ contracts_per_entry, so the IC path is
+  byte-identical; ORDER-006 now validates the ACTUAL requested qty). The overlay
+  caller places each leg ONCE at leg.quantity, chunked by max_contracts_per_order,
+  and is now ATOMIC — a partial fill unwinds every filled leg
+  (`_brandon_unwind_overlay_legs` → `_flatten_accumulated_partial`) instead of
+  tracking a partial structure / stranding a naked short. +10 tests
+  (test_brandon_overlay_live_sizing_2026_07_21).
+- Overlay double-book guard, atomic (2026-07-18, follow-up to the reconcile fix
+  below). The aggregate-only overlay booking (hedge whose entry is absent from
+  daily_state at settle) had NO idempotency guard, so a settle-sweep re-run after a
+  restart could double-book it into gross_pnl (B dry-run; C is overlay=False, immune).
+  FIX: a UNIFIED per-day set `_brandon_overlay_booked` that BOTH booking paths check +
+  set (also closes the presence-FLIP double-book: absent one run, present the next).
+  Persisted in hydra_state.json ATOMICALLY with total_realized_pnl (same os.replace,
+  same same-day-gated restore) — NOT the hedge sidecar, which would let a crash restore
+  the guard without the booked total and silently LOSE the overlay (2nd review finding).
+  +9 tests (booking/flip idempotency + save co-location + same-day-gated restore); two
+  adversarial-review rounds each caught a real bug pre-deploy. B/C only reconcile 100%
+  including on overlay + restart days.
+- Reconciliation overlay-aware + per-day unattributed-overlay column (2026-07-18).
+  The per-entry identity `sum(trade_entries.realized_pnl) == daily_summaries.gross_pnl`
+  had two blind spots that made an audit false-flag: (a) a Brandon defensive-overlay
+  hedge whose entry is ABSENT from daily_state at settle (post-close / cross-day
+  restart) is booked aggregate-only — its P&L lands in gross but on no entry
+  (2026-07-07 B: per-entry sum $2925 vs gross $392, EXPECTED not corruption); (b)
+  pre-feature days (< 2026-07-02) carry unbooked 0.0 realized_pnl. FIX: new
+  `_unattributed_overlay_pnl()` (0.0 base; Brandon sums settlements whose entry is
+  absent) so the live RECONCILE guard identity is `sum(entries) + unattributed ==
+  total_realized_pnl` — derived from THIS process's settlement sweep so a genuine
+  aggregate double-book still surfaces as drift (not masked). Persisted via schema
+  **v13** (`daily_summaries.unattributed_overlay_pnl`, additive/nullable, HOMER
+  parity) — forwarded through `_record_daily_summary_to_db`'s payload — so slot_edge
+  + offline audits reconcile too. slot_edge cross-check now overlay-adjusted +
+  floored to the reliable window (>= 2026-07-02) + intersected to days present in
+  daily_summaries (no cross-table drift). Daily/cumulative P&L UNCHANGED (this only
+  fixes attribution + the reconciliation check). +15 tests; 4-lens adversarial review
+  caught the un-forwarded-key bug (column would have written NULL) pre-deploy. See
+  memory `per-slot-edge-and-realized-pnl`.
+- Brandon degraded-Polygon-data guard + honest dry-run (2026-07-17). ROOT CAUSE:
+  on 2026-07-17 (OPEX Fri) Polygon's greek feed degraded (80/1000 strikes hydrated);
+  Brandon's 8δ delta-target, with no real 8δ strikes in a sparse chain, sold the
+  "closest" — actually ~0.5-1δ, far-OTM, ~$0.05 premium. Every existing guard missed
+  it (profile FRESH so the stale-guard passed; pick BELOW the max-delta clamp; ~$0
+  credit so the too-rich price-veto couldn't fire). Impact: live C churned
+  protective-long leg-in/unwinds (the net-credit guard-floor saved it → 0 positions,
+  no orphans); dry-run B booked 3 phantom $0-credit ICs → dashboard −$138 (commission
+  only). A (non-Brandon) unaffected (+$403 normal day). FIXES: (1) find_strike_at_delta
+  gains return_delta=True → (strike, achieved_delta) so the caller sees the picked delta
+  (bots/hydra/brandon/gex_provider.py). (2) DEGRADED-DATA FLOOR in _calculate_strikes: a
+  short below target × min_delta_pct_of_target (config under delta_target_strike_selection,
+  default 0.5 → 4δ for an 8δ target) → SKIP the entry (operator-chosen over the
+  OTM-multiplier fallback) via entry.abort_entry_reason + a MEDIUM Telegram alert. (3)
+  _initiate_entry routes abort_entry_reason to a new _skip_degraded_entry clean-skip (early
+  + post-dispatch, mirrors _skip_require_both_sides). (4) HONEST-DRY-RUN: base
+  _simulate_entry skips a sim entry when NO ACTIVE side clears the net-credit floor
+  (min_net_credit_per_contract×100 = $5/ct), gated by skip_dryrun_below_net_credit_floor
+  (default true) — so B stops booking phantom $0 ICs, but a legit one-sided or
+  one-viable-leg entry still books (call_active/put_active mirror _execute_entry;
+  2026-07-18 review fix). Both knobs config-reversible; A unaffected (non-Brandon → real
+  credit). NOTE: the delta-floor guard's one-sided neutrality assumes B/C keep
+  one_sided_entries_enabled=false — revisit if that flag is flipped back on. +15 tests
+  (test_brandon_degraded_delta_guard_2026_07_18); 4-lens adversarial review + focused
+  re-verify → SAFE-TO-DEPLOY. See memory `brandon_degraded_polygon_data_guard`.
+- Require-both-sides / no one-sided entries on B+C (2026-07-16). Data showed one-sided
+  entries (put_only-dominant) win 69-77% but carry NEGATIVE expectancy on B and C
+  (naked-short fat tail), net -$14.3k (B) / -$3.8k (C) over 2026-07-01..07-16 — worse
+  than full ICs. Set `one_sided_entries_enabled=false` on B+C. The credit-gate one-sided
+  path (MKT-011/032/039/040) already skips when the flag is false; ADDED coverage for the
+  two paths that bypassed it: (a) the Brandon GEX strike-adjuster SKIP (bots/hydra/brandon/
+  strategy.py) now sets `entry.require_both_abort` instead of routing one-sided when the
+  flag is off, and `_execute/_simulate_entry` return without placing; (b) `_initiate_entry`
+  gains two guards (pre-dispatch for credit-gate/E6 one-sided, post-dispatch for the GEX
+  abort) that funnel to a new `_skip_require_both_sides` clean-skip helper (recorded as a
+  SKIP, not a failed retry). Fully config-reversible (flag→true restores prior behavior).
+  Flag reads are getattr-defensive (default true). +6 tests (test_brandon_strategy_integration
+  TestRequireBothSidesGuards + TestStrikeAdjusterLive). Also fixed a residual data bug:
+  variant C 2026-07-06 two full_ic entries carried stale realized_pnl (-1489.54/-734.49 vs
+  the correct +105.00/0.00; SPX never breached, peak cost-to-close $315) — a leftover of the
+  07-06 stale-SPX settlement bug (daily/cumulative were corrected, entry rows were not).
+  Corrected in C's backtesting.db (GCS-backed); every reliable day now reconciles
+  SUM(realized_pnl)==gross_pnl. See memory `onesided_entry_negative_expectancy`.
+- Data-integrity + dashboard-plumbing fixes (2026-07-14, from the 07-13 audit).
+  (1) `_record_stop_to_db` treated a RESOLVED close-cost of 0.0 (a worthless close
+  = full credit kept) as "missing" via a falsy-0 guard, booking the trigger-level
+  placeholder -(stop-credit) into `trade_stops.net_pnl` instead of +credit
+  (variant B's 07-13 E3 recorded -1500, not +500). Now only None (a fill never
+  captured) falls back to the placeholder; the two stop callers map their unknown
+  0.0 → None. RECORD-ONLY — realized_pnl / cumulative P&L were always correct
+  (this is a reporting column). +4 tests (test_early_close_pnl_signs). (2) HOMER's
+  Sheets→DB back-fill fabricated PHANTOM trade_entries/trade_stops rows in variant
+  A's MAIN backtesting.db for slots A SKIPPED — the Sheets reflect the LIVE variant
+  post-2026-06-02 pivot, and INSERT OR IGNORE can't dedup a skipped slot A never
+  wrote. `db_manager` now drops any back-fill row whose (date,entry_number) is in
+  the target DB's skipped_entries (no-op on the live variant's own DB). +5 tests
+  (test_homer_skip_contamination). (3) Strategy E's SPY underlying isn't read via
+  the index (sec_type=IND) path, so its vestigial IC daily_summaries had
+  spx_open/high=0.0; E now backfills that row's OHLC from its own recorded SPY
+  market_ticks (new read-only DataRecorder.get_spx_ohlc_for_date + an E-only
+  `_record_daily_summary_to_db` override — strict no-op for A/B/C/D). +6 tests
+  (test_e_daily_summary_ohlc). Companion dashboard fix (commit 4b3d6a0): History
+  day-detail entries/stops scope to the picked variant via a shared reader_for()
+  instead of always reading primary-C. Full suite: 1918 passed.
+- Stale-SPX settlement guard (2026-07-07). A post-close RESTART can re-fetch a
+  stale, non-zero current_price — variant C on 07-06 held 7420.22 (a PRIOR-day
+  value, ~1.6% below the real 7537.86 recorded close). The daily-summary +
+  Brandon-overlay settlement then booked against it → a phantom -$6,037 loss
+  (the overlays all settled as total losses vs the wrong low SPX; the RECONCILE
+  guard flagged the drift). _resolve_spx_close() only guarded the after-hours-
+  decay-to-0 case, not a non-zero-but-stale value. Fix: it now cross-checks the
+  clean on-disk recorded intraday close (market_ticks survives a restart) and,
+  when live current_price diverges >1%, trusts the recorded close; the Brandon
+  overlay settlement (log_daily_summary) routes through it instead of raw
+  current_price. Operational: don't restart C/B while settlement is still
+  pending. +5 tests (test_aud5_fixes).
+- Brandon hedge-legs variant isolation (2026-07-07). ROOT of the 07-06 phantom:
+  _brandon_resolve_hedge_state_path used _PROJECT_DATA_DIR (the SHARED base data/
+  dir), so Brandon variants B and C both wrote data/brandon_hedge_legs.json and
+  clobbered each other. On 07-06 variant C restarted and loaded variant B's 6
+  overlays from that shared file (the date matched), settling them onto C's day
+  total — the "no matching daily_state entry" E3/E4/E6/E7 orphans that, with the
+  stale-SPX settle, produced C's phantom -$6,037. Fix: use the variant-aware
+  DATA_DIR (data/variant_<id>/) so each Brandon variant is isolated (still safe
+  pre-super() — DATA_DIR is an env-derived module constant). +2 tests
+  (test_brandon_strategy_integration); full suite 1898 passed. Deploy: at EOD
+  after B/C settle today's overlays, restart B/C (they start fresh under the new
+  per-variant path) + delete the now-orphaned shared data/brandon_hedge_legs.json.
+- MKT-047 PER-SIDE OTM-skip + calendar per-entry P&L booking (2026-07-06). (1) The
+  EOD-flatten OTM-skip was PER-ENTRY all-or-nothing — it only skipped an entry when
+  EVERY alive short was >= the cushion, so one at-risk side force-closed the whole
+  entry including a far-OTM sibling side. On 2026-07-06 variant C's short calls were
+  ~18pt OTM (< cushion) while the short puts were 72-77pt OTM: both entries flattened
+  in full, buying the worthless puts back for a needless debit + close commission and
+  giving back ~$215 of a ~$215.60 would-be day (booked $105 realized − $104.65 comm =
+  $0.35 net). Fix: `_eod_flatten_can_skip_side(entry, side)` gates each side
+  independently and `_close_entry_early(entry, skip_sides=...)` leaves the safe
+  side(s) UNTOUCHED to ride to free worthless expiry, flattening only the at-risk
+  side — the pre-expiry tail protection is preserved where it matters. The
+  whole-entry `_eod_flatten_can_skip` fast-path is retained. Threshold default
+  lowered 25 → 20pt to match the 84-day final-10-min max move (18.4pt). Shared by
+  A/B/C (one strategy.py path). (2) Calendar per-entry attribution: `_dc_close_calendar`
+  (CAL-STOP + CAL-EOD-CLOSE), `_dc_settle_entry` (D), and `_spy_dc_partial_close` +
+  `_dc_settle_entry` (E) booked realized P&L straight to `daily_state.total_realized_pnl`,
+  leaving `entry.realized_pnl` at 0.0 and tripping the settlement RECONCILE drift guard
+  (2026-07-06 D: sum $0 != total −$340). All four now route through
+  `_book_realized_pnl(entry=...)`; aggregate unchanged, per-entry populated (unblocks
+  slot_edge on the calendars). +14 tests (per-side gate/exec/leg-exclusion + calendar
+  per-entry); full suite 1888 passed.
+- MKT-047 OTM-skip + dashboard EOD-flatten labeling (2026-06-25). (1) The EOD
+  safety flatten now LEAVES a 0DTE entry whose every alive short is >= 25pt OTM
+  (config eod_flatten.skip_otm_pts) to cash-settle worthless for FREE, instead of
+  paying to buy it back in the un-closable window. Data-derived: over 84 days SPX
+  never moved >= 20pt in the final 10 min (max 18.4), so a >= 25pt-OTM SPXW short
+  (cash-settled, no assignment) has ~0% settlement risk while closing it burns the
+  close cost + commission — 2026-06-25 variant C E#2 gave back ~$43 of a $210
+  credit closing a 53pt-OTM put. A skipped entry stays fully monitored (the stop
+  net is unchanged) and is booked solely by settlement, which books the rare ITM
+  tail as a real loss (audited PASS). An entry with ANY alive short within the
+  cushion is still fully closed; skip_otm_pts=0 restores the always-close behavior.
+  (2) Dashboard: an EOD-flatten was mislabeled as "Expired"/a red stop dot (the
+  early-close reuses *_side_expired); now rendered as a distinct "Flattened"
+  status with stop markers/realized-P&L gated on early_closed, and the backend
+  stamps close_reason="EOD_FLATTEN". DISPLAY-only. +12 tests (eod-flatten 26 incl.
+  10 OTM-skip; dashboard); full suite 1847 passed.
+- Hold-if-safe cushion 25 → 50pt (2026-06-23, Brandon B/C). Data-derived: 84
+  trading days of SPX 1-min paths show a short held to expiry from the final hour
+  is TOUCHED 26.5% of the time at a 25pt cushion but only ~4-5% at 50pt. Riding
+  to expiry instead of taking the ~80% TP gains only ~20% of a thin credit
+  (~$12/contract) against a near-max-loss stop on a breach, so it is +EV only
+  below a ~3-7% reversal rate — making the old 25pt decisively −EV and 50pt the
+  break-even threshold. Code default raised (B/C leave the knob unset); the
+  time-window widening, a shadow logger, and VIX-scaling were all considered and
+  rejected (see docs/HYDRA_HOLD_IF_SAFE_ANALYSIS.md). +1 regression-guard test.
+- MKT-049 fail-CLOSED + POS-003 recent-close orphan suppression (2026-06-23).
+  Two live-C fixes after a market-hours review. (1) MKT-049 take-profit gate
+  SUPERSEDES its 2026-06-22 fail-OPEN behavior: it now FAILS CLOSED. The
+  net-of-cost gate (brandon/strategy.py _brandon_real_close_capture) returns None
+  ONLY when a SHORT leg (the cost driver) is unquoted/crossed; a worthless /
+  unquoted / crossed LONG leg is priced as $0 recovery and the side is still
+  computed from the short — so one dead long leg can't blind the gate to a
+  still-wide short side. And when real_capture is None the gate now HOLDS the TP
+  (protected by the GEX breach-exit + credit+buffer stop + expiry) instead of
+  closing on the optimistic mid. Why: on 2026-06-23 C E#1/E#2 fired TPs logging
+  ~88% MID capture but only ~46-50% REAL (E#2's call side closed at a −$30 loss)
+  because a worthless long_call went unquoted near expiry → the old fail-OPEN let
+  the mid TP through. The B/C-shared Brandon class means both variants get this.
+  (2) POS-003 hourly reconciliation no longer false-CRITICALs on the bot's OWN
+  just-closed legs while IBKR's positions feed lags them out: every successful
+  real close records its conid (_note_recent_close in base_strategy's
+  _close_position_with_retry chokepoint), and the orphan sweep
+  (_recon_suppress_recent_closes) suppresses orphans at conids closed within
+  RECON_CLOSE_SETTLE_GRACE_S (300s) — a close that PERSISTS past the grace (the
+  close didn't take) is still surfaced. The settle-confirm window was also bumped
+  30→60s. Dry-run variants never populate the recent-close set (the dry-run
+  early-return precedes the hook) and never reconcile. 2026-06-23: a TP-closed
+  leg lingered 83s, past the old 30s window → spurious CRITICAL + Telegram on C.
+  +13 tests (test_mkt049_tp_net_of_cost.py 17, test_reconciliation_settle_delay.py
+  +5); full suite 1817 passed.
+- Calendar (D/E) dry-run EDGE reader + settle-commission fix (2026-06-23). Built
+  the tool that answers the MVL-D audit's gating question ("V1 — edge sanity")
+  from D/E's forward dry-run record alone, so the build-or-don't-build decision
+  for MVL-D becomes data-gated instead of a guess: is a debit double calendar +
+  20%-debit stop NON-NEGATIVE EV, NET of commission, over a meaningful window?
+  New pure-stdlib module bots/hydra/dc_edge.py (+ thin CLI
+  scripts/analyze_calendar_edge.py) reads a variant's isolated dc_calendar.db
+  (dc_outcomes) and renders a verdict. Audit-hardened (2 independent adversarial
+  passes): (1) TRANSFORM SEGMENTATION — transformed outcomes are excluded from
+  the verdict (their dry-run P&L is a mid-pricing artifact that won't survive
+  real fills, audit §0.3); detection keys on per-outcome transform_credit>0, NOT
+  a join to dc_transformations (whose `date` is the transform day, not the entry
+  day, and would mis-match a multi-day transform). (2) COMMISSION-NET — the
+  verdict gates on realized_pnl − 2×close_commission (realized_pnl is booked
+  gross; the round trip is 2× the recorded close side). (3) Student-t (not z) CI,
+  gated on the usable return-series size, with a degenerate-sample guard + a
+  non-independence caveat (overlapping multi-day trades). (4) "DB not found" is
+  distinguished from "0 outcomes." Verdict tiers: INSUFFICIENT_DATA (<10
+  trustworthy trades — TODAY's state: n=1) → PRELIMINARY_* (<30) → EDGE_POSITIVE
+  / EDGE_NEGATIVE / INCONCLUSIVE / DEGENERATE_SAMPLE. The settle-path fix: D's +
+  E's `_dc_settle_entry` leftover-close backstop now stamps entry.close_commission
+  (4 legs, mirroring _dc_close_calendar) so that rare path records commission
+  instead of $0 — otherwise the reader would over-state the edge on it. DRY-RUN
+  ONLY (D/E remain dry-run-locked); recording-only change, no trading behavior
+  altered. +30 tests (tests/test_dc_edge.py); full calendar/dc set 188 passed.
+- One-sided dry-run mark fix (2026-06-23). Put-only / call-only DRY-RUN entries
+  showed a deep-negative P&L even as SPX moved AWAY from the short (so they
+  should have been profitable — the reported variant-B bug). Root cause:
+  _simulate_put_spread_only / _simulate_call_spread_only never populated the leg
+  conids, so the heartbeat couldn't fetch real quotes and fell back to
+  _simulate_hydra_entry_prices — a moneyness-BLIND model whose units bug
+  (credit/100 instead of credit/(70×contracts)) started the spread VALUE at ~7×
+  the credit, i.e. an instant deep-negative P&L that then only time-decayed
+  (nothing to do with SPX direction). Fix 1: the one-sided sims now populate the
+  active side's conids + the REAL estimated credit (mirror _simulate_entry), so
+  the heartbeat marks from real quotes exactly like a full IC. Fix 2: the
+  fallback's initial leg prices now make the spread value start at the credit
+  (not 7×) — for the one-sided AND the full-IC branch (the same units bug lived
+  in `total_credit/200`; it surfaced as a ~−$1378 phantom on a full IC whose
+  conids were dropped by a restart-recovery). Fix 3 (the proper one): the
+  heartbeat now RE-RESOLVES missing leg conids from the persisted strikes
+  (`_repopulate_dry_conids`), so a dry-run entry that came back conid-less after
+  a restart marks from REAL quotes again instead of the crude fallback — the
+  fallback is now only a genuine last resort. Fix 4 (the shared-account leak):
+  the JOURNAL per-entry P&L (`_get_broker_pnl_for_entry`) summed BROKER positions
+  whose conid matched the entry's legs — but a dry-run bot holds NO real
+  positions; the SHARED IBKR account carries the LIVE variant's (C's) positions.
+  Once Fix 3 re-resolved B's conids to strikes overlapping C's, B's journal P&L
+  picked up C's real LOSING positions (Entry #3 read −$1452 against a $0 spread
+  value). Dry-run now returns the SIMULATED mark (`entry.unrealized_pnl`) and
+  never touches the shared account; live (C) keeps the real broker lookup.
+  Verified live post-deploy: B's four entries read +$125 / +$450 / +$400 / +$125,
+  each satisfying P&L = credit − (call_SV + put_SV). DRY-RUN ONLY — variant C
+  (live) places real orders with real conids and was never affected; the bug only
+  polluted B's dry-run head-to-head display. Tests:
+  tests/test_one_sided_dryrun_mark.py (12).
+- Backlog polish batch (2026-06-22). (item 2) CalendarStrategyBase now logs a
+  neutral [CAL-*] prefix instead of [DCTM-*] — the base runs for BOTH D and E, so
+  the DCTM (DC Time Machine = D) tag mis-attributed E's calendar plumbing to D;
+  D's own double_calendar_strategy.py keeps its legitimate [DCTM-*] tags, nothing
+  parses the tags. (item 6) Per-command Telegram variant selectors: /status,
+  /snapshot and /stops accept an optional variant token (e.g. `/status c`) and
+  render that NON-primary variant from its own state file via one unified view
+  (reuses _load_variant_state + _build_variant_summary); D/E point at /calendars,
+  A falls through to the full view. The dashboard-side items from the same review
+  (per-strategy History/Analytics, ConfigDelta baseline) and the decision to keep
+  the non-primary WebSocket on polling are tracked in docs/NEXT_STEPS.md §5.
+  Tests: tests/test_telegram_variant_selector.py (10).
+- MKT-049 net-of-cost take-profit gate (Brandon, 2026-06-22). The exit-side
+  mirror of MKT-048. Brandon's take-profit fires on the MID mark
+  (entry.*_spread_value), but a thin 0DTE credit spread CLOSES at
+  short_ask − long_bid, which can be many times the mid. On 2026-06-22 variant-C
+  E#2 the mid said "SV $17.50 → 87.5% captured", but the real close cost was
+  $105 (25% captured); after commission the $140 credit netted only +$2.80 — the
+  TP gave back ~75% to slippage it never saw, when holding the comfortably-OTM
+  put to expiry would have kept ~$140. Fix: _brandon_real_close_capture recomputes
+  the REAL net capture from live bid/ask (buy the short at ask, sell the long at
+  bid) minus close commission, and _brandon_check_take_profit DEFERS the close
+  when it's below brandon_tp_min_net_capture (default = the TP threshold, 0.80) —
+  the short then rides to expiry (100%, no close cost), still backstopped by the
+  GEX breach-exit + credit-buffer stop. FAIL-OPEN: a missing / crossed quote (or
+  any data error) returns None → falls back to the mid decision, so a flaky quote
+  never blocks a legitimate close. Gated by brandon_tp_net_of_cost_gate_enabled
+  (default true). Tests: tests/test_mkt049_tp_net_of_cost.py (13).
+- MKT-048 credit-gate fillability veto (2026-06-22). The 2026-06-22 variant-C
+  Entry#1 failed all 3 retries at leg 3 ("Short Call order failed", a HIGH
+  entry-window watchdog alert) while variant B "worked" — but only because B is
+  dry_run_shadow (simulated fills never test fillability). Root cause: MKT-011
+  decides side viability on MID prices, yet an IC side fills with the short at
+  its BID and the protective long at ~its MID (its buy-limit starts at mid), so
+  a side can clear the mid threshold while its fillable credit
+  (short_bid − long_mid) is a debit. The placement net-credit floor
+  (_sell_credit_floor_price) then correctly refuses to leg into a debit — but
+  only AFTER buying the protective long, so C bled the longs across 3 retries
+  and ended put-only anyway. Fix: _estimate_entry_credit_ib now stashes each
+  side's per-share fillable credit on the entry (in the quote read it already
+  does — no extra IBKR calls), and _check_credit_gate vetoes a still-viable but
+  unfillable side UP FRONT so the existing one-sided routing books it cleanly
+  (put-only / call-only / skip) with zero retries and no false alarm. FAIL-OPEN
+  (vetoes only on a debit the data CONFIRMS; a missing/crossed quote never
+  vetoes), gated by mkt011_fillability_gate_enabled (default true). Hardened by
+  an independent adversarial review: predict the long cost with its MID not its
+  ASK (long fills ≤ mid, so ASK over-vetoed fillable spreads — F1); _sane_bid
+  drops crossed books so a nonsense quote can't veto (F2); the per-share stash
+  is penny-rounded so a float-subtraction artefact can't trip `< floor` (F3);
+  and a tightened-put call-only retry re-checks fillability before committing
+  to a full IC (F4). Correct for A/B/C — only ever triggers on a side that
+  would have failed at leg 3/4 anyway. Tests:
+  tests/test_mkt048_fillability_gate.py (17).
+- E Friday-only expiries — the ACTUAL root cause of E never entering (2026-06-18).
+  A live broker probe (post strike-snap) showed E STILL skipped: get_option_chain
+  returns a generic, non-expiry-validated strike list for ANY weekday, so the old
+  prefer_friday=False picked an UNLISTED Monday/Wednesday short (e.g. 07-20) whose
+  conids never resolve (only Friday/monthly SPY expiries exist at 30+ DTE). Fix:
+  _pick_expiries filters candidates to Fridays (weekday==FRIDAY; the monthly 3rd
+  Friday is included) + prefer_friday=True, so both legs resolve. The strike-snap
+  below is kept as a secondary guard for monthly($5)-vs-weekly($1) grid mismatches.
+  Lesson (again): a LIVE entry-path probe is mandatory — unit tests with mocked
+  chains can't see that get_option_chain lists strikes the conid lookup won't qualify.
+- E strike-snap to the short∩long grid + shared-SPX dashboard chart (2026-06-18).
+  (1) Strategy E never entered because it rounded the ±EM target to a fixed $1 grid
+  then required that exact strike on BOTH expiries — but SPY monthlies use a $5
+  far-OTM grid vs the weeklies' $1, so it was unlisted on one leg and skipped every
+  day. Fix: new CalendarStrategyBase._dc_strikes_for_expiry lists each expiry's
+  strikes; E._calculate_strikes now snaps each EM target to the NEAREST strike in
+  the short∩long INTERSECTION (a listed-grid strike near ±EM beats a perfect-EM
+  strike that doesn't exist). (2) Per-strategy SPX candle charts were sparse/dotted
+  (esp. on no-trade days) because they read each variant's THROTTLED DB (only A
+  derives market_ohlc_1min; B/C ticks are api_pacing-thinned). Fix: the dashboard
+  snapshot now reads SPX bars from the SHARED main market-data DB (SPX is the same
+  index for all), so every view gets the dense series; entry markers stay
+  per-strategy. 4 E-strike tests + 2 snapshot-mirror tests updated; suite 1726.
+- MKT-047 gate — never EOD-flatten the multi-day calendars (2026-06-18). MKT-047
+  (the 0DTE expiry-window EOD flatten) is inherited by the calendar variants D/E
+  via the shared `_handle_monitoring`, and on 06-18 it WRONGLY force-closed D's
+  multi-day calendar at 15:50 ($-9.20) and left its sidecar stale. On a day D
+  transforms, it would flatten the risk-free IC the same afternoon and destroy the
+  multi-day hold. Fix: `_check_eod_flatten` returns None when
+  `requires_protective_wings` is False (the calendars set it False; the 0DTE ICs
+  keep it True) — D/E manage their own EOD via `_dc_manage_calendar`. 1 new test
+  (test_eod_flatten_safety.py::test_calendar_strategy_never_flattens); suite 1724.
+- Calendar dry-run REALISM — spread-crossing fill model for D + E (2026-06-17).
+  The calendar sim priced EVERY simulated fill at the bid/ask MID (entry debit,
+  transform credit, mark-to-market, liquidation), which made D's transform look
+  risk-free far cheaper + faster than crossing 4–6 real spreads allows (the
+  "+$845 locked in 47 min" artifact). New CalendarStrategyBase._dc_fill_price
+  crosses the spread — BUY toward ask, SELL toward bid — scaled by
+  config strategy.dry_run_fill_model.aggressiveness (default 1.0 = full touch,
+  the honest worst case for a marketable order; 0.0 = old mid; + an optional
+  extra_slippage_per_leg). Applied at: entry debit (_dc_simulate_entry, longs@ask
+  / shorts@bid → HIGHER debit), the live mark + every value-driven decision
+  (_dc_refresh_marks now marks at the LIQUIDATION fill — longs@bid / shorts@ask →
+  honest unrealized_pnl, profit-take ladder, %-stop, transform trigger, and the
+  daily close P&L), and D's transform credit (_dc_attempt_transform sells longs@bid
+  / buys wings@ask → LOWER credit, so the risk-free gate is honest and can now
+  DEFER when the spread eats the cushion). Covers D AND E (shared base). 11 new
+  tests (tests/test_calendar_fill_model.py); suite 1723 passed/15 skipped. Note:
+  E still can't ENTER until its EM-strike-on-both-expiries selection is fixed.
+- IBKR-audit #5b — settlement SPX fallback so an ITM-settled short isn't mis-booked
+  as worthless on a post-close restart (2026-06-17). Sibling bug to MKT-047: after C's
+  stop-close FAILED (leaving the ITM put unbooked), a post-close RESTART ran settlement
+  before the live SPX snapshot warmed up → _settlement_spx_level returned None →
+  _settlement_booked_pnl assumed worthless → the ~$3.1k max-loss put was booked as a
+  +$336.70 PROFIT (dashboard showed C as a winner). Fix: (1) persist last_spx_price in
+  the state file + restore it into self.spx_price on recovery; (2) _settlement_spx_level
+  now falls back to the last-known SPX (self.spx_price / current_price) BEFORE assuming
+  worthless — only assumes worthless with no reference at all. Latent for every live IC
+  (A/B unaffected today: A booked via stops on OTM-ending puts, B via dry-run stops; only
+  C, the live broker, hit the stop-close-fail + restart combo). 9 new tests
+  (tests/test_settlement_itm_spx_fallback.py); suite 1712 passed/15 skipped.
+- MKT-047 — EOD safety flatten + near-expiry MARKET escalation (2026-06-17).
+  Trading-safety fix for all 0DTE IC variants (A/B/C). Root cause: on the 06-17
+  FOMC selloff, variant C's E#1 put breached its credit+buffer stop at 15:57 but
+  EMERGENCY-001's marketable-limit closes "did not fill" and the 0DTE options
+  then expired ("Order is already expired" ×5) → full put-spread max loss (~$3.1k).
+  Two coupled fixes: (1) _check_eod_flatten/_execute_eod_flatten force-close every
+  open 0DTE short at a cutoff (default 15:50 ET, 15:40 on FOMC announcement days)
+  BEFORE the un-closable final-minutes window — a SAFETY exit, not profit-gated
+  like MKT-018, reusing the MKT-018 leg-closer (books real P&L, B2 naked-short
+  guard, Fix #81 worthless-long skip); idempotent per day; does NOT force
+  DAILY_COMPLETE so a failed leg falls back to normal monitoring/expiry. (2)
+  base_strategy._place_marketable_close escalates straight to a true MARKET order
+  when within eod_flatten_market_minutes (default 6) of the actual close (handles
+  early-close days via get_market_close_time) — a crossing limit chases-and-misses
+  a fast tape near expiry. Config: strategy.eod_flatten {enabled(true), time_et,
+  time_fomc_et, market_order_minutes}. Defaults ON for A/B/C; D/E (calendars)
+  unaffected (no 0DTE expiry, getattr default 0 → no escalation). 17 new tests
+  (tests/test_eod_flatten_safety.py); full suite 1703 passed/15 skipped.
+- Strategy D — live mark for TRANSFORMED positions (2026-06-17). Observability-only;
+  A/B/C byte-unchanged, no trading-decision change. A transformed (risk-free, held-to-
+  expiry) calendar was never re-marked — _check_stop_losses only managed CALENDAR-phase
+  entries — so its MTM (CalendarEntry.unrealized_pnl) stayed pinned at the transform-time
+  leg prices (e.g. frozen at +$310 for 44+ min while SPX moved). Now _check_stop_losses
+  refreshes the legs of TRANSFORMED entries each tick (no management action) and persists
+  the sidecar, so the heartbeat + Telegram /calendars + dashboard DC card show a LIVE mark
+  converging toward the locked floor (transform_credit − net_debit). Sidecar now carries
+  unrealized_pnl + pnl_pct (output-only; deserialize ignores them); both readers
+  (bots.hydra.dc_status + dashboard dc_reader) expose them; the DC card renders a "Live MTM"
+  row. Costs 4 quote reads + 1 small sidecar write per tick while a transformed calendar is
+  held (D's api_pacing_multiplier governs cadence). E unaffected (E never transforms).
+- Strategy E (SPY double calendar) + strategy-grouping/naming redesign (2026-06-16).
+  All dry-run / additive — A/B/C/D byte-unchanged. Feature branch.
+  - New strategy E: SpyDoubleCalendarStrategy (registry "spy_double_calendar", "SPY Double
+    Calendar"), a MANAGED SPY double calendar (net-debit call calendar above spot + put
+    calendar below), expected-move strikes, low-IV entry gate (VIX proxy), laddered
+    profit-taking, NO hard stop, never held to expiry. Dry-run-LOCKED. Sibling of D via a
+    new shared base CalendarStrategyBase (D's calendar plumbing lifted verbatim — D stays
+    byte-identical; its 135 tests pass with zero edits). Go-live gates (in the class
+    docstring): SPY American early-assignment/dividend handling; multi-contract ladder
+    net_debit scaling; true IV-rank gate; the shared-account coexistence MUST-FIXes.
+  - Strategy taxonomy (shared/strategy_taxonomy.py): single source of truth keyed by the
+    unchanged variant letter → display_name + comparability group (ic_0dte credit {a,b,c}
+    / calendar_multiday debit {d,e}). main.py banner is taxonomy-driven and FAIL-STOPS if
+    the runtime-resolved strategy class disagrees with the table. The alert-wire bot_name,
+    the anti-spam fingerprint, and HOMER's Sheets anchors stay FROZEN.
+  - Comms: alerts/Telegram/email show display names + group labels (additive payload
+    fields; Cloud Function renders with bot_name fallback); /compare is group-scoped (bare
+    = the 0DTE-IC group; /compare calendars = the calendar group via a calendar-native,
+    no-IC-field renderer); /help regrouped by group; poller stays variant-A-only.
+  - Dashboard (read-only): group-aware /api/strategies API + a debit-native DCDBReader
+    (no IC-field leakage); a main-page strategy picker (header re-binds to the selection,
+    no cross-strategy toasts), group comparison tabs (credit IC and debit calendar never
+    share a P&L axis), and EOD auto-update (cumulative + end-of-day cards refresh at close,
+    no manual reload). Full suite 1680 passed / 15 skipped.
+- Strategy D hardening + dashboard put-only/metrics fixes (2026-06-16). D is dry-run
+  (no real money). Triggered by C's GEX-routed put-only day + D's premature stop.
+  Strategy D (double_calendar_strategy / DoubleCalendarStrategy), bot-side:
+  - Premature-stop fix: _dc_close_calendar no longer RE-refreshes marks (it booked a
+    different value than the noisy tick that triggered the close — a -20% trigger
+    booked at -6.3%); the 20%-debit stop now requires the breach to PERSIST
+    dc_stop_confirm_seconds (default 20s) before closing, clearing on recovery
+    (MKT-046 analogue). Optional real-time quote gate (dc_require_realtime_quotes,
+    default OFF — the persistence window is the primary defense).
+  - Calendar-native observability (the inherited IC heartbeat showed 'Credit $0 /
+    -469% cushion / SV ignoring the debit'): get_detailed_position_status override
+    (phase, Kc/Kp, both expiries, debit, value, P&L %-of-debit);
+    _calculate_capital_deployed override (sum of OPEN net_debit, was the $500 wing
+    notional < the $1035 debit); _calculate_max_loss_with_stops/_catastrophic
+    overrides (stop_pct×debit / full debit, not IC stop math).
+  - Lifecycle/BP: concurrent-calendar cap (dc_max_concurrent, default 1) + per-
+    variant BP budget (dc_max_deployed_debit, default $5000 — MUST-FIX #3, caps D's
+    footprint on the shared account); calendar-aware get_monitoring_mode (vigilant
+    near the stop/transform triggers and during a stop-confirm, vs the inherited
+    always-normal ~12.5s). Multi-day realized-P&L was already correct (cost basis on
+    the carried entry; realized booked at settlement) — the stale TODO was corrected
+    to document it. Tested 15/15.
+  Dashboard (read-only): EntryCard shows strikes for put-only/call-only entries (the
+  short_call_strike>0 gate hid them); PerformanceMetrics gates annualized ratios
+  behind >=20 trading days (a tiny sample made Sharpe=111 and Sortino/Calmar/PF/WL=INF);
+  PositionHeatmap axis includes the live SPX (far-OTM put-only had spot off-chart).
+  NOTE: C's tiny put-only credit on 06-16 ($70 vs $455 on 06-15) is NOT a bug — the
+  GEX strike-adjuster skipped the call side (call short within 25pt of a negative-GEX
+  accel-zone peak at 7565) → put-only; 06-15 had no accel wall near the call → full
+  ICs. Side effect: put-only credit barely clears commission (~$16-18) — a strategy-
+  tuning concern (consider a min-credit floor), not an error.
+- Variant-C TP / reconciliation / alert hardening + dashboard observability (2026-06-15).
+  Bot-side behavior changes (live on A/B/C after this restart):
+  (1) Variant-aware alerts — AlertService bot_name is now HYDRA / HYDRA_B / HYDRA_C
+      (was a generic "HYDRA" for all three), so every email/Telegram alert says WHICH
+      variant fired and each variant gets its own dedup namespace (base_strategy reads
+      the HYDRA_VARIANT_ID suffix). Cloud Function uses bot_name only as a label, so
+      delivery is unaffected.
+  (2) DataRecorder schema v11 — trade_stops gains exit_reason (stop_loss / take_profit /
+      gex_breach / early_close); HydraStrategy._record_stop_to_db threads it (Brandon
+      TP/breach tagged from close_reason). Additive + nullable migration. The dashboard
+      Stops/Survival analytics now exclude profitable Brandon take-profit exits from
+      "stops" (exit_reason, with a net_pnl<0 fallback for pre-v11 rows).
+  (3) POS-003 reconciliation confirm-before-alarm — IBKR's positions endpoint lags fills
+      ~20-40s, so a reconciliation racing a just-executed close read STALE quantities and
+      fired a false CRITICAL "orphan" + HIGH "mismatch" (2026-06-15 variant C, 25s after
+      E#2's TP). The FIRST detection now schedules a 30s settle re-check (non-blocking,
+      _recon_recheck_at) and only alerts/acts on what persists — also stops
+      _handle_position_discrepancies from marking a live leg stopped off a stale qty=0.
+      Merge attribution was already correct (_expected_position_quantities sums per conid),
+      so same-strike multi-entry positions reconcile by net quantity.
+  (4) Brandon take-profit — worthless-leg fix + near-expiry hold-if-safe. The old guard
+      skipped TP whenever a side's spread_value==0 (assumed "stale quote"); a genuinely
+      worthless leg is also $0, so a worthless-leg IC could NEVER take profit (C E#1's
+      7450 put rode to expiry instead). Now a $0 is trusted when the short is >=
+      worthless_otm_pts OTM (default 20); and in the final hold_to_expiry_minutes
+      (default 60) a comfortably-OTM IC (every live short >= hold_safe_cushion_pts,
+      default 25) is held to expiry (keeps 100%, zero close cost) over an 80% TP that
+      pays slippage + commission — the credit+buffer stop still backstops a reversal.
+      Knobs under strategy.brandon.take_profit; pure helpers _tp_value_trustworthy /
+      _tp_hold_to_expiry, tested.
+  Read-only dashboard (no bot behavior): comparison-page per-side stop visibility +
+  "cost"/"cushion" relabel + SIM vs PAPER-$ badge + distance-to-stop + per-contract
+  leaderboard; main/history/analytics correctness (conditional PUT/CALL-ONLY badge,
+  one-sided strikes, Brandon TP no longer shown as a red loss, cumulative-P&L color);
+  chart-tick accessibility contrast/size.
+- Strategy D — strike-selection latency + both-expiry SHOWSTOPPER fix (2026-06-15,
+  dry-run-only, A/B/C byte-identical): a LIVE entry-path exercise on the VM broker
+  (read-only, market hours — the audit that code review + unit tests could not do)
+  found D's real entry took ~4 MINUTES and then SKIPPED anyway. Root causes: (1)
+  _dc_delta_target_strike scanned greeks for up to ~40 COLD conids/side (each
+  snapshot warmup ~2-4s) ≈ 95s/side; (2) _dc_pick_expiries' day-granular listed-
+  filter added ~50s of per-candidate broker calls; (3) it picked the ~Δ strike on
+  the SHORT expiry without checking the LONG lists it, so the long leg failed to
+  resolve and the whole entry was discarded. A ~4-min broker burst would also
+  saturate the ONE shared calypso-broker session and add latency to LIVE C. FIX
+  (bounded delta-scan, user-chosen): _dc_pick_expiries is now PURE/fast (returns
+  (short, [long candidates]) — no broker calls). _calculate_strikes centers a small
+  strike window on the VIX-expected-move estimate (em_1sd × delta_otm_fraction ≈ 35Δ
+  OTM distance), fetches each expiry's chain ONCE (one _read_option_chain per expiry
+  returns both call+put maps over a combined window) and hands the maps to
+  _dc_pick_delta_strike, which SEEDS at the both-expiry strike nearest the estimate
+  and STEP-SEARCHES toward target Δ — |delta| is monotonic in OTM distance, so it
+  reads ~1-4 cold greeks/side (capped at delta_max_reads, default 6) instead of the
+  ~40-cold-scan (~95s/side) or the first bounded pass that still read 10/side (~67s).
+  _calculate_strikes iterates the long candidates so a thin long expiry falls back to
+  the next instead of skipping. The both-expiry intersection (short_map ∩ long_map)
+  is the real gap-day guard (a strike unlisted on the long is structurally excluded),
+  making the prior month-granular/ATM-only filter unnecessary (removed). New config
+  knobs: delta_otm_fraction (0.40), delta_window (8), delta_max_reads (6). Expected
+  broker work per long candidate: 2 chain reads + ~1-4 cold greeks/side (down from
+  ~4 chain + ~10-40 greeks). Tests rewritten for the new signatures (seeded step-
+  search, both-expiry intersection, long-candidate fallback); full suite 1553 passed.
+  D remains dry-run-LOCKED + STOPPED/undeployed pending the live VM entry-path re-test
+  (must confirm seconds-not-minutes + all 4 legs resolve + net_debit>0). Lesson: a
+  live entry-path exercise is mandatory before trusting D — latency + real strike/
+  expiry listing can't be seen statically.
+- Strategy D — post-audit re-review fixes (2026-06-15, dry-run-only, A/B/C
+  byte-identical): a 14-agent independently-verified re-review of the 3 post-audit
+  commits found 0 critical / 0 high / 2 medium / 8 low (deduped to 3 real issues).
+  Fixed: (MEDIUM) the expiry-listed filter was a NO-OP — get_option_chain is
+  MONTH-granular (JUN26 covers all June expiries) so a gap weekday (Jun 29) still
+  looked listed; _dc_expiry_is_listed is now DAY-granular (resolves one ATM conid
+  at the exact expiry via _get_option_uic → qualify_option_strikes' maturityDate
+  filter, the same path the legs resolve through), so gap days are genuinely
+  excluded (the misleading get_option_chain-mock test was rewritten). (LOW)
+  _dc_close_calendar now calls _save_state_to_disk (crash-window guard) so a stop/
+  EOD close is persisted immediately — a crash before the next heartbeat can no
+  longer re-adopt a CLOSED calendar as open from a stale sidecar (mirrors
+  _dc_settle_due / _initiate_entry). (LOW) refreshed stale 'backtesting.db'
+  docstrings (dc_recorder, dc_reader) + clarified that variant_d_backtesting_db is
+  the market-tick DB while the calendar tables live in dc_calendar.db. The
+  prior fail-safe (a gap-day pick already failing cleanly at leg resolution) meant
+  none of these were trading-correctness or A/B/C risks. +1 test, full suite 1549.
+- Strategy D — close the 3 deferred-LOW review findings (2026-06-15, dry-run-only,
+  A/B/C byte-identical): (1) get_daily_summary OVERRIDDEN in D to zero the
+  IC-credit-vertical breakdown (expired_credits/stop_loss_debits) and report
+  realized P&L from total_realized_pnl — a settled CalendarEntry's transform-time
+  call/put_spread_credit can no longer surface as a bogus expired-credit. (2)
+  _dc_settlement_spx now uses HYDRA's _resolve_spx_close (current_price, else the
+  day's last recorded SPX tick) so a LATE settlement doesn't mark against a
+  post-close current_price decayed to 0 (still the recorded close, not the
+  official SPXW SOQ — a documented dry-run fidelity limit). (3) D's calendar DB
+  tables moved to their OWN file (data/variant_d/dc_calendar.db), separate from
+  the shared backtesting.db the base DataRecorder uses — eliminates the
+  two-connections-on-one-file concern entirely (readers/Telegram/dashboard
+  repointed). +3 tests; full suite 1549 passed. D still dry-run-LOCKED, undeployed.
+- Strategy D — live two-expiry probe + expiry-gap fix (2026-06-15, market-hours
+  VM probe): the gating market-hours check (two simultaneous SPXW expirations via
+  the live calypso-broker session, read-only — no deploy, no A/B/C restart)
+  CONFIRMED the capability: both a Fri 11-DTE short and a Tue +4 long return full
+  chains (714 strikes), conids, quotes, and delta/vega/theta, with the long leg
+  correctly dearer. TWO findings: (1) IBKR's snapshot returns delta/gamma/vega/
+  theta but NOT implied_vol (field 7633) for SPXW even after warmup [WRONG — SEE
+  THE 2026-09-10 ENTRY: IBKR DOES return 7633; our own parser was discarding it,
+  because IBKR percent-suffixes it as a string and `float('11.8%')` raised into a
+  swallowed except. Not a feed limitation.] — D's CRITICAL
+  path (delta-target strikes, mid-based debit, credit-gated transform) does NOT
+  use IV, only the informational _dc_front_back_iv signal does (and it already
+  degrades to 'no signal'), so D operates fully; the term-structure signal is just
+  unobservable on this feed (the offline backtest with real IV is the edge gate).
+  (2) BUG FIXED: SPXW has expiry GAPS (Jun 29 is a weekday but NOT a listed
+  expiry; Jun 30 is) — generate_candidate_expiries assumed every weekday is
+  listed, so D could pick a non-existent long and fail to resolve. _dc_pick_expiries
+  now filters generated candidates to ACTUALLY-listed chains (_dc_expiry_is_listed
+  via a cheap get_option_chain check) before selecting, so D skips gap days. +1
+  test; full suite 1546 passed. D still dry-run-LOCKED, undeployed.
+- Strategy D — adversarial-review fixes (2026-06-14, dry-run-only, A/B/C
+  byte-identical): a 26-agent independently-verified review of the full Phases 0-7
+  build found 0 critical / 2 high / 1 medium / 14 low (all D-internal or dry-run-
+  fidelity; A/B/C confirmed untouched). Fixed: (HIGH) sidecar clobber on startup —
+  _dc_save_sidecar is now guarded by a _dc_loaded flag (set before super().__init__)
+  so the base recovery/reset can't overwrite the real sidecar with an empty list
+  before _dc_load_sidecar reads it; (HIGH) _reset_for_new_day duplicated carried
+  calendars when the base reset early-returns (broker outage/STATE-004) — now
+  identity-deduped; (MEDIUM) _dc_simulate_entry rejects a net-credit/zero
+  "calendar" (inverted term structure) instead of opening an unmanaged position;
+  (LOW) wing_width stamped at OPEN (fixes spread_width/capital_deployed=0 in the
+  CALENDAR phase); (LOW) _dc_refresh_marks returns freshness and _dc_manage_calendar
+  acts on transform/stop ONLY when all leg marks are fresh this tick (EOD close
+  stays time-based); (LOW) leg conids nulled on close/settle (no spurious base
+  reconcile pass); (LOW) settlement persists base state + sidecar (not just
+  sidecar); (LOW) pick_calendar_expiries backtracks when the preferred Friday
+  short has no long in the gap; (LOW) dc_status opens the DB read-only (matches the
+  dashboard reader); (LOW) refreshed stale "SCAFFOLD/STUBBED" docstrings + config
+  comments. DEFERRED (documented, contained): the IC-credit-vertical daily-summary
+  leak (LOW — every D output sink is disabled, fix before enabling D sheets/
+  alerts), settlement marking against the intraday SPX vs the official PM/SOQ
+  close (dry-run fidelity), and two DataRecorder connections on one DB (fine under
+  WAL, single-threaded). The Telegram-poller-gated-to-A change is INTENDED (it
+  fixes the live multi-poller race), not a regression. +5 tests; full suite 1545.
+- Strategy D Phase 7 — D-native Telegram + dashboard observability (2026-06-14,
+  dry-run-only, completes the dry-run build): D is surfaced through its OWN view,
+  NOT folded into the 0DTE iron-condor /compare or dashboard _VARIANT_IDS
+  (credit/Sharpe head-to-head is apples-to-oranges for a multi-day net-DEBIT
+  calendar — the Phase-0 exclusions stay, by design). (1) bots/hydra/dc_status.py
+  (pure): reads D's sidecar (open calendars) + dc_outcomes and renders them;
+  build_telegram_calendars (HydraStrategy) + a new /calendars Telegram command
+  (variant A's poller renders D cross-variant — only A polls per Phase 0).
+  (2) Dashboard: dashboard/backend/services/dc_reader.py (dashboard-owned pure
+  reader, no bot import) + GET /api/dc/status (routers/dc.py) returning D's open
+  calendars + outcomes + summary; registered in dashboard main. A React DC panel
+  consuming /api/dc/status is the remaining UI polish (needs a frontend build +
+  browser to verify — not doable offline). +10 tests; full suite 1540 passed.
+  This completes the dry-run build (Phases 0-7). REMAINING before any go-live
+  consideration: run _dc_probe_two_expiry_data on the VM (live non-0DTE
+  entitlement/warmup, the one offline-unverifiable assumption) and, ideally, an
+  offline historical backtest go/no-go. D dry-run-LOCKED, undeployed.
+- Strategy D Phase 6 — calendar DB schema (2026-06-14, dry-run-only, shared
+  DataRecorder UNTOUCHED, A/B/C byte-identical): D records its trades truthfully
+  in its OWN isolated DB (data/variant_d/backtesting.db). New bots/hydra/
+  dc_recorder.py:DCDataRecorder owns calendar-shaped tables — dc_calendar_entries
+  (debit, 2 expiries, DTEs, conids), dc_transformations (transform_credit,
+  is_risk_free, wing strikes), dc_outcomes (terminal_state + realized_pnl with
+  BOTH entry_date and close_date so P&L attributes to the entry date), and
+  dc_calendar_snapshots — all CREATE IF NOT EXISTS with their own dc_schema_info,
+  so NO shared SCHEMA_VERSION bump (A/B/C DBs unmigrated). The shared DataRecorder
+  is left exactly as-is. Wired into D: record_calendar_entry in _initiate_entry,
+  record_transformation on a fired transformer, record_outcome on stop/EOD/
+  settlement; and _record_heartbeat_to_db is OVERRIDDEN to write the generic
+  market tick + dc_calendar_snapshots instead of the IC-shaped spread_snapshots
+  (call/put_spread_value in IC-named columns would mis-describe a debit calendar).
+  All writes fire-and-forget (never block trading); a bad DB path degrades to a
+  no-op. +6 tests; full suite 1530 passed. STILL: Telegram/dashboard Phase 7; sim
+  fidelity rests on live two-expiry mids (run _dc_probe_two_expiry_data on the
+  VM). D dry-run-LOCKED, undeployed.
+- Strategy D Phase 5 — multi-day persistence + per-expiry settlement (2026-06-14,
+  dry-run-only, ZERO base edits, A/B/C byte-identical): D survives restarts and
+  books P&L on the right date. Persistence is a SIDECAR (data/variant_d/
+  dc_open_trades.json — the Brandon-hedge precedent) so the fix-scarred 0DTE base
+  save/load is NOT touched: _save_state_to_disk calls super() (base file
+  unchanged) then writes the sidecar with the multi-day fields the fixed IC
+  schema can't hold (dc_phase, per-leg expiry, net_debit, transform_credit,
+  wing_width, is_risk_free, flags); _recover_positions_from_saxo calls super()
+  (base today-only recovery) then _dc_load_sidecar re-adopts open calendars —
+  including ones opened on a PRIOR day, which the base date!=today guard drops —
+  replacing any base-loaded IC-shaped version by strategy_id. Settlement:
+  check_after_hours_settlement now calls _dc_settle_due — any position whose SHORT
+  expiry has arrived settles at the SPX close: a TRANSFORMED IC books
+  transform_credit - net_debit - IC-intrinsic (each side capped at the wing; >= 0
+  when the risk-free gate held), a leftover CALENDAR liquidates at mark; both mark
+  CLOSED + side-expired so active_entries drops them. +8 tests (serialize/load
+  round-trip, dedup, CLOSED-exclusion, OTM/ITM settlement, settle-due past/future/
+  spx-defer). Full suite 1524 passed. STILL: DB Phase 6, Telegram/dashboard Phase
+  7; sim fidelity rests on live two-expiry mids (run _dc_probe_two_expiry_data on
+  the VM). D dry-run-LOCKED, undeployed.
+- Strategy D Phase 4 — transformer + risk controls (2026-06-14, dry-run-only, NO
+  running-bot behavior change while undeployed): _check_stop_losses is now real —
+  the DC Time Machine's defining mechanic. Per open calendar each tick
+  (_dc_manage_calendar, priority order): (1) at >= dc_profit_trigger_pct profit,
+  attempt the TRANSFORMER (_dc_attempt_transform) — sell the 2 back-dated longs +
+  buy wings at Kc+wing / Kp-wing on the SHORT expiry, and FIRE ONLY IF the
+  realized transform credit >= net_debit + wing_width*100*contracts (structurally
+  risk-free); on fire the long legs become the wings (calendar -> same-expiry
+  iron condor), dc_phase -> TRANSFORMED, is_risk_free set, [DCTM-TRANSFORM] +
+  [DCTM-RISKFREE] logged; if the gate fails it HOLDS (no non-risk-free transform).
+  (2) else at <= -dc_pre_transform_stop_pct (default 20% of debit) -> hard close
+  ([DCTM-STOP]). (3) else past the EOD cutoff (dc_eod_cutoff_et, default 15:55) ->
+  EOD-day-1 close ([DCTM-EOD-CLOSE]). A closed calendar books realized P&L from
+  the mark, marks CLOSED, and sets side-done flags so active_entries drops it; a
+  TRANSFORMED position holds to expiry (settled in Phase 5). +9 tests; full suite
+  1516 passed. STILL: cross-restart persistence Phase 5, DB Phase 6, Telegram/
+  dashboard Phase 7; sim fidelity rests on live two-expiry mids (offline-
+  unverified — run _dc_probe_two_expiry_data on the VM). D dry-run-LOCKED, undeployed.
+- Strategy D Phase 3 — entry + dry-run simulation (2026-06-14, dry-run-only, NO
+  running-bot behavior change while undeployed): D's actual entry path. (1)
+  _dc_delta_target_strike — scans on-grid OTM strikes outward from spot, reading
+  per-strike delta from the broker greeks, and picks the strike closest to
+  dc_target_delta within dc_delta_band (the 30-40delta short selection). (2)
+  _calculate_strikes — picks the two expiries + the call/put short strikes and
+  stamps them on a CalendarEntry (short+long of a side share the STRIKE, differ
+  in EXPIRY). (3) _dc_simulate_entry — opens the net-DEBIT double calendar from
+  REAL mids (no broker order; net_debit = buy-longs - sell-shorts; synthetic DRY
+  ids + per-leg fills). (4) _initiate_entry — orchestrates gates -> strikes ->
+  simulate -> book (debit, 4-leg commission, state save). (5)
+  _min_buying_power_per_unit overridden to a debit-based floor
+  (min_buying_power_per_calendar, default $2000/contract) since a calendar's
+  defined risk is the debit, not the IC floor. D stays dry-run-LOCKED — no real
+  order ever reaches the broker. +12 tests; full suite 1507 passed. KNOWN GAPS
+  (by design): _check_stop_losses is still a Phase-4 stub (an opened calendar
+  HOLDS with no transformer/stop/EOD-close yet); DB recording is Phase 6;
+  cross-restart persistence of dc_phase/expiry is Phase 5; and the simulation's
+  fidelity depends on the live two-expiry mids whose entitlement/warmup is still
+  offline-unverified (run _dc_probe_two_expiry_data on the VM). D is NOT deployed.
+- Strategy D Phase 2 — two-expiry data layer (2026-06-14, dry-run plumbing, NO
+  running-bot behavior change): the broker-data plumbing to pick + read BOTH
+  expirations. (1) New bots/hydra/calendar_chain.py (pure, broker-free):
+  generate_candidate_expiries (trading-day SPXW candidates, holiday-aware) +
+  pick_calendar_expiries (short = in-window expiry, prefer the following-week
+  Friday; long = smallest gap in [long_extra_min, long_extra_max] after it). (2)
+  DoubleCalendarStrategy gains thin wrappers over the EXISTING broker-data
+  methods called with explicit non-0DTE expiries: _dc_pick_expiries,
+  _dc_resolve_calendar_legs (4 conids across 2 expiries via _get_option_uic),
+  _dc_read_iv / _dc_front_back_iv (per-expiry IV for the term-structure signal;
+  None — not 0 — on a flaky read), _dc_read_leg_quotes, and _dc_probe_two_expiry_data
+  (a LIVE on-VM diagnostic that verifies non-0DTE SPXW entitlement + snapshot
+  warmup — the one Phase-2 item that can't be checked offline). +25 tests; full
+  suite 1495 passed. STILL OFFLINE-UNVERIFIED: the live two-expiry entitlement/
+  warmup probe must be run on the VM in market hours before Phase 3 relies on it.
+- Strategy D Phase 1 — CalendarEntry foundation (2026-06-14, model-only, NO
+  running-bot behavior change): the two-expiration / net-DEBIT position model
+  every other D surface depends on. (1) Leg gains an additive optional `expiry`
+  field (bots/hydra/leg.py) — None on the 0DTE iron-condor family (byte-identical),
+  set per-leg on a calendar where the short/long of a side share a strike but
+  differ in expiry. (2) New bots/hydra/calendar_entry.py: DCPhase (moved here) +
+  CalendarEntry(IronCondorEntry). It SUBCLASSES IronCondorEntry so it reuses the
+  Leg bridge, active_entries recognition, state save/load and (conid,quantity)
+  reconciliation UNCHANGED — a double calendar's 4 legs map onto the canonical
+  leg names, and post-transform the longs move to wing strikes so it becomes a
+  genuine same-expiry IC — and OVERRIDES every economic property (total_credit /
+  spread_width / call+put_spread_value / unrealized_pnl) with phase-aware,
+  debit-rooted math so the IC credit-vertical formulas (which degenerate at
+  width=0 on same-strike legs) NEVER run for a calendar. Adds net_debit /
+  transform_credit / wing_width / is_risk_free + the risk-free invariant
+  (transform_credit >= net_debit + wing*100*contracts). double_calendar_strategy
+  now imports DCPhase/CalendarEntry from calendar_entry. A/B/C construct no
+  CalendarEntry, so they are unaffected. +18 tests; full suite 1478 passed.
+  (Phase 2+: two-expiry chain/quote, entry+sim, transformer, multi-day
+  lifecycle/state, DB, Telegram, dashboard — still to come.)
+- Strategy D "DC Time Machine" SCAFFOLD + Phase-0 coexistence safety (2026-06-14):
+  Adds Strategy D — a multi-day SPX double calendar that transforms into a
+  risk-free iron condor (Steve Burnich, video JtGW1wNFNIY) — as a dry-run-LOCKED
+  4th variant SCAFFOLD. New DoubleCalendarStrategy(HydraStrategy)
+  (bots/hydra/double_calendar_strategy.py): BOT_NAME="DCTM",
+  requires_protective_wings=False, a __init__ dry-run LOCK (ConfigError unless
+  dry_run=True, BEFORE super() — mirrors StrangleStrategy), a DCPhase enum
+  (CALENDAR/TRANSFORMED/CLOSED), multi-day lifecycle overrides (_reset_for_new_day
+  carries open positions across the daily reset instead of wiping; check_after_
+  hours_settlement treats a held position as normal, not "pending forever"), and
+  the three abstract hooks OVERRIDDEN to inert stubs so D never runs HYDRA's IC
+  logic. D opens NOTHING (stubbed entry) and cannot place a real order (lock +
+  stub). Registered in registry.py ("double_calendar"); config_variant_d.json +
+  deploy/hydra_variant_d.service added (HYDRA_VARIANT_ID=d, dry_run, alerts+sheets
+  OFF). Phase-0 safety so D can't disturb the live variants: (1) the Telegram
+  command poller is now gated to variant A ONLY (main.py) — getUpdates allows one
+  consumer per token, so B/C/D no longer each spin a poller; this also FIXES a
+  latent live B/C race. (2) print_banner is variant-aware (D gets a DCTM banner,
+  not "0DTE Iron Condors"). (3) /compare (strategy.py _discover_variant_ids)
+  excludes D — interim, until Phase 7 structure-aware rendering renders its
+  net-debit correctly instead of as a credit. (4) dashboard config pre-staged
+  (variant_d_* paths + accent) but 'd' deliberately NOT in _VARIANT_IDS yet. (5)
+  DCTM-* greppable log tags. Full build (entry/transformer/debit-P&L/two-expiry
+  sim/DB/dashboard) is planned (Phases 1-7, dry-run only) — NOT in this commit.
+  +14 tests (test_double_calendar_strategy.py + registry); full suite 1460 passed.
+- Alert anti-spam gate + Brandon strike-veto + %-of-width shadow (2026-06-11):
+  Three changes after a variant-C retry-loop flooded the inbox and the same day's
+  Entry#2 mis-placed a short. (1) AlertService gained a single anti-spam GATE at
+  the send_alert chokepoint (shared/alert_service.py): content-dedup per priority
+  window + per-type token bucket + global email ceiling, fail-open, with a
+  _NEVER_SUPPRESS set for halt/naked/breaker/emergency. _should_send_email was
+  reordered so _TELEGRAM_ONLY beats the CRITICAL/HIGH bypass (LOW = Telegram-only).
+  The Brandon orphan-close alert was re-typed EMERGENCY_CLOSE/HIGH + a 90s
+  per-(entry,side) cooldown so a doomed 0-leg close stops re-firing every tick;
+  the "IBKR session lost (will restart)" notice was demoted to LOW (self-healing
+  in broker mode); ARGUS got file-based cross-run dedup. (2) Brandon delta-target
+  PRICE VETO (brandon/strategy.py _calculate_strikes): the 0DTE delta the picker
+  keys off under-states moneyness ~2x, so the max_delta clamp passed a ~30delta
+  short selected as "8delta" (Entry#2 7250 put). After selection we estimate the
+  spread credit and fall back to the conservative OTM-multiplier when a side's
+  credit exceeds max_credit_pct_of_width of its width (default 0.20); fail-safe on
+  a flaky/0 estimate. (3) %-of-width stop SHADOW (narrow_spread_stop.shadow): logs
+  the would-fire trigger vs the acting credit+buffer without acting, for a
+  zero-risk head-to-head on live C before flipping the decoupled stop on. +26
+  tests; full suite 1425 passed.
+- L-C2 Brandon credit+buffer BACKSTOP (2026-06-10): on the Brandon variants
+  (B/C), HYDRA's credit+buffer stop now ACTS as a live backstop in BOTH GEX
+  states, not just when GEX is fully down (L-C1). Previously, when GEX was armed
+  the credit+buffer ran shadow-only and the GEX breach exit was the sole acting
+  stop — but the breach exit only fires when spot breaches a decel-wall EDGE,
+  which can sit far from the short (a wide/low wall, or a strike placed off a
+  stale-greeks profile). The 2026-06-10 variant-C Entry#1 put hit this gap: deep
+  ITM at ~16% cushion with the only decel wall 340pt below the 7290 short, so the
+  breach exit could never fire and the shadowed credit+buffer never acted — the
+  short rode unstopped toward max loss. Fix (brandon/strategy.py _check_stop_losses
+  step 3): the GEX breach still gets first crack (PRIMARY, returns early when it
+  fires); if it does not close a side, super()._check_stop_losses() runs as the
+  MKT-046-confirmed backstop. Mutually exclusive per tick → no double-stop. The
+  shadow check is retained as a ~10s early-warning (renamed BRANDON-HYDRA-BACKSTOP).
+  Pairs with the same-day stale-greeks guard (which prevents the mis-placement);
+  the backstop guarantees protection even if a short ends up far from the wall.
+  +1 test rewritten, +1 added (TestGexFallbackStop). Polygon-independent (the
+  credit+buffer reads broker quotes, not Polygon) — no subscription change needed.
+- 2.0.0-rc.1 modularity refactor — instrument parameterization (2026-06-08, NO
+  behavior change): the hardcoded SPX / VIX / SPXW / CBOE / 5pt-grid / 0DTE-expiry
+  literals are now config-driven via _load_instrument_params (underlying_symbol /
+  volatility_symbol / trading_class / exchange / strike_increment / target_dte),
+  each defaulting to today's literal so an absent config is byte-identical. A
+  startup assertion (ConfigError, subclass of ValueError) fails fast on an
+  unset/invalid value; class-level fallbacks on MEICStrategy keep __new__-built
+  objects safe. Threaded through: the option-chain path (qualify_contract /
+  qualify_option_strikes / get_option_chain gained an `exchange` param + the live
+  caller passes trading_class/exchange), the SPX + VIX index reads, the strike grid
+  (HydraStrategy._snap_to_grid + the MKT-020/022 + MKT-040 step sites + Brandon's
+  AdjusterConfig.strike_increment), and _get_todays_expiry (target_dte, weekday-aware;
+  exchange-holiday-aware expiry deferred). Item 2 of docs/MODULARITY_AUDIT.md /
+  docs/PR_SCOPE_LEG_INSTRUMENT.md. +29 tests (test_instrument_params); full suite
+  1189 passing.
+- 2.0.0-rc.1 modularity refactor — Leg/LegSet substrate (2026-06-08, NO behavior
+  change): IronCondorEntry's 24 flat leg fields (short_call_strike … *_mid_at_fill)
+  are now backward-compat @property bridges over a `legs` dict of first-class `Leg`
+  objects (bots/hydra/leg.py + bind_leg_bridge). Reads, writes, and dynamic
+  getattr/setattr all resolve to the legs; the on-disk state schema, serialization,
+  and all ~1,011 flat leg references are unchanged. Substrate for future
+  non-iron-condor strategies (strangle/butterfly/ratio/…) — item 1 of
+  docs/MODULARITY_AUDIT.md / docs/PR_SCOPE_LEG_INSTRUMENT.md. Pinned by 79 new
+  tests (test_leg, test_state_serialization_roundtrip, test_entry_leg_accessors);
+  full suite 1160 passing.
+- 2.0.0-rc.1 post-AUD5 go-live hardening (2026-06-03 → 06-04): the first real
+  live-paper fills exposed a cluster of IBKR-path bugs the dry-run masked.
+  • Phantom daily-summary (`4dd0a41`): the bot booted after the open into stale
+    prior-day state and wrote a daily summary from it (the duplicate Jun-3 row,
+    SPX=0). `_daily_summary_is_stale` now vetoes both the DB recorder and the
+    main.py after-hours write when the state's date ≠ today or close is 0.
+  • One-sided live entry (`57be626`): the Brandon GEX adjuster routes ~86% of
+    entries put-only, but the live `_execute_entry` placed all four legs
+    unconditionally → a $0.0-strike Long Call leg → "Entry failed at leg 1".
+    It now places ONLY the active side(s), mirroring the dry-run path.
+  • C1-sweep misses (`46b93c2`): the Saxo→IBKR migration's C1 fix (gate action
+    paths on the conid `*_uic`, since IBKR has no per-leg position id so
+    `*_position_id` is ALWAYS None live) fixed `_execute_stop_loss` but MISSED
+    its siblings. A 10-finder audit found `_close_entry_early` — the close
+    method behind BOTH Brandon take-profit AND GEX breach exit — still gated on
+    `*_position_id`, so the Jun-4 13:12 TP "closed 0 legs", orphaned the live
+    position, and booked $0 (the "+$285 → −$23" cliff). Fixed `_close_entry_early`,
+    `_execute_pivot_side_close`, `_count_active_position_legs`, and
+    `active_entries.has_any_position` to gate on `*_uic`. Brandon TP/breach exit
+    made fail-closed (mark a side stopped ONLY if a leg actually closed; else
+    CRITICAL log + orphan-close Telegram). Settlement `_process_expired_credits`
+    re-books a side a 0-leg TP/BREACH spuriously marked stopped (forward-safe;
+    genuine HYDRA stops are not double-booked). Recovery restores `is_complete`
+    and detects active entries conid-aware.
+  • Daily-summary Sheet idempotency (this commit): `log_daily_summary` removed
+    a day's existing row(s) before appending, so a legitimate same-day re-write
+    (restart / multi-pass settlement / manual correction) REPLACES rather than
+    appends a second row (the duplicate Jun-2 Sheet row). Mirrors the DB path
+    where `daily_summaries.date` is the PRIMARY KEY; self-heals pre-existing dups.
+  Tests: tests/test_aud5_fixes.py (+TestLiveCloseGating, TestRecoveryActiveEntries,
+  TestSettlementRebook, TestDailySummarySheetIdempotent),
+  tests/test_brandon_strategy_integration.py fail-closed updates — 1075 passing.
+
+- 2.0.0-rc.1 go-live hardening + AUD5 (2026-06-02): post-cutover fixes atop
+  rc.1. Context: the Saxo→IBKR cutover executed 2026-05-29 (A on IBKR paper;
+  B/C dry-run via the shared `calypso-broker` session service); commission
+  modelled at IBKR ~$1.15/leg (was Saxo $2.50, `078049f`); the 30-agent AUD4
+  migration audit fixed 79 findings (`38ac9d6`). The **AUD5** go-live audit
+  (20 domain agents + 3 meta-auditors + 16 backfill agents over `38ac9d6..
+  d83d50b`; see docs/migration/AUD5_FINDINGS.md) then fixed:
+  • GL-2: ORDER-004 buying-power gate no longer fails open on the IBKR path —
+    `margin_pct` is None there, and three f-strings formatted it with `.1f%`
+    (TypeError, swallowed by the broad except → gate silently skipped on every
+    live entry). Now rendered "n/a" via the existing `_util_str`.
+  • C-1: completed the real-time market-data gate that 651a5cc only half-built.
+    Index `current_price`/`current_vix` now refuse a quote whose 6509 flag is
+    Z/Y/N (frozen / frozen-delayed / not-subscribed), consistent with
+    MarketData.update_spx; `_check_market_halt` treats Y/N like Z; a new
+    `_option_quote_is_realtime()` gate (None/absent flag passes; explicit
+    non-'R' blocks) is wired into MKT-020/022 strike tightening and the MKT-033
+    salvage path, and `_read_option_quotes_batch` now surfaces `availability`.
+  • C-2: an empty position snapshot shrinks the Sheets Positions tab to
+    header-only instead of leaving the prior snapshot's stale rows.
+  • C-3: the post-settlement `log_performance_metrics` call uses a
+    throttle-exempt period ("End of Day") so the settled-P&L write isn't
+    dropped by the intraday Sheets-write throttle.
+  • GL-1: flip_a_live.sh / flip_ac_live.sh / broker_paper_smoke.py pin the
+    smoke PASS sentinel + the flip's freshness check to the Eastern (market)
+    day; flip_ac_live.sh's false "scheduled via systemd timer" comment
+    corrected — it is operator-run (manual); see RUNBOOKS RB-8.
+  Regression tests: tests/test_aud5_fixes.py. Doc sweep: PROJECT_STATUS,
+  strategy spec commission note, CALYPSO_IBKR_MAX_RPS comments (8→5),
+  data_recorder docstring, this history.
+
+- 2.0.0-rc.1 (2026-05-22, branch: hydra-ibkr-standalone): IBKR-standalone
+  migration. Saxo Bank → Interactive Brokers Web API (ibind OAuth 1.0a,
+  no gateway, no local container). All seven phases F1–F7 are
+  code-complete (see docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md):
+  F1 auth + LST handshake, F2 contract qualification, F3 option chain
+  via probed secdef behavior, F4 conid-quantity reconciliation (IBKR
+  has no per-leg position id), F5 closedpositions + activities for
+  fill-price authority, F6 order write-path with cOID dedup safety,
+  F7 broker-agnostic strategy read helpers + account balance. All
+  five P1–P7 cleanups: P1 imports + module purges, P2 dead Saxo
+  helper removal, P3 method ranges audit, P4 broker abstraction
+  flattening, P5 streaming subsystem, P6 retry + per-family circuit
+  breakers, P7 go-live (re-auth gate, systemd LoadCredentialEncrypted=
+  credentials, multi-agent code audit). The P7 audit found and fixed
+  4 Critical + 13 High + 17 Medium + 15 Low/Nit issues across the
+  branch — see docs/migration/P7_AUDIT_FINDINGS.md. This branch trades
+  IBKR paper only — there is no live-money path. The legacy `--live`
+  CLI flag is retained as a no-op for back-compat. Saxo client +
+  token_keeper service are kept on the main branch unchanged; HYDRA
+  uses neither on this branch.
+
 - 1.27.2 (2026-05-05 PM): Hedge position tracking for the defensive overlay.
   Closes the dry-run gap where overlay placements were logged but not journaled.
   New `bots/hydra/brandon/hedge_position.py` module: HedgeLeg dataclass,

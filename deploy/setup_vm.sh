@@ -1,7 +1,42 @@
 #!/bin/bash
 # =============================================================================
-# Calypso Trading Bot - GCP VM Setup Script
+# Calypso Trading Bot - GCP VM Setup Script (LEGACY — Saxo-era)
 # =============================================================================
+#
+# AUD2-M2 (2026-05-24): THIS SCRIPT IS LEGACY AND WILL FAIL ON THIS BRANCH.
+#
+# It was written for the Saxo-era Delta Neutral bot and references:
+#   - `calypso.service` (does NOT exist on this branch; HYDRA's unit is
+#     `hydra.service` and friends, with `LoadCredentialEncrypted=` for the
+#     6 IBKR OAuth credentials)
+#   - `calypso-saxo-credentials` Secret Manager secret (does NOT exist)
+#   - `token_keeper`-style setup (Saxo-only; OAuth 1.0a on IBKR is
+#     unattended — no refresh service needed)
+#
+# DO NOT RUN THIS SCRIPT on a fresh VM provisioning the IBKR-standalone
+# branch. It will install dead units and silently leave the VM in a
+# half-configured state.
+#
+# CORRECT VM PROVISIONING PROCEDURE:
+#   1. Follow `deploy/IBKR_CREDENTIALS_SETUP.md` for the 6 IBKR OAuth creds.
+#   2. Copy active units per `deploy/README.md` "How to install on a
+#      fresh VM" section.
+#   3. Run the mandatory 3-check pre-start verification before
+#      `systemctl enable hydra`.
+#
+# This script is preserved as a historical reference for the Saxo-era
+# bootstrap. When a fresh IBKR-era bootstrap script is written, it
+# should live alongside this one (e.g. `setup_vm_ibkr.sh`), NOT replace
+# this file.
+#
+# Hard exit so accidental sudo-runs fail loudly with this guidance.
+echo "AUD2-M2: setup_vm.sh is the LEGACY Saxo-era bootstrap and will FAIL" >&2
+echo "         on the hydra-ibkr-standalone branch. See the header for" >&2
+echo "         the correct procedure (deploy/IBKR_CREDENTIALS_SETUP.md +" >&2
+echo "         deploy/README.md). Aborting." >&2
+exit 99
+
+# ─── Original Saxo-era body retained below for historical reference ──
 # This script sets up a fresh GCP Compute Engine VM for running the
 # Calypso Delta Neutral Trading Bot.
 #
@@ -142,18 +177,24 @@ echo ""
 # Step 8: Install systemd service
 # =============================================================================
 echo -e "${YELLOW}[8/9] Installing systemd service...${NC}"
-if [ -f "/opt/calypso/deploy/calypso.service" ]; then
-    cp /opt/calypso/deploy/calypso.service /etc/systemd/system/
-elif [ -f "$SCRIPT_DIR/calypso.service" ]; then
-    cp "$SCRIPT_DIR/calypso.service" /etc/systemd/system/
-else
-    echo -e "${RED}calypso.service not found!${NC}"
-    echo "Please copy it to /etc/systemd/system/ manually."
+# I-M7: the legacy Saxo `calypso.service` (ExecStart=src/main.py) does NOT exist
+# on the IBKR-standalone branch — installing/enabling it would register a unit
+# that can never start while installing NONE of the real units (calypso-broker,
+# hydra, hydra_variant_{b,c}, dashboard, + agent timers). Refuse to install it
+# and point the operator at the real, current deploy units instead.
+if [ -f "/opt/calypso/deploy/calypso.service" ] || [ -f "$SCRIPT_DIR/calypso.service" ]; then
+    echo -e "${RED}Refusing to install legacy Saxo calypso.service (dead on this branch).${NC}"
 fi
+echo -e "${YELLOW}This cold-deploy script predates the IBKR-standalone unit set.${NC}"
+echo "Install the REAL units from deploy/ instead:"
+echo "  calypso-broker.service (owns the IBKR session — start FIRST),"
+echo "  hydra.service, hydra_variant_b.service, hydra_variant_c.service,"
+echo "  dashboard.service, + the agent .service/.timer pairs."
+echo "See deploy/IBKR_CREDENTIALS_SETUP.md and CLAUDE.md 'Cold deploy' for the"
+echo "mandatory pre-start credential verification before enabling anything."
 
 systemctl daemon-reload
-systemctl enable calypso.service
-echo -e "${GREEN}Done.${NC}"
+echo -e "${GREEN}Done (no legacy unit enabled — install the real units per the docs above).${NC}"
 echo ""
 
 # =============================================================================

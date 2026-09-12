@@ -10,6 +10,7 @@ All tests use mocked IbkrClient — no live IBKR calls.
 from __future__ import annotations
 
 import subprocess
+import time
 from datetime import date
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -25,6 +26,7 @@ from shared.ib_client import (
     IBClient,
     IBClientError,
     IBConfig,
+    RatePenaltyError,
 )
 from shared.ib_oauth import IBKRCredentials
 
@@ -61,14 +63,29 @@ def connected_client(paper_creds):
     mock_ibkr = MagicMock()
     auth_status = MagicMock()
     auth_status.data = {"authenticated": True, "connected": True, "competing": False}
+    auth_status.error = None  # Phase A.8: _ib_call → _unwrap checks .error
     mock_ibkr.authentication_status.return_value = auth_status
     portfolio_result = MagicMock()
     portfolio_result.data = [{"accountId": "DU1234567"}]
+    portfolio_result.error = None
     mock_ibkr.portfolio_accounts.return_value = portfolio_result
+    # P7-audit M11: what_if_order now primes /iserver/accounts via
+    # _ensure_iserver_primed (same preflight as snapshot). Configure the
+    # mock so the priming call returns a clean Result.
+    iserver_result = MagicMock()
+    iserver_result.data = {}
+    iserver_result.error = None
+    mock_ibkr.receive_brokerage_accounts.return_value = iserver_result
 
     with patch("shared.ib_client.IbkrClient", return_value=mock_ibkr):
         client = IBClient(IBConfig(credentials=paper_creds))
         client.connect()
+    # Audit #20: qualify_* now FAIL CLOSED on a secdef row with no parseable
+    # expiry. These order-construction tests use bare {conid,tradingClass} mocks
+    # (they exercise conidex/pricing/coid, not expiry resolution), so enable the
+    # test-only escape hatch. Expiry-resolution fail-closed is covered by the
+    # dedicated tests in test_ib_client_reads.py against a flag-less client.
+    client._allow_missing_expiry = True
     return client, mock_ibkr
 
 
@@ -155,6 +172,22 @@ class TestRoundToIncrement:
 
     def test_custom_increment(self):
         assert IBClient._round_to_increment(0.123, 0.01) == pytest.approx(0.12)
+
+
+class TestSpxOptionTick:
+    """IBKR-audit #16: SPX/SPXW single-leg tiered tick ($0.05 <$3, $0.10 ≥$3)."""
+
+    def test_below_three_is_nickel(self):
+        assert IBClient._spx_option_tick(0.05) == pytest.approx(0.05)
+        assert IBClient._spx_option_tick(2.95) == pytest.approx(0.05)
+
+    def test_at_or_above_three_is_dime(self):
+        assert IBClient._spx_option_tick(3.0) == pytest.approx(0.10)
+        assert IBClient._spx_option_tick(7.40) == pytest.approx(0.10)
+
+    def test_sign_safe(self):
+        # Net-debit/credit signs shouldn't flip the tier.
+        assert IBClient._spx_option_tick(-4.2) == pytest.approx(0.10)
 
 
 # ─── place_iron_condor ─────────────────────────────────────────────────────
@@ -455,6 +488,33 @@ class TestPlaceOrder:
         )
         assert mock_ibkr.place_order.call_args.kwargs["order_request"].price == pytest.approx(5.37)
 
+    def test_default_uses_spx_tiered_tick_below_three(self, connected_client):
+        """IBKR-audit #16: default rounding for a sub-$3 single leg is the
+        $0.05 grid ($1.32 stays $1.30, not $1.35)."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        client.place_order(conid=1, side="BUY", quantity=1, order_type="LMT", price=1.32)
+        assert mock_ibkr.place_order.call_args.kwargs["order_request"].price == pytest.approx(1.30)
+
+    def test_default_uses_spx_tiered_tick_at_or_above_three(self, connected_client):
+        """IBKR-audit #16: a $3+ single leg rounds to the legal $0.10 grid by
+        default — $3.07 → $3.10, NOT $3.05 (which the exchange would reject)."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        client.place_order(conid=1, side="SELL", quantity=1, order_type="LMT", price=3.07)
+        assert mock_ibkr.place_order.call_args.kwargs["order_request"].price == pytest.approx(3.10)
+
+    def test_explicit_numeric_increment_overrides_tiered_default(self, connected_client):
+        """An explicit numeric increment (e.g. equities at $0.01) bypasses the
+        SPX tiered default entirely."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        client.place_order(
+            conid=1, side="BUY", quantity=1, order_type="LMT",
+            price=3.07, price_increment=0.01,
+        )
+        assert mock_ibkr.place_order.call_args.kwargs["order_request"].price == pytest.approx(3.07)
+
     def test_quantity_serialized_as_float(self, connected_client):
         """OrderRequest.quantity is typed float in ibind; we cast at the
         call site so the wire payload is deterministic."""
@@ -501,6 +561,26 @@ class TestSubmitOrderResponseShapes:
         )
         assert out == {}
 
+    def test_prefers_order_id_entry_over_reply_prompt(self, connected_client):
+        """P7-audit M15: if a list response interleaves a reply-prompt
+        entry (no `order_id`/`id`) with a real order entry, promote the
+        order entry. Otherwise the caller reads `order_id=None` and
+        treats the fill as a failure even though IBKR accepted it."""
+        client, mock_ibkr = connected_client
+        # Reply-prompt-shaped entry FIRST, real order SECOND.
+        mock_ibkr.place_order.return_value = _mk_result([
+            {"message": ["Confirm price improvement"], "isSuppressed": False},
+            {"order_id": "real_id", "order_status": "Submitted"},
+        ])
+        out = client.place_order(
+            conid=1, side="BUY", quantity=1, order_type="LMT", price=1.0,
+        )
+        assert out["order_id"] == "real_id"
+        # The reply-prompt entry is preserved under `_legs` (nothing
+        # silently dropped — caller can inspect for unhandled prompts).
+        assert "_legs" in out
+        assert any("message" in d for d in out["_legs"])
+
 
 class TestPlaceMarketOrder:
     def test_wraps_place_order_with_mkt(self, connected_client):
@@ -513,6 +593,593 @@ class TestPlaceMarketOrder:
         assert order_req.price is None
 
 
+# ─── Position normalization ────────────────────────────────────────────────
+
+
+class TestNormalizePositionDict:
+    """Unit tests for the module-level _normalize_position_dict helper.
+
+    IBKR's portfolio_positions response is flat but uses broker-specific
+    field naming (`conid`, `position`, `putOrCall`, `lastTradingDay`,
+    etc.). Strategy code shouldn't lock in IBKR's vocabulary — the
+    normalizer translates to a stable schema. These tests pin the
+    contract.
+    """
+
+    # ─── Standard option position shapes ───────────────────────────────
+
+    def test_short_call_with_full_option_fields(self):
+        """Canonical SPXW short call position with all IBKR option fields."""
+        from datetime import date as date_cls
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 883539497,
+            "ticker": "SPXW",
+            "contractDesc": "SPXW 20260518 5800 C",
+            "assetClass": "OPT",
+            "position": -1.0,            # short = negative
+            "avgCost": 2.50,
+            "mktPrice": 0.05,
+            "mktValue": -5.0,
+            "unrealizedPnl": 245.0,
+            "currency": "USD",
+            "lastTradingDay": "20260518",
+            "strike": 5800.0,
+            "putOrCall": "C",
+        })
+        assert out["instrument_id"] == 883539497
+        assert out["symbol"] == "SPXW"
+        assert out["asset_type"] == "OPT"
+        assert out["quantity"] == -1
+        assert out["side"] == "SHORT"
+        assert out["avg_cost"] == pytest.approx(2.50)
+        assert out["market_price"] == pytest.approx(0.05)
+        assert out["market_value"] == pytest.approx(-5.0)
+        assert out["unrealized_pnl"] == pytest.approx(245.0)
+        assert out["currency"] == "USD"
+        assert out["expiry"] == date_cls(2026, 5, 18)
+        assert out["strike"] == pytest.approx(5800.0)
+        assert out["right"] == "C"
+
+    def test_long_put_position(self):
+        from datetime import date as date_cls
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 873614067,
+            "ticker": "SPXW",
+            "assetClass": "OPT",
+            "position": 1.0,             # long = positive
+            "avgCost": 1.10,
+            "lastTradingDay": "20260518",
+            "strike": 5195.0,
+            "putOrCall": "P",
+        })
+        assert out["quantity"] == 1
+        assert out["side"] == "LONG"
+        assert out["right"] == "P"
+        assert out["strike"] == pytest.approx(5195.0)
+        assert out["expiry"] == date_cls(2026, 5, 18)
+
+    def test_index_position_has_no_option_fields(self):
+        """SPX index position — option-specific fields all None."""
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 416904,
+            "ticker": "SPX",
+            "assetClass": "IND",
+            "position": 0.0,  # indices are non-tradable; "position" is informational
+            "currency": "USD",
+        })
+        assert out["instrument_id"] == 416904
+        assert out["asset_type"] == "IND"
+        assert out["side"] == "FLAT"
+        assert out["expiry"] is None
+        assert out["strike"] is None
+        assert out["right"] is None
+
+    def test_stock_position_no_option_fields(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 76792991,
+            "ticker": "AAPL",
+            "assetClass": "STK",
+            "position": 100,
+            "avgCost": 175.0,
+        })
+        assert out["asset_type"] == "STK"
+        assert out["quantity"] == 100
+        assert out["side"] == "LONG"
+        assert out["expiry"] is None
+        assert out["strike"] is None
+        assert out["right"] is None
+
+    # ─── Side derivation from signed quantity ──────────────────────────
+
+    def test_zero_quantity_is_flat(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "position": 0})
+        assert out["quantity"] == 0
+        assert out["side"] == "FLAT"
+
+    def test_negative_quantity_is_short(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "position": -5})
+        assert out["side"] == "SHORT"
+
+    def test_positive_quantity_is_long(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "position": 5})
+        assert out["side"] == "LONG"
+
+    def test_float_quantity_cast_to_int(self):
+        """IBKR wire format uses float for `position`. We always work in
+        whole contracts → cast to int. Fractional positions don't exist
+        in our universe (no crypto, no fractional shares)."""
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "position": 3.0})
+        assert out["quantity"] == 3
+        assert isinstance(out["quantity"], int)
+
+    # ─── Required field validation ─────────────────────────────────────
+
+    def test_missing_conid_raises(self):
+        from shared.ib_client import _normalize_position_dict
+        with pytest.raises(ValueError, match="missing conid"):
+            _normalize_position_dict({"position": 1, "ticker": "AAPL"})
+
+    def test_non_dict_input_raises(self):
+        from shared.ib_client import _normalize_position_dict
+        with pytest.raises(ValueError, match="must be a dict"):
+            _normalize_position_dict([{"conid": 1}])
+        with pytest.raises(ValueError, match="must be a dict"):
+            _normalize_position_dict(None)
+
+    # ─── Right normalization (P/C variants) ────────────────────────────
+
+    def test_right_put_full_word_normalizes_to_P(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "putOrCall": "PUT"})
+        assert out["right"] == "P"
+
+    def test_right_call_full_word_normalizes_to_C(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "putOrCall": "CALL"})
+        assert out["right"] == "C"
+
+    def test_right_lowercase_is_normalized(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "putOrCall": "p"})
+        assert out["right"] == "P"
+
+    def test_right_invalid_value_becomes_none(self):
+        """Defensive: don't silently mis-label a position with garbage."""
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "putOrCall": "X"})
+        assert out["right"] is None
+
+    # ─── Expiry parsing ────────────────────────────────────────────────
+
+    def test_expiry_parsed_from_lastTradingDay(self):
+        from datetime import date as date_cls
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 1, "lastTradingDay": "20260518",
+        })
+        assert out["expiry"] == date_cls(2026, 5, 18)
+
+    def test_expiry_missing_field_returns_none(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1})
+        assert out["expiry"] is None
+
+    def test_expiry_malformed_field_returns_none(self):
+        """Defensive parsing: bad input → None, not an exception."""
+        from shared.ib_client import _normalize_position_dict
+        for bad_value in ("not-a-date", "2026-05-18", "20260518X", "x"):
+            out = _normalize_position_dict({
+                "conid": 1, "lastTradingDay": bad_value,
+            })
+            assert out["expiry"] is None, f"Bad value should yield None: {bad_value!r}"
+
+    # ─── Symbol extraction ─────────────────────────────────────────────
+
+    def test_symbol_prefers_ticker(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 1, "ticker": "SPX", "contractDesc": "Different Description",
+        })
+        assert out["symbol"] == "SPX"
+
+    def test_symbol_falls_back_to_contractDesc_first_word(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 1, "contractDesc": "SPXW 20260518 5800 C",
+        })
+        assert out["symbol"] == "SPXW"
+
+    def test_symbol_empty_when_both_missing(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1})
+        assert out["symbol"] == ""
+
+    # ─── Numeric field defensive parsing ───────────────────────────────
+
+    def test_missing_numeric_fields_become_none(self):
+        """Status-only responses (no fills yet) won't have price fields."""
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "position": 1})
+        assert out["avg_cost"] is None
+        assert out["market_price"] is None
+        assert out["market_value"] is None
+        assert out["unrealized_pnl"] is None
+
+    def test_malformed_numeric_fields_become_none(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({
+            "conid": 1, "avgCost": "not-a-number", "mktPrice": "",
+        })
+        assert out["avg_cost"] is None
+        assert out["market_price"] is None
+
+    # ─── Defaults + preservation ───────────────────────────────────────
+
+    def test_currency_defaults_to_USD(self):
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1})
+        assert out["currency"] == "USD"
+
+    def test_asset_class_uppercased(self):
+        """IBKR sometimes returns lowercase; normalize for caller convenience."""
+        from shared.ib_client import _normalize_position_dict
+        out = _normalize_position_dict({"conid": 1, "assetClass": "opt"})
+        assert out["asset_type"] == "OPT"
+
+    def test_raw_preserved(self):
+        """Callers needing fields we didn't normalize can drop down to `raw`."""
+        from shared.ib_client import _normalize_position_dict
+        raw = {
+            "conid": 1, "position": 1,
+            "exchange": "CBOE", "ticker": "SPX",
+            "customField": "preserve-this",
+        }
+        out = _normalize_position_dict(raw)
+        assert out["raw"] is raw  # same object
+
+
+# ─── place_and_wait_for_fill ───────────────────────────────────────────────
+
+
+class TestBuildFillResultDict:
+    """Unit tests for the module-level _build_fill_result_dict helper.
+
+    IBKR's order status response uses inconsistent field names across
+    endpoints (snake_case vs camelCase, `filled` vs `filledQuantity`,
+    etc.). The helper accepts several variants — these tests pin which.
+    """
+
+    def test_extracts_filled_quantity_and_avg_price_camelcase(self):
+        from shared.ib_client import _build_fill_result_dict
+        out = _build_fill_result_dict(
+            order_id="abc",
+            raw={"filledQuantity": "3", "avgPrice": "5.25"},
+            status="filled",
+        )
+        assert out["order_id"] == "abc"
+        assert out["status"] == "filled"
+        assert out["filled_quantity"] == 3
+        assert out["avg_fill_price"] == 5.25
+
+    def test_extracts_snake_case_variants(self):
+        from shared.ib_client import _build_fill_result_dict
+        out = _build_fill_result_dict(
+            order_id="abc",
+            raw={"filled_quantity": 5, "avg_fill_price": 1.10},
+            status="filled",
+        )
+        assert out["filled_quantity"] == 5
+        assert out["avg_fill_price"] == pytest.approx(1.10)
+
+    def test_accepts_filled_and_average_price_variants(self):
+        from shared.ib_client import _build_fill_result_dict
+        out = _build_fill_result_dict(
+            order_id="abc",
+            raw={"filled": 2, "average_price": "0.40"},
+            status="filled",
+        )
+        assert out["filled_quantity"] == 2
+        assert out["avg_fill_price"] == pytest.approx(0.40)
+
+    def test_accepts_avgfillprice_variant(self):
+        from shared.ib_client import _build_fill_result_dict
+        out = _build_fill_result_dict(
+            order_id="abc",
+            raw={"avgFillPrice": 7.0},
+            status="filled",
+        )
+        assert out["avg_fill_price"] == pytest.approx(7.0)
+
+    def test_missing_fields_become_zero_and_none(self):
+        """Status responses for non-filled states often omit fill info."""
+        from shared.ib_client import _build_fill_result_dict
+        out = _build_fill_result_dict(
+            order_id="abc",
+            raw={"status": "Submitted"},  # no fill fields
+            status="timed_out",
+        )
+        assert out["filled_quantity"] == 0
+        assert out["avg_fill_price"] is None
+
+    def test_filled_status_authoritative_when_qty_field_unknown(self):
+        """Audit #3 hardening: the exact order/status fill-quantity key is not
+        confirmed against a captured IBKR payload. If NONE of the known keys
+        parse but the order reached terminal 'filled', that status is
+        authoritative → report the full requested quantity (NOT 0, which would
+        drive a cancel+retry double-fill). Field-name-independent."""
+        from shared.ib_client import _build_fill_result_dict
+        out = _build_fill_result_dict(
+            order_id="abc",
+            raw={"order_status": "Filled", "some_future_qty_key": 1},  # unknown key
+            status="filled",
+            requested_quantity=1,
+        )
+        assert out["filled_quantity"] == 1  # not 0 → no double-fill
+
+    def test_non_filled_status_does_not_fabricate_quantity(self):
+        """The authoritative-fill fallback must ONLY fire on terminal 'filled';
+        a cancelled/timed_out order with no qty stays 0."""
+        from shared.ib_client import _build_fill_result_dict
+        for st in ("cancelled", "timed_out", "rejected"):
+            out = _build_fill_result_dict(
+                order_id="abc", raw={"status": st}, status=st, requested_quantity=4,
+            )
+            assert out["filled_quantity"] == 0, f"{st} must not fabricate a fill"
+
+    def test_bad_values_dont_crash(self):
+        """Defensive: malformed responses shouldn't raise. Bad int → 0, bad float → None."""
+        from shared.ib_client import _build_fill_result_dict
+        out = _build_fill_result_dict(
+            order_id="abc",
+            raw={"filledQuantity": "not-a-number", "avgPrice": "also-bad"},
+            status="filled",
+        )
+        assert out["filled_quantity"] == 0
+        assert out["avg_fill_price"] is None
+
+    def test_raw_response_preserved_for_diagnostics(self):
+        """Callers may need fields we didn't normalize — raw stays intact."""
+        from shared.ib_client import _build_fill_result_dict
+        raw = {"filledQuantity": 1, "avgPrice": 1.0, "customField": "preserve-me"}
+        out = _build_fill_result_dict(order_id="abc", raw=raw, status="filled")
+        assert out["raw"] is raw  # same object, not a copy
+
+
+class TestPlaceAndWaitForFill:
+    """Building block for HYDRA's strategy-level retry loops.
+
+    Encapsulates place → poll-status → return-when-done so callers don't
+    re-implement polling at every retry level. Polling timing is mocked
+    via patching `time.sleep` / `time.monotonic`.
+    """
+
+    # ─── Input validation ──────────────────────────────────────────────
+
+    def test_quantity_must_be_positive(self, connected_client):
+        client, _ = connected_client
+        with pytest.raises(ValueError, match="quantity must be positive"):
+            client.place_and_wait_for_fill(
+                conid=1, side="BUY", quantity=0, order_type="MKT",
+            )
+
+    def test_side_must_be_buy_or_sell(self, connected_client):
+        client, _ = connected_client
+        with pytest.raises(ValueError, match="side must be"):
+            client.place_and_wait_for_fill(
+                conid=1, side="HODL", quantity=1, order_type="MKT",
+            )
+
+    def test_lmt_requires_limit_price(self, connected_client):
+        client, _ = connected_client
+        with pytest.raises(ValueError, match="LMT order_type requires limit_price"):
+            client.place_and_wait_for_fill(
+                conid=1, side="BUY", quantity=1, order_type="LMT",
+            )
+
+    def test_place_response_without_order_id_raises(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{}])  # no order_id field
+        with pytest.raises(IBClientError, match="place_order returned no order_id"):
+            client.place_and_wait_for_fill(
+                conid=1, side="BUY", quantity=1, order_type="MKT",
+            )
+
+    # ─── Happy paths ───────────────────────────────────────────────────
+
+    def test_lmt_fills_on_first_poll(self, connected_client):
+        """Order placed, first status poll shows Filled. No retry needed."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result(
+            [{"order_id": "order-1", "order_status": "Submitted"}]
+        )
+        mock_ibkr.order_status.return_value = _mk_result({
+            "status": "Filled", "filledQuantity": 1, "avgPrice": 2.50,
+        })
+        with patch("shared.ib_client.time.sleep"):
+            result = client.place_and_wait_for_fill(
+                conid=12345, side="SELL", quantity=1,
+                order_type="LMT", limit_price=2.50,
+            )
+        assert result["order_id"] == "order-1"
+        assert result["status"] == "filled"
+        assert result["filled_quantity"] == 1
+        assert result["avg_fill_price"] == pytest.approx(2.50)
+
+    def test_mkt_fills_immediately_in_place_response(self, connected_client):
+        """P7-audit C3+C4. IBKR's place response reports the state under
+        `order_status` (not `status`) and carries NO fill detail. When it
+        is terminal=Filled we short-circuit the poll loop, but must do ONE
+        order_status fetch to get the real filledQuantity/avgPrice —
+        otherwise a filled order is reported filled_quantity=0 and the
+        caller retries into a double position."""
+        client, mock_ibkr = connected_client
+        # IBKR place response: state under `order_status`, NO fill detail.
+        mock_ibkr.place_order.return_value = _mk_result([{
+            "order_id": "order-mkt-1",
+            "order_status": "Filled",
+        }])
+        # Authoritative fill detail comes from the order-status fetch.
+        mock_ibkr.order_status.return_value = _mk_result({
+            "status": "Filled", "filledQuantity": 5, "avgPrice": 1.10,
+        })
+        with patch("shared.ib_client.time.sleep") as mock_sleep:
+            result = client.place_and_wait_for_fill(
+                conid=12345, side="BUY", quantity=5, order_type="MKT",
+            )
+        assert result["status"] == "filled"
+        assert result["filled_quantity"] == 5            # C4: real qty, not 0
+        assert result["avg_fill_price"] == pytest.approx(1.10)
+        # C4: exactly ONE order_status fetch for the fill detail —
+        # the short-circuit means NO poll loop (and no sleep).
+        assert mock_ibkr.order_status.call_count == 1
+        mock_sleep.assert_not_called()
+
+    def test_instant_fill_falls_back_to_place_resp_if_status_fetch_fails(
+        self, connected_client,
+    ):
+        """C4 graceful path: if the post-fill order_status fetch raises
+        (order purged), fall back to the place response rather than
+        crashing — the order is still correctly reported `filled`."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{
+            "order_id": "order-mkt-2", "order_status": "Filled",
+        }])
+        mock_ibkr.order_status.side_effect = IBClientError("is not found")
+        with patch("shared.ib_client.time.sleep"):
+            result = client.place_and_wait_for_fill(
+                conid=12345, side="BUY", quantity=3, order_type="MKT",
+            )
+        assert result["status"] == "filled"  # still terminal, no crash
+
+    def test_pendingcancel_is_NOT_terminal_keeps_polling(
+        self, connected_client,
+    ):
+        """`pendingcancel` means cancel-in-progress but order could still
+        fill. We must keep polling until truly terminal."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result(
+            [{"order_id": "order-x"}]
+        )
+        # First poll: PendingCancel (not terminal). Second poll: Filled.
+        mock_ibkr.order_status.side_effect = [
+            _mk_result({"status": "PendingCancel"}),
+            _mk_result({"status": "Filled", "filledQuantity": 1, "avgPrice": 3.0}),
+        ]
+        with patch("shared.ib_client.time.sleep"):
+            result = client.place_and_wait_for_fill(
+                conid=12345, side="SELL", quantity=1,
+                order_type="LMT", limit_price=3.0,
+            )
+        assert result["status"] == "filled"
+        # Two polls happened (PendingCancel → keep going → Filled)
+        assert mock_ibkr.order_status.call_count == 2
+
+    # ─── Terminal-not-filled paths ────────────────────────────────────
+
+    def test_rejected_order_returns_status_rejected(self, connected_client):
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result(
+            [{"order_id": "x", "order_status": "Submitted"}]
+        )
+        mock_ibkr.order_status.return_value = _mk_result({"status": "Rejected"})
+        with patch("shared.ib_client.time.sleep"):
+            result = client.place_and_wait_for_fill(
+                conid=1, side="BUY", quantity=1,
+                order_type="LMT", limit_price=1.0,
+            )
+        assert result["status"] == "rejected"
+        assert result["filled_quantity"] == 0
+        assert result["avg_fill_price"] is None
+
+    def test_inactive_is_terminal(self, connected_client):
+        """IBKR-specific 'Inactive' status — broker decided not to work
+        the order. Treated as terminal so we don't poll forever."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        mock_ibkr.order_status.return_value = _mk_result({"status": "Inactive"})
+        with patch("shared.ib_client.time.sleep"):
+            result = client.place_and_wait_for_fill(
+                conid=1, side="BUY", quantity=1,
+                order_type="LMT", limit_price=1.0,
+            )
+        assert result["status"] == "inactive"
+
+    def test_purged_order_503_not_found_treated_as_cancelled(
+        self, connected_client,
+    ):
+        """IBKR's misuse of 503 for permanent errors: when get_order_status
+        raises with 'is not found', the order was purged after reaching
+        terminal state. Return status=cancelled (no longer working)."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        # Status query raises with the IBKR 503 'not found' pattern
+        mock_ibkr.order_status.side_effect = IBClientError(
+            "ibind error: 503 Service Unavailable :: "
+            '{"error":"Order x is not found","statusCode":503}'
+        )
+        with patch("shared.ib_client.time.sleep"):
+            result = client.place_and_wait_for_fill(
+                conid=1, side="BUY", quantity=1,
+                order_type="LMT", limit_price=1.0,
+            )
+        assert result["status"] == "cancelled"
+
+    def test_non_permanent_ibclient_error_during_poll_propagates(
+        self, connected_client,
+    ):
+        """A real failure mid-polling (e.g. auth error) must NOT be
+        swallowed — propagate so the caller can escalate."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        mock_ibkr.order_status.side_effect = IBClientError(
+            "auth failure — token expired"
+        )
+        with patch("shared.ib_client.time.sleep"):
+            with pytest.raises(IBClientError, match="auth failure"):
+                client.place_and_wait_for_fill(
+                    conid=1, side="BUY", quantity=1,
+                    order_type="LMT", limit_price=1.0,
+                )
+
+    # ─── Timeout path ──────────────────────────────────────────────────
+
+    def test_times_out_when_status_never_terminal(self, connected_client):
+        """If the order never reaches a terminal status within the timeout,
+        return status='timed_out'. The order remains WORKING on IBKR's
+        side — caller decides whether to cancel or escalate.
+
+        Implementation note: `time.monotonic` is patched with an
+        unlimited counter rather than a fixed list because the breaker
+        layer (record_success on each successful poll) also calls
+        monotonic, so a fixed-length iter would exhaust unpredictably.
+        Counter step (0.05s) × deadline (0.5s) ensures the loop exits
+        after ~10 monotonic calls regardless of how many are consumed
+        by the breaker."""
+        import itertools
+        client, mock_ibkr = connected_client
+        mock_ibkr.place_order.return_value = _mk_result([{"order_id": "x"}])
+        mock_ibkr.order_status.return_value = _mk_result({"status": "Submitted"})
+        counter = itertools.count(start=100.0, step=0.05)
+        with patch("shared.ib_client.time.sleep"), \
+             patch("shared.ib_client.time.monotonic", side_effect=lambda: next(counter)):
+            result = client.place_and_wait_for_fill(
+                conid=1, side="BUY", quantity=1,
+                order_type="LMT", limit_price=1.0,
+                timeout_seconds=0.5,
+            )
+        assert result["status"] == "timed_out"
+        # We polled at least once and saw Submitted in `raw`
+        assert (result["raw"].get("status") or "").lower() == "submitted"
+
+
 # ─── cancel_order ──────────────────────────────────────────────────────────
 
 
@@ -523,13 +1190,73 @@ class TestCancelOrder:
         assert client.cancel_order("abc123") is True
         mock_ibkr.cancel_order.assert_called_with(order_id="abc123", account_id="DU1234567")
 
-    def test_returns_false_on_ibind_error(self, connected_client):
+    def test_returns_false_on_genuine_ibind_error(self, connected_client):
+        """Genuine failure (e.g. network/auth) → False so caller escalates
+        the P0 risk that a working order couldn't be cancelled."""
         client, mock_ibkr = connected_client
         result = MagicMock()
         result.data = None
-        result.error = "order already filled"
+        result.error = "network unreachable"
         mock_ibkr.cancel_order.return_value = result
         assert client.cancel_order("abc123") is False
+
+    # ─── Already-terminal handling (Fix 2026-05-18 paper smoke) ────────
+    # IBKR returns 4xx/5xx with body indicating the order is already in
+    # a terminal state. The caller's intent ("order no longer working")
+    # is satisfied even though OUR cancel arrived too late — return True.
+
+    def test_returns_true_when_order_already_filled_or_canceled(
+        self, connected_client,
+    ):
+        """The exact IBKR phrase from Mon 2026-05-18 paper smoke:
+        '400 Bad Request: {"error":"Order Message:\\nSELL 1 Combo\\nOrder
+        is filled or canceled"}'. cancel_order must treat this as success
+        because the order is no longer working — caller's intent met."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.cancel_order.side_effect = Exception(
+            "IbkrClient: response error :: 400 :: Bad Request :: "
+            '{"error":"Order Message:\\nSELL 1 Combo\\nOrder is filled or canceled"}'
+        )
+        assert client.cancel_order("417709432") is True
+
+    def test_returns_true_when_order_already_cancelled(self, connected_client):
+        """Variants of the same idea — IBKR may report 'already cancelled'
+        in slightly different ways."""
+        client, mock_ibkr = connected_client
+        for err_msg in (
+            "503 Service Unavailable: order is already cancelled",
+            "400 Bad Request: order already canceled",
+            "ibind error: order is already filled",
+        ):
+            mock_ibkr.cancel_order.side_effect = Exception(err_msg)
+            assert client.cancel_order("abc123") is True, (
+                f"Should treat as success: {err_msg!r}"
+            )
+
+    def test_returns_true_when_order_purged_not_found(self, connected_client):
+        """503 with 'is not found' body = IBKR purged the order after a
+        terminal state. Sunday's smoke uncovered this via the
+        check_order.py diagnostic; cancel_order should treat same as
+        already-cancelled (order is no longer working)."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.cancel_order.side_effect = Exception(
+            "IbkrClient: response error :: 503 :: Service Unavailable :: "
+            '{"error":"Order 893931734 is not found","statusCode":503}'
+        )
+        assert client.cancel_order("893931734") is True
+
+    def test_returns_false_when_breaker_open(self, connected_client):
+        """Breaker-open means the order MAY still be working — DON'T
+        pretend success. Caller must escalate."""
+        from shared.ib_retry import CircuitBreakerOpen
+        client, mock_ibkr = connected_client
+        # Trip the orders breaker manually
+        br = client.circuit_breakers["orders"]
+        for _ in range(br.consecutive_failures_threshold):
+            br.record_failure()
+        assert client.cancel_order("abc123") is False
+        # And ibind wasn't called (short-circuited)
+        mock_ibkr.cancel_order.assert_not_called()
 
 
 # ─── modify_order ──────────────────────────────────────────────────────────
@@ -642,3 +1369,152 @@ class TestDefaultOrderAnswers:
         """We don't use native stop orders for 0DTE."""
         from ibind import QuestionType
         assert DEFAULT_ORDER_ANSWERS[QuestionType.STOP_ORDER_RISKS] is False
+
+
+# ─── 429 penalty box: family-aware exemption + concurrency cap (429-burst) ───
+
+
+class TestPenaltyBoxFamilyAware:
+    """The penalty box must REFUSE non-risk-critical calls (new entries / bulk
+    chain resolution) but EXEMPT risk-critical reads/closes (stop-loss monitoring
+    + the stop-close) so a 10-min box can't blind a held 0DTE position."""
+
+    def _box(self, client):
+        # Put the box ~5 min into the future.
+        client._rate_penalty_until = time.monotonic() + 300
+
+    def test_non_risk_critical_refused_with_typed_error(self, connected_client):
+        client, _ = connected_client
+        self._box(client)
+        with pytest.raises(RatePenaltyError):
+            client._ib_call("market", lambda: "should-not-run")
+
+    def test_risk_critical_is_exempt(self, connected_client):
+        client, _ = connected_client
+        self._box(client)
+        # Risk-critical call is NOT refused — it runs (routed via penalty gate).
+        out = client._ib_call("market", lambda: "ok", _risk_critical=True)
+        assert out == "ok"
+
+    def test_risk_critical_uses_slow_penalty_gate_when_boxed(self, connected_client):
+        client, _ = connected_client
+        self._box(client)
+        slept = []
+        with patch("shared.ib_client.time.sleep", side_effect=lambda s: slept.append(s)):
+            # Two back-to-back risk-critical calls while boxed → the 3 rps
+            # penalty gate must space the second by ~1/3s.
+            client._ib_call("market", lambda: 1, _risk_critical=True)
+            client._ib_call("market", lambda: 2, _risk_critical=True)
+        assert any(s > 0 for s in slept), "penalty gate should have paced the 2nd call"
+
+    def test_no_box_means_no_refusal(self, connected_client):
+        client, _ = connected_client
+        client._rate_penalty_until = 0.0
+        assert client._ib_call("market", lambda: "ok") == "ok"
+
+    def test_429_enters_box_and_reraises(self, connected_client):
+        client, _ = connected_client
+        client._rate_penalty_until = 0.0
+
+        class _E429(Exception):
+            status_code = 429
+
+        def _boom():
+            raise _E429("Too Many Requests")
+
+        with pytest.raises(Exception):
+            client._ib_call("market", _boom)
+        # The 429 handler armed the box.
+        assert client._rate_penalty_until > time.monotonic()
+
+    def test_clear_rate_penalty_unblocks(self, connected_client):
+        client, _ = connected_client
+        self._box(client)
+        remaining = client.clear_rate_penalty()
+        assert remaining > 0
+        assert client._rate_penalty_until == 0.0
+        # A normal (non-risk-critical) call now succeeds.
+        assert client._ib_call("market", lambda: "ok") == "ok"
+
+    def test_clear_when_not_boxed_returns_zero(self, connected_client):
+        client, _ = connected_client
+        client._rate_penalty_until = 0.0
+        assert client.clear_rate_penalty() == 0.0
+
+    def test_cancel_order_survives_the_box(self, connected_client):
+        """MUST-FIX: cancel_order is on the stop-close action path. During a box
+        it must NOT be refused (else an un-cancelled working close over-closes).
+        With _risk_critical it proceeds and returns True."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.cancel_order.return_value = _mk_result({"order_id": "O1"})
+        self._box(client)
+        assert client.cancel_order("O1") is True
+        mock_ibkr.cancel_order.assert_called_once()
+
+    def test_boxed_qualify_strikes_raises_not_empty(self, connected_client):
+        """MUST-FIX: a penalty box that activates during chain resolution must
+        ABORT qualify_option_strikes with RatePenaltyError (so the strategy
+        alerts), NOT be swallowed per-strike into a silent empty conid map."""
+        client, mock_ibkr = connected_client
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
+        self._box(client)
+        with pytest.raises(RatePenaltyError):
+            client.qualify_option_strikes(
+                symbol="SPX", expiry=date(2026, 6, 1),
+                strikes=[5000, 5010, 5020], trading_class="SPXW",
+            )
+
+    def test_iserver_preflight_exempt_when_risk_critical(self, connected_client):
+        """SHOULD-FIX: the snapshot's mandatory /iserver/accounts preflight must
+        inherit risk-criticality so a reconnect-during-box can't blind stop
+        reads. Boxed + primed-reset + risk_critical → preflight is NOT refused."""
+        client, mock_ibkr = connected_client
+        client._iserver_primed = False
+        self._box(client)
+        # Non-risk-critical preflight IS refused during a box…
+        with pytest.raises(RatePenaltyError):
+            client._ensure_iserver_primed()
+        # …but the risk-critical variant (stop-loss snapshot path) is exempt.
+        client._iserver_primed = False
+        client._ensure_iserver_primed(_risk_critical=True)
+        assert client._iserver_primed is True
+
+
+class TestChainResolveConcurrencyCap:
+    """qualify_option_strikes' per-strike secdef fan-out must never have more
+    than CALYPSO_IBKR_CHAIN_CONCURRENCY calls in flight at once (the cross-bot
+    cap that prevents the entry-window 429 burst)."""
+
+    def test_concurrent_secdef_calls_capped(self, connected_client):
+        import threading
+        client, mock_ibkr = connected_client
+        # Shrink the global cap to make the bound easy to observe.
+        client._chain_resolve_sem = threading.BoundedSemaphore(2)
+        mock_ibkr.search_contract_by_symbol.return_value = _mk_result([{"conid": 416904}])
+
+        in_flight = {"now": 0, "max": 0}
+        lock = threading.Lock()
+
+        def _slow_secdef(*a, **k):
+            with lock:
+                in_flight["now"] += 1
+                in_flight["max"] = max(in_flight["max"], in_flight["now"])
+            time.sleep(0.02)
+            with lock:
+                in_flight["now"] -= 1
+            strike = int(k.get("strike", "5000"))
+            return _mk_result([
+                {"conid": strike * 10, "tradingClass": "SPXW",
+                 "maturityDate": "20260601", "right": "C"},
+            ])
+
+        mock_ibkr.search_secdef_info_by_conid.side_effect = _slow_secdef
+        client._allow_missing_expiry = False
+        client.qualify_option_strikes(
+            symbol="SPX", expiry=date(2026, 6, 1),
+            strikes=[5000, 5010, 5020, 5030, 5040, 5050, 5060, 5070],
+            trading_class="SPXW", max_workers=8,
+        )
+        assert in_flight["max"] <= 2, (
+            f"secdef concurrency exceeded the semaphore cap: {in_flight['max']} > 2"
+        )

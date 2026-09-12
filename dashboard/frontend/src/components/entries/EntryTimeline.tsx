@@ -27,7 +27,21 @@ function timeToMinutes(timeStr: string): number {
 
 function getStatus(entry: HydraEntry | undefined): EntryStatus {
   if (!entry || !entry.entry_time) return "pending";
+  // 2026-07-31: a genuine execution FAILURE also sets both *_side_skipped
+  // flags — must be checked before the generic skipped branch below, same
+  // fix as EntryCard.tsx's getEntryStatus() (see its comment for the full
+  // incident writeup).
+  if (entry.execution_failed) return "failed";
   if (entry.call_side_skipped && entry.put_side_skipped) return "skipped";
+
+  // Prefer close_reason: a Brandon TP/breach sets *_side_stopped as a generic
+  // "closed" marker, so flag-inference alone mislabels a take-profit as a stop.
+  const reason = (entry.close_reason || "").toUpperCase();
+  if (reason === "TP") return "take_profit";
+  if (reason === "BREACH") return "breach";
+  // EOD safety flatten / generic early-close reuses *_side_expired/_stopped, so
+  // without this it mislabels as a red stop or an expiry. Render "flattened".
+  if (reason === "EOD_FLATTEN" || entry.early_closed) return "flattened";
 
   const callStopped = entry.call_side_stopped;
   const putStopped = entry.put_side_stopped;
@@ -39,9 +53,16 @@ function getStatus(entry: HydraEntry | undefined): EntryStatus {
   return "placing";
 }
 
-export function EntryTimeline() {
+interface EntryTimelineProps {
+  /** Polled non-primary snapshot's entries. When provided, the timeline dots
+   *  resolve from THESE instead of the WS store. Omitted → WS store,
+   *  byte-identical to the old behavior. */
+  entries?: HydraEntry[];
+}
+
+export function EntryTimeline({ entries: entriesProp }: EntryTimelineProps = {}) {
   const { hydraState } = useHydraStore();
-  const entries = hydraState?.entries ?? [];
+  const entries = entriesProp ?? hydraState?.entries ?? [];
   const showConditional = useShowConditionalEntries();
   const schedule = hydraState?.entry_schedule;
 

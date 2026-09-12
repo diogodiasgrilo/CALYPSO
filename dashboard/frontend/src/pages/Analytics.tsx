@@ -1,4 +1,5 @@
 import { useEffect, useState, useMemo } from "react";
+import { useSelectedStrategy } from "../hooks/useSelectedStrategy";
 import {
   BarChart,
   Bar,
@@ -20,6 +21,7 @@ import {
 import { colors } from "../lib/tradingColors";
 import { formatPnL } from "../lib/formatters";
 import { EquityCurve } from "../components/pnl/EquityCurve";
+import { markersForStrategy } from "../lib/strategyMarkers";
 import { CorrelationHeatmap } from "../components/market/CorrelationHeatmap";
 import { Download } from "lucide-react";
 import { exportEntriesCSV } from "../lib/exportUtils";
@@ -49,6 +51,19 @@ interface TradeStop {
   net_pnl: number;
   confirmation_seconds: number;
   breach_recoveries: number;
+  // v11: 'stop_loss' | 'take_profit' | 'gex_breach' | 'early_close'. Older rows
+  // (pre-v11) are undefined → we fall back to the net_pnl sign.
+  exit_reason?: string;
+}
+
+/**
+ * A real stop-LOSS, as opposed to a Brandon take-profit / GEX-breach early-close
+ * (both of which the bot also writes to trade_stops). Prefer the explicit v11
+ * exit_reason; for legacy rows without it, treat a negative net_pnl as a loss-stop.
+ */
+function isRealStop(s: TradeStop): boolean {
+  if (s.exit_reason) return s.exit_reason === "stop_loss";
+  return (s.net_pnl ?? 0) < 0;
 }
 
 interface DaySummary {
@@ -118,13 +133,23 @@ const chartCursor = { fill: "rgba(126, 232, 199, 0.06)", stroke: colors.borderDi
 
 function parseEntryTimeToSlot(timeStr: string): number | null {
   if (!timeStr) return null;
-  const m = timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
-  if (!m) return null;
-  let h = parseInt(m[1], 10);
-  const min = parseInt(m[2], 10);
-  const ampm = m[3].toUpperCase();
-  if (ampm === "PM" && h !== 12) h += 12;
-  if (ampm === "AM" && h === 12) h = 0;
+  let h: number;
+  let min: number;
+  const ampm = timeStr.match(/(\d{1,2}):(\d{2})\s*(AM|PM)/i);
+  if (ampm) {
+    h = parseInt(ampm[1], 10);
+    min = parseInt(ampm[2], 10);
+    const p = ampm[3].toUpperCase();
+    if (p === "PM" && h !== 12) h += 12;
+    if (p === "AM" && h === 12) h = 0;
+  } else {
+    // 24-hour DB format: "YYYY-MM-DD HH:MM:SS" / "HH:MM:SS" / "HH:MM".
+    // The first colon-pair is always the time (the date has no colons).
+    const t = timeStr.match(/(\d{1,2}):(\d{2})/);
+    if (!t) return null;
+    h = parseInt(t[1], 10);
+    min = parseInt(t[2], 10);
+  }
   const totalMin = h * 60 + min;
   let best = SCHEDULED_SLOTS[0];
   let bestDist = Math.abs(totalMin - best);
@@ -166,12 +191,16 @@ export function Analytics() {
   const [summaries, setSummaries] = useState<DaySummary[]>([]);
   const [loading, setLoading] = useState(true);
   const [activeTab, setActiveTab] = useState<AnalyticsTab>("performance");
+  // Analytics follows the picker's selected strategy (empty = canonical primary).
+  const { strategy } = useSelectedStrategy();
+  const strategyId = strategy?.id ?? "";
 
   useEffect(() => {
+    const sid = `strategy_id=${strategyId}`;
     Promise.all([
-      fetch("/api/metrics/entries").then((r) => r.json()),
-      fetch("/api/metrics/stops").then((r) => r.json()),
-      fetch("/api/metrics/daily?days=365").then((r) => r.json()),
+      fetch(`/api/metrics/entries?${sid}`).then((r) => r.json()),
+      fetch(`/api/metrics/stops?${sid}`).then((r) => r.json()),
+      fetch(`/api/metrics/daily?days=365&${sid}`).then((r) => r.json()),
     ])
       .then(([entryData, stopData, summaryData]) => {
         setEntries(entryData.entries ?? []);
@@ -180,7 +209,7 @@ export function Analytics() {
         setLoading(false);
       })
       .catch(() => setLoading(false));
-  }, []);
+  }, [strategyId]);
 
   // ── Computed data (shared across tabs) ──
 
@@ -257,7 +286,7 @@ export function Analytics() {
           <>
             <PerformanceTab summaries={sortedSummaries} />
             <div className="col-span-2 max-lg:col-span-1">
-              <EquityCurve dailySummaries={sortedSummaries} />
+              <EquityCurve dailySummaries={sortedSummaries} markers={markersForStrategy(strategyId)} />
             </div>
           </>
         )}
@@ -369,18 +398,18 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
             <AreaChart data={cumulativeData}>
               <defs>
                 <linearGradient id="cumPnlGrad" x1="0" y1="0" x2="0" y2="1">
-                  <stop offset="5%" stopColor={colors.profit} stopOpacity={0.3} />
-                  <stop offset="95%" stopColor={colors.profit} stopOpacity={0} />
+                  <stop offset="5%" stopColor={(cumulativeData[cumulativeData.length - 1]?.cumPnl ?? 0) < 0 ? colors.loss : colors.profit} stopOpacity={0.3} />
+                  <stop offset="95%" stopColor={(cumulativeData[cumulativeData.length - 1]?.cumPnl ?? 0) < 0 ? colors.loss : colors.profit} stopOpacity={0} />
                 </linearGradient>
               </defs>
               <CartesianGrid strokeDasharray="3 3" stroke={colors.borderDim} />
               <XAxis
                 dataKey="date"
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
@@ -397,7 +426,7 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
               <Area
                 type="monotone"
                 dataKey="cumPnl"
-                stroke={colors.profit}
+                stroke={(cumulativeData[cumulativeData.length - 1]?.cumPnl ?? 0) < 0 ? colors.loss : colors.profit}
                 fill="url(#cumPnlGrad)"
                 strokeWidth={2}
               />
@@ -415,11 +444,11 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
             <BarChart data={histogramData}>
               <XAxis
                 dataKey="range"
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 allowDecimals={false}
               />
@@ -450,11 +479,11 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
               <CartesianGrid strokeDasharray="3 3" stroke={colors.borderDim} />
               <XAxis
                 dataKey="date"
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `${v}%`}
                 domain={[0, 100]}
@@ -490,11 +519,11 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
             <BarChart data={dowData}>
               <XAxis
                 dataKey="day"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
@@ -555,7 +584,8 @@ function EntriesTab({
     entries.forEach((e) => {
       const type = (e.entry_type || "").toLowerCase();
       const label =
-        type.includes("iron") || type === "full" ? "Iron Condor"
+        // "full_ic" / "iron_condor" / "full" all mean a full iron condor.
+        type.includes("iron") || type.includes("condor") || type.includes("ic") || type.startsWith("full") ? "Iron Condor"
         : type.includes("put") ? "Put Spread"
         : type.includes("call") ? "Call Spread"
         : e.entry_type || "Other";
@@ -604,8 +634,11 @@ function EntriesTab({
 
     entries.forEach((e) => {
       const entryStops = stopLookup.get(`${e.date}_${e.entry_number}`) ?? [];
-      const callStopped = entryStops.some((s) => s.side === "call");
-      const putStopped = entryStops.some((s) => s.side === "put");
+      // Count only loss-stops as non-survival — Brandon variants also write
+      // profitable take-profit / GEX-breach exits to trade_stops (net_pnl > 0),
+      // and those did NOT "kill" the side.
+      const callStopped = entryStops.some((s) => s.side === "call" && (s.net_pnl ?? 0) < 0);
+      const putStopped = entryStops.some((s) => s.side === "put" && (s.net_pnl ?? 0) < 0);
 
       // Process call side
       if (e.otm_distance_call != null && e.otm_distance_call > 0) {
@@ -646,11 +679,11 @@ function EntriesTab({
             <BarChart data={creditBySlot}>
               <XAxis
                 dataKey="slot"
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
@@ -712,11 +745,11 @@ function EntriesTab({
             <BarChart data={pnlByEntry}>
               <XAxis
                 dataKey="entry"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
@@ -749,11 +782,11 @@ function EntriesTab({
             <BarChart data={otmBucketData}>
               <XAxis
                 dataKey="otm"
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `${v}%`}
                 domain={[0, 100]}
@@ -788,11 +821,17 @@ function EntriesTab({
 
 function StopsTab({
   entries,
-  stops,
+  stops: allStops,
 }: {
   entries: TradeEntry[];
   stops: TradeStop[];
 }) {
+  // Brandon variants also log take-profit / GEX-breach exits to trade_stops;
+  // every chart on this tab is about stop-LOSSES. Filter to real loss-stops once
+  // (v11 exit_reason; legacy rows fall back to net_pnl sign) — all downstream
+  // memos reference `stops`, so this single swap corrects the whole tab.
+  const stops = useMemo(() => allStops.filter(isRealStop), [allStops]);
+
   // 1. Stop rate by time slot
   const stopRateByEntry = useMemo(() => {
     const entrySlotLookup = new Map<string, number>();
@@ -899,6 +938,9 @@ function StopsTab({
 
   return (
     <>
+      <div className="text-[11px] text-text-secondary mb-1">
+        Stop-losses only — Brandon take-profit / GEX-breach exits are excluded.
+      </div>
       {/* Stop Rate by Time Slot */}
       <ChartCard title="Stop Rate by Time Slot">
         {stops.length === 0 ? (
@@ -908,11 +950,11 @@ function StopsTab({
             <BarChart data={stopRateByEntry}>
               <XAxis
                 dataKey="entry"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `${v}%`}
                 domain={[0, 100]}
@@ -977,11 +1019,11 @@ function StopsTab({
             <BarChart data={slippageData}>
               <XAxis
                 dataKey="range"
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 allowDecimals={false}
               />
@@ -1011,15 +1053,15 @@ function StopsTab({
             <BarChart data={stopsPerDayData}>
               <XAxis
                 dataKey="stops"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
-                label={{ value: "# Stops", position: "insideBottom", offset: -2, fontSize: 9, fill: colors.textDim }}
+                label={{ value: "# Stops", position: "insideBottom", offset: -2, fontSize: 11, fill: colors.textSecondary }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 allowDecimals={false}
-                label={{ value: "Days", angle: -90, position: "insideLeft", fontSize: 9, fill: colors.textDim }}
+                label={{ value: "Days", angle: -90, position: "insideLeft", fontSize: 11, fill: colors.textSecondary }}
               />
               <Tooltip
                 contentStyle={chartTooltipStyle}
@@ -1028,7 +1070,7 @@ function StopsTab({
                 cursor={chartCursor}
                 formatter={(value: unknown) => [`${value} days`, "Count"]}
               />
-              <Bar dataKey="days" radius={[3, 3, 0, 0]}>
+              <Bar dataKey="days" radius={[3, 3, 0, 0]} maxBarSize={64}>
                 {stopsPerDayData.map((d, i) => (
                   <Cell
                     key={i}
@@ -1105,8 +1147,10 @@ function MarketTab({
   const trendData = useMemo(() => {
     const map = new Map<string, { totalPnl: number; count: number }>();
     entries.forEach((e) => {
-      const signal = e.trend_signal || "Unknown";
-      if (signal === "Unknown") return;
+      // DB stores the signal lowercase ("neutral"); the order/labels below are
+      // uppercase, so normalize or the panel renders empty despite having data.
+      const signal = (e.trend_signal || "Unknown").toUpperCase();
+      if (signal === "UNKNOWN") return;
       const entryStops = stopLookup.get(`${e.date}_${e.entry_number}`) ?? [];
       let pnl = e.total_credit || 0;
       entryStops.forEach((s) => {
@@ -1140,13 +1184,16 @@ function MarketTab({
               <XAxis
                 dataKey="vix"
                 name="VIX"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                type="number"
+                domain={["dataMin - 0.5", "dataMax + 0.5"]}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
+                tickFormatter={(v) => Number(v).toFixed(1)}
               />
               <YAxis
                 dataKey="pnl"
                 name="P&L"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
@@ -1178,14 +1225,17 @@ function MarketTab({
               <XAxis
                 dataKey="range"
                 name="Range"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                type="number"
+                domain={["dataMin - 2", "dataMax + 2"]}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
-                label={{ value: "SPX Range (pts)", position: "insideBottom", offset: -2, fontSize: 9, fill: colors.textDim }}
+                tickFormatter={(v) => Number(v).toFixed(0)}
+                label={{ value: "SPX Range (pts)", position: "insideBottom", offset: -2, fontSize: 11, fill: colors.textSecondary }}
               />
               <YAxis
                 dataKey="pnl"
                 name="P&L"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
@@ -1215,11 +1265,11 @@ function MarketTab({
             <BarChart data={directionData}>
               <XAxis
                 dataKey="direction"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />
@@ -1252,11 +1302,11 @@ function MarketTab({
             <BarChart data={trendData}>
               <XAxis
                 dataKey="signal"
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
               />
               <YAxis
-                tick={{ fontSize: 10, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickFormatter={(v) => `$${v}`}
               />

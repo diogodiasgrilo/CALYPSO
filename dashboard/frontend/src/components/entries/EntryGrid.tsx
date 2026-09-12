@@ -17,12 +17,119 @@ function findEntryByNumber(
   return null;
 }
 
-export function EntryGrid() {
+/** A fully-skipped entry (MKT-011 credit gate, MKT-010 illiquidity, …) is NOT a
+ *  position. The bot records it so the dashboard can show WHAT was skipped and
+ *  WHY, but it must never be presented as an open/real entry — that made a
+ *  $0-capital skip read as a 10:45 "entry" (2026-06-30). A legitimate one-sided
+ *  entry skips only ONE side, so a true skip requires BOTH sides skipped.
+ *
+ *  2026-07-31: a genuine order-EXECUTION FAILURE (broker accepted the order
+ *  but it never filled after exhausting retries) ALSO sets both sides
+ *  skipped=True (see EntryCard.tsx's getEntryStatus() comment for the full
+ *  incident) — it must NOT be bucketed into the generic "Skipped — no
+ *  position" strip below, which only shows a plain gray skip_reason line
+ *  with no visual distinction from a routine strategic skip. Excluding it
+ *  here routes it through the `positions`/EntryCard path instead, where it
+ *  already renders as a visually distinct red "failed" card. */
+function isFullySkipped(e: HydraEntry): boolean {
+  return Boolean(e.call_side_skipped && e.put_side_skipped) && !e.execution_failed;
+}
+
+/** Compact "HH:MM" from the bot-stamped entry_time (ISO, ET). */
+function entryHm(e: HydraEntry): string {
+  return e.entry_time ? String(e.entry_time).slice(11, 16) : "—";
+}
+
+interface EntryGridProps {
+  /** Polled non-primary snapshot's entries. When provided, the grid renders
+   *  THESE instead of the WS store's. The schedule still comes from the bot
+   *  config / state schedule (the polled body doesn't carry an entry_schedule),
+   *  which is exactly the WS fallback when a schedule is absent. Omitted → WS
+   *  store, byte-identical to the old behavior. */
+  entries?: HydraEntry[];
+}
+
+export function EntryGrid({ entries: entriesProp }: EntryGridProps = {}) {
   const { hydraState } = useHydraStore();
   const config = useBotConfig();
-  const entries: HydraEntry[] = hydraState?.entries ?? [];
+  const entries: HydraEntry[] = entriesProp ?? hydraState?.entries ?? [];
   const schedule = hydraState?.entry_schedule;
   const showConditional = useShowConditionalEntries();
+
+  // ── Non-primary (polled) strategies ──────────────────────────────────────
+  // When the parent passes a polled snapshot's entries, render EXACTLY those.
+  // Do NOT derive the slot count from useBotConfig() below — that is ALWAYS the
+  // GLOBAL /api/hydra/bot-config (variant A's config: 2 base slots). Any strategy
+  // that runs more entries than A (e.g. B's 4) had its extra entries — AND their
+  // P&L — silently hidden, which made a losing day look like a winning one
+  // (2026-06-17). We don't have the selected strategy's own schedule client-side,
+  // so rendering the actual placed entries (numbered) is the correct, no-hiding
+  // behavior. The primary (WS-store) path below is untouched — there the config
+  // genuinely IS this strategy's (variant A), so its schedule logic stays exact.
+  if (entriesProp) {
+    const sorted = [...entriesProp].sort(
+      (a, b) => (a.entry_number ?? 0) - (b.entry_number ?? 0)
+    );
+    // Separate real positions from fully-skipped attempts: a skip is NOT a
+    // position and must not occupy a position card / inflate the count. Real
+    // positions render as cards; skips collapse into a compact reason strip.
+    const positions = sorted.filter((e) => !isFullySkipped(e));
+    const skips = sorted.filter(isFullySkipped);
+    return (
+      <div>
+        <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
+          Entries{positions.length ? ` (${positions.length})` : ""}
+        </h3>
+        {sorted.length === 0 ? (
+          <div className="text-sm text-text-secondary py-2">No entries today.</div>
+        ) : (
+          <>
+            {positions.length > 0 ? (
+              <div className="grid gap-2 max-sm:grid-cols-1 grid-cols-2 lg:grid-cols-3">
+                {positions.map((entry, i) => (
+                  <EntryCard
+                    key={entry.entry_number ?? i}
+                    entry={entry}
+                    label={`#${entry.entry_number ?? i + 1}`}
+                  />
+                ))}
+              </div>
+            ) : (
+              <div className="text-sm text-text-secondary py-2">
+                No positions opened today.
+              </div>
+            )}
+            {skips.length > 0 && (
+              <div className="mt-2 rounded border border-border-dim bg-bg px-3 py-2">
+                <div
+                  className="text-[10px] font-semibold uppercase tracking-wider mb-1"
+                  style={{ color: colors.textDim }}
+                >
+                  Skipped — no position ({skips.length})
+                </div>
+                <div className="flex flex-col gap-0.5">
+                  {skips.map((e, i) => (
+                    <div
+                      key={e.entry_number ?? `s${i}`}
+                      className="text-xs font-mono text-text-secondary"
+                    >
+                      <span style={{ color: colors.textDim }}>
+                        #{e.entry_number ?? "?"}
+                      </span>{" "}
+                      {entryHm(e)}{" "}
+                      <span style={{ color: colors.textDim }}>
+                        · {e.skip_reason || "credit gate"}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </>
+        )}
+      </div>
+    );
+  }
 
   // Canonical base times (pre-VIX-cap) come from bot config.
   // As of 2026-04-17, the 10:15 slot is dropped at ALL VIX levels (max_entries [2,2,2,1]).
@@ -50,8 +157,16 @@ export function EntryGrid() {
   // schedule, not the canonical schedule. So Entry #1 = first active base slot
   // (10:45 when 10:15 is dropped), Entry #2 = second, and conditional slots
   // continue the sequence.
-  const activeBaseTimes = canonicalBaseTimes.filter((t) => activeBaseSet.has(t));
-  const activeCondTimes = canonicalCondTimes.filter((t) => activeCondSet.has(t));
+  // Intersect the canonical (config) slots with the runtime schedule (which
+  // survived the VIX-regime cap). If the persisted runtime schedule
+  // (state.entry_schedule) DISAGREES with the current config — e.g. the
+  // config's entry_times changed since these entries were created — the
+  // intersection is empty, which would make existing entries VANISH. Fall back
+  // to the canonical config slots in that case so the cards still render.
+  const _intersectedBase = canonicalBaseTimes.filter((t) => activeBaseSet.has(t));
+  const _intersectedCond = canonicalCondTimes.filter((t) => activeCondSet.has(t));
+  const activeBaseTimes = _intersectedBase.length > 0 ? _intersectedBase : canonicalBaseTimes;
+  const activeCondTimes = _intersectedCond.length > 0 ? _intersectedCond : canonicalCondTimes;
   const effectiveBaseNum = (time: string) => activeBaseTimes.indexOf(time) + 1;
   const effectiveCondNum = (time: string) =>
     activeBaseTimes.length + activeCondTimes.indexOf(time) + 1;

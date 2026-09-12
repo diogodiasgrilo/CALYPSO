@@ -2,18 +2,28 @@
 
 import re
 
-from fastapi import APIRouter
+from fastapi import APIRouter, Query
 from fastapi.responses import JSONResponse
 
 from dashboard.backend.config import settings
 from dashboard.backend.services.db_reader import BacktestingDBReader
+from dashboard.backend.services.variant_readers import reader_for
 from dashboard.backend.services.live_ohlc import LiveOHLCBuilder
 from dashboard.backend.services.live_state import LiveStateProvider
 from dashboard.backend.services.market_status import get_current_status, get_today_et
 
 router = APIRouter(prefix="/api/market", tags=["market"])
 
+# Trade-data reader (primary variant, e.g. C): fallback tick source. Per-variant
+# trade data (replay P&L from spread_snapshots) is resolved per-request via
+# reader_for() so the session replay curve matches the picked strategy.
 db_reader = BacktestingDBReader(settings.backtesting_db)
+
+# Market-data reader (densest recorder, e.g. A): SPX/VIX OHLC + ticks. SPX is
+# the SAME index for every variant, so the price chart is sourced from whichever
+# variant samples densest — that's what gives full candle bodies instead of the
+# flat single-sample dojis the primary (C, ~1 tick/min) produces. See config.py.
+market_reader = BacktestingDBReader(settings.market_data_db)
 
 # Set by main.py at startup to share the broadcaster's live data sources
 _live_ohlc: LiveOHLCBuilder | None = None
@@ -47,14 +57,21 @@ async def get_ohlc(date_str: str | None = None):
     if err := _validate_date(date_str):
         return JSONResponse(status_code=400, content={"error": err})
     target = date_str or get_today_et()
-    ohlc = await db_reader.get_today_ohlc(target)
 
-    # Fall back to live OHLC bars for today if SQLite has no data yet
+    # 1. Authoritative dense bars from the market-data source (HOMER writes
+    #    market_ohlc_1min post-close for the densest variant).
+    ohlc = await market_reader.get_today_ohlc(target)
+
+    # 2. Live (intraday, before HOMER): compute dense bars from the market-data
+    #    source's market_ticks (~4-8 samples/min → real candle bodies).
+    if not ohlc:
+        ohlc = await market_reader.compute_ohlc_from_ticks(target)
+
+    # 3. Last resort (market-data source has nothing — e.g. it's not running):
+    #    the log-parsed live builder, then the primary's own ticks. These are
+    #    sparse (~1/min), so the frontend renders them as a line, not crosses.
     if not ohlc and _live_ohlc and _is_today(target):
         ohlc = _live_ohlc.get_ohlc_bars()
-
-    # Final fallback: compute OHLC from market_ticks (covers today before HOMER runs
-    # and after bot restarts that clear the live OHLC builder)
     if not ohlc:
         ohlc = await db_reader.compute_ohlc_from_ticks(target)
 
@@ -67,25 +84,36 @@ async def get_ticks(date_str: str | None = None):
     if err := _validate_date(date_str):
         return JSONResponse(status_code=400, content={"error": err})
     target = date_str or get_today_et()
-    ticks = await db_reader.get_today_ticks(target)
 
-    # Fall back to live ticks for today if SQLite has no data yet
+    # Dense SPX/VIX track from the market-data source (account-agnostic index).
+    ticks = await market_reader.get_today_ticks(target)
+
+    # Fall back to live ticks for today, then the primary's own ticks (covers
+    # historical dates the market-data source didn't record).
     if not ticks and _live_ohlc and _is_today(target):
         ticks = _live_ohlc.get_ticks()
+    if not ticks:
+        ticks = await db_reader.get_today_ticks(target)
 
     return {"date": target, "count": len(ticks), "ticks": ticks}
 
 
 @router.get("/replay_pnl")
-async def get_replay_pnl(date_str: str | None = None):
-    """Unrealized P&L curve from spread_snapshots for session replay."""
+async def get_replay_pnl(date_str: str | None = None, strategy_id: str = Query(default="")):
+    """Unrealized P&L curve from spread_snapshots for session replay.
+
+    ``strategy_id`` scopes the spread_snapshots to the picked variant's DB (same
+    resolver as the entries table) so the replay curve matches the strategy shown.
+    Empty / primary id → the canonical (live) DB.
+    """
     if err := _validate_date(date_str):
         return JSONResponse(status_code=400, content={"error": err})
+    reader, is_canonical = reader_for(strategy_id)
     target = date_str or get_today_et()
-    curve = await db_reader.get_replay_pnl(target)
+    curve = await reader.get_replay_pnl(target)
 
-    # Fall back to pnl_history from state file for today
-    if not curve and _live_state and _is_today(target):
+    # Fall back to pnl_history from state file for today (primary variant only).
+    if not curve and is_canonical and _live_state and _is_today(target):
         curve = _live_state.get_today_replay_pnl()
 
     return {"date": target, "count": len(curve), "pnl_curve": curve}

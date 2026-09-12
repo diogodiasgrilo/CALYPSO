@@ -56,8 +56,8 @@ export function DayDetailSummary({ summary }: { summary: DaySummary }) {
         />
         <StatCard
           label="Stops"
-          value={String(summary.entries_stopped || 0)}
-          color={(summary.entries_stopped || 0) > 0 ? colors.loss : colors.textPrimary}
+          value={String(summary.actual_stops ?? summary.entries_stopped ?? 0)}
+          color={(summary.actual_stops ?? summary.entries_stopped ?? 0) > 0 ? colors.loss : colors.textPrimary}
         />
         <StatCard
           label="Expired"

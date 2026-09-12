@@ -1,4 +1,5 @@
 import { useState, useEffect, useRef, useMemo, useCallback } from "react";
+import { isRegularSessionTime } from "../../lib/formatters";
 import { Play, Pause, RotateCcw } from "lucide-react";
 import {
   AreaChart,
@@ -25,6 +26,7 @@ interface ReplayEntry {
   total_credit: number;
   short_call_strike: number;
   short_put_strike: number;
+  entry_type?: string;
 }
 
 interface PnLPoint {
@@ -66,7 +68,7 @@ function fmtEntryTime(ts: string): string {
   return toTime24h(ts).slice(0, 5);
 }
 
-export function SessionReplay({ date }: { date: string }) {
+export function SessionReplay({ date, strategyId = "" }: { date: string; strategyId?: string }) {
   const [state, setState] = useState<ReplayState>("idle");
   const [ticks, setTicks] = useState<Tick[]>([]);
   const [entries, setEntries] = useState<ReplayEntry[]>([]);
@@ -78,10 +80,13 @@ export function SessionReplay({ date }: { date: string }) {
   // Load all data in parallel
   useEffect(() => {
     setState("loading");
+    // ticks = variant-agnostic SPX/VIX track; entries + replay P&L are scoped to
+    // the picked variant so the replay matches the strategy shown in History.
+    const sid = encodeURIComponent(strategyId);
     Promise.all([
       fetch(`/api/market/ticks?date_str=${date}`).then((r) => r.json()),
-      fetch(`/api/hydra/entries?date_str=${date}`).then((r) => r.json()),
-      fetch(`/api/market/replay_pnl?date_str=${date}`).then((r) => r.json()),
+      fetch(`/api/hydra/entries?date_str=${date}&strategy_id=${sid}`).then((r) => r.json()),
+      fetch(`/api/market/replay_pnl?date_str=${date}&strategy_id=${sid}`).then((r) => r.json()),
     ])
       .then(([tickData, entryData, pnlData]) => {
         const t = (tickData.ticks ?? []) as Tick[];
@@ -97,15 +102,22 @@ export function SessionReplay({ date }: { date: string }) {
             total_credit: (e.total_credit ?? ((e.call_spread_credit as number ?? 0) + (e.put_spread_credit as number ?? 0))) as number,
             short_call_strike: (e.short_call_strike ?? 0) as number,
             short_put_strike: (e.short_put_strike ?? 0) as number,
+            entry_type: (e.entry_type ?? "") as string,
           };
         }));
 
-        setPnlCurve((pnlData.pnl_curve ?? []) as PnLPoint[]);
+        // Regular session only — drop after-hours/restart points so the replay
+        // curve doesn't stretch past the close.
+        setPnlCurve(
+          ((pnlData.pnl_curve ?? []) as PnLPoint[]).filter((p) =>
+            isRegularSessionTime(p.time)
+          )
+        );
         setCurrentIndex(0);
         setState(t.length > 0 ? "ready" : "idle");
       })
       .catch(() => setState("idle"));
-  }, [date]);
+  }, [date, strategyId]);
 
   useEffect(() => {
     return () => { if (intervalRef.current) clearInterval(intervalRef.current); };
@@ -287,14 +299,14 @@ export function SessionReplay({ date }: { date: string }) {
               </defs>
               <XAxis
                 dataKey="time"
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickLine={false}
               />
               <YAxis
                 width={45}
                 domain={yDomain}
-                tick={{ fontSize: 9, fill: colors.textDim }}
+                tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={false}
                 tickLine={false}
                 tickFormatter={(v: number) => `$${v}`}
@@ -337,8 +349,8 @@ export function SessionReplay({ date }: { date: string }) {
                 <span className="text-text-dim">{fmtEntryTime(e.entry_time)}</span>
               </div>
               <div className="flex justify-between text-text-secondary">
-                <span>C:{e.short_call_strike}</span>
-                <span>P:{e.short_put_strike}</span>
+                <span>{(e.entry_type || "").includes("put_only") ? "C: —" : `C:${e.short_call_strike}`}</span>
+                <span>{(e.entry_type || "").includes("call_only") ? "P: —" : `P:${e.short_put_strike}`}</span>
               </div>
               <div className="text-right mt-0.5" style={{ color: colors.profit }}>
                 ${(e.total_credit ?? 0).toFixed(2)}

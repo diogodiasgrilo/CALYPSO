@@ -31,6 +31,11 @@ class HedgeLeg:
     structure: str       # "debit_spread" or "butterfly"
     threatened_side: str # "call" or "put" — which IC side the hedge protects
     placed_at: datetime
+    # L-H6: the REAL broker conid for a LIVE overlay leg, in the SAME native
+    # type the IC legs' *_uic carry (so reconciliation's expected/actual sets
+    # match). None for dry-run synthetic legs. Stored/loaded raw (NOT coerced to
+    # str) so an int conid survives a restart as an int.
+    conid: Optional[int] = None
 
 
 def _norm_cdf(x: float) -> float:

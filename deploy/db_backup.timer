@@ -2,8 +2,12 @@
 Description=Daily CALYPSO SQLite Database Backup
 
 [Timer]
-# Run at 6:00 PM ET (23:00 UTC during EST, 22:00 UTC during EDT)
-# After settlement and HOMER have completed
+# Run daily at 23:00 UTC. ET equivalent shifts with DST:
+#   - 6 PM EST during winter (Nov–Mar)
+#   - 7 PM EDT during summer (Mar–Nov)
+# Both windows are after the 16:00 ET market close + HOMER's
+# 19:30 ET journal write, so the backup captures the day's final
+# state. AUD2-L1: prior comment had the DST mapping backwards.
 OnCalendar=*-*-* 23:00:00 UTC
 Persistent=true
 

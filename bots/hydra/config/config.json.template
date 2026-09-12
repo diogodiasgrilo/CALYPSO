@@ -1,19 +1,11 @@
 {
   "bot_name": "HYDRA",
-  "saxo_api": {
-    "environment": "live",
-    "app_key": "FROM_SECRET_MANAGER",
-    "app_secret": "FROM_SECRET_MANAGER",
-    "redirect_uri": "http://localhost:8000/callback"
-  },
+  "_comment_credentials": "IBKR OAuth credentials are NOT in this file. They are loaded by shared/ib_oauth.load_credentials('paper') from systemd's $CREDENTIALS_DIRECTORY on the VM (LoadCredentialEncrypted= in hydra.service), or from env vars + ~/ibkr-oauth/paper/ in the dev path. See deploy/IBKR_CREDENTIALS_SETUP.md.",
   "strategy": {
-    "_comment_underlying": "US500.I is a CFD that tracks SPX - provides real-time prices",
-    "underlying_symbol": "US500.I",
-    "underlying_uic": 4913,
-    "_comment_options": "SPXW are SPX weekly options (0DTE)",
-    "option_root_uic": 128,
-    "_comment_vix": "VIX spot for volatility filtering",
-    "vix_spot_uic": 10606,
+    "_comment_commission": "IBKR all-in SPX cost ~$1.15/leg/contract (~$0.65 IBKR Pro base + ~$0.45 CBOE index fee + ~$0.05 ORF/OCC/CAT) — replaces the Saxo-era $2.50 default. Display/reported-P&L only; does NOT affect entry/stop logic. Set 2026-05-29 at the IBKR cutover so net P&L reflects real IBKR economics.",
+    "commission_per_leg": 1.15,
+    "_comment_underlying": "LIVE INSTRUMENT LOOKUP KEY (modularity item 2, 2026-06-08) — underlying_symbol is now the symbol passed to qualify_contract / get_option_chain / qualify_option_strikes / get_chart_data on EVERY heartbeat and entry. It is NO LONGER cosmetic: a wrong/stale value (e.g. the Saxo ticker 'US500.I') makes IBKR return 'No symbol found' and the bot goes blind (SPX/VIX never resolve, every entry skipped). For SPX 0DTE it MUST be 'SPX'. The legacy Saxo UIC keys (underlying_uic, option_root_uic, vix_spot_uic) remain vestigial (IBKR looks up by conid). The other now-live instrument knobs default correctly for SPX 0DTE and only need setting for a different instrument: volatility_symbol ('VIX'), trading_class ('SPXW'), exchange ('CBOE'), strike_increment (5), target_dte (0).",
+    "underlying_symbol": "SPX",
     "_comment_entry_times": "Entry times in HH:MM format (US Eastern). Configured slots are :15/:45 starting at 10:15 AM, but the active VIX regime caps max_entries (currently [2,2,2,1] \u2014 drops EARLIEST entries first, so E#1 at 10:15 is dropped at ALL VIX levels). Effective live schedule = 10:45 + 11:15. MKT-031 smart entry scouting starts 10min before each time. Only used when vix_time_shift.enabled=false.",
     "entry_times": [
       "10:15",
@@ -183,6 +175,14 @@
   "filters": {
     "_comment": "Skip trading on FOMC announcement days due to high volatility",
     "fomc_blackout": true
+  },
+  "google_sheets": {
+    "_comment": "Top-level google_sheets block — schema GoogleSheetsLogger.__init__ actually reads (shared/logger_service.py). The logging.* keys are read by LocalFileLogger and a few other consumers, but Sheets-specific config lives here. spreadsheet_name mirrors logging.spreadsheet_name (variant A live workbook).",
+    "enabled": true,
+    "credentials_file": "config/google_credentials.json",
+    "spreadsheet_name": "Calypso_HYDRA_Live_Data",
+    "worksheet_name": "Trades",
+    "strategy_type": "hydra"
   },
   "alerts": {
     "_comment": "Alert settings - phone/email loaded from Secret Manager in cloud",

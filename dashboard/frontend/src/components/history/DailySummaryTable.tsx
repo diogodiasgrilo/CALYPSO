@@ -101,12 +101,12 @@ export function DailySummaryTable({
                   className="px-3 py-1.5 text-center"
                   style={{
                     color:
-                      (day.entries_stopped || 0) > 0
+                      (day.actual_stops ?? day.entries_stopped ?? 0) > 0
                         ? colors.loss
                         : colors.textPrimary,
                   }}
                 >
-                  {day.entries_stopped || 0}
+                  {day.actual_stops ?? day.entries_stopped ?? 0}
                 </td>
                 <td className="px-3 py-1.5 text-right text-text-secondary">
                   {day.spx_close?.toFixed(0) || "\u2014"}

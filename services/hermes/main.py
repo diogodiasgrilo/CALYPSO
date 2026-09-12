@@ -74,6 +74,17 @@ def main():
 
     today_str = get_us_market_time().strftime("%Y-%m-%d")
 
+    # SETTLEMENT GATE (2026-09-10). Until today this ran at 19:00 ET while
+    # settlement completed between 21:45 and 22:37 — so it analysed an
+    # unsettled day, every trading day. The timer now fires at 23:00, but a
+    # fixed clock time is still a guess against a variable event (0DTE SPX is
+    # PM-settled and IBKR's feed clears on its own schedule), so confirm
+    # against the bot's own record rather than trusting the clock.
+    from shared.settlement_gate import require_settled
+
+    if not require_settled(config, agent="hermes", date_str=today_str):
+        return
+
     # Idempotency: skip if today's report already exists (e.g., triggered by HYDRA settlement)
     report_dir = config.get("hermes", {}).get("report_dir", "intel/hermes")
     report_path = os.path.join(report_dir, f"{today_str}.md")

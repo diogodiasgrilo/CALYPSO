@@ -17,6 +17,8 @@ Usage:
 
 import logging
 import os
+import threading
+import time
 from typing import Any, Dict, Optional
 
 logger = logging.getLogger(__name__)
@@ -24,6 +26,27 @@ logger = logging.getLogger(__name__)
 # Default model — best cost/quality balance for analysis tasks
 DEFAULT_MODEL = "claude-sonnet-4-6"
 DEFAULT_MAX_TOKENS = 4096
+
+# Intra-process call pacing (2026-05-31). Agents like HOMER fire ~5 calls of
+# ~13k input tokens back-to-back; that burst exceeds the account's per-minute
+# input-token limit (ITPM — e.g. ~30k on Anthropic Tier 1 for Sonnet) → HTTP
+# 429 (the SDK rides it out via max_retries below, so the agent still SUCCEEDS,
+# but the 429 generates a rate-limit email).
+# Default 35s spaces consecutive calls so that AT MOST 2 land in any 60s window
+# (~26k input < Tier-1's ~30k ITPM) → no 429, no email, even on the lowest tier.
+# HOMER's evening run is a batch job (not latency-sensitive), so ~3 min for its
+# 5 calls is free. Lower CALYPSO_CLAUDE_MIN_INTERVAL_S if you raise your tier.
+_MIN_CALL_INTERVAL_S = float(os.environ.get("CALYPSO_CLAUDE_MIN_INTERVAL_S", "35.0"))
+_pace_lock = threading.Lock()
+_last_call_at = 0.0
+
+# Per-request HTTP timeout for the Anthropic client. Default 120s suits the
+# short analyst/journal calls. CLIO asks for a single LARGE generation
+# (max_tokens=12288 against ~62k input chars) that legitimately needs several
+# minutes — at 120s the SDK times out, retries, then raises APITimeoutError and
+# the run fails. CLIO's unit sets CALYPSO_CLAUDE_TIMEOUT_S=600 to give that one
+# big call room; every other consumer keeps the 120s default.
+_REQUEST_TIMEOUT_S = float(os.environ.get("CALYPSO_CLAUDE_TIMEOUT_S", "120.0"))
 
 
 def get_anthropic_client(config: Optional[Dict[str, Any]] = None):
@@ -75,7 +98,10 @@ def get_anthropic_client(config: Optional[Dict[str, Any]] = None):
         )
         return None
 
-    return anthropic.Anthropic(api_key=api_key, timeout=120.0)
+    # max_retries above the SDK default (2) so a transient 429/overload is
+    # ridden out with exponential backoff rather than surfacing as a failed
+    # agent report.
+    return anthropic.Anthropic(api_key=api_key, timeout=_REQUEST_TIMEOUT_S, max_retries=5)
 
 
 def ask_claude(
@@ -106,6 +132,18 @@ def ask_claude(
         model = DEFAULT_MODEL
     if max_tokens is None:
         max_tokens = DEFAULT_MAX_TOKENS
+
+    # Pace consecutive calls within this process so a multi-call agent run
+    # (e.g. HOMER's ~5 back-to-back narrative calls) does not burst past the
+    # account's per-minute token limit and trigger a 429 + rate-limit email.
+    global _last_call_at
+    if _MIN_CALL_INTERVAL_S > 0:
+        with _pace_lock:
+            wait = _last_call_at + _MIN_CALL_INTERVAL_S - time.monotonic()
+            if wait > 0:
+                logger.debug("ask_claude: pacing %.1fs to stay under rate limit", wait)
+                time.sleep(wait)
+            _last_call_at = time.monotonic()
 
     try:
         response = client.messages.create(

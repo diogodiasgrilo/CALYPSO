@@ -75,33 +75,42 @@ def _read_apollo_report(config: Dict[str, Any], today_str: str) -> Optional[str]
 
 
 def _read_sheets_daily_summary(config: Dict[str, Any]) -> Optional[Dict[str, str]]:
-    """Read today's daily summary row from Google Sheets."""
+    """Read today's daily summary row — from the DB (migration) or Google Sheets.
+
+    Source chosen by config["hermes"]["data_source"] / config["data_source"]
+    (default sheets) via make_agent_reader. DB mode returns a Sheet-shaped row.
+    """
     try:
-        from shared.sheets_reader import SheetsReader
+        from shared.sheets_db_shim import make_agent_reader
 
         spreadsheet = config.get("google_sheets", {}).get(
             "spreadsheet_name", "Calypso_HYDRA_Live_Data"
         )
-        reader = SheetsReader(config)
+        reader = make_agent_reader(config, agent="hermes")
         return reader.get_last_row_as_dict(spreadsheet, "Daily Summary")
     except Exception as e:
-        logger.warning(f"Failed to read Daily Summary from Sheets: {e}")
+        logger.warning(f"Failed to read Daily Summary: {e}")
         return None
 
 
 def _read_sheets_positions(config: Dict[str, Any]) -> Optional[List[Dict[str, str]]]:
-    """Read today's position entries from Google Sheets."""
+    """Read recent position entries — from the DB (migration) or Google Sheets.
+
+    In DB mode the shim returns recent trade_entries as raw position context (this
+    block is dumped verbatim to Claude; HERMES's numeric analysis comes from the
+    state file, not here). Source chosen as in _read_sheets_daily_summary.
+    """
     try:
-        from shared.sheets_reader import SheetsReader
+        from shared.sheets_db_shim import make_agent_reader
 
         spreadsheet = config.get("google_sheets", {}).get(
             "spreadsheet_name", "Calypso_HYDRA_Live_Data"
         )
-        reader = SheetsReader(config)
+        reader = make_agent_reader(config, agent="hermes")
         # Read last 20 rows (max 6 entries × ~3 rows each for a typical day)
         return reader.read_tab_as_dicts(spreadsheet, "Positions", limit_rows=20)
     except Exception as e:
-        logger.warning(f"Failed to read Positions from Sheets: {e}")
+        logger.warning(f"Failed to read Positions: {e}")
         return None
 
 
@@ -149,6 +158,14 @@ def _read_journal_logs(lines: int = 200) -> Optional[str]:
 # ---------------------------------------------------------------------------
 
 
+# The live-track-record baseline. HERMES rebases its cumulative figures to this
+# date so they AGREE with the dashboard, which rebases every cumulative tile to
+# the same DASHBOARD_BASELINE_DATE (2026-06-09 — "the first clean day after
+# go-live debugging; prior history is mostly dry-run sim + phantom rows"). Keep
+# this in sync with deploy/.../dashboard.service.d/baseline.conf.
+LIVE_BASELINE_DATE = "2026-06-09"
+
+
 def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
     """
     Pre-compute all counting and arithmetic for HERMES analysis.
@@ -179,7 +196,12 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
         put_credit = e.get("put_spread_credit", 0) or 0
         total_credit = call_credit + put_credit
 
-        if e.get("call_side_skipped"):
+        # 2026-07-31: an execution FAILURE also sets both *_side_skipped flags
+        # (see _classify_outcome docstring) — must be checked first, else it
+        # falls into the call_side_skipped branch and is mislabeled "put_only".
+        if e.get("execution_failed"):
+            entry_type = "execution_failed"
+        elif e.get("call_side_skipped"):
             entry_type = "put_only"
         elif e.get("put_side_skipped"):
             entry_type = "call_only"
@@ -226,12 +248,19 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
     put_stops = state.get("put_stops_triggered", 0)
     double_stops_count = state.get("double_stops", 0)
 
-    clean_entries = sum(1 for eo in entry_outcomes if eo["outcome"] == "clean")
-    entries_with_stops = sum(1 for eo in entry_outcomes if eo["outcome"] != "clean")
+    # A take-profit / early close is NOT a stop. Count only real stop-loss
+    # outcomes toward "entries_with_stops"; everything else (clean expiry,
+    # take_profit, early_closed, breach_exit) is a non-stopped entry.
+    entries_with_stops = sum(1 for eo in entry_outcomes if eo["outcome"] in _STOP_OUTCOMES)
+    clean_entries = len(entry_outcomes) - entries_with_stops
 
     # --- Best / worst entry by outcome category ---
-    # clean > one-side-stop > double-stop; within same category, higher credit = better
-    outcome_rank = {"clean": 0, "call_stopped": 1, "put_stopped": 1, "double_stopped": 2}
+    # take-profit/clean > one-side-stop > double-stop; within a category, higher
+    # credit = better. Unknown outcomes default to mid-rank.
+    outcome_rank = {
+        "take_profit": 0, "clean": 0, "early_closed": 0, "breach_exit": 1,
+        "call_stopped": 1, "put_stopped": 1, "double_stopped": 2,
+    }
     best_entry = None
     worst_entry = None
     if entry_outcomes:
@@ -311,18 +340,40 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
     if metrics and metrics.get("daily_returns"):
         daily_returns = metrics["daily_returns"]
 
-    win_streak, lose_streak = _compute_streak(daily_returns)
-    avg_win, avg_loss = _compute_averages(daily_returns)
+    # Rebase to LIVE_BASELINE_DATE so HERMES's cumulative AGREES with the
+    # dashboard (same baseline) and excludes the pre-go-live dry-run/sim era.
+    # Every cumulative figure is computed from daily_returns — the authoritative
+    # per-trading-day list — NOT the file's top-level winning_days/losing_days
+    # counters, which historically drifted (0-capital no-trade days were
+    # mis-counted as wins on restart; observed 18 vs 14 on variant C 2026-06-10).
+    rebased_returns = [d for d in daily_returns
+                       if str(d.get("date", "")) >= LIVE_BASELINE_DATE]
+
+    win_streak, lose_streak = _compute_streak(rebased_returns)
+    avg_win, avg_loss = _compute_averages(rebased_returns)
     # Phase 2 A-3: per-contract historical averages for mixed-count comparison.
     # Critical when today is 2c but history is all 1c — the raw avg_win is
     # misleading. Claude should use per-contract values for apples-to-apples.
-    avg_win_pc, avg_loss_pc = _compute_averages_per_contract(daily_returns)
+    avg_win_pc, avg_loss_pc = _compute_averages_per_contract(rebased_returns)
+
+    if rebased_returns:
+        cum_pnl = sum(d.get("net_pnl", 0) for d in rebased_returns)
+        wins = sum(1 for d in rebased_returns if d.get("net_pnl", 0) >= 0)
+        losses = sum(1 for d in rebased_returns if d.get("net_pnl", 0) < 0)
+        day_number = len(rebased_returns)
+    else:
+        # No booked days at/after the baseline yet — fall back to today's live P&L.
+        cum_pnl = net_pnl
+        wins = 1 if net_pnl >= 0 else 0
+        losses = 1 if net_pnl < 0 else 0
+        day_number = 1
 
     cumulative = {
-        "day_number": len(daily_returns) if daily_returns else 1,
-        "cumulative_pnl": metrics.get("cumulative_pnl", 0) if metrics else net_pnl,
-        "winning_days": metrics.get("winning_days", 0) if metrics else (1 if net_pnl >= 0 else 0),
-        "losing_days": metrics.get("losing_days", 0) if metrics else (1 if net_pnl < 0 else 0),
+        "day_number": day_number,
+        "cumulative_pnl": cum_pnl,
+        "winning_days": wins,
+        "losing_days": losses,
+        "baseline_date": LIVE_BASELINE_DATE,
         "win_streak": win_streak,
         "lose_streak": lose_streak,
         "avg_win_pnl": avg_win,
@@ -391,7 +442,35 @@ def compute_cheat_sheet(data: Dict[str, Any]) -> Dict[str, Any]:
 
 
 def _classify_outcome(entry: Dict) -> str:
-    """Classify entry outcome: clean, call_stopped, put_stopped, or double_stopped."""
+    """Classify entry outcome: clean, take_profit, early_closed, call_stopped,
+    put_stopped, double_stopped, or execution_failed.
+
+    A Brandon take-profit / GEX-breach / MKT-018 close sets BOTH *_side_stopped
+    flags as a generic "closed" marker, so the flags alone mislabel a profitable
+    take-profit as a "double_stopped". The state entry's close_reason ("TP" /
+    "BREACH" / "STOP" / "EXPIRED") is the authoritative disposition — consult it
+    before any flag inference.
+
+    2026-07-31: a genuine order-EXECUTION FAILURE (broker accepted the order but
+    it never filled after exhausting retries) also sets BOTH call_side_skipped
+    and put_side_skipped=True with no close_reason and no *_side_stopped flags —
+    without this check it fell through to "clean" (a real incident: HERMES would
+    have narrated a $0-credit put_only trade as a routine, uneventful entry
+    instead of flagging a broker/execution problem). Must be checked before any
+    other branch since a failure has none of the other markers set.
+    """
+    if entry.get("execution_failed"):
+        return "execution_failed"
+    reason = str(entry.get("close_reason", "") or "").upper()
+    if reason == "TP":
+        return "take_profit"
+    if reason == "BREACH":
+        return "breach_exit"
+    if reason not in ("STOP", "") or entry.get("early_closed"):
+        # Any other early close (e.g. MKT-018) that is NOT a real stop.
+        if entry.get("early_closed"):
+            return "early_closed"
+
     call_stopped = entry.get("call_side_stopped", False)
     put_stopped = entry.get("put_side_stopped", False)
 
@@ -402,6 +481,11 @@ def _classify_outcome(entry: Dict) -> str:
     if put_stopped:
         return "put_stopped"
     return "clean"
+
+
+# Outcomes that represent a real stop-loss (loss-cut), as opposed to a clean
+# expiry or a profitable/defensive early close.
+_STOP_OUTCOMES = frozenset({"call_stopped", "put_stopped", "double_stopped"})
 
 
 def _detect_stop_pattern(entry_outcomes: List[Dict]) -> str:

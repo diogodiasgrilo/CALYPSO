@@ -78,6 +78,10 @@ function createWidget(data) {
     active: "#58a6ff",
     expired: "#7ee8c7",
     stopped: "#f85149",
+    // 2026-07-31: a genuine order-execution FAILURE (broker never filled after
+    // retries) — same red as "stopped" so it stands out from the neutral gray
+    // "skipped"/"pending" default, matching the web dashboard's failed-card color.
+    failed: "#f85149",
     pending: "#5e6e82",
   };
 

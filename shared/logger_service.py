@@ -15,6 +15,7 @@ Date: 2024
 
 import logging
 import json
+import os
 import smtplib
 from datetime import datetime
 from typing import Optional, Dict, List, Any
@@ -195,6 +196,20 @@ class GoogleSheetsLogger:
         """
         self.config = config.get("google_sheets", {})
         self.enabled = self.config.get("enabled", False)
+        # RETIRED 2026-07-18: the Google Sheets WRITE path is decommissioned. The
+        # agents (CLIO/HERMES/HOMER) and the dashboard now read
+        # data/variant_c/backtesting.db; all variants run google_sheets.enabled=false.
+        # Force-disable so the write path can NEVER execute regardless of config —
+        # this short-circuits _initialize() below, and every log_* method already
+        # guards on self.enabled. Kept as DORMANT code (symmetric with the retained
+        # read-side shared/sheets_reader.py). Reversible: delete this override. See
+        # docs/GOOGLE_SHEETS.md + memory agents_sheets_to_db_migration.
+        if self.enabled:
+            logger.info(
+                "GoogleSheetsLogger: Sheets WRITE path is RETIRED (2026-07-18) — "
+                "ignoring google_sheets.enabled=true; agents + dashboard read the DB."
+            )
+        self.enabled = False
         self.credentials_file = self.config.get("credentials_file", "config/google_credentials.json")
         self.spreadsheet_name = self.config.get("spreadsheet_name", "Trading_Bot_Log")
 
@@ -217,6 +232,26 @@ class GoogleSheetsLogger:
         self._log_buffer = []
         self._log_buffer_lock = threading.Lock()
         self._last_log_flush = datetime.now()
+
+        # Position-snapshot write throttle (audit 2026-06-02): the Positions tab
+        # was rewritten on every ~10-15s heartbeat across 3 bots sharing ONE GCP
+        # project's Sheets write quota → continuous HTTP 429 "write requests per
+        # minute" rejections. A snapshot is a "current view"; ~60s freshness is
+        # plenty. Configurable via google_sheets.position_snapshot_min_interval_s.
+        self._pos_snapshot_min_interval = float(
+            self.config.get("position_snapshot_min_interval_s", 60)
+        )
+        self._last_pos_snapshot_at = 0.0
+        # Same throttle for the per-heartbeat dashboard writes (performance
+        # metrics + account-summary tabs). They were unthrottled and, with three
+        # bots sharing one project's write quota, contributed to the 429/timeout
+        # noise ("... update skipped due to timeout"). Separate timestamps because
+        # the two are called as a pair each heartbeat.
+        self._dashboard_write_min_interval = float(
+            self.config.get("dashboard_write_min_interval_s", 60)
+        )
+        self._last_metrics_write_at = 0.0
+        self._last_summary_write_at = 0.0
 
         if self.enabled:
             self._initialize()
@@ -281,7 +316,7 @@ class GoogleSheetsLogger:
                         self.spreadsheet = self.client.create(self.spreadsheet_name)
                         logger.info(f"Created new Google spreadsheet: {self.spreadsheet_name}")
 
-                    # Initialize all worksheets (7 tabs for comprehensive Looker dashboard)
+                    # Initialize all worksheets (7 tabs — legacy Google Sheets dashboard, RETIRED 2026-07-18)
                     self._setup_trades_worksheet()
                     self._setup_positions_worksheet()
                     self._setup_daily_summary_worksheet()
@@ -358,6 +393,12 @@ class GoogleSheetsLogger:
         if timeout is None:
             timeout = self.SHEETS_API_TIMEOUT
 
+        # L-M1: track whether the LAST call timed out (ambiguous — the daemon
+        # thread may still complete the write server-side) vs returned cleanly.
+        # The trade-append retry loop reads this to avoid re-appending a row that
+        # may have landed (a duplicate that would inflate logged credit/loss).
+        self._last_sheets_timed_out = False
+
         result = [None]
         exception = [None]
 
@@ -373,6 +414,7 @@ class GoogleSheetsLogger:
 
         if thread.is_alive():
             # Thread is still running - timeout occurred
+            self._last_sheets_timed_out = True  # L-M1: ambiguous — may still land
             logger.warning(f"SHEETS-TIMEOUT: Google Sheets API call timed out after {timeout}s: {func.__name__ if hasattr(func, '__name__') else str(func)}")
             return None
 
@@ -447,7 +489,11 @@ class GoogleSheetsLogger:
                     headers = [
                         "Last Updated", "Entry #", "Leg Type", "Strike", "Expiry",
                         "Entry Credit", "Current Value", "P&L ($)", "P&L (EUR)",
-                        "Stop Level", "Distance to Stop ($)", "Stop Triggered",
+                        # "Stop Debit ($)" = the credit+buffer cost-to-close threshold (a
+                        # DOLLAR debit, not a price level). Renamed from "Stop Level" 2026-06-10:
+                        # sitting next to the price-level "Strike" column, "Stop Level" read as
+                        # a nonsensical price (e.g. 5619.96 vs a 7290 put strike).
+                        "Stop Debit ($)", "Distance to Stop ($)", "Stop Triggered",
                         "Side", "Spread Width", "Position ID", "Trend Signal", "Status"
                     ]
                 else:
@@ -1410,7 +1456,7 @@ class GoogleSheetsLogger:
             logger.error(f"Failed to log recovered position: {e}")
             return False
 
-    def log_position_snapshot(self, positions: List[Dict[str, Any]]) -> bool:
+    def log_position_snapshot(self, positions: List[Dict[str, Any]], force: bool = False) -> bool:
         """
         Update the Positions worksheet with current position snapshot.
 
@@ -1418,6 +1464,10 @@ class GoogleSheetsLogger:
 
         Args:
             positions: List of position dictionaries
+            force: I-M1 — settlement callers pass True to bypass the intraday
+                write throttle so the final post-settlement snapshot is never
+                silently dropped (the Sheets daily record would otherwise be
+                permanently absent for the day).
 
         Returns:
             bool: True if logged successfully
@@ -1425,11 +1475,27 @@ class GoogleSheetsLogger:
         if not self.enabled or "Positions" not in self.worksheets:
             return False
 
+        # Throttle (audit 2026-06-02): cap Positions-tab rewrites to ≥ the
+        # configured interval to stay under the Sheets per-minute write quota.
+        # A skipped snapshot is benign (the next one rewrites the full current
+        # state), so return True — not an error.
+        import time as _time
+        if not force:  # I-M1: settlement bypasses the throttle
+            _now = _time.monotonic()
+            if _now - self._last_pos_snapshot_at < self._pos_snapshot_min_interval:
+                return True
+            self._last_pos_snapshot_at = _now
+
         try:
             # Clear existing data (keep headers)
             worksheet = self.worksheets["Positions"]
-            # Only delete if there are rows beyond the header
-            if worksheet.row_count > 1:
+            # Only delete for APPEND-based layouts (iron_fly/delta_neutral/etc.).
+            # The meic/hydra path below uses resize+update which overwrites AND
+            # shrinks the sheet itself, so a delete-to-1-row here is redundant —
+            # and was harmful: when the later resize was throttled/failed under
+            # 429 pressure, the sheet was left at 1 row and the update/format hit
+            # "Range exceeds grid limits. Max rows: 1" (audit 2026-06-02). Skip it.
+            if self.strategy_type not in ("meic", "hydra") and worksheet.row_count > 1:
                 # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
                 self._sheets_call_with_timeout(worksheet.delete_rows, 2, worksheet.row_count)
                 # Ignore failures - we'll overwrite anyway
@@ -1499,7 +1565,7 @@ class GoogleSheetsLogger:
                 # MEIC/HYDRA: Multiple iron condors - one row per side (call/put) per entry
                 # Columns: Last Updated, Entry #, Leg Type, Strike, Expiry,
                 #          Entry Credit, Current Value, P&L ($), P&L (EUR),
-                #          Stop Level, Distance to Stop ($), Stop Triggered,
+                #          Stop Debit ($), Distance to Stop ($), Stop Triggered,
                 #          Side, Spread Width, Position ID, Trend Signal, Status
                 all_rows = []
                 for pos in positions:
@@ -1524,22 +1590,25 @@ class GoogleSheetsLogger:
                     ]
                     all_rows.append(row)
 
-                # Batch write all rows at once (single API call)
+                # Batch write all rows at once. Minimize API calls (429-quota
+                # fix 2026-06-02): just resize-to-exact + one update. resize
+                # both grows AND shrinks to end_row (removing stale rows), so no
+                # separate delete is needed; the per-snapshot bold-clear format
+                # call was dropped (data rows written via update are not bold) —
+                # 2 write calls/snapshot instead of 4.
+                #
+                # AUD5 C-2: the resize runs UNCONDITIONALLY (outside the
+                # all_rows guard) so an empty snapshot — every position expired —
+                # shrinks the sheet back to header-only (end_row=1) instead of
+                # leaving the prior snapshot's stale rows on display. The update
+                # is skipped when there are no data rows to write.
+                end_row = 1 + len(all_rows)
+                self._sheets_call_with_timeout(
+                    worksheet.resize, end_row, 17
+                )
                 if all_rows:
-                    end_row = 1 + len(all_rows)
-                    # Always resize to exact needed size — cached row_count can be
-                    # stale after a timed-out delete_rows (Fix #80: sheet may have
-                    # shrunk server-side but gspread cache still shows old count)
-                    self._sheets_call_with_timeout(
-                        worksheet.resize, end_row, 17
-                    )
                     self._sheets_call_with_timeout(
                         worksheet.update, f"A2:Q{end_row}", all_rows
-                    )
-
-                    # Clear any bold formatting from data rows
-                    self._sheets_call_with_timeout(
-                        worksheet.format, f"A2:Q{end_row}", {"textFormat": {"bold": False}}
                     )
 
             else:
@@ -2205,11 +2274,23 @@ class GoogleSheetsLogger:
                 ]
                 logger.debug(f"Daily summary logged to Google Sheets (Net Theta: ${net_theta:.2f})")
 
-            # Fix #64: Use timeout wrapper to prevent freeze on Google Sheets API hang
-            result = self._sheets_call_with_timeout(
-                self.worksheets["Daily Summary"].append_row,
-                row
-            )
+            # 06-04: IDEMPOTENT BY DATE. The daily summary can legitimately be
+            # (re)written more than once for the same day — a mid-day restart, a
+            # multi-pass settlement, or a manual correction. A blind append_row
+            # left a SECOND row for the day (the duplicate Jun-2 row). Remove any
+            # existing row(s) for this date first, then append the fresh one, so
+            # there is exactly one row per day (also self-heals pre-existing dups).
+            # Mirrors the DB path, where `date` is the PRIMARY KEY.
+            # Fix #64: timeout wrapper to prevent freeze on a Google Sheets API hang.
+            ws = self.worksheets["Daily Summary"]
+            date_str = str(row[0])
+            col_a = self._sheets_call_with_timeout(ws.col_values, 1)
+            if col_a:
+                # 1-based row indices of existing rows for this date (skip header)
+                dup_rows = [i + 1 for i, d in enumerate(col_a) if i > 0 and d == date_str]
+                for ridx in reversed(dup_rows):  # delete bottom-up so indices stay valid
+                    self._sheets_call_with_timeout(ws.delete_rows, ridx)
+            result = self._sheets_call_with_timeout(ws.append_row, row)
             if result is None:
                 logger.warning(f"Daily summary log skipped due to timeout")
                 return False
@@ -2573,6 +2654,18 @@ class GoogleSheetsLogger:
         if not self.enabled or "Performance Metrics" not in self.worksheets:
             return False
 
+        # Throttle the high-frequency intraday metrics writes (Sheets write
+        # quota — 3 bots share it). EOD / All-Time / Weekly / Monthly / Final
+        # periods are the important low-frequency settlement writes and are
+        # NEVER throttled. A throttled intraday call returns True (benign —
+        # the next one rewrites current state).
+        import time as _time
+        if not any(k in str(period) for k in ("End", "All", "Weekly", "Monthly", "Final")):
+            _now = _time.monotonic()
+            if _now - self._last_metrics_write_at < self._dashboard_write_min_interval:
+                return True
+            self._last_metrics_write_at = _now
+
         try:
             # Calculate EUR values if exchange rate provided
             total_pnl = metrics.get("total_pnl", 0)
@@ -2808,7 +2901,8 @@ class GoogleSheetsLogger:
         self,
         strategy_data: Dict[str, Any],
         exchange_rate: float = None,
-        environment: str = "LIVE"
+        environment: str = "LIVE",
+        force: bool = False,
     ) -> bool:
         """
         Log strategy account summary for Looker dashboard.
@@ -2819,12 +2913,26 @@ class GoogleSheetsLogger:
             strategy_data: Strategy-specific data (varies by strategy_type)
             exchange_rate: Optional USD/EUR exchange rate
             environment: Trading environment (LIVE/SIM)
+            force: I-M1 — settlement callers pass True to bypass the intraday
+                write throttle so the final settled-state snapshot is never
+                silently dropped.
 
         Returns:
             bool: True if logged successfully
         """
         if not self.enabled or "Account Summary" not in self.worksheets:
             return False
+
+        # Throttle the high-frequency account-summary snapshot (Sheets write
+        # quota). It's a current-state snapshot, so ~60s freshness is plenty and
+        # the last write before EOD still reflects final state. Returns True when
+        # throttled (benign — next snapshot rewrites current state).
+        import time as _time
+        if not force:  # I-M1: settlement bypasses the throttle
+            _now = _time.monotonic()
+            if _now - self._last_summary_write_at < self._dashboard_write_min_interval:
+                return True
+            self._last_summary_write_at = _now
 
         try:
             worksheet = self.worksheets["Account Summary"]
@@ -3289,15 +3397,43 @@ class LocalFileLogger:
             config: Configuration dictionary with logging settings
         """
         self.config = config.get("logging", {})
-        self.log_file = self.config.get("log_file", "logs/bot_log.txt")
         self.log_level = self.config.get("log_level", "INFO")
         self.console_output = self.config.get("console_output", True)
+
+        # Resolve a PER-VARIANT log file so the three concurrently-running HYDRA
+        # variants (A/B/C) do not all write the same file. They share
+        # WorkingDirectory=/opt/calypso, so a single relative default would
+        # resolve to one identical absolute path for every process, interleaving
+        # their lines and racing TimedRotatingFileHandler rollovers/trades.json.
+        #
+        # Precedence:
+        #   1. explicit `log_file` config key (back-compat / overrides)
+        #   2. `log_dir` config key -> <log_dir>/bot.log  (what the variant
+        #      configs set: logs/hydra, logs/hydra_variant_b, logs/hydra_variant_c;
+        #      filename "bot.log" matches the per-variant paths the dashboard
+        #      backend tails, e.g. /opt/calypso/logs/hydra/bot.log)
+        #   3. HYDRA_VARIANT_ID env var -> logs/hydra_variant_<id>/bot.log
+        #      (variant A / unset -> logs/hydra/bot.log)
+        log_file = self.config.get("log_file")
+        if not log_file:
+            log_dir_cfg = self.config.get("log_dir")
+            if log_dir_cfg:
+                log_file = str(Path(log_dir_cfg) / "bot.log")
+            else:
+                variant_id = (os.environ.get("HYDRA_VARIANT_ID", "") or "").strip().lower()
+                if variant_id:
+                    log_file = f"logs/hydra_variant_{variant_id}/bot.log"
+                else:
+                    log_file = "logs/hydra/bot.log"
+        self.log_file = log_file
 
         # Ensure log directory exists
         log_dir = Path(self.log_file).parent
         log_dir.mkdir(parents=True, exist_ok=True)
 
-        # Separate file for trade records in JSON format
+        # Separate file for trade records in JSON format. Lives alongside the
+        # per-variant log file, so each variant gets its own trades.json and the
+        # full read-modify-write in log_trade() cannot clobber another variant.
         self.trade_log_file = str(log_dir / "trades.json")
 
         self._setup_logging()
@@ -3326,11 +3462,56 @@ class LocalFileLogger:
             datefmt="%Y-%m-%d %H:%M:%S"
         )
 
-        # File handler (TimedRotatingFileHandler: rotate at midnight, keep 7 days)
+        # File handler (TimedRotatingFileHandler: rotate at midnight ET, keep 7 days)
         # Rotated files: bot.log.2026-03-16, bot.log.2026-03-15, etc.
-        # Midnight rotation avoids mid-day log file switches that could disrupt parsing.
+        #
+        # Rotation is aligned to Eastern Time (the same zone every in-line
+        # timestamp is forced to via ETFormatter). The stock handler computes its
+        # rollover boundary and dated-file suffix from time.localtime(), i.e. the
+        # VM's system zone (commonly UTC on GCE) -- that would rotate at ~20:00 ET
+        # mid-overnight session and stamp evening logs with the next calendar
+        # day's date, splitting one ET trading day across two files. _ETMidnight*
+        # below feeds the handler an epoch shifted by the current ET UTC-offset so
+        # that its internal localtime() math lands exactly on ET midnight.
         from logging.handlers import TimedRotatingFileHandler
-        file_handler = TimedRotatingFileHandler(
+
+        class ETMidnightRotatingFileHandler(TimedRotatingFileHandler):
+            """TimedRotatingFileHandler whose midnight boundary tracks US/Eastern.
+
+            The base class derives its next-rollover instant from the process's
+            local timezone. We can't rely on the VM being set to
+            America/New_York, so we shift the timestamps fed into the base-class
+            rollover math by ET's current UTC offset, making its localtime()
+            midnight calculation resolve to Eastern wall-clock time regardless of
+            system TZ. The dated backup suffix (bot.log.YYYY-MM-DD) is still
+            generated by the base class from system local time; since rollover
+            now fires at ET midnight the suffix is at most an hours-level label
+            difference and never splits an ET trading day across two files.
+            """
+
+            @staticmethod
+            def _et_offset_seconds():
+                # Seconds to add so the base class's localtime() math lands on ET
+                # wall clock. Computed as (ET UTC offset - system local UTC
+                # offset): on a UTC VM this is just ET's offset; on a VM already
+                # set to America/New_York it is 0 (no double-count); handles
+                # EST/EDT automatically via get_us_market_time().
+                import time as _time
+                et_off = get_us_market_time().utcoffset()
+                et_off = et_off.total_seconds() if et_off is not None else 0.0
+                # tm_gmtoff is the system local zone's offset from UTC, in seconds.
+                local_off = _time.localtime().tm_gmtoff
+                if local_off is None:
+                    local_off = 0
+                return et_off - local_off
+
+            def computeRollover(self, currentTime):
+                # Shift into "ET epoch" so the base class's localtime() midnight
+                # math is ET-relative, then shift the result back to real epoch.
+                off = self._et_offset_seconds()
+                return super().computeRollover(currentTime + off) - off
+
+        file_handler = ETMidnightRotatingFileHandler(
             self.log_file, when="midnight", backupCount=7, encoding="utf-8"
         )
         file_handler.setLevel(getattr(logging, self.log_level))
@@ -3602,9 +3783,18 @@ class TradeLoggerService:
         # Initialize Email Alerter (optional)
         self.email_alerter = EmailAlerter(config)
 
-        # Initialize shared monitor log file (for multi-bot monitoring)
+        # Initialize shared monitor log file (for multi-bot monitoring).
+        # This file is intentionally SHARED across all bots/variants (each line is
+        # tagged with bot_name) so `tail -f logs/monitor.log` shows a combined
+        # stream. Because multiple processes append to it, we cannot hand it to a
+        # stdlib RotatingFileHandler (that holds an open fd and would reintroduce
+        # the cross-process rename race); instead log_monitor() does a size-capped
+        # roll under the same append flow so the file cannot grow without bound.
         self.monitor_log_file = Path("logs/monitor.log")
         self.monitor_log_file.parent.mkdir(parents=True, exist_ok=True)
+        # Size cap / retention for the shared monitor log (fix: was unbounded).
+        self.monitor_log_max_bytes = 10 * 1024 * 1024  # 10 MB
+        self.monitor_log_backup_count = 5
 
         # Asynchronous logging queue
         self.log_queue: Queue = Queue()
@@ -3657,12 +3847,49 @@ class TradeLoggerService:
             # Build log line
             log_line = f"{timestamp} | {self.bot_name:<20} | {status:<10} | {message}{metrics_str}\n"
 
+            # Roll the file before appending if it has hit the size cap, so the
+            # shared monitor log cannot grow without bound.
+            self._roll_monitor_log_if_needed()
+
             # Append to monitor log file (thread-safe via file system)
             with open(self.monitor_log_file, "a", encoding="utf-8") as f:
                 f.write(log_line)
 
         except Exception as e:
             logger.error(f"Failed to write to monitor log: {e}")
+
+    def _roll_monitor_log_if_needed(self):
+        """Size-cap the shared monitor log with simple numbered rotation.
+
+        Rotates monitor.log -> monitor.log.1 -> ... -> monitor.log.N when it
+        exceeds monitor_log_max_bytes, dropping the oldest backup. Uses
+        os.replace (atomic rename) under the same append flow rather than a
+        stdlib RotatingFileHandler, because multiple bot processes share this
+        file and an open-fd handler would reintroduce the cross-process rename
+        race. A best-effort, non-fatal hygiene step: any failure is swallowed so
+        monitoring writes never break the caller.
+        """
+        try:
+            if self.monitor_log_max_bytes <= 0:
+                return
+            if not self.monitor_log_file.exists():
+                return
+            if self.monitor_log_file.stat().st_size < self.monitor_log_max_bytes:
+                return
+
+            base = str(self.monitor_log_file)
+            backup_count = max(1, self.monitor_log_backup_count)
+            # Drop the oldest, then shift each backup up by one.
+            oldest = f"{base}.{backup_count}"
+            if os.path.exists(oldest):
+                os.remove(oldest)
+            for i in range(backup_count - 1, 0, -1):
+                src = f"{base}.{i}"
+                if os.path.exists(src):
+                    os.replace(src, f"{base}.{i + 1}")
+            os.replace(base, f"{base}.1")
+        except Exception as e:
+            logger.debug(f"Monitor log rotation skipped (non-fatal): {e}")
 
     def _auto_forward_to_monitor(self, message: str, level: str = "INFO"):
         """
@@ -3772,6 +3999,21 @@ class TradeLoggerService:
                     for attempt in range(1, self.SHEETS_WRITE_MAX_RETRIES + 1):
                         if self.google_logger.log_trade(trade):
                             success = True
+                            break
+                        # L-M1: if the failed attempt TIMED OUT, the append may
+                        # have landed server-side (the daemon thread keeps
+                        # running). Re-appending would create a DUPLICATE row
+                        # that inflates the logged credit/loss totals HOMER and
+                        # /lastday read. Treat a timeout as ambiguous: do NOT
+                        # retry. The DB remains the authoritative record, so at
+                        # worst we lose one Sheets row (recoverable) rather than
+                        # double-count it.
+                        if getattr(self.google_logger, "_last_sheets_timed_out", False):
+                            logger.warning(
+                                f"SHEETS-AMBIGUOUS: append for {trade.action} timed "
+                                f"out — it may have landed; NOT retrying to avoid a "
+                                f"duplicate row (DB stays authoritative)."
+                            )
                             break
                         if attempt < self.SHEETS_WRITE_MAX_RETRIES:
                             logger.warning(
@@ -4044,15 +4286,16 @@ class TradeLoggerService:
         logger.info(f"  Roll Count: {status.get('roll_count', 0)}")
         logger.info("=" * 60)
 
-    def log_position_snapshot(self, positions: List[Dict[str, Any]]):
+    def log_position_snapshot(self, positions: List[Dict[str, Any]], force: bool = False):
         """
         Log current position snapshot to Google Sheets.
 
         Args:
             positions: List of position dictionaries with all details
+            force: I-M1 — settlement callers pass True to bypass the write throttle.
         """
         if self.google_logger.enabled:
-            self.google_logger.log_position_snapshot(positions)
+            self.google_logger.log_position_snapshot(positions, force=force)
 
     def add_position(self, position: Dict[str, Any]):
         """
@@ -4101,15 +4344,22 @@ class TradeLoggerService:
         if self.google_logger.enabled:
             self.google_logger.sync_positions_with_saxo(saxo_positions)
 
-    def log_daily_summary(self, summary: Dict[str, Any]):
+    def log_daily_summary(self, summary: Dict[str, Any]) -> bool:
         """
         Log daily summary metrics to Google Sheets.
 
         Args:
             summary: Dictionary with daily performance metrics
+
+        Returns:
+            bool: True if actually logged to Sheets, False if disabled (this used
+            to return None either way, silently discarding the real success signal
+            GoogleSheetsLogger.log_daily_summary already reports -- found 2026-09-03
+            via a caller that needs to know whether the write really happened).
         """
         if self.google_logger.enabled:
-            self.google_logger.log_daily_summary(summary)
+            return self.google_logger.log_daily_summary(summary)
+        return False
 
     def get_accumulated_theta_from_daily_summary(self, since_date: str = None) -> Optional[float]:
         """
@@ -4488,7 +4738,8 @@ class TradeLoggerService:
         self,
         strategy_data: Dict[str, Any],
         saxo_client=None,
-        environment: str = "LIVE"
+        environment: str = "LIVE",
+        force: bool = False,
     ):
         """
         Log SPY strategy account summary for the dashboard.
@@ -4529,7 +4780,8 @@ class TradeLoggerService:
             self.google_logger.log_account_summary(
                 strategy_data=strategy_data,
                 exchange_rate=exchange_rate,
-                environment=environment
+                environment=environment,
+                force=force,
             )
         except Exception as e:
             logger.error(f"Failed to log account summary: {e}")
@@ -4562,8 +4814,27 @@ class TradeLoggerService:
         # Stop the logging thread
         self._stop_logging = True
 
-        # Wait for queue to empty
-        self.log_queue.join()
+        # Wait for queue to empty — BOUNDED (2026-09-06). Queue.join() blocks
+        # until every task_done() lands, with no timeout: if the consumer
+        # thread has already died (unhandled exception) or is wedged on a
+        # Sheets/network call, this blocks the SHUTDOWN PATH forever. The
+        # thread join immediately below already uses a 5s bound, so an
+        # unbounded wait here was the inconsistent one. Poll instead, and
+        # proceed on timeout — pending log lines are best-effort by
+        # definition, and losing a few is strictly better than never exiting.
+        # (Distinct from the grpc-core finalization stall main.py._hard_exit
+        # handles; this one would block BEFORE we ever reach that.)
+        _join_deadline = time.time() + 5.0
+        while time.time() < _join_deadline:
+            if self.log_queue.unfinished_tasks == 0:
+                break
+            time.sleep(0.05)
+        else:
+            logger.warning(
+                "Trade logger shutdown: log queue still had %d unfinished "
+                "task(s) after 5s — proceeding (pending lines dropped)",
+                self.log_queue.unfinished_tasks,
+            )
 
         # Wait for thread to finish
         if self._log_thread:

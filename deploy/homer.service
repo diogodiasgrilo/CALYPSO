@@ -31,5 +31,8 @@ ProtectHome=true
 # tree must be writable. ProtectSystem=strict still shields the rest of /.
 ReadWritePaths=/opt/calypso
 
-# Claude API (120s per narrative × 3 calls per day × N days) + Sheets reads (3×15s) + git (60s) + overhead
-TimeoutStartSec=600
+# Claude API (~3 calls/day) + 35s inter-call pacing + Sheets reads + git + overhead.
+# Sized for a CATCH-UP backlog: max_catch_up_days (~10) × ~3 calls × (35s pacing +
+# up to ~25s retry) ≈ 30 min worst case. The old 600s killed the May 29 run mid
+# multi-day backlog (8/9 days done) — 2700s gives the backlog room to finish.
+TimeoutStartSec=2700

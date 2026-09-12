@@ -22,14 +22,18 @@ Security context:
 
 from __future__ import annotations
 
+import logging
 import os
 import re
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Optional
 
 from ibind.oauth.oauth1a import OAuth1aConfig  # module-level so tests can patch cleanly
+
+
+logger = logging.getLogger(__name__)
 
 
 # Path where the OAuth crypto files live. Override via env var if needed.
@@ -52,11 +56,19 @@ class IBKRCredentials:
       access_token, access_token_secret: returned by IBKR at "Generate Token"
       private_signature_path, private_encryption_path: PEM files on disk
       dh_param_path: PEM file on disk; we extract the hex prime via openssl
+
+    Secret-leak hardening (Polish Item 10, 2026-05-24): the three string
+    secrets (`consumer_key`, `access_token`, `access_token_secret`) are
+    marked `repr=False` so the default dataclass `__repr__` cannot leak
+    them into a traceback or log line. The path fields are not secret
+    (just filesystem locations) so they remain in repr for debugging.
+    A custom `__repr__` would have worked too but the field flag is
+    less code and equally tested by the test suite.
     """
     environment: str
-    consumer_key: str
-    access_token: str
-    access_token_secret: str
+    consumer_key: str = field(repr=False)
+    access_token: str = field(repr=False)
+    access_token_secret: str = field(repr=False)
     private_signature_path: Path
     private_encryption_path: Path
     dh_param_path: Path
@@ -76,11 +88,14 @@ class IBKRCredentials:
     def validate_secrets(self) -> None:
         """Raise ValueError if any required secret is empty or obviously bad.
 
-        IBKR's self-service portal documents the consumer key as 1-9 chars
-        A-Z (per https://github.com/Voyz/ibind/wiki/OAuth-1.0a). The portal
-        silently uppercases any lowercase input at registration time. We
-        accept A-Z plus 0-9 to leave room for any future relaxation IBKR
-        applies — the actual identity check is server-side.
+        IBKR's self-service portal documents the consumer key as a
+        9-character password whose valid characters are A-Z (per
+        https://github.com/Voyz/ibind/wiki/OAuth-1.0a); it uppercases any
+        lowercase input at registration time. We deliberately keep this a
+        lenient guard — a `<= 9` length bound and an A-Z plus 0-9 charset —
+        rather than hard-requiring exactly 9 A-Z, so a future IBKR relaxation
+        can't lock us out. A genuinely wrong key still fails closed at the
+        server-side OAuth identity check, never silently mis-trading.
         """
         if not self.consumer_key:
             raise ValueError("consumer_key must be non-empty")
@@ -89,9 +104,14 @@ class IBKRCredentials:
                 f"consumer_key must be at most 9 chars; got {len(self.consumer_key)}"
             )
         if not re.fullmatch(r"[A-Z0-9]+", self.consumer_key):
+            # P7-audit / Polish Item 10: don't echo the bad consumer_key
+            # value in the error message — that value WILL land in
+            # tracebacks / logs, and a misregistered key still has secret
+            # value (the IBKR account-recovery story is non-trivial).
+            # Give the operator enough to debug without including the value.
             raise ValueError(
-                f"consumer_key must be uppercase A-Z / 0-9 only; got "
-                f"{self.consumer_key!r}"
+                f"consumer_key must be uppercase A-Z / 0-9 only "
+                f"(length {len(self.consumer_key)}, redacted)"
             )
         if not self.access_token or not self.access_token_secret:
             raise ValueError(
@@ -158,11 +178,101 @@ def assert_safe_crypto_backend() -> None:
         )
 
 
+#: Environment variable that selects paper vs live. Deliberately CALYPSO-prefixed
+#: rather than reusing an IBIND_* name, so it cannot collide with anything ibind
+#: reads, and grep finds every reference.
+ENV_VAR = "CALYPSO_IBKR_ENV"
+
+VALID_ENVIRONMENTS = ("paper", "live")
+
+
+def resolve_environment(default: str = "paper") -> str:
+    """Which IBKR environment this process should connect to.
+
+    Reads ``$CALYPSO_IBKR_ENV``, defaulting to ``paper``. Exists because the
+    environment used to be a HARDCODED LITERAL at two call sites
+    (``bots/hydra/main.py`` and ``services/broker/main.py``), which meant:
+
+      * there was no way to run live without editing source, and
+      * ``IBClient.is_paper`` — derived from that literal — was a
+        SELF-DECLARATION rather than a fact. Re-encrypting live credentials
+        under the same systemd credential IDs would have connected to a live
+        account while ``is_paper`` still cheerfully reported True.
+
+    Defaults to paper on purpose: an unset or malformed value must never
+    silently select live. Anything not in VALID_ENVIRONMENTS raises rather than
+    falling back, because a typo'd "LIVE " that quietly became "paper" would be
+    just as bad in the other direction — the operator would think they were
+    live and not be.
+
+    The declaration is only half of it; ``IBClient`` cross-checks the
+    DISCOVERED account code against this (see ``_assert_account_matches_env``),
+    which is what turns it from a claim into a verified fact.
+    """
+    raw = os.environ.get(ENV_VAR)
+    if raw is None or not raw.strip():
+        return default
+    env = raw.strip().lower()
+    if env not in VALID_ENVIRONMENTS:
+        raise ValueError(
+            f"{ENV_VAR}={raw!r} is not a valid IBKR environment. "
+            f"Expected one of {VALID_ENVIRONMENTS}. Refusing to guess — an "
+            f"unrecognised value must not silently fall back to either "
+            f"environment."
+        )
+    return env
+
+
 def _keys_dir(environment: str) -> Path:
     """Return the per-environment key directory (paper or live)."""
     if environment not in ("paper", "live"):
         raise ValueError(f"environment must be 'paper' or 'live', got {environment!r}")
     return DEFAULT_KEYS_BASE / environment
+
+
+# systemd credential IDs (see deploy/hydra.service LoadCredentialEncrypted=).
+# At runtime systemd decrypts each into a file named exactly the ID inside
+# $CREDENTIALS_DIRECTORY.
+_SYSTEMD_CRED_NAMES = {
+    "consumer_key": "ibkr_consumer_key",
+    "access_token": "ibkr_access_token",
+    "access_token_secret": "ibkr_access_token_secret",
+    "signature": "ibkr_signature_pem",
+    "encryption": "ibkr_encryption_pem",
+    "dhparam": "ibkr_dhparam_pem",
+}
+
+
+def _read_credential_file(path: Path) -> str:
+    """Read a systemd-delivered string credential file.
+
+    Returns "" if the credential is absent so load_credentials' downstream
+    ``validate_secrets()`` surfaces a clear "missing credential" error.
+
+    P7-audit M2: distinguish absent (``FileNotFoundError``) from
+    unreadable (permission denied, IO error). Silently returning "" on
+    an unreadable file was indistinguishable from "absent" downstream
+    and could mask a credential-delivery deployment bug. Now:
+      • Missing file → "" (caller treats as "credential not provided"
+        and either uses the args/env-var path or surfaces a missing-
+        credential error).
+      • Unreadable file (permission, IO error) → WARNING log so the
+        operator notices the misconfiguration; still returns "" so
+        downstream validation can produce a single consistent error
+        rather than a Python traceback.
+    """
+    try:
+        return path.read_text()
+    except FileNotFoundError:
+        return ""
+    except OSError as exc:
+        logger.warning(
+            "ib_oauth: credential file %s exists but could not be read "
+            "(%s: %s). Check systemd-creds permissions and the service "
+            "unit's LoadCredentialEncrypted= entry.",
+            path, type(exc).__name__, exc,
+        )
+        return ""
 
 
 def load_credentials(
@@ -180,25 +290,74 @@ def load_credentials(
       IBIND_OAUTH1A_ACCESS_TOKEN
       IBIND_OAUTH1A_ACCESS_TOKEN_SECRET
 
-    The crypto files are read from disk at `$CALYPSO_IBKR_KEYS_DIR/{env}/`
-    (default `~/ibkr-oauth/{env}/`).
+    Production (systemd): when $CREDENTIALS_DIRECTORY is set, all six
+    credentials — the three strings AND the three crypto files — are read
+    from there instead. systemd's LoadCredentialEncrypted= delivers each
+    one as a file named by its credential ID (see deploy/hydra.service).
+    This keeps the secrets off the process environment and away from
+    child processes. Explicit args still win, so tests and the
+    activation poller are unaffected.
+
+    The crypto files are otherwise read from disk at
+    `$CALYPSO_IBKR_KEYS_DIR/{env}/` (default `~/ibkr-oauth/{env}/`).
 
     Args:
         environment: 'paper' or 'live'
-        consumer_key: if None, reads IBIND_OAUTH1A_CONSUMER_KEY env var
-        access_token: if None, reads IBIND_OAUTH1A_ACCESS_TOKEN env var
-        access_token_secret: if None, reads IBIND_OAUTH1A_ACCESS_TOKEN_SECRET
+        consumer_key: if None, reads the systemd credential / env var
+        access_token: if None, reads the systemd credential / env var
+        access_token_secret: if None, reads the systemd credential / env var
 
     Returns:
         IBKRCredentials with paths NOT yet validated. Caller should call
         .validate_paths() + .validate_secrets() if needed.
     """
+    if environment not in ("paper", "live"):
+        raise ValueError(f"environment must be 'paper' or 'live', got {environment!r}")
+
+    # Production VM path: systemd LoadCredentialEncrypted= delivered the
+    # six credentials into $CREDENTIALS_DIRECTORY.
+    #
+    # P7-audit M3: explicitly check for None and an empty string. The
+    # prior `if creds_dir:` matched a non-empty string but also fell
+    # through when the env var was set-but-empty (e.g. a malformed
+    # service unit) → silent dev-path fallback. Now: if the env var is
+    # set, even to "", we treat it as a production-path declaration —
+    # an empty value raises so the deployment bug surfaces immediately
+    # rather than silently picking up dev credentials.
+    creds_dir = os.environ.get("CREDENTIALS_DIRECTORY")
+    if creds_dir is not None and creds_dir.strip() == "":
+        raise RuntimeError(
+            "CREDENTIALS_DIRECTORY env var is set but empty — this "
+            "usually means systemd's LoadCredentialEncrypted= entries "
+            "failed and the service started without credentials. Check "
+            "`systemctl status hydra` for credential-load errors."
+        )
+    if creds_dir:
+        cd = Path(creds_dir)
+        n = _SYSTEMD_CRED_NAMES
+        return IBKRCredentials(
+            environment=environment,
+            consumer_key=(consumer_key
+                          or _read_credential_file(cd / n["consumer_key"])).strip(),
+            access_token=(access_token
+                          or _read_credential_file(cd / n["access_token"])).strip(),
+            access_token_secret=(access_token_secret
+                                 or _read_credential_file(cd / n["access_token_secret"])).strip(),
+            private_signature_path=cd / n["signature"],
+            private_encryption_path=cd / n["encryption"],
+            dh_param_path=cd / n["dhparam"],
+        )
+
     keys_dir = _keys_dir(environment)
+    # .strip() the secrets: env vars set by copy-paste routinely carry a
+    # trailing newline/space, which silently corrupts the OAuth signature
+    # (or trips the consumer_key length check). A genuine IBKR
+    # consumer-key / token has no surrounding whitespace.
     return IBKRCredentials(
         environment=environment,
-        consumer_key=consumer_key or os.environ.get("IBIND_OAUTH1A_CONSUMER_KEY", ""),
-        access_token=access_token or os.environ.get("IBIND_OAUTH1A_ACCESS_TOKEN", ""),
-        access_token_secret=access_token_secret or os.environ.get("IBIND_OAUTH1A_ACCESS_TOKEN_SECRET", ""),
+        consumer_key=(consumer_key or os.environ.get("IBIND_OAUTH1A_CONSUMER_KEY", "")).strip(),
+        access_token=(access_token or os.environ.get("IBIND_OAUTH1A_ACCESS_TOKEN", "")).strip(),
+        access_token_secret=(access_token_secret or os.environ.get("IBIND_OAUTH1A_ACCESS_TOKEN_SECRET", "")).strip(),
         private_signature_path=keys_dir / "private_signature.pem",
         private_encryption_path=keys_dir / "private_encryption.pem",
         dh_param_path=keys_dir / "dhparam.pem",

@@ -8,13 +8,31 @@ import {
   ReferenceArea,
   ResponsiveContainer,
 } from "recharts";
-import { useHydraStore } from "../../store/hydraStore";
+import { useHydraStore, type PnLDataPoint } from "../../store/hydraStore";
 import { colors } from "../../lib/tradingColors";
-import { formatPnL } from "../../lib/formatters";
+import { formatPnL, isRegularSessionTime } from "../../lib/formatters";
 
-export function PnLCurve() {
-  const pnlHistory = useHydraStore((s) => s.pnlHistory);
-  const comparisons = useHydraStore((s) => s.comparisons);
+interface PnLCurveProps {
+  /** Polled non-primary snapshot's pnl_history. When provided, the curve plots
+   *  THIS series instead of the WS store. The comparison threshold bands are a
+   *  WS-only augmentation, so they don't render in prop mode. Omitted → WS
+   *  store, byte-identical to the old behavior. */
+  pnlHistory?: PnLDataPoint[];
+}
+
+export function PnLCurve({ pnlHistory: pnlHistoryProp }: PnLCurveProps = {}) {
+  // Hooks always called; a prop overrides the WS-store read.
+  const storeHistory = useHydraStore((s) => s.pnlHistory);
+  const storeComparisons = useHydraStore((s) => s.comparisons);
+
+  const usingProps = pnlHistoryProp !== undefined;
+  const pnlHistoryRaw = pnlHistoryProp ?? storeHistory;
+  const comparisons = usingProps ? null : storeComparisons;
+
+  // Intraday chart: regular session only (09:30–16:00 ET). The bot also records
+  // after-hours points (settlement snapshot + any restarts) which would stretch
+  // the x-axis into the evening and make the (already-ET) curve look wrong.
+  const pnlHistory = pnlHistoryRaw.filter((p) => isRegularSessionTime(p.time));
 
   // Determine current P&L from last data point
   const lastPoint = pnlHistory[pnlHistory.length - 1];
@@ -58,12 +76,12 @@ export function PnLCurve() {
             </defs>
             <XAxis
               dataKey="time"
-              tick={{ fontSize: 10, fill: colors.textDim }}
+              tick={{ fontSize: 11, fill: colors.textSecondary }}
               axisLine={{ stroke: "rgba(255,255,255,0.06)" }}
               tickLine={false}
             />
             <YAxis
-              tick={{ fontSize: 10, fill: colors.textDim }}
+              tick={{ fontSize: 11, fill: colors.textSecondary }}
               axisLine={false}
               tickLine={false}
               tickFormatter={(v) => `$${v}`}

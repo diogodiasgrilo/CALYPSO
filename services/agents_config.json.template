@@ -9,6 +9,7 @@
     },
 
     "google_sheets": {
+        "_comment": "Google Sheets is being RETIRED — agents read the DB instead. Each agent takes a 'data_source' ('db' | 'sheets', default 'sheets') + 'read_db' (path to the CANONICAL variant's backtesting.db, e.g. data/variant_c/backtesting.db) — see clio/hermes/homer below. make_agent_reader() resolves per-agent then top-level. This block is needed only while any agent is still on 'sheets'.",
         "spreadsheet_name": "Calypso_HYDRA_Live_Data",
         "credentials_file": "config/google_credentials.json"
     },
@@ -29,7 +30,9 @@
         "report_dir": "intel/hermes",
         "journal_lines": 200,
         "state_file": "data/hydra_state.json",
-        "metrics_file": "data/hydra_metrics.json"
+        "metrics_file": "data/hydra_metrics.json",
+        "data_source": "db",
+        "read_db": "data/variant_c/backtesting.db"
     },
 
     "apollo": {
@@ -44,7 +47,9 @@
             "hermes": 90,
             "apollo": 30,
             "argus": 90
-        }
+        },
+        "data_source": "db",
+        "read_db": "data/variant_c/backtesting.db"
     },
 
     "homer": {
@@ -55,6 +60,9 @@
         "max_catch_up_days": 10,
         "claude_model": "claude-sonnet-4-6",
         "telegram_alert": true,
+        "data_source": "db",
+        "read_db": "data/variant_c/backtesting.db",
+        "_comment_backtesting_db": "Legacy WRITE target for HOMER's Sheets->DB backfill. The backfill is being removed (the DB is written live by DataRecorder); once removed, this key is unused. It also caused variant-A contamination when HOMER wrote C's data into A's DB.",
         "backtesting_db": "data/backtesting.db"
     }
 }
