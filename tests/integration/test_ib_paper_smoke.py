@@ -142,15 +142,6 @@ def _activation_check() -> tuple[bool, str]:
         return False, f"connect probe errored: {exc}"
 
 
-# Run the activation probe ONCE per pytest session. If it returns False,
-# the entire module skips.
-_activated, _activation_reason = _activation_check()
-pytestmark = pytest.mark.skipif(
-    not _activated,
-    reason=f"Phase A.10 smoke skipped — {_activation_reason}",
-)
-
-
 # ─── SESSION-CONTENTION GUARD (added 2026-09-12) ────────────────────────────
 #
 # THIS FILE OPENS ITS OWN IBKR SESSION AND WILL EVICT A RUNNING calypso-broker.
@@ -195,12 +186,32 @@ def _broker_is_holding_a_session() -> str:
         )
     return f"a broker is reachable at {url} but not holding a session ({health}); refusing anyway"
 
-
+# ORDER MATTERS. The eviction guard must be evaluated BEFORE _activation_check(),
+# because that probe ITSELF calls IBClient.connect() — so on the broker-era VM,
+# merely COLLECTING this module would open the second session and evict the
+# broker, before any skip mark was consulted. Guard first; only probe if safe.
 _EVICTION_REASON = _broker_is_holding_a_session()
-pytestmark = pytest.mark.skipif(
-    bool(_EVICTION_REASON),
-    reason=f"WOULD EVICT THE BROKER SESSION — {_EVICTION_REASON}",
-)
+
+if _EVICTION_REASON:
+    _activated, _activation_reason = False, "not probed — broker-eviction guard active"
+else:
+    # Run the activation probe ONCE per pytest session. If it returns False,
+    # the entire module skips.
+    _activated, _activation_reason = _activation_check()
+
+# BOTH marks, as a list. A bare second `pytestmark = ...` would REBIND the name
+# and silently drop the first — which is exactly what happened on the first
+# attempt at this guard, turning 15 clean skips into 15 errors.
+pytestmark = [
+    pytest.mark.skipif(
+        bool(_EVICTION_REASON),
+        reason=f"WOULD EVICT THE BROKER SESSION — {_EVICTION_REASON}",
+    ),
+    pytest.mark.skipif(
+        not _activated,
+        reason=f"Phase A.10 smoke skipped — {_activation_reason}",
+    ),
+]
 
 
 # ─── Session-scope fixtures ─────────────────────────────────────────────────
