@@ -5,8 +5,8 @@
 > [`docs/migration/PROJECT_STATUS.md`](migration/PROJECT_STATUS.md) (project-wide state) and the per-effort
 > design docs.
 >
-> **Last updated: 2026-09-11** (deploy executed 03:25–03:35 ET; the accountId theory was refuted —
-> see §A P0.6). §A–§D below are current. **§0–§10 are the older backlog (2026-07-14 /
+> **Last updated: 2026-09-12 (Sat 03:05 ET).** Second deploy executed 02:49–02:52 ET. IBKR's
+> brokerage session is DOWN (weekend maintenance) — see §A P0-bis. §A–§D below are current. **§0–§10 are the older backlog (2026-07-14 /
 > 07-24 era)** — much of it is done or superseded; **verify against the code before acting on anything
 > there.** Real live items still live in §5 (entry-schedule lock, E calendar-stop analyzer) and §6
 > (Brandon fill-quality confirmations), which is why those sections are kept rather than deleted.
@@ -46,36 +46,51 @@ Kept for the record, since the sequence is the reusable part:
 7. **Read today's `BROKER-RECONCILE` log line** and settle whether IBKR's `raw_ledger.USD.realizedpnl` is
    gross or net of commission. Until that is known the check logs and does not alert.
 
-### P1 — TODAY (Fri 2026-09-11): VERIFY, do not build
+### P0-bis — SATURDAY 2026-09-12 STATE, and the two Monday gates
 
-Everything is deployed as of 03:35 ET. Nothing is required before the 09:30 open. The job today is
-watching B's FIRST session on the new entry pricing — confirm, do not stack more changes on top.
+**Second deploy done 02:49–02:52 ET.** Broker first (broker_service OrderRequest coercion,
+data_recorder v17, ib_client), then all 7 strategies. Zero errors, `ENV-ASSERT ok`.
 
-- [ ] **Entry-failure / unwind rate and rung-2+ escalation rate on B.** THE PRIORITY. This is where
-      passive rung-1 pricing shows up as a *cost*: resting instead of taking means sometimes not filling,
-      and a part-filled entry pays the spread TWICE on the unwind. The per-leg fill-vs-mid columns already
-      exist (`short_*_fill_price` / `*_mid_at_fill`), so no new telemetry is needed.
-      Baseline to beat: the leak was ~$79/day, and the expected recovery is $20-34/day at 7c — an
-      ESTIMATE with real error bars (passive-fill evidence is n=11), not a measurement.
-      B's first slot is 09:45; there are 7.
-- [x] ~~**Did the executions endpoint come alive?**~~ **NO — theory refuted, see P0.6.**
-- [x] ~~**Gross vs net on the ledger reconcile**~~ — **RESOLVED 2026-09-12: it is SETTLEMENT TIMING,
-      not a P&L error.** IBKR's `realizedpnl` LAGS 0DTE expiry settlement, so the daily
-      `BROKER-RECONCILE` gap measures timing, not correctness (09-11 read IBKR $245.41 vs our
-      $883.40 — a 72% gap that looked alarming). Our figure reconstructs EXACTLY from the broker's
-      own fill prices, and all six shorts closed 28–78pt OTM.
-      **The decisive test was cumulative**, via the new `scripts/verify_pnl_vs_account.py`:
-      ```
-      09-08 -> 09-09   account  +618.31   claimed  +623.15   drift   -4.84
-      09-09 -> 09-10   account  +853.44   claimed +1133.50   drift -280.06
-      09-10 -> 09-11   account +1789.12   claimed +1804.60   drift  -15.48
-      ```
-      Two of three agree within $15 — that rules out systematic overstatement. Keep
-      `_reconcile_pnl_against_broker` on LOGS, not alerts: a single-day comparison will keep
-      showing large gaps that are timing. Use the cumulative tool to judge correctness.
-- **Rollback lever if anything looks wrong:** `strategy.entry_pricing.deliberate_rung_pricing: false` +
-  a strategy restart. It is the only change that alters order pricing and the only one with no broker
-  dependency.
+**⚠️ IBKR's brokerage session is DOWN.** `ssodh/init` → **410 Gone** since 01:02 ET, 4 consecutive
+re-auth failures. A broker restart came up clean but still `authenticated: false`. Data reads work
+(positions + balance return 200); only the brokerage session is down. `410 Gone` beginning 01:02 on
+a Saturday is consistent with **IBKR weekend maintenance**, not a fault here.
+
+Consequence: the strategies are parked in a startup wait-loop (`broker not holding a session yet`,
+retry ~15s). Correct, safe behaviour — they will not trade blind. **But `DataRecorder` never
+initialises, so the v17 migration has NOT run** (schema still v16).
+
+**TWO GATES BEFORE MONDAY 09:30:**
+- [ ] **Session recovered?** Re-check Sunday evening. If still `410 Gone`, this becomes a real
+      problem to solve before the open, not a wait-and-see.
+- [ ] **v17 migration ran?** `PRAGMA table_info(trade_entries)` must show four
+      `*_mid_at_decision` columns. It fires on `DataRecorder` init, which needs the session.
+
+**Sequencing lesson, recorded so it is not repeated:** the strategies were restarted before the
+broker had a confirmed session, which parked them in a wait-loop. Harmless on a Saturday. The
+correct order is **broker → confirm `/health` says connected → strategies**.
+
+### P1 — DONE Fri 2026-09-11: the first passively-priced session
+
+**Result: B net $883.40, 3 entries, 0 stops, zero errors.** All three condors expired worthless
+(shorts 28–78pt OTM). SPX range was only 25.8pt — a quiet tape.
+
+**Passive pricing, hand-reconstructed from logs (v17 was not yet recording):**
+
+| Entry | legs filled on attempt 1 | leg-in | vs legacy |
+|---|---|---|---|
+| #1 09:49 | 2 of 4 | 193s | −$35 |
+| #2 10:17 | 3 of 4 | 100s | +$70 |
+| #5 11:47 | **4 of 4** | 80s | +$105 |
+| | | | **+$139** |
+
+Leg-in fell 193→100→80s against a 52.9s median. **Read it lightly**: a 25-point range is the EASY
+case for resting orders, and both misses on #1 came during the morning's only real drift. This is a
+best-case data point, not a representative one. Tomorrow is the first day it is MEASURED rather
+than reconstructed.
+
+Also: 4 of 7 slots were skipped (credit gate), consistent with the known gating rate. Every skip
+now records its strikes.
 
 ### P2 — remaining non-go-live work (small)
 
@@ -245,6 +260,7 @@ make that error (mutation-tested).
 | `scripts/analyze_fill_quality.py` | paid-vs-mid per leg + leg-in duration. Baseline **$1,905 / $79.38 a day / $26.83 an entry**, longs = 91% | after a close; `--compare 2026-09-11` for the pricing change |
 | `scripts/analyze_skipped_entry_outcomes.py` | would the vetoed entries have been breached | needs ≥20 recorded vetoes (~1 week from 2026-09-11) |
 | `scripts/probe_combo_whatif.py` | is a 4-leg combo accepted; does `@CBOE` change margin | **during RTH only** — needs live quotes |
+| `scripts/verify_pnl_vs_account.py` | does the ACCOUNT agree with our claimed P&L (cumulative) | any time; needs ≥2 days of retained logs |
 
 ---
 
