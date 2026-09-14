@@ -127,9 +127,16 @@ def main(argv=None) -> int:
 
     traded = _traded_days(db)
     incidents = _argus_incident_days()
-    days = sorted(set(list(manual) + list(auto) + list(crit)
-                      + [d for d in traded if d in {_day_of(l) or "" for l in lines}]))
-    days = [d for d in days if datetime.strptime(d, "%Y-%m-%d").weekday() < 5]
+
+    # Enumerate EVERY weekday the journal covers, not just days that had an
+    # event. A perfectly quiet day has no manual restart, no auto restart and no
+    # critical alert — so keying off those dicts makes the best days invisible.
+    # Keying off daily_summaries instead misses TODAY until settlement writes the
+    # EOD row, which on 0DTE is hours after the close: measured 2026-09-14, a
+    # genuinely clean session simply did not appear.
+    journal_days = sorted({d for d in (_day_of(l) for l in lines) if d})
+    days = [d for d in journal_days
+            if datetime.strptime(d, "%Y-%m-%d").weekday() < 5]
 
     print(f"\nGATE 4 — consecutive clean sessions   unit={a.unit}  window={a.days}d")
     print(f"  journal covers {days[0] if days else '—'} … {days[-1] if days else '—'}\n")
@@ -139,7 +146,7 @@ def main(argv=None) -> int:
     streak, best, verdicts = 0, 0, []
     for d in days:
         t = traded.get(d)
-        tr = f"{t['entries']}e" if t else "—"
+        tr = f"{t['entries']}e" if t else "(pending)"
         inc = "YES" if d in incidents else "-"
         clean = manual[d] == 0 and crit[d] == 0 and d not in incidents
         verdicts.append((d, clean))
