@@ -212,6 +212,23 @@ make the flip defensible.
 
 ---
 
+### P2-quater — ✅ FIXED 2026-09-15: variant F never recorded a single entry
+
+`variant_f`: **0 `trade_entries` ever, 1 `trade_stop`, lifetime −$14.80.** F had genuinely traded —
+its heartbeat showed the position — but `GhauriMeanReversionStrategy._initiate_entry` bypasses
+`HydraStrategy._initiate_entry` (for sound reasons) and dropped the `_record_entry_to_db` call.
+**Stops were unaffected** because they run through the inherited `_execute_stop_loss`, so F's entire
+recorded history was losses; it would have read as a never-wins strategy forever.
+
+Fixed in `88ec8ed` (+ the immediate `_save_state_to_disk` the parent does). Wrapped defensively —
+F's method is `try/finally` with no `except`, so a raise would have escaped past the
+POSITION_OPENED alert on an already-open position. Deployed to `hydra_variant_f` only, which does
+**not** break the Gate-4 streak (measured on the live seat).
+
+**The generalisable lesson:** a self-contained override inherits the parts you didn't think about and
+omits the parts you did. **Any future strategy that overrides `_initiate_entry` must be checked for
+this exact omission** — the symptom is stops-without-entries, and it is invisible unless you look.
+
 ### P2-ter — 🔴 OPEN RISK: two entries sharing a strike make POS-003 ambiguous, and the bot loses track of a real position
 
 **Found 2026-09-12** by the new `scripts/check_clean_sessions.py` — nobody had looked at these alerts.
