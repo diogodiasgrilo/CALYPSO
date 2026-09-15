@@ -5,17 +5,76 @@
 > [`docs/migration/PROJECT_STATUS.md`](migration/PROJECT_STATUS.md) (project-wide state) and the per-effort
 > design docs.
 >
-> **Last updated: 2026-09-12 (Sat 03:05 ET).** Second deploy executed 02:49–02:52 ET. IBKR's
-> brokerage session is DOWN (weekend maintenance) — see §A P0-bis. §A–§D below are current. **§0–§10 are the older backlog (2026-07-14 /
-> 07-24 era)** — much of it is done or superseded; **verify against the code before acting on anything
-> there.** Real live items still live in §5 (entry-schedule lock, E calendar-stop analyzer) and §6
-> (Brandon fill-quality confirmations), which is why those sections are kept rather than deleted.
+> **Last updated: 2026-09-15 (Tue, pre-market).** **Read §A0 first — it is the whole current state on
+> one screen.** §A–§D are current. **§0–§10 are the older backlog (2026-07-14 / 07-24 era)** — much of
+> it is done or superseded; **verify against the code before acting on anything there.** Real live
+> items still live in §5 (entry-schedule lock, E calendar-stop analyzer) and §6 (Brandon fill-quality
+> confirmations), which is why those sections are kept rather than deleted.
+
+---
+
+# §A0. WHERE WE ARE — 2026-09-15 (Tue, pre-market)
+
+**Fleet:** all 9 units active · broker `connected/authenticated/not competing` · account FLAT ·
+settlement complete for Monday · VM and origin in sync.
+
+### Deployed and VERIFIED
+
+| | What | Evidence |
+|---|---|---|
+| ✅ | **Dependency CVEs: 44 → 0** | `pip-audit` clean on `requirements.txt`, the lock file, **and the VM's installed set**. Root cause was the unpinned dashboard stack — now pinned. |
+| ✅ | **`main` merged** (613 commits, `--no-ff`) | `main` at `59a1fc7`; suite green *on the merge result*; every doc-cited SHA still resolves. |
+| ✅ | **Backups now cover the live seat** | They never did — `db_backup.sh` protected a dry-run shadow. Found by the first RB-7 rehearsal, which then PASSED. |
+| ✅ | **Chaos test PASSED** | First ever. 33s restart, state intact, no orphans. `RUNBOOKS.md` RB-10. |
+| ✅ | **Schema v17 on all 7 DBs** | Migrated offline — it never needed the broker. |
+| ✅ | **Halt criteria + week-1 plan drafted** | `LIVE_HALT_CRITERIA.md`, thresholds from B's real loss distribution, **per contract**. Held on first contact Monday (−$1,756 vs −$2,800 limit). |
+
+### Deployed 2026-09-15, NOT YET VERIFIED IN PRODUCTION
+
+> **These are the only two things waiting on today's session. A fix confirmed only by tests is
+> half-done.**
+
+1. **POS-003 merged-leg resolver** (`c1544fb`, live 04:09 ET). Today should produce another
+   long/short overlap — it is structural, not rare. **Watch for the resolver firing and resolving to
+   the correct leg.** Grep `POS-003` in `hydra_variant_b`. Runs on B ONLY (reconciliation is
+   dry_run-gated).
+2. **Variant F entry recording** (`88ec8ed`, live 07:15 UTC). **Check `trade_entries` for
+   `variant_f` after today's close** — it has 0 rows in its entire history.
+
+### Next actions, in order
+
+1. **[today, RTH]** `scripts/broker_paper_smoke.py` check-only → closes **Gate 3**'s last item. Needs
+   live quotes; exit 0 = PASS, 75 = skipped/market-closed.
+2. **[today, post-close]** Verify the two items above; re-run `scripts/verify_pnl_vs_account.py` with
+   a flat account for a clean drift reading.
+3. **[this week]** **Change freeze on B.** Gate 4 restarts from 0 — deliberately reset by today's
+   deploy. See the note below.
+4. **[~2 weeks]** GEX veto EV becomes answerable once ~20 vetoes carry both strikes AND credit.
+
+### Blocked on the operator — the critical path
+
+**FUND THE LIVE ACCOUNT** (created, not funded; confirm it is a **margin** account). Then:
+funded → options-spread permissions → live market-data subscriptions → OAuth keypair → ~2wk
+activation. **4–6 weeks, all calendar, none of it engineering.** Everything else queues behind it.
+Also yours: review the halt thresholds, then the approval commit (Gate 9).
+
+### Gate board
+
+| 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 |
+|---|---|---|---|---|---|---|---|---|---|
+| 🟡 | 🟢 | 🟡 | 🔴 | 🟡 | ⚪ | 🟢 | 🔴 | 🟡 | 🟡 |
+
+Gate 4 is 🔴 at **streak 0** — reset on purpose today. **Why that was right:** Gate 4 is FOUR
+requirements, not one, and also demands the 5 sessions net **≥ $0**. The streak being protected had
+day 1 = −$1,756 against B's +$216/traded-day average, so it could never have passed. **Fix first,
+then freeze on the code you actually go live with.** Gate 8 is 🔴 only because B runs 7 contracts vs
+a mandated 1 — a cutover-time change, not work.
 
 ---
 
 # §A. DO NEXT — by priority (2026-09-10)
 
-### P0 — ✅ DEPLOYED 2026-09-11, 03:25–03:35 ET
+### P0 — ✅ DEPLOYED 2026-09-11 *(historical — see §A0 for current state)*
 
 All commits are live. VM at `ea0bd8c`, broker restarted first and healthy (connected/authenticated/not
 competing), all 8 strategy units clean with zero errors, unit files installed + `daemon-reload`, timers
@@ -46,7 +105,7 @@ Kept for the record, since the sequence is the reusable part:
 7. **Read today's `BROKER-RECONCILE` log line** and settle whether IBKR's `raw_ledger.USD.realizedpnl` is
    gross or net of commission. Until that is known the check logs and does not alert.
 
-### P0-bis — SATURDAY 2026-09-12 STATE, and the two Monday gates
+### P0-bis — Saturday 2026-09-12 state *(HISTORICAL — both Monday gates closed; see §A0)*
 
 **Second deploy done 02:49–02:52 ET.** Broker first (broker_service OrderRequest coercion,
 data_recorder v17, ib_client), then all 7 strategies. Zero errors, `ENV-ASSERT ok`.
@@ -70,7 +129,7 @@ initialises, so the v17 migration has NOT run** (schema still v16).
 broker had a confirmed session, which parked them in a wait-loop. Harmless on a Saturday. The
 correct order is **broker → confirm `/health` says connected → strategies**.
 
-### P1 — DONE Fri 2026-09-11: the first passively-priced session
+### P1 — DONE Fri 2026-09-11: the first passively-priced session *(historical)*
 
 **Result: B net $883.40, 3 entries, 0 stops, zero errors.** All three condors expired worthless
 (shorts 28–78pt OTM). SPX range was only 25.8pt — a quiet tape.
@@ -381,6 +440,18 @@ make that error (mutation-tested).
 | `scripts/analyze_skipped_entry_outcomes.py` | would the vetoed entries have been breached | needs ≥20 recorded vetoes (~1 week from 2026-09-11) |
 | `scripts/probe_combo_whatif.py` | is a 4-leg combo accepted; does `@CBOE` change margin | **during RTH only** — needs live quotes |
 | `scripts/verify_pnl_vs_account.py` | does the ACCOUNT agree with our claimed P&L (cumulative) | any time; needs ≥2 days of retained logs |
+
+---
+
+# §A-ter. SESSION LOG — the live seat, most recent first
+
+Keep this short: date, what happened, what it proved. Detail belongs in the linked commits.
+
+| Date | B (live) | What it proved |
+|---|---|---|
+| **2026-09-15** (Tue) | in progress | First session on the POS-003 resolver + F's entry recording. **Both await verification.** |
+| **2026-09-14** (Mon) | **−$1,756** · 4e/2s | **First real test of the halt criteria — they held** (H1 −$2,800 limit, H3 3-stop limit; actual −$1,756 / 2 stops). A call-side trend day: SPX 7592→7647.93→close 7619.40, and *every* stop on *every* variant was call-side. B's stopped entries kept their surviving PUT-side credit, which is why the booked figure beat the −$1,890 projection. C lost MORE (−$2,791.60) on half the entries — first clean evidence **B's wider strikes beat C's tighter ones on a trend day**. The merged 7555 puts settled cleanly. **GEX veto cost money a 2nd time** (vetoed short call 7650 vs day high 7647.93 — survived by 2.07pt). |
+| **2026-09-11** (Fri) | **+$883.40** · 3e/0s | First passively-priced session; all expired worthless. A 25.8pt range is the EASY case for resting orders — treat as best-case. Also the day the POS-003 collision left a 7-lot untracked for 6h (found 09-12). |
 
 ---
 
