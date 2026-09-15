@@ -101,6 +101,81 @@ needs its own validation, and the account is not funded.
 
 ---
 
-## 7. Results
+## 7. Results — run 2026-09-15
 
-*(appended after the run — this section did not exist at pre-registration time)*
+Era floor 2026-07-24. P&L **per contract**. `~` = bootstrap 95% CI spans zero (no signal).
+
+### 7.1 By `move_pct` (open→close trend) — NOTHING
+
+| var | n | quiet | moderate | trending | perm p |
+|---|---|---|---|---|---|
+| A | 32 | −88 ~ | +133 ~ | +60 ~ | 0.474 |
+| **B** | 26 | +43 ~ | −23 ~ | +58 ~ | **0.844** |
+| C | 20 | −62 ~ | −102 ~ | +28 ~ | 0.284 |
+| G | 11 | +202 ~ | −108 ~ | +247 | 0.873 |
+
+**No variant's P&L relates to open→close movement.** Every CI spans zero; every p is far from
+significance. **H1 is FALSIFIED as stated.**
+
+### 7.2 By `range_pct` (intraday high−low) — a coherent pattern
+
+| var | n | quiet | moderate | trending | perm p |
+|---|---|---|---|---|---|
+| A | 32 | **+253** | +39 ~ | −156 ~ | **0.033** |
+| **B** | 26 | **+111** | +11 ~ | −32 ~ | 0.064 |
+| C | 20 | −10 ~ | −67 ~ | −39 ~ | 0.747 |
+| G | 11 | **+266** | +180 ~ | −224 ~ | 0.061 |
+
+**Three of the four premium sellers decline monotonically as intraday range rises** (A, B, G), with
+the quiet-bucket mean significantly positive in each. C does not, and is simply noisier.
+
+### 7.3 What this actually means — and the correction it forces
+
+**The hypothesis was wrong about WHICH market feature hurts.** I had characterised B's failure mode
+as a *trend day*. It is not: where the day **closes** relative to its open is irrelevant (p=0.844).
+What matters is how far it **travelled** intraday.
+
+That is obvious in hindsight and worth stating plainly: a short iron condor is breached by the day's
+**excursion**, not its destination. 2026-09-14 is the illustration — SPX ran 7592 → 7647.93 and
+closed 7619.40. A modest 0.36% open→close move, but a **0.73% range**, which is the top bucket. Every
+stop that day was call-side, on every variant.
+
+**This changes what a complement would have to be.** Something that profits from *direction*
+(momentum, trend-following) targets the feature that does **not** predict these losses. The
+complement must profit from **range** — long gamma, not long delta.
+
+### 7.4 Verdict against the pre-registered criteria
+
+| | Outcome |
+|---|---|
+| **H1** — B loses as movement rises | **FALSIFIED for trend, SUPPORTED for range.** Direction of the day is irrelevant; distance travelled is what matters. |
+| **H2** — no existing variant is a complement | **SUPPORTED.** All four premium sellers fall as range rises; none earns on high-range days. They are one trade. |
+| **H3** — the complement is specifiable | **UNANSWERABLE at this n.** B's high-range mean is −$32/contract with a CI spanning zero. There is no reliable number to size a complement against. |
+
+**The honest caveat that limits all of the above:** A, B and G are **not three independent
+confirmations**. They correlate r = +0.59 to +0.84 and agree in direction on 82–89% of days. This is
+closer to **one observation seen three times**. And with 42 cells examined, ~2 significant results
+are expected by chance — A's p=0.033 is within that budget on its own. It counts only because it
+sits inside a monotonic pattern the other two share, which is weaker evidence than three
+independent p-values would be.
+
+### 7.5 What this analysis is allowed to conclude
+
+Per §6, a **specification**, never a deployment instruction:
+
+1. **Do not add another premium seller.** A/B/C/F/G are one trade. Stop counting them as a portfolio.
+2. **Any complement must target intraday RANGE, not direction.** This is the concrete, non-obvious
+   output, and it rules out the momentum/trend sleeve that seemed natural before the run.
+3. **Do not pick one yet.** The required offset cannot be sized: B's high-range bucket is
+   −$32/contract with a CI spanning zero, over 9 days.
+4. **It must clear the bar the Brandon hedges failed** (2026-09-04): hedge debits of $1,925–$2,240
+   against an IC-side loss of ~$1,400. A long-gamma complement is structurally the same trade as
+   those hedges, so **this is not a new idea — it is the idea that already failed once**, and it needs
+   to explain what would be different.
+
+### 7.6 What would make H3 answerable
+
+Roughly **60+ traded live-era days** for B (currently 26), giving ~20 per bucket instead of ~9. At
+the current cadence that is **early 2027**. Re-run this then; the tooling is in place and the
+pre-registration stands.
+
