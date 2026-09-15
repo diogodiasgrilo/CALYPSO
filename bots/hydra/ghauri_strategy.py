@@ -570,6 +570,36 @@ class GhauriMeanReversionStrategy(HydraStrategy):
             self._current_entry = None
             self.state = MEICState.MONITORING
 
+            # ── PERSIST + RECORD (added 2026-09-15) ──────────────────────────
+            # This method deliberately bypasses HydraStrategy._initiate_entry
+            # (see the docstring above), and in doing so it silently dropped two
+            # things that method does after a successful placement: the
+            # immediate state save, and the SQLite entry record.
+            #
+            # The SECOND omission made this strategy unmeasurable. Stops ARE
+            # recorded, because they run through the INHERITED
+            # _execute_stop_loss — so `trade_entries` stayed empty while
+            # `trade_stops` filled up, and F's entire recorded history was
+            # losses. Measured 2026-09-14: 0 entries ever, 1 stop, lifetime
+            # -$14.80 — a strategy that had actually traded, reading as pure
+            # loss in every report and analyzer.
+            #
+            # Wrapped defensively because this method has try/FINALLY and no
+            # `except`: an exception here would escape past the alert on a
+            # position that IS ALREADY OPEN. Recording must never cost us a
+            # placed entry — the parent can call these bare only because its own
+            # method has a surrounding except.
+            try:
+                self._save_state_to_disk()
+                entry._spx_at_entry = self.current_price
+                self._record_entry_to_db(entry)
+            except Exception as exc:  # noqa: BLE001 — telemetry is never fatal
+                logger.warning(
+                    f"GHAURI: entry #{entry_num} placed, but persist/record failed "
+                    f"({type(exc).__name__}: {exc}) — position is open and tracked "
+                    f"in memory; DB row may be missing."
+                )
+
             credit = entry.call_spread_credit if entry.call_only else entry.put_spread_credit
             strike = entry.short_call_strike if entry.call_only else entry.short_put_strike
             self.alert_service.send_alert(
