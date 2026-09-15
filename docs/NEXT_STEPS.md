@@ -229,43 +229,40 @@ POSITION_OPENED alert on an already-open position. Deployed to `hydra_variant_f`
 omits the parts you did. **Any future strategy that overrides `_initiate_entry` must be checked for
 this exact omission** — the symptom is stops-without-entries, and it is invisible unless you look.
 
-### P2-ter — 🔴 OPEN RISK: two entries sharing a strike make POS-003 ambiguous, and the bot loses track of a real position
+### P2-ter — ✅ FIXED 2026-09-15: POS-003 now resolves merged legs instead of giving up
 
-**Found 2026-09-12** by the new `scripts/check_clean_sessions.py` — nobody had looked at these alerts.
+**The mechanism was NOT what the first diagnosis said.** It is not two entries picking the same
+strike on the same side. With 5pt-wide spreads placed 30 min apart, **one entry's protective LONG
+lands on another entry's SHORT** — same conid, opposite signs. Verified against 2026-09-11:
 
 ```
-2026-09-11 10:31  POS-003: 1 conid(s) mismatch the broker's quantity
-                    conid 911460104: expected 0, broker shows 7
-                  POS-003: conid 911460104 maps to 2 tracked legs — ambiguous,
-                           leaving for manual review
+strike 7710:  E#1 short_call  +  E#5 long_call     -> nets to 0
+strike 7715:  E#1 long_call   +  E#2 short_call    -> nets to 0
 ```
 
-**What happens.** IBKR merges positions at the same `(conid, side)`. B runs **7 slots/day** with
-delta-targeted strikes on a 5pt grid, so two entries picking the same strike is structurally likely,
-not exotic. When they do, one broker position backs two tracked legs, POS-003 cannot attribute
-quantity to either, and it explicitly **declines to auto-resolve**. On 09-11 the bot believed it held
-**0** contracts at that conid while the broker held **7**.
+They net to zero, so expected and actual agree — until the short is stopped. The broker then shows
+**+7 against an expectation of 0**, the code saw "maps to 2 tracked legs", logged *ambiguous, leaving
+for manual review*, and stopped. **A real 7-lot sat untracked for six hours**, firing CRITICAL alerts
+nobody read. An untracked position has no stop on it.
 
-**Frequency (live seat, full 24-day journal retention):** 2 of ~17 sessions —
-**2026-08-20** (14 ambiguous) and **2026-09-11** (6 ambiguous + 6 quantity mismatches). Variant C:
-zero. It fired 6 CRITICAL-class `critical_intervention` alerts on 09-11 and was never investigated.
+**It was never ambiguous.** The contribution that disappeared is exactly `expected − actual`, so
+identifying the vanished legs is subset-sum over a few signed numbers. Net +7 against
+{short −7, long +7} has one answer. Fixed in `c1544fb` — deployed to all strategies 2026-09-15 04:09
+ET (flat account, settlement complete, pre-market).
 
-**Why it matters more on real money.** An untracked position is one the bot will not stop out — the
-naked-risk shape. Both occurrences cleaned themselves up at 0DTE expiry, which is **expiry doing the
-work, not the bot managing risk**. This is exactly halt criterion **H10** in
-[`LIVE_HALT_CRITERIA.md`](migration/LIVE_HALT_CRITERIA.md) ("any unreconciled position gap"), and
-under Gate 4's own definition it makes the day NOT clean.
+**The strike-avoidance fix originally proposed here would NOT have worked** and is abandoned:
+avoiding long/short overlap with 5pt spreads forces entries ≥10pt apart, which fights the
+delta-targeting that is the point of the Brandon stack — damaging the strategy to dodge a
+bookkeeping problem. **No trade, strike or stop behaviour changed**; only what the bot does when its
+own books look odd.
 
-**Not fixed — it needs design, not a patch.** Options, none chosen:
-1. **Prevent the collision:** make strike selection avoid strikes already held by an open entry.
-   Cheapest, but perturbs the delta-target logic that is the point of the Brandon stack.
-2. **Disambiguate by proportion:** attribute merged quantity across tracked legs pro-rata. Works for
-   reporting; still cannot tell you *which* entry a partial close belonged to.
-3. **Track at (conid, entry) with our own ledger** rather than inferring from broker quantity — the
-   most correct, the most work, and it re-opens the F4 conid-quantity model.
+**Still refuses to guess:** only a UNIQUE solution is acted on. Two same-sign legs are NOT
+interchangeable (credits differ ⇒ P&L mis-attribution), so ties still go to manual review, and the
+partial-fill guard survives for free.
 
-**Decide before real money.** At 1 contract the exposure is small, but the bot being wrong about what
-it holds is a correctness problem, not a sizing one.
+⚠️ **This reset the Gate-4 clean-session streak to 0** (was 2), deliberately: that streak's day 1 was
+−$1,756 and Gate 4 also requires the 5 sessions to net ≥ 0, which it could not have met. Fix first,
+then freeze on corrected code.
 
 ### P3 — the real-money combo track (the actual next phase)
 
