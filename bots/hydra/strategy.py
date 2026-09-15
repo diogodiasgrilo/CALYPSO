@@ -12851,14 +12851,26 @@ class HydraStrategy(MEICStrategy):
     ) -> None:
         """Clean up entry state for conids the broker no longer backs (F4.4).
 
-        For a conid mapped to exactly ONE tracked leg whose broker
-        quantity has dropped to zero, the leg has genuinely vanished —
-        clear its ``*_uic`` and, if it was a short, mark that side
-        stopped (it can no longer be monitored). A conid mapped to
-        several tracked legs (a cross-entry merge) or showing a partial
-        / unexpected non-zero quantity is left for manual review —
-        auto-mutating an ambiguous discrepancy is worse than alerting a
-        human.
+        For each discrepant conid, :meth:`_resolve_vanished_legs` works out
+        WHICH tracked leg(s) disappeared — the vanished contribution is exactly
+        ``expected - actual``, so this is subset-sum over the legs' signed
+        quantities, not guesswork. Every uniquely-determined leg is then passed
+        to :meth:`_dispose_vanished_leg`, which clears its ``*_uic`` and, if it
+        was a short, marks that side stopped and books its P&L under the L-M3
+        guard.
+
+        UPDATED 2026-09-15 — this used to bail out whenever a conid mapped to
+        anything other than exactly ONE tracked leg. That is the common case,
+        not the exotic one: with 5pt-wide spreads placed 30 minutes apart, one
+        entry's protective LONG routinely lands on another entry's SHORT, and
+        when the short is stopped the surviving long looks like an unexplained
+        position. On 2026-09-11 that left a live 7-lot untracked for six hours.
+
+        STILL REFUSES TO GUESS. Only a unique solution is acted on: two
+        same-sign legs of equal size admit two valid answers and are NOT
+        interchangeable (their entries' credits differ, so booking the wrong one
+        mis-attributes realized P&L). Ties, and partial quantities that no
+        subset can explain, still fall through to manual review.
         """
         for conid, (exp_qty, act_qty) in discrepant.items():
             # AUDIT #45: iterate ALL tracked entries (matches the expected set,

@@ -213,3 +213,21 @@ class TestTheHANDLERAssignsSignsCorrectly:
         e5.contracts = 3
         # expected -10 + 3 = -7 ; broker +3 -> the 10-lot short vanished
         assert self._run([e1, e5], -7, 3) == [(1, "short_call")]
+
+
+class TestTheDocstringMatchesTheCode:
+    """Documentation that contradicts the code is worse than none — a reader
+    would believe the bot still gives up on merged legs. Caught in review of
+    this very change: the docstring still described the removed behaviour."""
+
+    def test_it_no_longer_claims_merged_legs_are_left_alone(self):
+        import inspect
+        doc = inspect.getdoc(HydraStrategy._handle_position_discrepancies)
+        assert "several tracked legs" not in doc
+        assert "_resolve_vanished_legs" in doc
+
+    def test_it_still_documents_the_refusal_to_guess(self):
+        import inspect
+        doc = inspect.getdoc(HydraStrategy._handle_position_discrepancies)
+        assert "unique" in doc.lower()
+        assert "interchangeable" in doc
