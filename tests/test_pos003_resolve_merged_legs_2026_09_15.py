@@ -231,3 +231,35 @@ class TestTheDocstringMatchesTheCode:
         doc = inspect.getdoc(HydraStrategy._handle_position_discrepancies)
         assert "unique" in doc.lower()
         assert "interchangeable" in doc
+
+
+class TestTheBlastRadiusIsTheLiveSeatOnly:
+    """Reconciliation is gated on dry_run, so this whole path only ever runs on
+    the LIVE seat. That gate is load-bearing in both directions:
+
+      * it bounds this change to one variant (checked before deploying);
+      * without it, every dry-run variant would mutate its own state from
+        broker positions it does not have — a dry-run bot holds tracked legs
+        with REAL contract ids while the broker holds nothing, so every leg
+        would look "vanished" and get cleared and marked stopped.
+
+    D and E inherit this method from HydraStrategy (verified via MRO), and their
+    calendars hold short and long at the SAME strike — so if the gate were ever
+    removed, they would be the first to corrupt.
+    """
+
+    def test_reconciliation_returns_early_in_dry_run(self):
+        import inspect
+        src = inspect.getsource(HydraStrategy._check_hourly_reconciliation)
+        assert "if self.dry_run:" in src, "the dry_run gate is gone"
+        i = src.index("if self.dry_run:")
+        assert "return" in src[i:i + 120], "the dry_run guard must return, not just log"
+
+    def test_the_calendar_strategies_do_inherit_this_path(self):
+        """Not academic — if the dry_run gate goes, D/E are exposed."""
+        from bots.hydra.double_calendar_strategy import DoubleCalendarStrategy
+        from bots.hydra.spy_double_calendar_strategy import SpyDoubleCalendarStrategy
+        for cls in (DoubleCalendarStrategy, SpyDoubleCalendarStrategy):
+            owner = next(c.__name__ for c in cls.__mro__
+                         if "_handle_position_discrepancies" in c.__dict__)
+            assert owner == "HydraStrategy"
