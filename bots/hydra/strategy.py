@@ -12772,6 +12772,80 @@ class HydraStrategy(MEICStrategy):
             actual[conid] = actual.get(conid, 0) + (p.get("quantity") or 0)
         return actual
 
+    @staticmethod
+    def _resolve_vanished_legs(exp_qty: int, act_qty: int, legs: list) -> tuple:
+        """Which of the tracked legs at one conid actually vanished (2026-09-15).
+
+        THE PROBLEM THIS SOLVES. IBKR nets every position at a conid into ONE
+        number, and with 5pt-wide spreads placed 30 minutes apart, one entry's
+        protective LONG routinely lands on another entry's SHORT — same conid,
+        opposite signs. Measured on the live seat 2026-09-11:
+
+            strike 7710: E#1 short_call  +  E#5 long_call
+            strike 7715: E#1 long_call   +  E#2 short_call
+
+        Those net to ZERO, so `expected` is 0 and the broker shows 0 — fine. But
+        when the short is stopped, the broker jumps to +7 while the bot still
+        expects 0, and the old code saw "conid maps to 2 tracked legs" and gave
+        up with "ambiguous, leaving for manual review". On 2026-09-11 that left a
+        real 7-lot position untracked for six hours, firing CRITICAL alerts
+        nobody read, while the bot believed it held nothing. An untracked
+        position has no stop on it.
+
+        IT WAS NEVER AMBIGUOUS. Each leg contributes a SIGNED quantity, and the
+        broker's net is the sum of whatever survived, so the contribution that
+        disappeared is exactly ``expected - actual``. Finding which legs vanished
+        is a subset-sum over a handful of legs, and in the real case there is
+        exactly one answer: net +7 against {short -7, long +7} can only mean the
+        short is gone.
+
+        DELIBERATELY REFUSES TO GUESS. Only a UNIQUE solution is acted on. Two
+        legs of the same sign and size (two entries short the same strike) admit
+        two equally valid answers, and they are NOT interchangeable — each
+        entry's credit differs, so booking the wrong one mis-attributes realized
+        P&L. Ties fall through to manual review exactly as before. This also
+        preserves the old partial-quantity guard for free: a half-closed leg
+        produces a delta no subset can sum to, so it too returns unresolved.
+
+        Args:
+            exp_qty: signed net quantity the bot expects at this conid.
+            act_qty: signed net quantity the broker actually shows.
+            legs: ``[(entry, leg_name, contribution), …]`` for this conid.
+
+        Returns:
+            ``(resolved, reason)`` — ``resolved`` is the list of
+            ``(entry, leg_name)`` that vanished, or ``None`` when unresolved.
+        """
+        delta = exp_qty - act_qty
+        if delta == 0:
+            return None, "expected and actual already agree — nothing vanished"
+        if not legs:
+            return None, "no tracked leg at this conid"
+        # Subset-sum. Leg counts here are tiny (4 legs per entry, and only the
+        # ones sharing this conid); the cap is a guard against a pathological
+        # state file, not an expected path.
+        if len(legs) > 12:
+            return None, f"{len(legs)} legs is too many to resolve safely"
+
+        matches = []
+        for mask in range(1, 1 << len(legs)):
+            subset = [legs[i] for i in range(len(legs)) if mask & (1 << i)]
+            if sum(c for (_, _, c) in subset) == delta:
+                matches.append(subset)
+                if len(matches) > 1:
+                    # Two explanations fit; stop early, we will not guess.
+                    return None, (
+                        f"{len(legs)} legs admit multiple explanations for a "
+                        f"change of {delta} — refusing to guess which vanished"
+                    )
+        if not matches:
+            return None, (
+                f"no combination of the {len(legs)} tracked leg(s) explains a "
+                f"change of {delta} (expected {exp_qty}, broker {act_qty}) — "
+                f"likely a partial fill"
+            )
+        return [(e, leg) for (e, leg, _) in matches[0]], "uniquely determined"
+
     def _handle_position_discrepancies(
         self, discrepant: Dict[Any, tuple]
     ) -> None:
@@ -12792,125 +12866,138 @@ class HydraStrategy(MEICStrategy):
             # surviving long leg of a fully short-only-stopped entry can still
             # be resolved instead of falling through to "ambiguous".
             legs = [
-                (entry, leg)
+                (
+                    entry,
+                    leg,
+                    (-1 if leg.startswith("short") else 1)
+                    * (getattr(entry, "contracts", 1) or 1),
+                )
                 for entry in self.daily_state.entries
                 for leg in LEG_NAMES
                 if getattr(entry, f"{leg}_uic", None) == conid
             ]
-            if len(legs) != 1:
+            # Solve which legs vanished instead of giving up whenever more than
+            # one leg shares the conid — see _resolve_vanished_legs. The old
+            # `len(legs) != 1` bail-out is what left a live 7-lot untracked for
+            # six hours on 2026-09-11.
+            resolved, reason = self._resolve_vanished_legs(exp_qty, act_qty, legs)
+            if resolved is None:
                 logger.warning(
-                    f"POS-003: conid {conid} maps to {len(legs)} tracked "
-                    f"legs — ambiguous, leaving for manual review"
+                    f"POS-003: conid {conid} maps to {len(legs)} tracked leg(s); "
+                    f"{reason} — leaving for manual review"
                 )
                 continue
-            entry, leg = legs[0]
-            if act_qty != 0:
-                logger.warning(
-                    f"POS-003: Entry #{entry.entry_number} {leg} (conid "
-                    f"{conid}) shows unexpected quantity {act_qty} — leaving "
-                    f"for manual review"
-                )
-                continue
-            logger.warning(
-                f"POS-003: Entry #{entry.entry_number} {leg} (conid {conid}) "
-                f"missing on the broker — clearing it and marking it closed"
+            for entry, leg in resolved:
+                self._dispose_vanished_leg(entry, leg, conid, act_qty)
+
+    def _dispose_vanished_leg(self, entry, leg: str, conid, act_qty: int) -> None:
+        """Clear one tracked leg the broker no longer backs, and book its P&L.
+
+        Split out of :meth:`_handle_position_discrepancies` unchanged (2026-09-15)
+        so the same disposal runs whether ONE leg vanished at a conid or one of
+        SEVERAL sharing it. Behaviour for the single-leg case is identical; what
+        changed is only which legs get here.
+        """
+        logger.warning(
+            f"POS-003: Entry #{entry.entry_number} {leg} (conid {conid}) "
+            f"missing on the broker — clearing it and marking it closed"
+        )
+        setattr(entry, f"{leg}_uic", None)
+        if leg in ("short_call", "short_put"):
+            side = "call" if leg == "short_call" else "put"
+            # L-M3 DOUBLE-BOOK GUARD (2026-09-10). Read the side's PRIOR
+            # disposition BEFORE the setattr below marks it stopped — that
+            # write would otherwise destroy the very evidence this guard
+            # needs. Order matters here; do not hoist the setattr.
+            #
+            # The old guard tested ONE flag, `{side}_side_pnl_booked_external`,
+            # which no other close path sets and which was not even persisted.
+            # Any side already closed and booked by ANOTHER path therefore
+            # looked unbooked here and got booked a second time.
+            prior_stopped = getattr(entry, f"{side}_side_stopped", False)
+            prior_close_reason = getattr(entry, "close_reason", "") or ""
+            already_booked = (
+                getattr(entry, f"{side}_side_pnl_booked_external", False)
+                or getattr(entry, f"{side}_side_expired", False)
+                or getattr(entry, f"{side}_side_skipped", False)
+                or getattr(entry, f"{side}_side_pivot_closed", False)
+                # A GENUINE stop booked its P&L at stop time. A Brandon
+                # TP/BREACH that closed 0 legs (the 06-04 orphan) set
+                # *_side_stopped but booked NOTHING, so it must still be
+                # bookable here. This mirrors settlement's own
+                # `*_genuine_stop` predicate exactly, so the two paths agree
+                # on what "already booked" means instead of each guessing.
+                or (prior_stopped and prior_close_reason not in ("TP", "BREACH"))
             )
-            setattr(entry, f"{leg}_uic", None)
-            if leg in ("short_call", "short_put"):
-                side = "call" if leg == "short_call" else "put"
-                # L-M3 DOUBLE-BOOK GUARD (2026-09-10). Read the side's PRIOR
-                # disposition BEFORE the setattr below marks it stopped — that
-                # write would otherwise destroy the very evidence this guard
-                # needs. Order matters here; do not hoist the setattr.
-                #
-                # The old guard tested ONE flag, `{side}_side_pnl_booked_external`,
-                # which no other close path sets and which was not even persisted.
-                # Any side already closed and booked by ANOTHER path therefore
-                # looked unbooked here and got booked a second time.
-                prior_stopped = getattr(entry, f"{side}_side_stopped", False)
-                prior_close_reason = getattr(entry, "close_reason", "") or ""
-                already_booked = (
-                    getattr(entry, f"{side}_side_pnl_booked_external", False)
-                    or getattr(entry, f"{side}_side_expired", False)
-                    or getattr(entry, f"{side}_side_skipped", False)
-                    or getattr(entry, f"{side}_side_pivot_closed", False)
-                    # A GENUINE stop booked its P&L at stop time. A Brandon
-                    # TP/BREACH that closed 0 legs (the 06-04 orphan) set
-                    # *_side_stopped but booked NOTHING, so it must still be
-                    # bookable here. This mirrors settlement's own
-                    # `*_genuine_stop` predicate exactly, so the two paths agree
-                    # on what "already booked" means instead of each guessing.
-                    or (prior_stopped and prior_close_reason not in ("TP", "BREACH"))
+            setattr(entry, f"{side}_side_stopped", True)
+            # L-M3: a short that vanished from the broker (closed externally
+            # or while the bot was down) was marked stopped but its close
+            # DEBIT was never booked — settlement then treats it as a genuine
+            # stop and SKIPS re-booking, so the loss is silently dropped and
+            # realized P&L is OVERSTATED. Book the side's realized P&L now
+            # from the actual closing execution (closing a short = a BUY) and
+            # tag close_reason so settlement leaves it alone. If the close
+            # price can't be read, alert for manual review rather than
+            # silently dropping it.
+            if not already_booked:
+                # Hoisted above the lookup (2026-09-10): the contract count
+                # is now also a disambiguation hint for which execution
+                # actually CLOSED this leg, so it must be known before the
+                # call, not just after it.
+                contracts = (
+                    getattr(entry, "contracts", None)
+                    or getattr(self, "contracts_per_entry", 1)
+                    or 1
                 )
-                setattr(entry, f"{side}_side_stopped", True)
-                # L-M3: a short that vanished from the broker (closed externally
-                # or while the bot was down) was marked stopped but its close
-                # DEBIT was never booked — settlement then treats it as a genuine
-                # stop and SKIPS re-booking, so the loss is silently dropped and
-                # realized P&L is OVERSTATED. Book the side's realized P&L now
-                # from the actual closing execution (closing a short = a BUY) and
-                # tag close_reason so settlement leaves it alone. If the close
-                # price can't be read, alert for manual review rather than
-                # silently dropping it.
-                if not already_booked:
-                    # Hoisted above the lookup (2026-09-10): the contract count
-                    # is now also a disambiguation hint for which execution
-                    # actually CLOSED this leg, so it must be known before the
-                    # call, not just after it.
-                    contracts = (
-                        getattr(entry, "contracts", None)
-                        or getattr(self, "contracts_per_entry", 1)
-                        or 1
+                closed = self._read_closed_position_price(
+                    conid, buy_or_sell="Buy",
+                    not_before=getattr(entry, "entry_time", None),
+                    expect_quantity=contracts,
+                )
+                close_px_raw = (closed or {}).get("closing_price")
+                try:
+                    close_px = float(close_px_raw) if close_px_raw is not None else None
+                except (TypeError, ValueError):
+                    close_px = None
+                side_credit = getattr(entry, f"{side}_spread_credit", 0) or 0
+                # `contracts` is computed above, before the lookup.
+                if close_px is not None and close_px > 0:
+                    close_debit = float(close_px) * 100 * contracts
+                    realized = side_credit - close_debit
+                    self._book_realized_pnl(realized, entry)
+                    setattr(entry, f"{side}_side_pnl_booked_external", True)
+                    if not getattr(entry, "close_reason", ""):
+                        entry.close_reason = "EXTERNAL"
+                    logger.warning(
+                        f"L-M3: booked external close of E#{entry.entry_number} "
+                        f"{side} short — credit ${side_credit:.2f} − debit "
+                        f"${close_debit:.2f} = ${realized:.2f} realized"
                     )
-                    closed = self._read_closed_position_price(
-                        conid, buy_or_sell="Buy",
-                        not_before=getattr(entry, "entry_time", None),
-                        expect_quantity=contracts,
-                    )
-                    close_px_raw = (closed or {}).get("closing_price")
-                    try:
-                        close_px = float(close_px_raw) if close_px_raw is not None else None
-                    except (TypeError, ValueError):
-                        close_px = None
-                    side_credit = getattr(entry, f"{side}_spread_credit", 0) or 0
-                    # `contracts` is computed above, before the lookup.
-                    if close_px is not None and close_px > 0:
-                        close_debit = float(close_px) * 100 * contracts
-                        realized = side_credit - close_debit
-                        self._book_realized_pnl(realized, entry)
-                        setattr(entry, f"{side}_side_pnl_booked_external", True)
-                        if not getattr(entry, "close_reason", ""):
-                            entry.close_reason = "EXTERNAL"
-                        logger.warning(
-                            f"L-M3: booked external close of E#{entry.entry_number} "
-                            f"{side} short — credit ${side_credit:.2f} − debit "
-                            f"${close_debit:.2f} = ${realized:.2f} realized"
-                        )
-                    else:
-                        # Close price unreadable → leave P&L unbooked but loud in
-                        # the log. We do NOT fire a separate alert here: the
-                        # reconciliation path already alerts about the vanished
-                        # position, so this would only double-notify.
-                        logger.critical(
-                            f"L-M3: E#{entry.entry_number} {side} short vanished "
-                            f"but its close price is unreadable — P&L for this side "
-                            f"is UNBOOKED; manual review recommended."
-                        )
                 else:
-                    # The guard fired. Log it: a SILENT skip is exactly how the
-                    # double-book hid for so long — the day still reconciled
-                    # because the in-process check compares two numbers that
-                    # descend from the same accumulator. Name which flag stopped
-                    # it so the next reader does not have to re-derive this.
-                    logger.info(
-                        f"L-M3: E#{entry.entry_number} {side} short already "
-                        f"disposed (expired={getattr(entry, f'{side}_side_expired', False)}, "
-                        f"skipped={getattr(entry, f'{side}_side_skipped', False)}, "
-                        f"pivot={getattr(entry, f'{side}_side_pivot_closed', False)}, "
-                        f"booked_external={getattr(entry, f'{side}_side_pnl_booked_external', False)}, "
-                        f"prior_stopped={prior_stopped}, close_reason='{prior_close_reason}') "
-                        f"— NOT re-booking its P&L."
+                    # Close price unreadable → leave P&L unbooked but loud in
+                    # the log. We do NOT fire a separate alert here: the
+                    # reconciliation path already alerts about the vanished
+                    # position, so this would only double-notify.
+                    logger.critical(
+                        f"L-M3: E#{entry.entry_number} {side} short vanished "
+                        f"but its close price is unreadable — P&L for this side "
+                        f"is UNBOOKED; manual review recommended."
                     )
+            else:
+                # The guard fired. Log it: a SILENT skip is exactly how the
+                # double-book hid for so long — the day still reconciled
+                # because the in-process check compares two numbers that
+                # descend from the same accumulator. Name which flag stopped
+                # it so the next reader does not have to re-derive this.
+                logger.info(
+                    f"L-M3: E#{entry.entry_number} {side} short already "
+                    f"disposed (expired={getattr(entry, f'{side}_side_expired', False)}, "
+                    f"skipped={getattr(entry, f'{side}_side_skipped', False)}, "
+                    f"pivot={getattr(entry, f'{side}_side_pivot_closed', False)}, "
+                    f"booked_external={getattr(entry, f'{side}_side_pnl_booked_external', False)}, "
+                    f"prior_stopped={prior_stopped}, close_reason='{prior_close_reason}') "
+                    f"— NOT re-booking its P&L."
+                )
 
     @staticmethod
     def _recon_diff_quantities(expected: Dict[Any, int], actual: Dict[Any, int]) -> Dict[Any, tuple]:
