@@ -223,7 +223,11 @@ Delays entry up to `calm_entry_max_delay_min` (default 5 min) when SPX moved mor
 
 ### Other knobs
 - **Stop Close Mode:** `long_salvage.short_only_stop` (default `false` = close both legs). When `true` → MKT-025 short-only stop + MKT-033 long salvage.
-- **FOMC Announcement Skip:** DISABLED. Bot trades normally on FOMC days.
+- **FOMC Announcement Skip:** **ENABLED on A/B/C** (`fomc_announcement_skip=true`) — they skip all
+  entries on an FOMC announcement day. Verified live 2026-09-16: B logged "FOMC announcement day -
+  skipping all entries" and placed nothing. (This line previously said DISABLED, which was stale.)
+  ⚠️ **F and G have it FALSE and DO trade announcement days** — including G, the undefined-risk naked
+  strangle. See `docs/NEXT_STEPS.md` §A-bis-2.
 - **FOMC T+1 Blackout:** ENABLED (`fomc_t1_skip_enabled: true`) — skip all entries the day after a FOMC announcement.
 - **FOMC T+1 Call-Only (MKT-038):** legacy, DISABLED. Code preserved as fallback when `fomc_t1_skip_enabled` is false.
 - **Base-Entry Down-Day Call-Only:** DISABLED (`base_entry_downday_callonly_pct: null`) — negative EV in A/B sweep (Feb–Apr 2026).

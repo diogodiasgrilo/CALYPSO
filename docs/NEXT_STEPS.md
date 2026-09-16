@@ -29,17 +29,29 @@ settlement complete for Monday · VM and origin in sync.
 | ✅ | **Schema v17 on all 7 DBs** | Migrated offline — it never needed the broker. |
 | ✅ | **Halt criteria + week-1 plan drafted** | `LIVE_HALT_CRITERIA.md`, thresholds from B's real loss distribution, **per contract**. Held on first contact Monday (−$1,756 vs −$2,800 limit). |
 
-### Deployed 2026-09-15, NOT YET VERIFIED IN PRODUCTION
+### Verification status of the 2026-09-15 deploys
 
-> **These are the only two things waiting on today's session. A fix confirmed only by tests is
-> half-done.**
+1. **Variant F entry recording — ✅ VERIFIED 2026-09-16.** `variant_f.trade_entries` has its first
+   row ever: `2026-09-15 e#1 put 7550/7540, credit $127.50`. The fix works.
+2. **POS-003 merged-leg resolver — ⏳ STILL UNVERIFIED.** Not because it failed: **B had 0 stops on
+   2026-09-15**, so no leg vanished and no discrepancy arose to resolve. 10 reconciliations ran, all
+   "0 mismatched". **It needs a day with both an overlap AND a stop.**
 
-1. **POS-003 merged-leg resolver** (`c1544fb`, live 04:09 ET). Today should produce another
-   long/short overlap — it is structural, not rare. **Watch for the resolver firing and resolving to
-   the correct leg.** Grep `POS-003` in `hydra_variant_b`. Runs on B ONLY (reconciliation is
-   dry_run-gated).
-2. **Variant F entry recording** (`88ec8ed`, live 07:15 UTC). **Check `trade_entries` for
-   `variant_f` after today's close** — it has 0 rows in its entire history.
+   **What that day showed instead is how common the overlap is** — far more than the Sep-11 evidence
+   suggested. On a single session B had **8 strikes carrying more than one leg**:
+
+   ```
+   7620: e#4 short_call, e#5 short_call, e#6 long_call, e#7 long_call   <- FOUR legs
+   7625: e#3 short_call, e#4 long_call,  e#5 long_call
+   7530 / 7535 / 7540 / 7625 : opposite-sign short/long pairs
+   7555 / 7550 : same-sign pairs across entries
+   ```
+
+   ⚠️ **A 4-leg strike like 7620 (2 shorts + 2 longs) is NOT fully solved by the fix.** If one short
+   closes, two subsets explain it equally, so the resolver correctly REFUSES and sends it to manual
+   review — the entries' credits differ, so guessing would mis-attribute P&L. The fix resolves the
+   2-leg opposite-sign case (the Sep-11 incident); it does not eliminate every manual-review case,
+   and should not be described as if it did.
 
 ### Next actions, in order
 
@@ -443,13 +455,53 @@ make that error (mutation-tested).
 
 ---
 
+# §A-bis-2. OPEN FINDINGS from the 2026-09-16 review
+
+### 🔴 F's daily summary books MORE than the trade could earn
+
+```
+trade_entries    2026-09-15 e#1  put 7550/7540  total_credit $127.50
+trade_stops      2026-09-15 e#1  put  early_close  debit $0.00  ->  +$127.50   (correct: keeps the credit)
+daily_summaries  2026-09-15      entries_placed=0  gross $195.00  net $192.70
+```
+
+**Two disagreements, same row.** Gross is **$67.50 more than the entire credit** — a short spread
+cannot earn more than it collected (CLAUDE.md lesson #14). And `entries_placed=0` contradicts the
+entry that is demonstrably recorded. The stop row and the entry row agree with each other; the daily
+summary agrees with neither, so the fault is in F's own daily-state accounting rather than in the
+recording fix. **Dry-run only, so no money — but the numbers are wrong, and F's lifetime P&L is built
+from them.** Not yet diagnosed.
+
+### ⚠️ The UNDEFINED-RISK strategy is the one trading FOMC days
+
+| variant | `fomc_announcement_skip` | traded 2026-09-16 (FOMC) |
+|---|---|---|
+| A, B, C (defined risk) | **True** | no |
+| F | False | — |
+| **G (naked strangle, undefined risk)** | **False** | **yes — 2 entries** |
+
+G sold ~$1,480 and ~$1,605 of event premium (vs ~$220 on a normal day — the credit is real, it is the
+announcement being priced), had both call sides stopped, and went into the 14:00 announcement holding
+**two naked short puts**. G is dry-run, so this is a research observation, not an incident — but it
+is backwards: the one strategy with unbounded loss is the only one taking Fed-announcement risk,
+while every defined-risk strategy sits out. **If G is ever promoted, that config travels with it.**
+
+### 📄 CLAUDE.md is stale on FOMC
+
+It states *"FOMC Announcement Skip: DISABLED. Bot trades normally on FOMC days."* The live configs
+say `fomc_announcement_skip=True` on A/B/C, and B demonstrably skipped 2026-09-16. The memory
+`fomc_trading_policy` ("0DTE A/B/C SKIP FOMC T+0") is the accurate one.
+
+---
+
 # §A-ter. SESSION LOG — the live seat, most recent first
 
 Keep this short: date, what happened, what it proved. Detail belongs in the linked commits.
 
 | Date | B (live) | What it proved |
 |---|---|---|
-| **2026-09-15** (Tue) | in progress | First session on the POS-003 resolver + F's entry recording. **Both await verification.** |
+| **2026-09-16** (Wed) | **no trades — FOMC** | B/A/C correctly skipped the announcement day. G (undefined risk) did NOT and is the outlier — see §A-bis-2. |
+| **2026-09-15** (Tue) | **+$1,344.30** · 6e/0s | Recovered most of Monday's −$1,756. Zero stops. **F recorded its first entry ever** (fix verified). POS-003 resolver still untested — no stops means nothing vanished — but the day showed **8 strikes carrying multiple legs**, one with FOUR, so the overlap is far more common than Sep-11 suggested. |
 | **2026-09-14** (Mon) | **−$1,756** · 4e/2s | **First real test of the halt criteria — they held** (H1 −$2,800 limit, H3 3-stop limit; actual −$1,756 / 2 stops). A call-side trend day: SPX 7592→7647.93→close 7619.40, and *every* stop on *every* variant was call-side. B's stopped entries kept their surviving PUT-side credit, which is why the booked figure beat the −$1,890 projection. C lost MORE (−$2,791.60) on half the entries — first clean evidence **B's wider strikes beat C's tighter ones on a trend day**. The merged 7555 puts settled cleanly. **GEX veto cost money a 2nd time** (vetoed short call 7650 vs day high 7647.93 — survived by 2.07pt). |
 | **2026-09-11** (Fri) | **+$883.40** · 3e/0s | First passively-priced session; all expired worthless. A 25.8pt range is the EASY case for resting orders — treat as best-case. Also the day the POS-003 collision left a 7-lot untracked for 6h (found 09-12). |
 
