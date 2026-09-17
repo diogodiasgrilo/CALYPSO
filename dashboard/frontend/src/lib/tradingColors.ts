@@ -41,6 +41,24 @@ export const colors = {
   textDim: "#5e6e82",
 } as const;
 
+/**
+ * Type-scale steps as NUMBERS, for charting libraries (recharts,
+ * lightweight-charts) whose props take a px number and cannot use a CSS class.
+ *
+ * Mirrors `--text-*` in index.css. Without this a chart label is a magic number
+ * that silently escapes the scale — `EquityCurve`'s marker label sat at 9px
+ * after 9px had been retired everywhere else, and only a rendered font-size
+ * census caught it.
+ */
+export const fontSizePx = {
+  /** 10px — labels, badges, dense tabular data. Matches `text-3xs`. */
+  xs3: 10,
+  /** 11px — smallest readable prose. Matches `text-2xs`. */
+  xs2: 11,
+  /** 12px — Tailwind `text-xs`. */
+  xs: 12,
+} as const;
+
 /** Color for a P&L value. */
 export function pnlColor(value: number): string {
   if (value > 0) return colors.profit;

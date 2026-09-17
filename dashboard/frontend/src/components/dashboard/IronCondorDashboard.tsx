@@ -311,7 +311,7 @@ function PolledICView({ body, strategyId }: { body: ICSnapshotBody; accent: stri
         {/* The live log is per-PROCESS (the dashboard tails the primary's log
             only), so we don't show the primary's log under a non-primary
             selection. A short note keeps the operator oriented. */}
-        <div className="text-[11px] text-text-dim italic px-1">
+        <div className="text-2xs text-text-dim italic px-1">
           Live log streams on this variant's own process — view it via its journal
           (e.g. <span className="font-mono not-italic">journalctl -u hydra_variant_*</span>).
         </div>

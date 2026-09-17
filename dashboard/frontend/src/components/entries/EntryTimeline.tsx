@@ -82,10 +82,10 @@ export function EntryTimeline({ entries: entriesProp }: EntryTimelineProps = {})
           <div className="absolute top-1/2 left-0 right-0 h-px bg-border" />
 
           {/* Time labels */}
-          <span className="absolute left-0 -top-1 text-[10px] text-text-dim">
+          <span className="absolute left-0 -top-1 text-3xs text-text-dim">
             9:30
           </span>
-          <span className="absolute right-0 -top-1 text-[10px] text-text-dim">
+          <span className="absolute right-0 -top-1 text-3xs text-text-dim">
             16:00
           </span>
 
@@ -115,7 +115,7 @@ export function EntryTimeline({ entries: entriesProp }: EntryTimelineProps = {})
                   }}
                   title={`E${entryNum} ${time} — ${status}`}
                 />
-                <span className="text-[9px] text-text-dim mt-1">{time}</span>
+                <span className="text-3xs text-text-dim mt-1">{time}</span>
               </div>
             );
           })}
@@ -147,7 +147,7 @@ export function EntryTimeline({ entries: entriesProp }: EntryTimelineProps = {})
                   }}
                   title={`E${entryNum} ${time} — conditional — ${status}`}
                 />
-                <span className="text-[9px] mt-1" style={{ color: isPending ? colors.textDim : colors.textSecondary }}>
+                <span className="text-3xs mt-1" style={{ color: isPending ? colors.textDim : colors.textSecondary }}>
                   {time}
                 </span>
               </div>

@@ -88,7 +88,7 @@ export function CorrelationHeatmap({ data }: CorrelationHeatmapProps) {
     <div>
       <h3 className="label-upper mb-2">Correlations</h3>
       <div className="bg-card rounded-lg border border-border-dim p-3 overflow-x-auto">
-        <table className="w-full text-[10px]">
+        <table className="w-full text-3xs">
           <thead>
             <tr>
               <th className="text-left text-text-dim py-1 pr-2" />

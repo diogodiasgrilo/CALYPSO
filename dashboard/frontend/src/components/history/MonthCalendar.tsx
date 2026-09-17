@@ -101,7 +101,7 @@ export function MonthCalendar({
         {WEEKDAY_LABELS.map((label, i) => (
           <div
             key={i}
-            className="flex-1 h-4 flex items-center justify-center text-[9px] text-text-dim font-medium"
+            className="flex-1 h-4 flex items-center justify-center text-3xs text-text-dim font-medium"
           >
             {label}
           </div>
@@ -126,7 +126,7 @@ export function MonthCalendar({
                 return (
                   <div
                     key={di}
-                    className="flex-1 h-8 rounded-sm flex items-center justify-center text-[10px] font-mono text-text-dim/40"
+                    className="flex-1 h-8 rounded-sm flex items-center justify-center text-3xs font-mono text-text-dim/40"
                     style={{ backgroundColor: "rgba(90, 100, 120, 0.1)" }}
                     title={date}
                   >
@@ -148,7 +148,7 @@ export function MonthCalendar({
               return (
                 <div
                   key={di}
-                  className="flex-1 h-8 rounded-sm flex items-center justify-center text-[10px] font-mono cursor-pointer hover:ring-1 hover:ring-text-dim/50 hover:brightness-125 transition-all"
+                  className="flex-1 h-8 rounded-sm flex items-center justify-center text-3xs font-mono cursor-pointer hover:ring-1 hover:ring-text-dim/50 hover:brightness-125 transition-all"
                   style={{ backgroundColor: bgColor }}
                   title={`${date}: ${formatPnL(pnl)} | ${summary.entries_placed} entries, ${summary.actual_stops ?? summary.entries_stopped ?? 0} stops`}
                   onClick={() => onDayClick(date)}
@@ -168,7 +168,7 @@ export function MonthCalendar({
         >
           {formatPnL(netPnl)}
         </span>
-        <span className="text-[10px] text-text-dim">
+        <span className="text-3xs text-text-dim">
           <span style={{ color: colors.profit }}>{wins}</span>
           <span className="text-text-dim">W</span>
           <span className="mx-0.5 text-text-dim">/</span>

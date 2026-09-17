@@ -102,7 +102,7 @@ export function EntryGrid({ entries: entriesProp }: EntryGridProps = {}) {
             {skips.length > 0 && (
               <div className="mt-2 rounded border border-border-dim bg-bg px-3 py-2">
                 <div
-                  className="text-[10px] font-semibold uppercase tracking-wider mb-1"
+                  className="text-3xs font-semibold uppercase tracking-wider mb-1"
                   style={{ color: colors.textDim }}
                 >
                   Skipped — no position ({skips.length})
@@ -222,7 +222,7 @@ export function EntryGrid({ entries: entriesProp }: EntryGridProps = {}) {
           conditional slots are omitted (same rationale as base). */}
       {showConditional && activeCondTimes.length > 0 && (
         <div className="mt-2">
-          <span className="text-[10px] text-text-dim uppercase tracking-wider">
+          <span className="text-3xs text-text-dim uppercase tracking-wider">
             Conditional (Up-day ↑ put-only · Down-day ↓ call-only)
           </span>
           <div className={`grid gap-2 max-sm:grid-cols-1 mt-1 ${condColsClass}`}>
@@ -307,10 +307,10 @@ function PendingSlot({
     >
       <span className="text-text-dim text-xs font-semibold">{label}</span>
       {scheduledTime && (
-        <span className="text-text-dim text-[10px] mt-1">{scheduledTime} ET</span>
+        <span className="text-text-dim text-3xs mt-1">{scheduledTime} ET</span>
       )}
       <span
-        className="text-[9px] mt-1 px-1.5 py-0.5 rounded"
+        className="text-3xs mt-1 px-1.5 py-0.5 rounded"
         style={{ backgroundColor: `${colors.textDim}15`, color: colors.textDim }}
       >
         {badge}

@@ -25,20 +25,20 @@ function fmtTime(ts: string): string {
 function entryTypeBadge(type: string) {
   if (type === "call_only") {
     return (
-      <span className="inline-block px-1.5 py-0.5 rounded text-[9px] font-semibold bg-blue-500/20 text-blue-300">
+      <span className="inline-block px-1.5 py-0.5 rounded text-3xs font-semibold bg-blue-500/20 text-blue-300">
         CALL
       </span>
     );
   }
   if (type === "put_only") {
     return (
-      <span className="inline-block px-1.5 py-0.5 rounded text-[9px] font-semibold bg-purple-500/20 text-purple-300">
+      <span className="inline-block px-1.5 py-0.5 rounded text-3xs font-semibold bg-purple-500/20 text-purple-300">
         PUT
       </span>
     );
   }
   return (
-    <span className="inline-block px-1.5 py-0.5 rounded text-[9px] font-semibold bg-teal-500/20 text-teal-300">
+    <span className="inline-block px-1.5 py-0.5 rounded text-3xs font-semibold bg-teal-500/20 text-teal-300">
       IC
     </span>
   );
@@ -92,7 +92,7 @@ export function DayDetailEntries({
 
   return (
     <div className="space-y-3">
-      <h4 className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider">
+      <h4 className="text-2xs font-semibold text-text-secondary uppercase tracking-wider">
         Entries ({entries.length})
       </h4>
       <div className="overflow-x-auto rounded-lg border border-border-dim">
@@ -132,7 +132,7 @@ export function DayDetailEntries({
                 <td className="px-2 py-1.5 text-center">
                   {entryTypeBadge(e.entry_type)}
                 </td>
-                <td className="px-2 py-1.5 text-text-secondary text-[10px]">
+                <td className="px-2 py-1.5 text-text-secondary text-3xs">
                   {e.override_reason || e.trend_signal || "\u2014"}
                 </td>
                 <td className="px-2 py-1.5 text-right font-mono text-text-secondary">
@@ -152,7 +152,7 @@ export function DayDetailEntries({
                 <td className="px-2 py-1.5 text-right font-mono text-text-primary">
                   ${(e.total_credit || 0).toFixed(2)}
                 </td>
-                <td className="px-2 py-1.5 text-center font-mono text-text-dim text-[10px]">
+                <td className="px-2 py-1.5 text-center font-mono text-text-dim text-3xs">
                   {e.otm_distance_call > 0 || e.otm_distance_put > 0
                     ? `${e.otm_distance_call?.toFixed(0) || "\u2014"}/${e.otm_distance_put?.toFixed(0) || "\u2014"}`
                     : "\u2014"}
@@ -170,7 +170,7 @@ export function DayDetailEntries({
       {/* Stops detail section */}
       {stops.length > 0 && (
         <>
-          <h4 className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider mt-4">
+          <h4 className="text-2xs font-semibold text-text-secondary uppercase tracking-wider mt-4">
             Stop Losses ({stops.length})
           </h4>
           <div className="overflow-x-auto rounded-lg border border-border-dim">

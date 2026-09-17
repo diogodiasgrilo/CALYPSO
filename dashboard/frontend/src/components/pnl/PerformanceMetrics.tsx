@@ -189,7 +189,7 @@ export function PerformanceMetrics({ dailyPnls: dailyPnlsProp }: PerformanceMetr
       <div className="flex items-baseline justify-between mb-2">
         <h3 className="label-upper">Performance</h3>
         {!enoughForRatios && (
-          <span className="text-[10px] text-text-dim">
+          <span className="text-3xs text-text-dim">
             ratios need ≥{MIN_DAYS_FOR_RATIOS} traded days · have {n}
           </span>
         )}

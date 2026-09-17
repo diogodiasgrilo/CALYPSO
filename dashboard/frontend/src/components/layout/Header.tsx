@@ -159,7 +159,7 @@ export function Header() {
             over a whole-cohort comparison is simply wrong. */}
         {!showPicker && !showGroupNote && primaryLabel && (
           <span
-            className="text-[10px] sm:text-xs font-bold px-2 py-0.5 rounded uppercase tracking-wide whitespace-nowrap"
+            className="text-3xs sm:text-xs font-bold px-2 py-0.5 rounded uppercase tracking-wide whitespace-nowrap"
             style={{
               backgroundColor: dryRun ? "rgba(210,153,34,0.18)" : "rgba(126,232,199,0.18)",
               color: dryRun ? colors.warning : colors.profit,
@@ -173,7 +173,7 @@ export function Header() {
         {/* Off-dashboard note — History/Analytics are primary-bound. */}
         {showOffTabNote && (
           <span
-            className="text-[10px] sm:text-xs px-2 py-0.5 rounded whitespace-nowrap text-text-secondary"
+            className="text-3xs sm:text-xs px-2 py-0.5 rounded whitespace-nowrap text-text-secondary"
             style={{ backgroundColor: "var(--bg-elevated)" }}
             title="History and Analytics show the primary strategy regardless of the dashboard picker selection."
           >
@@ -184,7 +184,7 @@ export function Header() {
         {/* Group comparison tab — name the COHORT, not a strategy. */}
         {showGroupNote && (
           <span
-            className="text-[10px] sm:text-xs font-bold px-2 py-0.5 rounded uppercase tracking-wide whitespace-nowrap"
+            className="text-3xs sm:text-xs font-bold px-2 py-0.5 rounded uppercase tracking-wide whitespace-nowrap"
             style={{
               backgroundColor: "rgba(126,232,199,0.18)",
               color: colors.profit,

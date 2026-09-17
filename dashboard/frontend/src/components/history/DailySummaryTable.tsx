@@ -98,7 +98,7 @@ export function DailySummaryTable({
               >
                 <td className="px-3 py-1.5 text-text-primary">
                   {formatDateShort(day.date)}
-                  <span className="text-text-dim ml-1 text-[10px]">
+                  <span className="text-text-dim ml-1 text-3xs">
                     {day.day_of_week?.slice(0, 3)}
                   </span>
                 </td>

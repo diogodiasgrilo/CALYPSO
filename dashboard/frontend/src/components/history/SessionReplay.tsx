@@ -231,7 +231,7 @@ export function SessionReplay({ date, strategyId = "" }: { date: string; strateg
             <button
               key={s}
               onClick={() => setSpeed(s)}
-              className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+              className={`px-1.5 py-0.5 rounded text-3xs font-semibold ${
                 speed === s ? "bg-info/20 text-info" : "text-text-dim hover:text-text-secondary"
               }`}
             >

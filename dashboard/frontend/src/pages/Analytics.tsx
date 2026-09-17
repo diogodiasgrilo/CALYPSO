@@ -390,7 +390,7 @@ export function Analytics() {
       {/* Name what was hidden and why. A reader comparing two strategies has to
           be able to tell "does not apply here" from "is broken". */}
       {hidden.length > 0 && (
-        <div className="text-[11px] text-text-dim leading-relaxed px-1">
+        <div className="text-2xs text-text-dim leading-relaxed px-1">
           {hidden.length} chart{hidden.length > 1 ? "s" : ""} not shown for{" "}
           {strategy?.display_name ?? "this strategy"}:{" "}
           {hidden.map((h, i) => (
@@ -572,7 +572,7 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
             </BarChart>
           </ResponsiveContainer>
           {noTradeDays > 0 && (
-            <div className="text-[10px] text-text-dim mt-1">
+            <div className="text-3xs text-text-dim mt-1">
               excludes {noTradeDays} no-trade day{noTradeDays > 1 ? "s" : ""} —
               they are not outcomes of size zero
             </div>
@@ -1052,7 +1052,7 @@ function StopsTab({
     <>
       {/* Spans the grid: as a plain child it consumed a whole chart-sized cell,
           leaving a tall void beside the first chart. */}
-      <div className="col-span-2 max-lg:col-span-1 text-[11px] text-text-secondary -mb-1">
+      <div className="col-span-2 max-lg:col-span-1 text-2xs text-text-secondary -mb-1">
         Stop-losses only — Brandon take-profit / GEX-breach exits are excluded.
       </div>
       {/* Stop Rate by Time Slot */}

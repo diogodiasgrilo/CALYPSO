@@ -40,7 +40,7 @@ function CompareBadge({ value, avg, invert = false, prefix = "$" }: { value: num
   const badColor = invert ? colors.profit : colors.loss;
   const color = isAbove ? goodColor : isBelow ? badColor : colors.textDim;
   return (
-    <span className="text-[9px] ml-1 opacity-70" style={{ color }}>
+    <span className="text-3xs ml-1 opacity-70" style={{ color }}>
       {arrow}{prefix}{Math.abs(avg).toFixed(0)}
     </span>
   );
@@ -50,7 +50,7 @@ function CompareBadge({ value, avg, invert = false, prefix = "$" }: { value: num
 function StatCell({ label, children, className = "" }: { label: string; children: React.ReactNode; className?: string }) {
   return (
     <div className={`text-center ${className}`}>
-      <div className="text-[10px] text-text-dim uppercase tracking-wider mb-0.5">{label}</div>
+      <div className="text-3xs text-text-dim uppercase tracking-wider mb-0.5">{label}</div>
       <div className="text-sm font-semibold text-text-primary">{children}</div>
     </div>
   );
@@ -193,7 +193,7 @@ export function DailyPnLCard({ summary, cumulative, entries: entriesProp }: Dail
             {formatPnL(animatedPnl)}
           </span>
           {comparisons && (
-            <div className="text-[10px] mt-0.5 opacity-60" style={{ color: pnlColor(avgPnl) }}>
+            <div className="text-3xs mt-0.5 opacity-60" style={{ color: pnlColor(avgPnl) }}>
               avg {formatPnL(avgPnl)}
             </div>
           )}

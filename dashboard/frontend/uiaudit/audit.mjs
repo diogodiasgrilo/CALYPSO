@@ -29,7 +29,14 @@ const findings = [];
 
 for (const sid of STRATS) {
   for (const [rname, path] of ROUTES) {
-    const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
+    // Deterministic rendering. Without this the count-up animation
+    // (useAnimatedNumber, 300ms rAF) and chart transitions make two runs of the
+    // SAME build differ, so a pixel diff measures timing noise instead of
+    // change — which is exactly what a first attempt at one did.
+    const ctx = await browser.newContext({
+      viewport: { width: 1440, height: 1000 },
+      reducedMotion: 'reduce',
+    });
     const page = await ctx.newPage();
     const errors = [], failed = [];
     page.on('console', m => { if (m.type() === 'error') errors.push(m.text().slice(0, 200)); });
@@ -46,7 +53,10 @@ for (const sid of STRATS) {
 
     try {
       await page.goto(BASE + path, { waitUntil: 'networkidle', timeout: 20000 });
-      await page.waitForTimeout(1200);
+      await page.addStyleTag({ content: `*,*::before,*::after{
+        animation: none !important; transition: none !important;
+        animation-duration: 0s !important; transition-duration: 0s !important; }` });
+      await page.waitForTimeout(2500);   // let rAF counters settle on their final value
       const name = `${sid}-${rname}`;
       await page.screenshot({ path: `${OUT}${name}.png`, fullPage: true });
       const text = (await page.innerText('body').catch(() => '')) || '';

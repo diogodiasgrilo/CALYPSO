@@ -85,7 +85,7 @@ export function PositionHeatmap({ entries: entriesProp, spx: spxProp }: Position
               <div key={e.entry_number} className="absolute left-0 right-0" style={{ top: y }}>
                 {/* Entry label */}
                 <span
-                  className="absolute text-[10px] font-semibold text-text-dim"
+                  className="absolute text-3xs font-semibold text-text-dim"
                   style={{ left: 0, top: 2 }}
                 >
                   E{e.entry_number}
@@ -124,7 +124,7 @@ export function PositionHeatmap({ entries: entriesProp, spx: spxProp }: Position
 
           {/* Strike axis */}
           <div
-            className="absolute left-0 right-0 flex justify-between text-[9px] text-text-dim"
+            className="absolute left-0 right-0 flex justify-between text-3xs text-text-dim"
             style={{ bottom: 0 }}
           >
             <span>{minStrike}</span>

@@ -10,3 +10,8 @@ structural.json
 # Derived/one-off probes generated during a run.
 audit_pre.mjs
 check-ratios.mjs
+shots_baseline/
+shots_det1/
+shots_det2/
+census_*.json
+fontcensus.json

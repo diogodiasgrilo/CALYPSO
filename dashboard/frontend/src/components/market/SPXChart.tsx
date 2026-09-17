@@ -468,7 +468,7 @@ export function SPXChart({ ohlc: ohlcProp, entries: entriesProp, date: dateProp 
             onChange={toggleStrikes}
             className="w-3 h-3 rounded accent-loss cursor-pointer"
           />
-          <span className="text-[10px] text-text-dim">Show Strikes</span>
+          <span className="text-3xs text-text-dim">Show Strikes</span>
         </label>
       </div>
       <div

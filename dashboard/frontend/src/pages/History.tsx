@@ -71,7 +71,7 @@ export function History() {
           </select>
           <ChevronDown size={10} className="absolute right-1.5 top-1/2 -translate-y-1/2 text-text-dim pointer-events-none" />
         </div>
-        <div className="flex items-center gap-1.5 text-[9px] text-text-dim">
+        <div className="flex items-center gap-1.5 text-3xs text-text-dim">
           <span>Loss</span>
           <div className="flex gap-px">
             {[0.7, 0.5, 0.3].map((o) => (

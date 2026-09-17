@@ -202,7 +202,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
             aria-controls={listboxId}
             className="flex-1 bg-transparent text-sm text-text-primary placeholder-text-dim outline-none"
           />
-          <kbd className="text-[10px] text-text-dim bg-card px-1.5 py-0.5 rounded">ESC</kbd>
+          <kbd className="text-3xs text-text-dim bg-card px-1.5 py-0.5 rounded">ESC</kbd>
         </div>
 
         {/* Results */}
@@ -228,7 +228,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
                 <span className="text-text-dim">{cmd.icon}</span>
                 <span className="flex-1 text-left">{cmd.label}</span>
                 {cmd.shortcut && (
-                  <kbd className="text-[10px] text-text-dim bg-bg px-1.5 py-0.5 rounded">{cmd.shortcut}</kbd>
+                  <kbd className="text-3xs text-text-dim bg-bg px-1.5 py-0.5 rounded">{cmd.shortcut}</kbd>
                 )}
               </button>
             ))
@@ -236,7 +236,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
         </div>
 
         {/* Footer */}
-        <div className="flex items-center gap-3 px-4 py-2 border-t border-border-dim text-[10px] text-text-dim">
+        <div className="flex items-center gap-3 px-4 py-2 border-t border-border-dim text-3xs text-text-dim">
           <span><kbd className="bg-card px-1 py-0.5 rounded">↑↓</kbd> Navigate</span>
           <span><kbd className="bg-card px-1 py-0.5 rounded">↵</kbd> Select</span>
         </div>

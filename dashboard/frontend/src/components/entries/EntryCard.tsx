@@ -213,7 +213,7 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
           {entry.entry_time ? formatTime(entry.entry_time) : "--:--"}
         </div>
         {entry.skip_reason && (
-          <div className="text-[10px] leading-tight" style={{ color: colors.loss }}>
+          <div className="text-3xs leading-tight" style={{ color: colors.loss }}>
             {entry.skip_reason}
           </div>
         )}
@@ -245,7 +245,7 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
           {entry.entry_time ? formatTime(entry.entry_time) : "--:--"}
         </div>
         {(entry.call_spread_credit > 0 || entry.put_spread_credit > 0) && (
-          <div className="flex gap-3 text-[10px] mt-1 mb-1">
+          <div className="flex gap-3 text-3xs mt-1 mb-1">
             {entry.call_spread_credit > 0 && (
               <span className="text-text-secondary">
                 Call: <span className="text-text-secondary">${entry.call_spread_credit.toFixed(0)}</span>
@@ -259,7 +259,7 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
           </div>
         )}
         {entry.skip_reason && (
-          <div className="text-[10px] text-text-dim leading-tight">
+          <div className="text-3xs text-text-dim leading-tight">
             {entry.skip_reason}
           </div>
         )}
@@ -353,7 +353,7 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
             {displayLabel}
           </span>
           {trendLabel && (
-            <span className="text-[10px] px-1 py-0.5 rounded bg-bg-elevated text-text-secondary">
+            <span className="text-3xs px-1 py-0.5 rounded bg-bg-elevated text-text-secondary">
               {trendLabel}
             </span>
           )}
@@ -365,7 +365,7 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
               on their cards. */}
           {(entry.put_only || entry.call_only) && (
             <span
-              className="text-[9px] px-1 py-0.5 rounded"
+              className="text-3xs px-1 py-0.5 rounded"
               style={{
                 backgroundColor: `${entry.put_only ? "#a371f7" : colors.info}15`,
                 color: entry.put_only ? "#a371f7" : colors.info,
@@ -404,7 +404,7 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
             >
               {formatPnL(animatedPnl)}
             </span>
-            <span className="text-[10px] text-text-dim">
+            <span className="text-3xs text-text-dim">
               / {formatPnL(animatedMax)}
             </span>
           </div>
@@ -453,7 +453,7 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
           wing at all — long_*_strike is always 0, not "skipped" — so show just
           the naked short strike instead of a misleading "short/0". */}
       {(entry.short_call_strike > 0 || entry.short_put_strike > 0) && (
-        <div className="mt-2 text-[10px] text-text-dim flex justify-between">
+        <div className="mt-2 text-3xs text-text-dim flex justify-between">
           <span>
             C:{entry.call_side_skipped || !(entry.short_call_strike > 0)
               ? 'skipped'
@@ -484,7 +484,7 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
             return (
               <div
                 key={i}
-                className="rounded px-2 py-1 text-[10px]"
+                className="rounded px-2 py-1 text-3xs"
                 style={{ backgroundColor: colors.bgElevated, borderLeft: `2px solid ${colors.warning}` }}
               >
                 <div className="flex items-center justify-between">

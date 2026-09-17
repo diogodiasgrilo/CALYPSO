@@ -13,7 +13,7 @@ function StatCard({
 }) {
   return (
     <div className="bg-card rounded-lg border border-border-dim p-3">
-      <div className="text-[10px] text-text-secondary uppercase tracking-wider mb-1">
+      <div className="text-3xs text-text-secondary uppercase tracking-wider mb-1">
         {label}
       </div>
       <div className="text-sm font-mono font-semibold" style={{ color }}>
@@ -66,7 +66,7 @@ export function DayDetailSummary({ summary }: { summary: DaySummary }) {
         />
       </div>
 
-      <div className="flex items-center gap-4 text-[11px] text-text-secondary">
+      <div className="flex items-center gap-4 text-2xs text-text-secondary">
         <span>
           SPX: {summary.spx_open?.toFixed(0) || "\u2014"} → {summary.spx_close?.toFixed(0) || "\u2014"}
           {spxChange !== 0 && (

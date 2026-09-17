@@ -81,7 +81,7 @@ export function UndefinedRiskCard({
 
       <div className="grid grid-cols-2 gap-4 max-sm:grid-cols-1">
         <div>
-          <div className="text-[10px] uppercase tracking-wider text-text-dim mb-1">
+          <div className="text-3xs uppercase tracking-wider text-text-dim mb-1">
             Max loss
           </div>
           <div
@@ -93,7 +93,7 @@ export function UndefinedRiskCard({
         </div>
 
         <div>
-          <div className="text-[10px] uppercase tracking-wider text-text-dim mb-1">
+          <div className="text-3xs uppercase tracking-wider text-text-dim mb-1">
             Nearest short
           </div>
           {nearest ? (
@@ -110,7 +110,7 @@ export function UndefinedRiskCard({
           ) : (
             <div className="text-xl font-semibold tracking-tight text-text-dim">—</div>
           )}
-          <div className="text-[10px] text-text-dim mt-0.5">
+          <div className="text-3xs text-text-dim mt-0.5">
             {nearest
               ? `short ${nearest.side} ${nearest.strike.toFixed(0)}${
                   nearest.points < 0 ? " — BREACHED" : ""
@@ -120,7 +120,7 @@ export function UndefinedRiskCard({
         </div>
       </div>
 
-      <p className="text-[11px] text-text-secondary leading-relaxed mt-3">
+      <p className="text-2xs text-text-secondary leading-relaxed mt-3">
         {displayName ?? "This strategy"} sells naked options — there is no long
         wing capping the loss, so a large move can cost more than the margin
         held. Capital shown elsewhere is the broker requirement, not a maximum

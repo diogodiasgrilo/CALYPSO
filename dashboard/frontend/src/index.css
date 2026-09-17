@@ -23,6 +23,23 @@
 
   --color-card: #222e35;
   --color-card-hover: #283338;
+
+  /* ── Type scale below Tailwind's `xs` (12px) ──────────────────────────────
+   * A dense financial UI legitimately needs sub-12px text, but Tailwind's
+   * scale stops at `xs`, so 104 one-off `text-[9px]` / `text-[10px]` /
+   * `text-[11px]` values had accumulated — three sizes within 2px of each
+   * other, used INTERCHANGEABLY: uppercase labels appeared at both 10 and
+   * 11px, dimmed text at both 9 and 10px. That is drift, not a scale.
+   *
+   * Two named steps replace all three:
+   *   2xs  11px  the smallest READABLE PROSE — captions, help text
+   *   3xs  10px  labels, badges, dense tabular data (uppercase / mono)
+   *
+   * 9px is retired into 3xs: it carried no role 10px did not already serve,
+   * and sub-10px is below a sensible legibility floor.
+   */
+  --text-2xs: 0.6875rem;   /* 11px */
+  --text-3xs: 0.625rem;    /* 10px */
 }
 
 /* ── Base styles ── */

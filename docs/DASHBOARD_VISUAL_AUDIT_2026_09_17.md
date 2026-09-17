@@ -277,7 +277,7 @@ Worth recording, because the audit is not a demolition:
 | D12 | Missing VIX rendered as `0.0` | **FIXED + DEPLOYED** — em dash; zero such cells remain |
 | D13 | "Entries 0" on days with P&L | **FIXED + DEPLOYED** — entry/stop columns are intraday-only |
 | D15 | Two sources of truth for the palette | **FIXED + DEPLOYED** — `bgDeep` had ALREADY drifted (`#1a2229` vs CSS `#161d23`); corrected + parity test |
-| D16 | 105 arbitrary `text-[Npx]` values | open |
+| D16 | 104 arbitrary `text-[Npx]` values | **FIXED + DEPLOYED** — two named steps (`text-2xs` 11px, `text-3xs` 10px); 9px retired; **0** arbitrary sizes and **0** sub-10px text remain |
 | D18 | `$0` bucket dominates the distribution histogram | **FIXED + DEPLOYED** — no-trade days excluded, count shown |
 | D19 | Single-member group renders a "leaderboard" | **FIXED + DEPLOYED** — "sole member of this group" |
 | — | eslint errors | **rules-of-hooks: 3 → 0.** 17 remain and are deliberately NOT chased — see below |

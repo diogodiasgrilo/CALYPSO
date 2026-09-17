@@ -87,7 +87,7 @@ export interface CalendarAggregatePayload {
 function Metric({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wide text-text-secondary">{label}</div>
+      <div className="text-3xs uppercase tracking-wide text-text-secondary">{label}</div>
       <div className="text-base font-mono mt-0.5" style={color ? { color } : { color: colors.textPrimary }}>
         {value}
       </div>
@@ -133,7 +133,7 @@ function MemberPanel({ m, accent }: { m: CalendarMember; accent: string }) {
       {/* Open calendars (debit-native) */}
       {openCalendars.length > 0 && (
         <div className="space-y-1 border-t border-border-dim pt-2">
-          <div className="text-[10px] uppercase tracking-wide text-text-secondary">Open Calendars</div>
+          <div className="text-3xs uppercase tracking-wide text-text-secondary">Open Calendars</div>
           {openCalendars.map((c, i) => (
             <div key={i} className="text-xs font-mono flex justify-between text-text-secondary">
               <span>
@@ -147,7 +147,7 @@ function MemberPanel({ m, accent }: { m: CalendarMember; accent: string }) {
 
       {/* Recent outcomes */}
       <div className="border-t border-border-dim pt-2">
-        <div className="text-[10px] uppercase tracking-wide text-text-secondary mb-1">Recent Outcomes</div>
+        <div className="text-3xs uppercase tracking-wide text-text-secondary mb-1">Recent Outcomes</div>
         {outcomes.length === 0 ? (
           <div className="text-xs text-text-dim italic">No closed calendars yet.</div>
         ) : (
@@ -300,7 +300,7 @@ export function CalendarComparison({
               const score = lb.scores?.[up] ?? m?.lifetime?.cumulative_pnl ?? 0;
               return (
                 <div key={id} className="text-right max-md:text-left">
-                  <div className="text-[10px] uppercase tracking-wide" style={{ color: accentForStrategy(id) }}>
+                  <div className="text-3xs uppercase tracking-wide" style={{ color: accentForStrategy(id) }}>
                     {m?.display_name ?? up}
                   </div>
                   <div className="text-xl font-mono mt-0.5" style={{ color: pnlColor(score) }}>

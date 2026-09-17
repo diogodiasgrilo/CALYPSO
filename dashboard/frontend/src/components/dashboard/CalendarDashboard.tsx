@@ -27,7 +27,7 @@ function isTransformed(phase: string | null): boolean {
 function Metric({ label, value, color }: { label: string; value: string; color?: string }) {
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wide text-text-secondary">{label}</div>
+      <div className="text-3xs uppercase tracking-wide text-text-secondary">{label}</div>
       <div className="text-base font-mono" style={color ? { color } : { color: colors.textPrimary }}>
         {value}
       </div>
@@ -41,12 +41,12 @@ function PhaseBadge({ phase, riskFree }: { phase: string | null; riskFree: boole
   const color = transformed ? colors.profit : colors.warning;
   return (
     <span className="flex items-center gap-1.5">
-      <span className="text-[9px] font-mono px-1 py-px rounded" style={{ color, border: `1px solid ${color}` }}>
+      <span className="text-3xs font-mono px-1 py-px rounded" style={{ color, border: `1px solid ${color}` }}>
         {label}
       </span>
       {riskFree && (
         <span
-          className="flex items-center gap-0.5 text-[9px] font-mono px-1 py-px rounded"
+          className="flex items-center gap-0.5 text-3xs font-mono px-1 py-px rounded"
           style={{ color: colors.profit, border: `1px solid ${colors.profit}` }}
           title="transform credit ≥ net debit + wing risk — locked risk-free"
         >
@@ -90,7 +90,7 @@ function CalendarCard({ c }: { c: DCOpenCalendar }) {
 
       {c.unrealized_pnl != null && (
         <div className="flex items-baseline justify-between border-t border-border-dim pt-2">
-          <span className="text-[11px] uppercase tracking-wide text-text-secondary">
+          <span className="text-2xs uppercase tracking-wide text-text-secondary">
             Live MTM
           </span>
           <span className="font-mono text-sm" style={{ color: pnlColor(c.unrealized_pnl) }}>
@@ -106,7 +106,7 @@ function CalendarCard({ c }: { c: DCOpenCalendar }) {
       )}
 
       {lockedDelta != null && (
-        <div className="text-[11px] text-text-secondary">
+        <div className="text-2xs text-text-secondary">
           {transformed ? "Locked floor vs debit" : "Locked vs debit"}:{" "}
           <span className="font-mono" style={{ color: pnlColor(lockedDelta) }}>
             {formatPnL(lockedDelta)}
@@ -125,7 +125,7 @@ function OutcomesTable({ outcomes }: { outcomes: DCRecentOutcome[] }) {
     <div className="overflow-x-auto">
       <table className="w-full text-sm">
         <thead>
-          <tr className="text-[10px] uppercase tracking-wide text-text-secondary border-b border-border-dim">
+          <tr className="text-3xs uppercase tracking-wide text-text-secondary border-b border-border-dim">
             <th className="text-left font-medium py-1.5 pr-3">Opened</th>
             <th className="text-left font-medium py-1.5 pr-3">Closed</th>
             <th className="text-left font-medium py-1.5 pr-3">#</th>
@@ -183,7 +183,7 @@ export function CalendarDashboard({ body, displayName, dryRun }: CalendarDashboa
         <CalendarClock size={18} style={{ color: colors.info }} />
         <div>
           <h1 className="text-sm font-semibold text-text-primary">{displayName}</h1>
-          <div className="text-[11px] text-text-secondary">
+          <div className="text-2xs text-text-secondary">
             Multi-day double calendar (net debit).{" "}
             {dryRun !== false && (
               <span style={{ color: colors.textDim }}>Dry-run — places no real orders.</span>
@@ -218,7 +218,7 @@ export function CalendarDashboard({ body, displayName, dryRun }: CalendarDashboa
 
       {/* Open calendars */}
       <div>
-        <h2 className="text-[10px] uppercase tracking-wide text-text-secondary mb-2">Open Calendars</h2>
+        <h2 className="text-3xs uppercase tracking-wide text-text-secondary mb-2">Open Calendars</h2>
         {openCalendars.length ? (
           <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3">
             {openCalendars.map((c, i) => (
@@ -232,7 +232,7 @@ export function CalendarDashboard({ body, displayName, dryRun }: CalendarDashboa
 
       {/* Recent outcomes */}
       <div>
-        <h2 className="text-[10px] uppercase tracking-wide text-text-secondary mb-2">Recent Outcomes</h2>
+        <h2 className="text-3xs uppercase tracking-wide text-text-secondary mb-2">Recent Outcomes</h2>
         <div className="rounded border border-border-dim bg-card p-4">
           <OutcomesTable outcomes={outcomes} />
         </div>

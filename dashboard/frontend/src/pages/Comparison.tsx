@@ -487,7 +487,7 @@ function Leaderboard({
               : winnerLabel}
           </div>
           {!soloMember && pcLeaderLabel && pcLeader !== winner && (
-            <div className="text-[11px] mt-1" style={{ color: accentFor(pcLeader!) }}>
+            <div className="text-2xs mt-1" style={{ color: accentFor(pcLeader!) }}>
               Per-contract leader: {pcLeaderLabel}
             </div>
           )}
@@ -515,7 +515,7 @@ function Leaderboard({
 function PnLBlock({ label, value, accent, contracts }: { label: string; value: number; accent: string; contracts?: number }) {
   return (
     <div className="text-right max-md:text-left">
-      <div className="text-[10px] uppercase tracking-wide" style={{ color: accent }}>
+      <div className="text-3xs uppercase tracking-wide" style={{ color: accent }}>
         {label}
       </div>
       <div className="text-xl font-mono mt-0.5" style={{ color: pnlColor(value) }}>
@@ -523,7 +523,7 @@ function PnLBlock({ label, value, accent, contracts }: { label: string; value: n
       </div>
       {contracts && contracts > 1 && (
         <div
-          className="text-[10px] font-mono text-text-dim"
+          className="text-3xs font-mono text-text-dim"
           title={`Per-contract (${contracts}c) — comparable across variants`}
         >
           {formatPnL(value / contracts)}/c
@@ -678,7 +678,7 @@ function VariantPanel({ v, accent }: { v: VariantPayload; accent: string }) {
       <div className="flex items-baseline justify-between gap-2">
         <div className="flex items-center gap-1.5 min-w-0">
           <span
-            className="text-[9px] font-mono px-1 py-px rounded shrink-0"
+            className="text-3xs font-mono px-1 py-px rounded shrink-0"
             style={
               isSim
                 ? { color: colors.textDim, border: `1px solid ${colors.borderDim}` }
@@ -708,7 +708,7 @@ function VariantPanel({ v, accent }: { v: VariantPayload; accent: string }) {
 
       {tightest !== null && tightest < 25 && (
         <div
-          className="text-[11px] font-mono rounded px-2 py-1"
+          className="text-2xs font-mono rounded px-2 py-1"
           style={{ backgroundColor: "rgba(248,81,73,0.08)", color: cushionColor(tightest) }}
         >
           ⚠ tightest live cushion {tightest.toFixed(0)}% — near a stop
@@ -743,7 +743,7 @@ function Metric({ label, value, colored }: { label: string; value: string; color
   const color = colored !== undefined ? pnlColor(colored) : colors.textPrimary;
   return (
     <div>
-      <div className="text-[10px] uppercase tracking-wide text-text-secondary">{label}</div>
+      <div className="text-3xs uppercase tracking-wide text-text-secondary">{label}</div>
       <div className="text-base font-mono mt-0.5" style={{ color }}>
         {value}
       </div>
@@ -882,7 +882,7 @@ function SideLine({ tag, info }: { tag: "C" | "P"; info: SideInfo }) {
           className="mt-0.5"
           title={`close $${info.cost?.toFixed(0)} → stop $${info.stop?.toFixed(0)} (effective)`}
         >
-          <div className="flex justify-between text-[10px] leading-none mb-0.5">
+          <div className="flex justify-between text-3xs leading-none mb-0.5">
             <span className="text-text-dim">
               {info.distancePt != null
                 ? info.distancePt >= 0
@@ -943,7 +943,7 @@ function EntryRow({ entry, accent, spx }: { entry: VariantEntry; accent: string;
           <span className="text-text-secondary">{time}</span>
         </span>
         <span
-          className="text-[10px] font-mono uppercase tracking-wider"
+          className="text-3xs font-mono uppercase tracking-wider"
           style={{ color: colors.loss }}
         >
           failed{entry.skip_reason ? ` · ${entry.skip_reason}` : ""}
@@ -965,7 +965,7 @@ function EntryRow({ entry, accent, spx }: { entry: VariantEntry; accent: string;
           <span className="text-text-secondary">{time}</span>
         </span>
         <span
-          className="text-[10px] font-mono uppercase tracking-wider"
+          className="text-3xs font-mono uppercase tracking-wider"
           style={{ color: colors.textDim }}
         >
           skipped{entry.skip_reason ? ` · ${entry.skip_reason}` : " · credit gate"}
@@ -1015,12 +1015,12 @@ function EntryRow({ entry, accent, spx }: { entry: VariantEntry; accent: string;
         </div>
         <div className="flex items-center gap-2">
           {Math.round(currentPnl) !== 0 && (
-            <span className="text-[11px] font-mono" style={{ color: pnlColor(currentPnl) }}>
+            <span className="text-2xs font-mono" style={{ color: pnlColor(currentPnl) }}>
               {currentPnl > 0 ? "+" : ""}${currentPnl.toFixed(0)}
             </span>
           )}
           <span
-            className="text-[10px] font-mono uppercase tracking-wider"
+            className="text-3xs font-mono uppercase tracking-wider"
             style={{ color: badgeColor }}
           >
             {badge}
@@ -1065,7 +1065,7 @@ function BufferBar({
   return (
     <div className={compact ? "" : "flex-1"}>
       {label && (
-        <div className="flex justify-between text-[10px] mb-0.5">
+        <div className="flex justify-between text-3xs mb-0.5">
           <span className="text-text-secondary">{label}</span>
           <span className="font-mono" style={{ color }}>
             {pct === null ? "—" : `${v.toFixed(0)}%`}
@@ -1307,7 +1307,7 @@ function CrossDayPanel({
         <div className="text-xs uppercase tracking-wide text-text-secondary">
           Cross-Day Performance
         </div>
-        <div className="text-[11px] text-text-dim">
+        <div className="text-2xs text-text-dim">
           {totalDaysRow} · H2H window: {h2h.common_days}d
         </div>
       </div>
@@ -1368,7 +1368,7 @@ function LifetimeStatsTable({ agg, ids }: { agg: AggregatePayload; ids: string[]
               >
                 {agg.variants[vid]?.label ?? vid} ({agg.variants[vid]?.total_days ?? 0}d)
                 {agg.variants[vid]?.baseline_date && (
-                  <div className="text-[10px] text-text-dim font-normal normal-case">
+                  <div className="text-3xs text-text-dim font-normal normal-case">
                     since {agg.variants[vid]?.baseline_date}
                   </div>
                 )}
@@ -1410,7 +1410,7 @@ function LifetimeStatsTable({ agg, ids }: { agg: AggregatePayload; ids: string[]
         >
           {ids.map((vid) => (
             <div key={vid} className="rounded bg-bg p-2 text-center">
-              <div className="text-text-dim text-[10px] uppercase tracking-wide">
+              <div className="text-text-dim text-3xs uppercase tracking-wide">
                 {vid} days won
               </div>
               <div
@@ -1422,7 +1422,7 @@ function LifetimeStatsTable({ agg, ids }: { agg: AggregatePayload; ids: string[]
             </div>
           ))}
           <div className="rounded bg-bg p-2 text-center">
-            <div className="text-text-dim text-[10px] uppercase tracking-wide">Tied</div>
+            <div className="text-text-dim text-3xs uppercase tracking-wide">Tied</div>
             <div className="font-mono text-base mt-0.5 text-text-secondary">
               {h2h.days_tied}
             </div>
@@ -1471,7 +1471,7 @@ function H2HCumulativeChart({
 
   return (
     <div>
-      <div className="text-[11px] text-text-secondary mb-1">
+      <div className="text-2xs text-text-secondary mb-1">
         Cumulative P&amp;L (H2H window only — starts at $0 on first common day)
       </div>
       <ResponsiveContainer width="100%" height={200}>
@@ -1541,7 +1541,7 @@ function H2HDailyDeltaChart({
     const bLabel = agg.variants[b]?.label ?? b;
     return (
       <div>
-        <div className="text-[11px] text-text-secondary mb-1">
+        <div className="text-2xs text-text-secondary mb-1">
           Daily delta ({a} − {b}). {a} bar = {a} won, {b} bar = {b} won.
         </div>
         <ResponsiveContainer width="100%" height={150}>
@@ -1602,7 +1602,7 @@ function H2HDailyDeltaChart({
   );
   return (
     <div>
-      <div className="text-[11px] text-text-secondary mb-1">
+      <div className="text-2xs text-text-secondary mb-1">
         Daily net P&amp;L per variant. Tallest bar of the day = winner.
       </div>
       <ResponsiveContainer width="100%" height={170}>

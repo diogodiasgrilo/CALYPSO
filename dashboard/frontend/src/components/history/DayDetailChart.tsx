@@ -261,7 +261,7 @@ export function DayDetailChart({
 
   return (
     <div>
-      <h4 className="text-[11px] font-semibold text-text-secondary uppercase tracking-wider mb-2">
+      <h4 className="text-2xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
         SPX 1-Min Chart
       </h4>
       <div

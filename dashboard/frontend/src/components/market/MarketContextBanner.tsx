@@ -462,7 +462,7 @@ export function OffDaySummaryCards({
                 {formatPnL(lastDay.net_pnl)}
               </span>
               {avgPnl !== 0 && (
-                <div className="text-[10px] mt-1" style={{ color: lastDay.net_pnl > avgPnl ? colors.profit : colors.loss }}>
+                <div className="text-3xs mt-1" style={{ color: lastDay.net_pnl > avgPnl ? colors.profit : colors.loss }}>
                   {lastDay.net_pnl > avgPnl ? "↑" : "↓"} vs {formatPnL(avgPnl)} avg
                 </div>
               )}
@@ -498,8 +498,8 @@ export function OffDaySummaryCards({
                       className="flex-1 text-center rounded py-1"
                       style={{ backgroundColor: e.pnl > 0 ? "rgba(126, 232, 199, 0.1)" : e.pnl < 0 ? "rgba(248, 81, 73, 0.1)" : "transparent" }}
                     >
-                      <div className="text-[9px] text-text-dim">E{e.entry_number}</div>
-                      <div className="text-[10px] font-semibold" style={{ color: pnlColor(e.pnl) }}>
+                      <div className="text-3xs text-text-dim">E{e.entry_number}</div>
+                      <div className="text-3xs font-semibold" style={{ color: pnlColor(e.pnl) }}>
                         {(e.pnl ?? 0) > 0 ? "+" : ""}{(e.pnl ?? 0).toFixed(0)}
                       </div>
                     </div>
@@ -530,7 +530,7 @@ export function OffDaySummaryCards({
                 {formatPnL(weekPnl)}
               </span>
               {weekDays.length > 0 && (
-                <div className="text-[10px] mt-1 text-text-dim">
+                <div className="text-3xs mt-1 text-text-dim">
                   {formatPnL(weekPnl / weekDays.length)} avg/day
                 </div>
               )}
@@ -571,8 +571,8 @@ export function OffDaySummaryCards({
                     className="flex-1 text-center rounded py-1"
                     style={{ backgroundColor: d.net_pnl > 0 ? "rgba(126, 232, 199, 0.1)" : d.net_pnl < 0 ? "rgba(248, 81, 73, 0.1)" : "transparent" }}
                   >
-                    <div className="text-[9px] text-text-dim">{d.day_of_week.slice(0, 3)}</div>
-                    <div className="text-[10px] font-semibold" style={{ color: pnlColor(d.net_pnl) }}>
+                    <div className="text-3xs text-text-dim">{d.day_of_week.slice(0, 3)}</div>
+                    <div className="text-3xs font-semibold" style={{ color: pnlColor(d.net_pnl) }}>
                       {(d.net_pnl ?? 0) > 0 ? "+" : ""}{(d.net_pnl ?? 0).toFixed(0)}
                     </div>
                   </div>

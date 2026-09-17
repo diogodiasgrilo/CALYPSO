@@ -8,7 +8,7 @@ import {
   ResponsiveContainer,
   ReferenceLine,
 } from "recharts";
-import { colors } from "../../lib/tradingColors";
+import { colors, fontSizePx } from "../../lib/tradingColors";
 import { formatPnL, formatDateShort } from "../../lib/formatters";
 import type { StrategyMarker } from "../../lib/strategyMarkers";
 
@@ -70,7 +70,7 @@ export function EquityCurve({ dailySummaries, markers }: EquityCurveProps) {
     <div>
       <h3 className="label-upper mb-2">Equity Curve</h3>
       {markerViews.length > 0 && (
-        <div className="mb-2 flex flex-wrap gap-x-3 gap-y-1 text-[11px] text-text-secondary">
+        <div className="mb-2 flex flex-wrap gap-x-3 gap-y-1 text-2xs text-text-secondary">
           {markerViews.map((mv) => (
             <span key={mv.date}>
               since <span style={{ color: colors.info }}>{mv.label}</span> (
@@ -134,7 +134,7 @@ export function EquityCurve({ dailySummaries, markers }: EquityCurveProps) {
                 label={{
                   value: mv.label,
                   position: "insideTopRight",
-                  fontSize: 9,
+                  fontSize: fontSizePx.xs3,
                   fill: colors.info,
                 }}
               />

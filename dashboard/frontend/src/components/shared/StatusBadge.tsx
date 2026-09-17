@@ -37,7 +37,7 @@ export function StatusBadge({ status, stoppedSide }: StatusBadgeProps) {
 
   return (
     <span
-      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase tracking-wider ${
+      className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-3xs font-semibold uppercase tracking-wider ${
         status === "active" ? "pulse-live" : ""
       }`}
       style={{

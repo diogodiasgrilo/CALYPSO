@@ -276,7 +276,7 @@ export function LoginGate({ children }: { children: ReactNode }) {
                   Scan with an authenticator app (Google Authenticator, Authy, 1Password…)
                 </p>
                 <img src={qrDataUri} alt="2FA QR code" className="rounded-lg" width={160} height={160} />
-                <p className="text-text-secondary text-[10px] text-center break-all">
+                <p className="text-text-secondary text-3xs text-center break-all">
                   Or enter manually: <span className="font-mono">{totpSecret}</span>
                 </p>
               </div>
@@ -336,7 +336,7 @@ export function LoginGate({ children }: { children: ReactNode }) {
           </div>
         )}
 
-        <p className="text-text-secondary text-[10px] text-center mt-6 leading-relaxed">
+        <p className="text-text-secondary text-3xs text-center mt-6 leading-relaxed">
           Read-only · IBKR paper account.
         </p>
       </div>

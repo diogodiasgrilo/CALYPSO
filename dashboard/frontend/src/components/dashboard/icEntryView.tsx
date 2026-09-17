@@ -127,7 +127,7 @@ export function BufferBar({
   return (
     <div className={compact ? "" : "flex-1"}>
       {label && (
-        <div className="flex justify-between text-[10px] mb-0.5">
+        <div className="flex justify-between text-3xs mb-0.5">
           <span className="text-text-secondary">{label}</span>
           <span className="font-mono" style={{ color }}>
             {pct === null ? "—" : `${v.toFixed(0)}%`}
@@ -173,7 +173,7 @@ export function SideLine({ tag, info }: { tag: "C" | "P"; info: SideInfo }) {
           className="mt-0.5"
           title={`close $${info.cost?.toFixed(0)} → stop $${info.stop?.toFixed(0)} (effective)`}
         >
-          <div className="flex justify-between text-[10px] leading-none mb-0.5">
+          <div className="flex justify-between text-3xs leading-none mb-0.5">
             <span className="text-text-dim">
               {info.distancePt != null
                 ? info.distancePt >= 0
@@ -229,7 +229,7 @@ export function ICEntryRow({ entry, accent, spx }: { entry: ICEntry; accent: str
           <span className="text-text-secondary">{time}</span>
         </span>
         <span
-          className="text-[10px] font-mono uppercase tracking-wider"
+          className="text-3xs font-mono uppercase tracking-wider"
           style={{ color: colors.textDim }}
         >
           skipped{entry.skip_reason ? ` · ${entry.skip_reason}` : " · credit gate"}
@@ -275,12 +275,12 @@ export function ICEntryRow({ entry, accent, spx }: { entry: ICEntry; accent: str
         </div>
         <div className="flex items-center gap-2">
           {Math.round(currentPnl) !== 0 && (
-            <span className="text-[11px] font-mono" style={{ color: pnlColor(currentPnl) }}>
+            <span className="text-2xs font-mono" style={{ color: pnlColor(currentPnl) }}>
               {currentPnl > 0 ? "+" : ""}${currentPnl.toFixed(0)}
             </span>
           )}
           <span
-            className="text-[10px] font-mono uppercase tracking-wider"
+            className="text-3xs font-mono uppercase tracking-wider"
             style={{ color: badgeColor }}
           >
             {badge}
@@ -303,7 +303,7 @@ export function ICEntryRow({ entry, accent, spx }: { entry: ICEntry; accent: str
             return (
               <div
                 key={i}
-                className="rounded px-2 py-1 text-[10px]"
+                className="rounded px-2 py-1 text-3xs"
                 style={{ backgroundColor: colors.bgElevated, borderLeft: `2px solid ${colors.warning}` }}
               >
                 <div className="flex items-center justify-between">
