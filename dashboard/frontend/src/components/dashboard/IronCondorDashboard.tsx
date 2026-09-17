@@ -36,14 +36,30 @@ import {
 } from "../market/MarketContextBanner";
 import { useHydraStore, type HydraEntry, type OHLCBar } from "../../store/hydraStore";
 import { BufferBar } from "./icEntryView";
+import { UndefinedRiskCard } from "../pnl/UndefinedRiskCard";
+import { capitalBasisConfig } from "../../lib/pnlShape";
+import { useSelectedStrategy } from "../../hooks/useSelectedStrategy";
 import type {
   ICSnapshotBody,
   ICSnapshotEntry,
   ICSnapshotOHLCBar,
 } from "../../hooks/useStrategySnapshot";
 
+/** HydraState carries an `[key: string]: unknown` index signature, so fields
+ *  reached through it are `unknown`. Coerce rather than cast — a bad value
+ *  becomes null and the card shows "—" instead of rendering NaN. */
+function num(v: unknown): number | null {
+  return typeof v === "number" && isFinite(v) ? v : null;
+}
+
 // ── PRIMARY (WebSocket) view — the original Dashboard layout, unchanged ──
 function PrimaryICView() {
+  const { strategy: selected } = useSelectedStrategy();
+  // Same rule as the polled view — the warning must not depend on which seat
+  // the strategy happens to hold. (A card reachable from only ONE of these two
+  // branches is the defect that hid the previous-day view from six strategies.)
+  const unbounded =
+    capitalBasisConfig(selected?.capital_basis)?.boundedLoss === false;
   const realizedPnl = useHydraStore((s) => s.hydraState?.total_realized_pnl ?? 0);
   const commission = useHydraStore((s) => s.hydraState?.total_commission ?? 0);
   const market = useHydraStore((s) => s.market);
@@ -70,6 +86,14 @@ function PrimaryICView() {
 
       <div className="relative space-y-3">
         <FOMCBanner />
+        {unbounded && (
+          <UndefinedRiskCard
+            entries={entries ?? []}
+            spx={num(hydraState?.current_price)}
+            vix={num(hydraState?.market_data_ohlc?.vix_open)}
+            displayName={selected?.display_name}
+          />
+        )}
 
         {showFullLayout ? (
           <>
@@ -176,6 +200,10 @@ function coerceOHLC(bars: ICSnapshotOHLCBar[]): OHLCBar[] {
 // ── NON-PRIMARY (polled) IC view — full parity with the primary panels ──
 function PolledICView({ body, strategyId }: { body: ICSnapshotBody; accent: string; strategyId?: string }) {
   const isLive = useHydraStore((s) => s.market?.is_open) === true;
+  const { strategy } = useSelectedStrategy();
+  // Driven by the capital basis, never by a variant letter: any future
+  // undefined-risk strategy gets this card with no edit here.
+  const unbounded = capitalBasisConfig(strategy?.capital_basis)?.boundedLoss === false;
 
   if (!body.available) {
     return (
@@ -213,6 +241,14 @@ function PolledICView({ body, strategyId }: { body: ICSnapshotBody; accent: stri
   if (!showFullLayout) {
     return (
       <div className="relative space-y-3">
+        {unbounded && (
+          <UndefinedRiskCard
+            entries={[]}
+            spx={body.spx_price}
+            vix={body.vix_open}
+            displayName={strategy?.display_name}
+          />
+        )}
         <MarketContextBanner cumulative={body.cumulative} comparisons={body.comparisons} />
         <OffDaySummaryCards strategyId={strategyId} comparisons={body.comparisons} />
         <PerformanceMetrics dailyPnls={body.performance?.daily_pnls ?? []} />
@@ -239,6 +275,15 @@ function PolledICView({ body, strategyId }: { body: ICSnapshotBody; accent: stri
             <DailyPnLCard summary={body.summary} cumulative={body.cumulative ?? {}} entries={entries} />
           </div>
         </div>
+
+        {unbounded && (
+          <UndefinedRiskCard
+            entries={entries}
+            spx={spx || body.spx_price}
+            vix={body.vix_open}
+            displayName={strategy?.display_name}
+          />
+        )}
 
         <PnLCurve pnlHistory={body.pnl_history ?? []} />
         <EntryGrid entries={entries} />

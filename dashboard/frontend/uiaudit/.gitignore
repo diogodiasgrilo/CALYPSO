@@ -1,6 +1,7 @@
 # Captured production payloads + rendered output — regenerate, never commit.
 fixtures/
 fixtures_premarket/
+fixtures_risk/
 shots/
 shots_pre/
 findings.json
