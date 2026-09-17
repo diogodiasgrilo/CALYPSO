@@ -152,3 +152,39 @@ def test_reader_for_g_carries_the_margin_basis():
         "the G reader still computes capital with the defined-risk formula, so "
         "its Return on Margin and Peak Margin cards stay blank"
     )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Every per-variant construction site must come through the ONE factory
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_per_variant_readers_are_basis_aware():
+    """variants._db_readers is built at import; if it constructs bare readers,
+    every /api/variants payload reports a wingless strategy's capital as 0."""
+    from dashboard.backend.routers import variants as V
+
+    assert V._db_readers["g"].capital_basis == "broker_margin"
+    for vid in ("a", "b", "c", "f"):
+        assert V._db_readers[vid].capital_basis == "defined_risk"
+
+
+def test_snapshot_cumulative_uses_the_factory():
+    """_read_variant_cumulative built its own reader, which is why G's cards
+    stayed blank even after db_reader itself was fixed. Pin the call site."""
+    import inspect
+    from dashboard.backend.routers import strategies as S
+
+    src = inspect.getsource(S._read_variant_cumulative)
+    assert "db_reader_for_variant" in src, (
+        "_read_variant_cumulative constructs a bare BacktestingDBReader again — "
+        "it will silently use the defined-risk formula for every strategy."
+    )
+
+
+def test_factory_is_the_single_source_of_the_rule():
+    from dashboard.backend.services import variant_readers as VR
+
+    assert VR.db_reader_for_variant("g").capital_basis == "broker_margin"
+    assert VR.db_reader_for_variant("b").capital_basis == "defined_risk"
+    # Unknown id degrades rather than raising.
+    assert VR.db_reader_for_variant("zz").capital_basis == "defined_risk"

@@ -384,8 +384,12 @@ def _read_variant_cumulative(vid: str) -> dict:
     if db_path is not None:
         try:
             if Path(db_path).exists():
+                # Basis-aware: a direct BacktestingDBReader(path) here silently
+                # uses the defined-risk formula, which is what kept G's Return
+                # on Margin / Peak Margin blank after the Phase 3 fix.
+                from dashboard.backend.services.variant_readers import db_reader_for_variant
                 overrides = _run_coro(
-                    BacktestingDBReader(Path(db_path)).get_cumulative_overrides(baseline)
+                    db_reader_for_variant(vid, Path(db_path)).get_cumulative_overrides(baseline)
                 ) or {}
         except Exception as e:
             logger.debug(f"snapshot cumulative DB read failed for {vid}: {e}")

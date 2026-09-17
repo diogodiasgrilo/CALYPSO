@@ -28,6 +28,8 @@ from fastapi import APIRouter, HTTPException
 
 from shared import strategy_taxonomy as tax
 
+from dashboard.backend.services import variant_readers as _vr
+
 from dashboard.backend.config import settings
 from dashboard.backend.services.state_reader import StateFileReader
 from dashboard.backend.services.metrics_reader import MetricsFileReader
@@ -124,8 +126,10 @@ _metrics_readers: dict[str, MetricsFileReader] = {
     for vid, p in _VARIANTS.items()
     if p.get("metrics_file") is not None
 }
+# Basis-aware per the taxonomy — a bare BacktestingDBReader(path) here would
+# compute a wingless strategy's capital as 0 (defect D2, third location).
 _db_readers: dict[str, BacktestingDBReader] = {
-    vid: BacktestingDBReader(p["backtesting_db"])
+    vid: _vr.db_reader_for_variant(vid, p["backtesting_db"])
     for vid, p in _VARIANTS.items()
     if p.get("backtesting_db") is not None
 }

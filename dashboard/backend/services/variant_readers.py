@@ -146,6 +146,26 @@ def _reader_for_id(sid: str) -> BacktestingDBReader:
     return _variant_readers[sid]
 
 
+def db_reader_for_variant(vid: str, db_path=None) -> BacktestingDBReader:
+    """A basis-aware reader for ONE variant — the single place that knows how a
+    strategy's deployed capital is computed.
+
+    Every per-variant construction site must come through here. Building
+    ``BacktestingDBReader(path)`` directly silently gets the DEFINED-RISK
+    formula, which reports capital 0 (and therefore ROI 0) for a wingless
+    strategy. That is exactly how defect D2 survived in a second AND third
+    location after Phase 3 fixed base_strategy: three separate call sites each
+    constructed their own reader.
+    """
+    path = db_path or getattr(settings, f"variant_{vid}_backtesting_db", None) \
+        or settings.backtesting_db
+    return BacktestingDBReader(
+        path,
+        capital_basis=_capital_basis_for(vid),
+        broker_margin_per_contract=_broker_margin_for(vid),
+    )
+
+
 def canonical_db_reader() -> BacktestingDBReader:
     """The canonical (live-seat) backtesting-DB reader — follows the swap."""
     return _reader_for_id(live_seat_id())
