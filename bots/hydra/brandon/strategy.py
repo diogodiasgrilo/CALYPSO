@@ -1920,7 +1920,11 @@ class BrandonHydraStrategy(HydraStrategy):
             watch_distance = short - spot if side == "call" else spot - short
             if 0 < watch_distance <= 2 * cfg.trigger_distance_pts:
                 now_monotonic = time.monotonic()
-                last_logged = self._brandon_overlay_watch_logged_at.get(key, 0.0)
+                # -inf, not 0.0: monotonic()'s zero is machine BOOT, so on a
+                # host up < 60s the throttle suppressed the FIRST watch line
+                # for every (entry, side). Proven by pinning monotonic to 33.
+                last_logged = self._brandon_overlay_watch_logged_at.get(
+                    key, float("-inf"))
                 if now_monotonic - last_logged >= 60.0:
                     self._brandon_overlay_watch_logged_at[key] = now_monotonic
                     # 2026-08-25: check which structure applies to THIS window

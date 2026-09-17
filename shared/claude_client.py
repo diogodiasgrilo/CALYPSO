@@ -38,7 +38,13 @@ DEFAULT_MAX_TOKENS = 4096
 # 5 calls is free. Lower CALYPSO_CLAUDE_MIN_INTERVAL_S if you raise your tier.
 _MIN_CALL_INTERVAL_S = float(os.environ.get("CALYPSO_CLAUDE_MIN_INTERVAL_S", "35.0"))
 _pace_lock = threading.Lock()
-_last_call_at = 0.0
+# -inf, not 0.0 — see the note in shared/alert_service.py. With 0.0 the
+# first call on a freshly booted host computes
+#   wait = 0.0 + _MIN_CALL_INTERVAL_S - monotonic()
+# and SLEEPS for the remainder of the interval before the very first
+# request. The agents run on systemd timers, so a VM that just booted
+# would stall its first APOLLO/HERMES/HOMER/CLIO call for up to 35s.
+_last_call_at = float("-inf")
 
 # Per-request HTTP timeout for the Anthropic client. Default 120s suits the
 # short analyst/journal calls. CLIO asks for a single LARGE generation

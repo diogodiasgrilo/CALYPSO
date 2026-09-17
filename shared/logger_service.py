@@ -241,7 +241,7 @@ class GoogleSheetsLogger:
         self._pos_snapshot_min_interval = float(
             self.config.get("position_snapshot_min_interval_s", 60)
         )
-        self._last_pos_snapshot_at = 0.0
+        self._last_pos_snapshot_at = float("-inf")   # not 0.0 — monotonic's zero is BOOT
         # Same throttle for the per-heartbeat dashboard writes (performance
         # metrics + account-summary tabs). They were unthrottled and, with three
         # bots sharing one project's write quota, contributed to the 429/timeout
@@ -250,8 +250,8 @@ class GoogleSheetsLogger:
         self._dashboard_write_min_interval = float(
             self.config.get("dashboard_write_min_interval_s", 60)
         )
-        self._last_metrics_write_at = 0.0
-        self._last_summary_write_at = 0.0
+        self._last_metrics_write_at = float("-inf")   # not 0.0 — monotonic's zero is BOOT
+        self._last_summary_write_at = float("-inf")   # not 0.0 — monotonic's zero is BOOT
 
         if self.enabled:
             self._initialize()
