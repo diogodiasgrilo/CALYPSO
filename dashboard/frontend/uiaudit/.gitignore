@@ -1,0 +1,5 @@
+# Captured production payloads + rendered output — regenerate, never commit.
+fixtures/
+shots/
+findings.json
+structural.json
