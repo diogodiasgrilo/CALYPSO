@@ -79,13 +79,25 @@ import shared.strategy_taxonomy as tax  # noqa: E402
 DEFAULT_STRANGLE_BP = 30_000.0
 
 
-def _to_dt(t) -> Optional[datetime]:
+def _to_dt(t, date: str = "") -> Optional[datetime]:
+    """Coerce a timestamp, tolerating the TWO formats the DB actually uses.
+
+    ``trade_entries.entry_time`` is a full ``'2026-08-28 10:45:36'`` but
+    ``trade_stops.stop_time`` is TIME-ONLY — ``'10:54:37'``. A parser that
+    handles only the first silently returns None for every stop, so no position
+    is ever marked closed and every entry appears held to the session close.
+    That produced a suspiciously constant $60,000/day for G before this was
+    caught; `date` supplies the missing day for the time-only form.
+    """
     if t is None or t == "":
         return None
     if isinstance(t, datetime):
         return t if t.tzinfo else t.replace(tzinfo=timezone.utc)
+    s = str(t).strip()
+    if date and len(s) <= 8 and s.count(":") == 2:
+        s = f"{date} {s}"
     try:
-        d = datetime.fromisoformat(str(t))
+        d = datetime.fromisoformat(s)
         return d if d.tzinfo else d.replace(tzinfo=timezone.utc)
     except (ValueError, TypeError):
         return None
@@ -119,6 +131,10 @@ def peak_concurrent_capital(
             continue
         # A 0DTE position with no stop row was held to expiry.
         close_t = stops.get(int(e.get("entry_number") or 0)) or session_close
+        if close_t < open_t:
+            # Defensive: a malformed stop earlier than its own entry would make
+            # the sweep go negative. Treat it as held to close instead.
+            close_t = session_close
         events.append((open_t, 0, margin))
         events.append((close_t, -1, margin))
     if not events:
@@ -153,14 +169,32 @@ def build_rows(db_path: Path, basis: str, strangle_bp: float,
         if not entries:
             skipped.append(f"{date}: no trade_entries rows")
             continue
-        stops: dict[int, datetime] = {}
+        # MIRROR the live sweep's side preference exactly:
+        #     close_time  or  call_stop_time  or  put_stop_time
+        # i.e. the CALL side's stop wins when both sides stopped, which is not
+        # necessarily the earlier one. Reproducing the live rule (rather than a
+        # better one) keeps backfilled days and future live days on the SAME
+        # definition; two definitions in one series would be worse than one
+        # imperfect definition.
+        #
+        # Known conservatism, inherited deliberately: the whole entry's margin
+        # is freed at that single moment, though a strangle's two naked legs are
+        # independent and only half the margin actually frees when one stops.
+        # Worth fixing in base_strategy._calculate_capital_deployed for BOTH
+        # paths at once — not here, one-sidedly.
+        by_side: dict[int, dict[str, datetime]] = {}
         for r in con.execute(
-            "SELECT entry_number, stop_time FROM trade_stops WHERE date = ?", (date,)
+            "SELECT entry_number, side, stop_time FROM trade_stops WHERE date = ?", (date,)
         ):
-            t = _to_dt(r["stop_time"])
-            n = int(r["entry_number"] or 0)
-            if t and (n not in stops or t < stops[n]):
-                stops[n] = t
+            t = _to_dt(r["stop_time"], date)
+            if not t:
+                continue
+            by_side.setdefault(int(r["entry_number"] or 0), {})[str(r["side"] or "")] = t
+        stops: dict[int, datetime] = {}
+        for n, sides in by_side.items():
+            chosen = sides.get("call") or sides.get("put")
+            if chosen:
+                stops[n] = chosen
         # 0DTE session close, 16:00 ET == 20:00 UTC (21:00 UTC under EST; the
         # hour only matters as an upper bound for "held to expiry", and every
         # entry opens well before it either way).
