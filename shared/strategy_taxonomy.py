@@ -68,6 +68,30 @@ class StrategyMeta:
     status: str  # operational metadata: "live" | "dry_run_shadow" | "dry_run_locked" (display only)
     bot_name_base: str  # the BOT_NAME class const it runs under ("HYDRA"/"DCTM"/...)
 
+    # ── Added 2026-09-17 (dashboard rebuild Phase 2 — docs/DASHBOARD_REBUILD_PLAN.md) ──
+    #
+    # capital_basis answers "what does CAPITAL mean for this strategy", which is
+    # NOT the same question as pnl_shape ("how is P&L earned"). Conflating them is
+    # what made G render as an iron condor: G sells premium, so pnl_shape="credit"
+    # like A/B/C/F — but its capital has no spread width to be a percentage OF,
+    # so return-on-capital came out UNDEFINED rather than merely missing.
+    #
+    #   "defined_risk"  loss capped by spread width -> width x 100 x contracts
+    #   "net_debit"     capital IS the debit paid   -> sum(open net_debit)
+    #   "broker_margin" UNDEFINED risk, no structural cap -> broker requirement
+    #
+    # Deliberately a NEW field rather than a new pnl_shape value: pnl_shape drives
+    # the comparison AXIS, and G genuinely belongs on the credit axis. Overloading
+    # it would silently make G non-comparable to A/B/C on P&L, which is a
+    # different wrong answer.
+    capital_basis: str = "defined_risk"
+
+    # sides answers "does this strategy ever place BOTH a call and a put side".
+    # F places a true one-sided subset of a 4-leg IC, so a renderer that always
+    # draws both sides shows a side F never trades — the phantom short_call=0.0
+    # seen in F's first recorded entry.
+    sides: str = "two_sided"
+
 
 # ---------------------------------------------------------------------------
 # The taxonomy data. Add a row here (and a GroupMeta if a new cohort) to register
@@ -119,6 +143,8 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         dte_class="0DTE",
         status="dry_run_shadow",  # A is dry-run (config dry_run=true; operator-confirmed 2026-06-17). Only C is live-paper.
         bot_name_base="HYDRA",
+        capital_basis="defined_risk",
+        sides="two_sided",
     ),
     "b": StrategyMeta(
         id="b",
@@ -138,6 +164,8 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         dte_class="0DTE",
         status="live",  # live paper seat since the 2026-07-24 B<->C swap (was dry_run_shadow before)
         bot_name_base="HYDRA",
+        capital_basis="defined_risk",
+        sides="two_sided",
     ),
     "c": StrategyMeta(
         id="c",
@@ -150,6 +178,8 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         dte_class="0DTE",
         status="dry_run_shadow",  # dry-run sim since the 2026-07-24 B<->C swap (was live before)
         bot_name_base="HYDRA",
+        capital_basis="defined_risk",
+        sides="two_sided",
     ),
     "d": StrategyMeta(
         id="d",
@@ -162,6 +192,8 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         dte_class="multi_day",
         status="dry_run_locked",
         bot_name_base="DCTM",
+        capital_basis="net_debit",
+        sides="two_sided",
     ),
     "e": StrategyMeta(
         id="e",
@@ -174,6 +206,8 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         dte_class="multi_day",
         status="dry_run_locked",
         bot_name_base="SPYDC",
+        capital_basis="net_debit",
+        sides="two_sided",
     ),
     "f": StrategyMeta(
         id="f",
@@ -196,6 +230,8 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         dte_class="0DTE",
         status="dry_run_locked",
         bot_name_base="HYDRA",
+        capital_basis="defined_risk",
+        sides="one_sided",  # a true one-sided subset of a 4-leg IC
     ),
     "g": StrategyMeta(
         id="g",
@@ -220,7 +256,9 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         pnl_shape="credit",
         dte_class="0DTE",
         status="dry_run_locked",
-        bot_name_base="STRANGLE",  # matches StrangleStrategy.BOT_NAME (not "HYDRA")
+        bot_name_base="STRANGLE",
+        capital_basis="broker_margin",  # naked shorts: margin, not width
+        sides="two_sided",  # two naked shorts — two-sided, just wingless  # matches StrangleStrategy.BOT_NAME (not "HYDRA")
     ),
 }
 

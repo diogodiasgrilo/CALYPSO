@@ -218,6 +218,12 @@ def _strategy_meta_dict(m: tax.StrategyMeta) -> dict:
         "group_id": m.group_id,
         "family": m.structure_family,  # spec: family (= structure_family)
         "pnl_shape": m.pnl_shape,
+        # Phase 2: what CAPITAL means, and whether both sides are ever placed.
+        # The renderer needs both to avoid showing a metric whose denominator
+        # does not exist (return-on-width for a wingless strangle) or a side the
+        # strategy never trades (F's phantom call leg).
+        "capital_basis": m.capital_basis,
+        "sides": m.sides,
         "data_kind": _data_kind(m),
         "is_live": _is_live(m.id),
         "is_primary": m.id == _primary_id(),

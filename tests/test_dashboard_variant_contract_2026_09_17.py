@@ -194,7 +194,6 @@ def test_D6_calendar_router_is_not_hardcoded_to_D():
 # D7 — the taxonomy cannot express a one-sided strategy or an undefined risk
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, reason="D7: StrategyMeta has no capital_basis/sides")
 def test_D7_taxonomy_can_express_capital_basis_and_sides():
     """The renderer needs two facts the taxonomy cannot currently state:
 
@@ -209,7 +208,6 @@ def test_D7_taxonomy_can_express_capital_basis_and_sides():
     assert {"capital_basis", "sides"} <= fields, f"StrategyMeta has: {sorted(fields)}"
 
 
-@pytest.mark.xfail(strict=True, reason="D7: G is modelled as a defined-risk credit structure")
 def test_D7_G_declares_broker_margin_capital():
     """G's group is already `undefined_risk_0dte` and comparable=False, so the
     taxonomy knows it is different — but pnl_shape is `credit`, identical to the
@@ -219,7 +217,6 @@ def test_D7_G_declares_broker_margin_capital():
     assert getattr(tax.meta("g"), "capital_basis", None) == "broker_margin"
 
 
-@pytest.mark.xfail(strict=True, reason="D7: F is classified iron_condor but trades one side")
 def test_D7_F_declares_itself_one_sided():
     assert getattr(tax.meta("f"), "sides", None) == "one_sided"
 
@@ -244,7 +241,6 @@ def test_D8_snapshot_exposes_a_previous_session():
 # The cross-cutting invariant the whole rebuild is FOR
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, reason="depends on D7; the renderer cannot yet ask")
 def test_every_strategy_can_state_what_its_capital_means():
     """The single sentence this rebuild exists to make true: a dashboard must
     never show a metric whose denominator does not exist for that strategy.
@@ -260,3 +256,35 @@ def test_every_strategy_can_state_what_its_capital_means():
     }
     actual = {v: getattr(tax.meta(v), "capital_basis", None) for v in expected}
     assert actual == expected, f"got {actual}"
+
+
+class TestPhase2GuardRails:
+    """Added when capital_basis / sides landed (Phase 2, 2026-09-17).
+
+    These stop the taxonomy regressing to the state that caused the whole
+    rebuild: a strategy whose view cannot know what its own capital means.
+    """
+
+    def test_every_strategy_declares_a_known_capital_basis(self):
+        valid = {"defined_risk", "net_debit", "broker_margin"}
+        for vid in tax.available_ids():
+            assert tax.meta(vid).capital_basis in valid, vid
+
+    def test_every_strategy_declares_known_sides(self):
+        for vid in tax.available_ids():
+            assert tax.meta(vid).sides in {"one_sided", "two_sided"}, vid
+
+    def test_capital_basis_is_INDEPENDENT_of_pnl_shape(self):
+        """The design decision this rebuild turns on. G and B share a pnl_shape
+        (both sell premium, both belong on the credit axis) but have different
+        capital bases. If these two fields ever move together, someone has
+        collapsed them back and G will render as an iron condor again."""
+        b, g = tax.meta("b"), tax.meta("g")
+        assert b.pnl_shape == g.pnl_shape == "credit"
+        assert b.capital_basis != g.capital_basis
+
+    def test_the_meta_endpoint_actually_ships_them(self):
+        """A taxonomy field the API does not expose cannot reach the renderer."""
+        src = (ROUTERS / "strategies.py").read_text()
+        assert '"capital_basis": m.capital_basis' in src
+        assert '"sides": m.sides' in src
