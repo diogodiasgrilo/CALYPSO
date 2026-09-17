@@ -4938,6 +4938,42 @@ N/A - Entry #3 Call Stopped
 
 ## 5. Key Performance Metrics
 
+> ### ⚠️ DEFINITION CHANGE — 2026-09-17: reported capital is now PEAK CONCURRENT
+>
+> **Reported ROI stepped UP on this date without any change in trading.** The
+> cause is a corrected definition, recorded here so the step has a written
+> reason rather than looking like performance.
+>
+> Two definitions of "deployed capital" had coexisted. The dashboard **summed**
+> every entry's margin; the bot's own
+> `base_strategy._calculate_capital_deployed` computes **peak concurrent**
+> margin per day — and had done since 2026-05-08, its docstring noting the prior
+> sum "overstated capital". The dashboard never followed. The sum counts the
+> same dollars again each time a position closes and the next opens.
+>
+> | variant | capital (SUM, old) | capital (PEAK, new) | SUM overstated | ROI old → new |
+> |---|---|---|---|---|
+> | A | $2,561,500 | $1,784,500 | **43.5%** | −0.126% → **−0.180%** |
+> | **B (live seat)** | $1,404,000 | $1,372,000 | 2.3% | 1.731% → **1.770%** |
+> | C | $422,500 | $422,500 | 0.0% | unchanged |
+> | F | $1,000 | $1,000 | 0.0% | unchanged |
+> | G | $780,000 | $660,000 | 18.2% | 0.107% → **0.130%** |
+>
+> **The correction is not uniformly flattering.** Because ROI = P&L ÷ capital,
+> a smaller denominator raises a profitable strategy's return *and* deepens a
+> losing one's: A's reported loss rate gets **worse**, B's and G's returns
+> improve. B — the live seat, and the only variant whose numbers have been
+> shown to anyone — moves by 2.3% relative, which is immaterial.
+>
+> It also resolves a contradiction *inside* the metrics file: the
+> `daily_returns` rows already used peak-concurrent, so the card and the rows
+> disagreed. G's card now reads **$50,769/day**, exactly matching its rows.
+>
+> Dashboard-read-path only — no trading logic, no strategy config, and no
+> effect on the Gate-4 clean-session streak. Defect D20 in
+> `docs/DASHBOARD_VISUAL_AUDIT_2026_09_17.md`; decision taken by the operator.
+
+
 ### Financial Metrics (94 days: May 5 - Sep 16)
 
 | Metric | Value |

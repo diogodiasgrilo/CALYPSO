@@ -62,6 +62,102 @@ class BacktestingDBReader:
         self.broker_margin_per_contract = float(broker_margin_per_contract)
         self._local = threading.local()
 
+    def _entry_margin(self, row: dict) -> float:
+        """Capital ONE entry ties up, per this strategy's basis."""
+        contracts = int(row.get("contracts") or 1) or 1
+        if self.capital_basis == "broker_margin":
+            return self.broker_margin_per_contract * contracts
+        width = max(float(row.get("call_spread_width") or 0.0),
+                    float(row.get("put_spread_width") or 0.0))
+        return width * 100.0 * contracts
+
+    def _peak_concurrent_capital(self, baseline_date: str = "") -> Optional[float]:
+        """Sum of each day's PEAK CONCURRENT margin (defect D20).
+
+        This replaced a plain ``SUM`` over every entry. The sum double-counted
+        dollars that are FREED when one position closes and then reused by the
+        next: measured on real data, it overstated B by 2.3% and G by 18.2%
+        (G's two daily entries frequently do not overlap at all). Because
+        ``roi_pct = pnl / capital``, the sum was UNDERSTATING return, and the
+        card's own label — "Peak Margin / Day" — described a number that was
+        not a peak.
+
+        ``base_strategy._calculate_capital_deployed`` had already made exactly
+        this correction inside the bot ("the sum overstated capital"); the
+        dashboard simply never followed. This makes the two agree, and makes the
+        card agree with the ``daily_returns`` rows in the same metrics file.
+
+        Mirrors the bot's sweep: a side closes at its stop time (CALL preferred
+        over put, matching ``close_time or call_stop_time or put_stop_time``),
+        otherwise the position is held to the session close. Closes sort BEFORE
+        opens at the same instant so a close-then-reopen is not double counted.
+
+        Returns None when the tables are unusable, so the caller can fall back
+        rather than publish a zero.
+        """
+        from datetime import datetime as _dt
+
+        def _to_dt(t, date: str = "") -> Optional[_dt]:
+            if not t:
+                return None
+            v = str(t).strip()
+            # trade_stops.stop_time is TIME-ONLY ("10:54:37") while
+            # trade_entries.entry_time is a full datetime. Parsing only the
+            # latter makes every stop vanish and every day look fully
+            # overlapped — which is how this was first got wrong.
+            if date and len(v) <= 8 and v.count(":") == 2:
+                v = f"{date} {v}"
+            try:
+                return _dt.fromisoformat(v)
+            except (ValueError, TypeError):
+                return None
+
+        clause, params = self._baseline_clause(baseline_date)
+        entries = self._query(
+            f"SELECT * FROM trade_entries {clause} ORDER BY date, entry_number", params)
+        if not entries:
+            return None
+        stops = self._query(
+            f"SELECT date, entry_number, side, stop_time FROM trade_stops {clause}", params)
+
+        by_day: dict[str, list[dict]] = {}
+        for e in entries:
+            by_day.setdefault(str(e.get("date")), []).append(e)
+        stop_at: dict[tuple, dict] = {}
+        for r in stops:
+            key = (str(r.get("date")), int(r.get("entry_number") or 0))
+            t = _to_dt(r.get("stop_time"), str(r.get("date")))
+            if t:
+                stop_at.setdefault(key, {})[str(r.get("side") or "")] = t
+
+        total = 0.0
+        for date, day_entries in by_day.items():
+            close_t = _to_dt(f"{date} 16:00:00")
+            events: list[tuple] = []
+            for e in day_entries:
+                margin = self._entry_margin(e)
+                if margin <= 0:
+                    continue
+                open_t = _to_dt(e.get("entry_time"))
+                if open_t is None:
+                    continue
+                sides = stop_at.get((date, int(e.get("entry_number") or 0)), {})
+                c = sides.get("call") or sides.get("put") or close_t
+                if c is None or c < open_t:
+                    c = close_t
+                events.append((open_t, 0, margin))
+                if c is not None:
+                    events.append((c, -1, margin))
+            if not events:
+                continue
+            events.sort(key=lambda x: (x[0], x[1]))
+            running = peak = 0.0
+            for _, kind, margin in events:
+                running += margin if kind == 0 else -margin
+                peak = max(peak, running)
+            total += peak
+        return round(total, 2)
+
     def _capital_sql(self) -> str:
         """Per-entry deployed-capital expression for this strategy's basis.
 
@@ -379,9 +475,17 @@ class BacktestingDBReader:
         )
         row = rows[0] if rows else {}
         if row:
-            # ROI (on capital deployed) = total P&L per dollar of max-risk
-            # capital deployed across all trades — normalizes for contract size
-            # AND entry count, so A (1c/75pt), B and C (10c/5-10pt) compare fairly.
+            # D20: replace the SQL SUM with PEAK CONCURRENT margin. The sum
+            # counted the same dollars again every time a position closed and
+            # another opened, so it overstated capital (B 2.3%, G 18.2%) and
+            # therefore UNDERSTATED roi_pct. Falls back to the summed value if
+            # the sweep cannot run, so a card never goes blank.
+            peak = await to_thread(self._peak_concurrent_capital, baseline_date)
+            if peak is not None and peak > 0:
+                row["capital_deployed"] = peak
+            # ROI (on capital deployed) = total P&L per dollar of margin
+            # ACTUALLY TIED UP at once — normalizes for contract size AND entry
+            # count, so A (1c/75pt), B and C (10c/5-10pt) compare fairly.
             cap = row.get("capital_deployed") or 0.0
             pnl = row.get("cumulative_pnl") or 0.0
             days = row.get("entry_days") or 0
