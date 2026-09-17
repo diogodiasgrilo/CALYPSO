@@ -252,7 +252,10 @@ Worth recording, because the audit is not a demolition:
   is the model for G.
 - **G's capital labels already work** — "RETURN ON MARGIN" / "PEAK MARGIN / DAY" instead of
   "ROI (on capital)". `capital_basis` dispatch is correct; only the *values* are still absent.
-- **Responsive layout is sound** — zero horizontal overflow, zero clipped text at 1440×1000.
+- **Responsive layout is sound at 1440×1000** — zero horizontal overflow, zero clipped text.
+  ⚠️ **Corrected 2026-09-17:** that was the ONLY viewport ever tested. At 390px
+  (iPhone 14) every route overflowed by 45% (body 390 / content 566). Now fixed
+  and measured across 390 / 820 / 1440 / 1920 — see §5c.
 - **Honest empty states** — "ratios need ≥20 days · have 15", "No entry data yet", `—` for absent
   values rather than a fabricated zero. The instinct is right; D10 is a bug in *what* is counted, not
   in the discipline.
@@ -317,6 +320,36 @@ become crashes. What is left:
 | `react-hooks/set-state-in-effect` | 12 | Performance advice about cascading renders, not correctness. Fixing means restructuring every page's data fetching. |
 | `react-hooks/immutability` | 3 | One is in `useWebSocket`'s reconnect path. **Measured rather than assumed:** a harness that drops the socket server-side shows the client reconnecting in ~1.2s and returning to `Connected`. The circular `useCallback` dependency is self-consistent. Restructuring live reconnect logic to satisfy a linter is the riskier change. `repro-reconnect.mjs` keeps that claim honest. |
 | `react-refresh/only-export-components` | 2 | Dev-server ergonomics only; zero production effect. |
+
+---
+
+## 5c. Responsive — the gap no prior audit had looked at
+
+Every earlier pass measured ONE viewport. Measured across real device widths:
+
+| viewport | before | after |
+|---|---|---|
+| iPhone 14 (390) | **566px content — 45% overflow, every route** | 390 / 390 ✅ |
+| iPad (820) | 820 / 820 | 820 / 820 ✅ |
+| laptop (1440) | 1440 / 1440 | 1440 / 1440 ✅ |
+| wide (1920) | 1920 / 1920 | 1920 / 1920 ✅ |
+
+Three root causes, all chrome rather than page content: the **NavTabs** row
+(5 tabs need ~520px — now a horizontally scrollable strip, because hiding a tab
+hides a whole page), the **StrategyPicker** (a `<select>` claims its longest
+option's width: 238px in a 171px slot), and header groups that could not shrink.
+
+**The `min-w-0` lesson.** The first attempt made it worse: applied to the icon
+groups, it let flex shrink them below their icons' width, so the mute and logout
+buttons spilled *past* the viewport. A shrink that content cannot absorb just
+relocates the overflow — `min-w-0` belongs only where content truncates.
+
+Accessibility measured alongside: sub-44px tap targets went **8 → 1** on the
+dashboard (the remaining one is TradingView's third-party attribution link), two
+16×16 icon buttons with no accessible name are now 32×32 with `aria-label`, and
+truncated strategy labels carry a `title` so the name is recoverable on a phone.
+
+Harness: `uiaudit/viewports.mjs`, `diag-mobile.mjs`, `diag-a11y.mjs`.
 
 ---
 

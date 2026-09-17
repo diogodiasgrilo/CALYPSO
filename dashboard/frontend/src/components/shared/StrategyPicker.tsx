@@ -44,21 +44,24 @@ export function StrategyPicker() {
   const accent = accentForStrategy(currentId);
 
   return (
-    <div className="relative inline-flex items-center">
+    // `min-w-0` lets this shrink inside the header's left group; without it the
+    // select claims the intrinsic width of its LONGEST option ("Brandon Narrow
+    // (7-slot) — LIVE"), which was 238px inside a 171px slot on a 390px phone.
+    <div className="relative inline-flex items-center min-w-0">
       <span
         className="w-2 h-2 rounded-full mr-1.5 shrink-0"
         style={{ backgroundColor: accent }}
         aria-hidden
       />
-      <div className="relative">
+      <div className="relative min-w-0">
         <select
           value={currentId}
           onChange={(e) => setSelectedStrategy(e.target.value)}
           aria-label="Select strategy to display on the dashboard"
           title="Which strategy the main dashboard is showing"
           className="appearance-none bg-bg-elevated border border-border-dim rounded text-xs text-text-primary
-                     pl-2 pr-6 py-1 cursor-pointer outline-none hover:border-border focus:border-info
-                     max-w-[14rem] truncate"
+                     pl-2 pr-6 py-1 max-sm:py-2 cursor-pointer outline-none hover:border-border focus:border-info
+                     max-w-[11rem] sm:max-w-[14rem] truncate w-full"
         >
           {groupsToShow.map((g) => (
             <optgroup key={g.id} label={g.label}>

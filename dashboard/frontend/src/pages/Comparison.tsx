@@ -688,7 +688,14 @@ function VariantPanel({ v, accent }: { v: VariantPayload; accent: string }) {
           >
             {isSim ? "SIM" : "PAPER $"}
           </span>
-          <div className="text-xs uppercase tracking-wide truncate" style={{ color: accent }}>
+          {/* Truncation is deliberate in a narrow column, but without a title
+              the rest of the name is unrecoverable on a phone — where the
+              column is narrowest and the ellipsis bites hardest. */}
+          <div
+            className="text-xs uppercase tracking-wide truncate"
+            style={{ color: accent }}
+            title={v.label}
+          >
             {v.label}
           </div>
         </div>

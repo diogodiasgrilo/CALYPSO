@@ -116,7 +116,11 @@ function MemberPanel({ m, accent }: { m: CalendarMember; accent: string }) {
   return (
     <div className="rounded border border-border-dim bg-card p-4 space-y-3">
       <div className="flex items-baseline justify-between gap-2">
-        <div className="text-xs uppercase tracking-wide truncate" style={{ color: accent }}>
+        <div
+          className="text-xs uppercase tracking-wide truncate"
+          style={{ color: accent }}
+          title={m.display_name}
+        >
           {m.display_name}
         </div>
         <div className="text-xs text-text-secondary whitespace-nowrap">

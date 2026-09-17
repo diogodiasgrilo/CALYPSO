@@ -17,8 +17,12 @@ import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
 // ad-hoc useComparisonEnabled/useDcEnabled probes are gone — meta is the SSOT.
 function NavTabs() {
   const meta = useStrategyMeta();
+  // `shrink-0` + `whitespace-nowrap` keep each tab at its natural width inside
+  // the scrollable strip below; without them flex would compress the labels
+  // into ellipses rather than letting the strip scroll.
   const linkClass = ({ isActive }: { isActive: boolean }) =>
-    `flex items-center gap-1.5 px-3 py-1.5 rounded text-xs font-medium transition-colors ${
+    `flex items-center gap-1.5 px-3 py-1.5 max-sm:py-2.5 rounded text-xs font-medium
+     transition-colors shrink-0 whitespace-nowrap ${
       isActive
         ? "bg-bg-elevated text-text-primary"
         : "text-text-secondary hover:text-text-primary"
@@ -27,7 +31,15 @@ function NavTabs() {
   const comparableGroups = meta.groups.filter((g) => g.comparable);
 
   return (
-    <nav className="flex gap-1 px-3 py-1.5 bg-bg border-b border-border-dim">
+    // Horizontally scrollable tab strip — the standard mobile pattern, and the
+    // reason this nav no longer forces the page 45% wider than an iPhone. Five
+    // tabs (three fixed + one per comparable group) need ~520px; a 390px phone
+    // cannot fit them, and hiding tabs would hide whole pages. `nav-scroll`
+    // hides the scrollbar chrome while keeping the scroll (see index.css).
+    <nav
+      className="flex gap-1 px-3 py-1.5 bg-bg border-b border-border-dim
+                 overflow-x-auto nav-scroll"
+    >
       <NavLink to="/" end className={linkClass}>
         <LayoutDashboard size={14} />
         Dashboard

@@ -135,9 +135,20 @@ export function Header() {
           ⚠ DRY-RUN MODE — REAL PRICES, NO REAL ORDERS — POSITION IDs PREFIXED DRY_* ⚠
         </div>
       )}
-      <header className="flex items-center justify-between px-4 max-sm:px-2 py-2 bg-bg border-b border-border-dim">
+      {/* `min-w-0` on the row AND on each group is what actually lets a flex
+          child shrink below its content width — without it the three groups
+          sum to ~566px and push the page 45% wider than a 390px phone. What
+          yields first is the least information-bearing chrome: the wordmark
+          (the logo already brands it) and the username.
+
+          `min-w-0` goes ONLY on the group whose content can truncate — the
+          left one, holding the strategy picker. Putting it on the icon groups
+          let flex shrink them below their icons' width, so the mute and logout
+          buttons spilled PAST the viewport: a shrink that content cannot
+          absorb just relocates the overflow. */}
+      <header className="flex items-center justify-between gap-2 px-4 max-sm:px-2 py-2 bg-bg border-b border-border-dim">
       {/* Left: Logo + title + connection + strategy picker */}
-      <div className="flex items-center gap-3 max-sm:gap-2">
+      <div className="flex items-center gap-3 max-sm:gap-2 min-w-0">
         <img
           src="/hydra-logo.png"
           alt="HYDRA"
@@ -146,7 +157,7 @@ export function Header() {
             (e.target as HTMLImageElement).style.display = "none";
           }}
         />
-        <span className="text-text-primary font-bold text-base max-sm:text-sm tracking-wide">
+        <span className="text-text-primary font-bold text-base max-sm:text-sm tracking-wide max-sm:hidden">
           HYDRA
         </span>
 
@@ -203,8 +214,9 @@ export function Header() {
         </div>
       </div>
 
-      {/* Center: underlying + VIX */}
-      <div className="flex items-center gap-6 max-sm:gap-3">
+      {/* Center: underlying + VIX — kept on mobile. On a trading dashboard the
+          live underlying is worth more than the wordmark beside it. */}
+      <div className="flex items-center gap-6 max-sm:gap-2 shrink-0">
         {spx > 0 && (
           <div
             className={`text-sm max-sm:text-xs ${
@@ -223,7 +235,7 @@ export function Header() {
         )}
         {showVix && vix > 0 && (
           <div
-            className={`text-sm max-sm:text-xs ${
+            className={`text-sm max-sm:text-xs max-sm:hidden ${
               vixFlash === "up"
                 ? "flash-up"
                 : vixFlash === "down"
@@ -240,7 +252,7 @@ export function Header() {
       </div>
 
       {/* Right: Market status + mute */}
-      <div className="flex items-center gap-4 max-sm:gap-2">
+      <div className="flex items-center gap-4 max-sm:gap-1 shrink-0">
         {market && (
           <div className="flex items-center gap-1.5">
             {market.is_fomc_day && (
@@ -281,7 +293,9 @@ export function Header() {
         )}
         <button
           onClick={handleMuteToggle}
-          className="text-text-secondary hover:text-text-primary transition-colors"
+          aria-label={muted ? "Unmute alert sounds" : "Mute alert sounds"}
+          className="text-text-secondary hover:text-text-primary transition-colors
+                     p-2 -m-1 rounded"
           title={muted ? "Unmute" : "Mute"}
         >
           {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
@@ -296,7 +310,9 @@ export function Header() {
                 await auth.logout();
                 window.location.reload();
               }}
-              className="text-text-secondary hover:text-loss transition-colors"
+              aria-label="Sign out"
+              className="text-text-secondary hover:text-loss transition-colors
+                         p-2 -m-1 rounded"
               title="Sign out"
             >
               <LogOut size={16} />

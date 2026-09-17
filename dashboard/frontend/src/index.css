@@ -74,6 +74,18 @@ body {
   flex-direction: column;
 }
 
+/* A scroll container with no visible scrollbar chrome — for the mobile tab
+   strip, where a permanent horizontal scrollbar under five tabs looks broken
+   rather than intentional. The strip still scrolls by touch/trackpad. */
+.nav-scroll {
+  scrollbar-width: none;            /* Firefox */
+  -ms-overflow-style: none;         /* old Edge */
+  -webkit-overflow-scrolling: touch;
+}
+.nav-scroll::-webkit-scrollbar {
+  display: none;                    /* WebKit */
+}
+
 /* ── Typography utility classes ── */
 .label-upper {
   font-size: 0.75rem;
