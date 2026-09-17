@@ -29,6 +29,53 @@ from __future__ import annotations
 import pytest
 
 
+#: Every module that bound ``is_running_on_gcp`` by name at import time. A
+#: patch on the SOURCE does not reach these — the name was already copied into
+#: each module's namespace — so all of them must be redirected individually.
+_GCP_PROBE_SITES = (
+    "shared.secret_manager",
+    "shared",
+    "shared.alert_service",
+    "shared.claude_client",
+    "shared.config_loader",
+    "shared.logger_service",
+    # Not a shared/ module, but it binds the name the same way. Found by
+    # test_every_binding_site_is_listed, which scans the source rather than
+    # trusting this list to be complete — it caught this omission immediately.
+    "bots.hydra.main",
+)
+
+
+@pytest.fixture(autouse=True)
+def _no_live_gcp_probe(monkeypatch):
+    """Stop the test suite making a real network call to detect GCP.
+
+    ``secret_manager.is_running_on_gcp()`` falls through to an actual HTTP GET
+    against ``http://metadata.google.internal/...`` with a 1-second timeout.
+    Three test files construct an ``AlertService`` without patching it, so the
+    suite was issuing live network calls whose latency depends entirely on how
+    the host resolves a name that does not exist — 7ms on this laptop, up to the
+    full timeout elsewhere.
+
+    That is a nondeterminism source in a suite that is supposed to be
+    hermetic, and it is the leading suspect for two alert tests that failed on
+    the CI runner and then passed on a re-run with no code change.
+
+    Defaults to False (the honest answer for any machine running tests). A test
+    that wants True still sets it explicitly; its ``monkeypatch.setattr`` runs
+    after this fixture and wins.
+    """
+    import importlib
+
+    for mod_name in _GCP_PROBE_SITES:
+        try:
+            mod = importlib.import_module(mod_name)
+        except Exception:      # noqa: BLE001 — a module absent on this branch
+            continue
+        if hasattr(mod, "is_running_on_gcp"):
+            monkeypatch.setattr(mod, "is_running_on_gcp", lambda: False)
+
+
 @pytest.fixture(autouse=True)
 def _isolate_shared_gex_cache(tmp_path_factory, monkeypatch):
     """Point the cross-variant GEX cache at a per-test temp directory.

@@ -132,3 +132,53 @@ def test_ci_installs_the_dev_requirements():
         "duplicated versions drift."
     )
     assert "pytest==" in body and "httpx==" in body
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# The suite must be hermetic — no live network probes
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_gcp_probe_is_patched_everywhere_during_a_test():
+    """secret_manager.is_running_on_gcp() falls through to a real HTTP GET
+    against metadata.google.internal with a 1s timeout. Three test files
+    construct an AlertService without patching it, so the suite was making live
+    network calls whose latency depends on how the host resolves a name that
+    does not exist — the leading suspect for two alert tests that failed on CI
+    and then passed on a re-run with no code change."""
+    import importlib
+
+    from tests.conftest import _GCP_PROBE_SITES
+
+    for name in _GCP_PROBE_SITES:
+        mod = importlib.import_module(name)
+        if not hasattr(mod, "is_running_on_gcp"):
+            continue
+        assert mod.is_running_on_gcp() is False, (
+            f"{name}.is_running_on_gcp is not isolated — this test run can "
+            f"make a live network call."
+        )
+
+
+def test_every_binding_site_is_listed():
+    """`_GCP_PROBE_SITES` is a hand-maintained list, so a NEW module that does
+    `from shared.secret_manager import is_running_on_gcp` would silently escape
+    the isolation. Find them by source, not by memory."""
+    import re
+
+    from tests.conftest import _GCP_PROBE_SITES
+
+    listed = set(_GCP_PROBE_SITES)
+    pattern = re.compile(r"from\s+(?:shared\.secret_manager|\.secret_manager)\s+import[^\n]*is_running_on_gcp")
+    missing = []
+    for d in ("shared", "bots", "dashboard"):
+        for p in (ROOT / d).rglob("*.py"):
+            if not pattern.search(p.read_text(errors="ignore")):
+                continue
+            mod = str(p.relative_to(ROOT)).removesuffix(".py").replace("/", ".")
+            mod = mod.removesuffix(".__init__")
+            if mod not in listed:
+                missing.append(mod)
+    assert not missing, (
+        f"module(s) bind is_running_on_gcp but are not isolated in conftest: "
+        f"{sorted(missing)} — add them to _GCP_PROBE_SITES."
+    )
