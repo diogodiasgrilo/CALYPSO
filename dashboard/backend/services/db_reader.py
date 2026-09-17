@@ -39,9 +39,46 @@ class BacktestingDBReader:
     connection per query (~40+ queries on analytics page load).
     """
 
-    def __init__(self, db_path: Path):
+    #: Per-contract margin floor for an undefined-risk (wingless) strategy —
+    #: mirrors ``strangle_strategy._min_buying_power_per_unit``'s default.
+    DEFAULT_BROKER_MARGIN_PER_CONTRACT = 30_000.0
+
+    def __init__(self, db_path: Path, capital_basis: str = "defined_risk",
+                 broker_margin_per_contract: float = DEFAULT_BROKER_MARGIN_PER_CONTRACT):
+        """``capital_basis`` decides how deployed capital is computed.
+
+        WHY IT IS A PARAMETER. ``capital_deployed`` used to be hardcoded in SQL as
+        ``MAX(call_spread_width, put_spread_width) * 100 * contracts`` — the
+        DEFINED-RISK formula. A wingless strategy (G, the naked strangle) has no
+        spread width, so every entry contributed 0, capital came back 0, and
+        ``roi_pct`` / ``avg_capital_per_day`` were both 0. That is defect D2
+        surviving in a SECOND place: the Phase 3 fix made
+        ``base_strategy._entry_margin`` basis-aware, but this reader kept its own
+        private copy of the old assumption, so the dashboard still showed a
+        naked strangle "—" for Return on Margin and Peak Margin / Day.
+        """
         self.db_path = db_path
+        self.capital_basis = capital_basis or "defined_risk"
+        self.broker_margin_per_contract = float(broker_margin_per_contract)
         self._local = threading.local()
+
+    def _capital_sql(self) -> str:
+        """Per-entry deployed-capital expression for this strategy's basis.
+
+        ``broker_margin`` uses the SAME floor the entry gate sized with, so the
+        reported return is a return on the capital the strategy actually
+        required rather than a second, invented definition.
+        """
+        if self.capital_basis == "broker_margin":
+            return f"({self.broker_margin_per_contract} * COALESCE(contracts, 1))"
+        # ``net_debit`` (the D/E calendars) deliberately falls through to the
+        # defined-risk expression, which is what it has always done here. Their
+        # dashboards read ``dc_db_reader``, which computes debit capital
+        # natively; this reader only backs the generic metrics endpoints for
+        # them. Changing it would be a behaviour change for the calendars
+        # smuggled into a fix for the strangle, so it is left alone and named.
+        return ("MAX(COALESCE(call_spread_width, 0), COALESCE(put_spread_width, 0))"
+                " * 100 * COALESCE(contracts, 1)")
 
     def _get_connection(self) -> sqlite3.Connection:
         """Get or create a thread-local read-only connection."""
@@ -314,6 +351,8 @@ class BacktestingDBReader:
         # the opposite direction from the file's undercounting bug — the two
         # numbers disagreed for two different wrong reasons; this makes them agree.
         has_exit_reason = await to_thread(self._trade_stops_has_exit_reason)
+        # Per-entry capital expression for THIS strategy's basis (see __init__).
+        cap_sql = self._capital_sql()
         stop_filter = (
             "(exit_reason IN ('stop_loss','gex_breach') OR (exit_reason IS NULL AND net_pnl < 0))"
             if has_exit_reason
@@ -332,9 +371,8 @@ class BacktestingDBReader:
                 (SELECT ROUND(COALESCE(SUM(total_credit), {z}), 2) FROM trade_entries {te}) AS total_credit_collected,
                 (SELECT COUNT(*) FROM trade_stops WHERE {stop_filter} {ts_and}) AS total_stops,
                 (SELECT MAX(date) FROM daily_summaries {ds}) AS last_updated,
-                (SELECT ROUND(COALESCE(SUM(
-                    MAX(COALESCE(call_spread_width, 0), COALESCE(put_spread_width, 0))
-                    * 100 * COALESCE(contracts, 1)), {z}), 2) FROM trade_entries {te}) AS capital_deployed,
+                (SELECT ROUND(COALESCE(SUM({cap_sql}), {z}), 2)
+                   FROM trade_entries {te}) AS capital_deployed,
                 (SELECT COUNT(DISTINCT date) FROM trade_entries {te}) AS entry_days
             """,
             p_ds + p_dsand + p_dsand + p_te + p_te + p_tsand + p_ds + p_te + p_te,

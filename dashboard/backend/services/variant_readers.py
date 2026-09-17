@@ -22,6 +22,8 @@ the wrong variant's rows. Resolving through one helper is the guard against that
 import json
 from pathlib import Path
 
+from shared import strategy_taxonomy as tax
+
 from dashboard.backend.config import settings
 from dashboard.backend.services.db_reader import BacktestingDBReader
 
@@ -105,10 +107,42 @@ def live_baseline_date() -> str:
 _variant_readers: dict[str, BacktestingDBReader] = {}
 
 
+def _capital_basis_for(sid: str) -> str:
+    """The strategy's capital basis, straight from the taxonomy.
+
+    Without this the reader computes deployed capital with the DEFINED-RISK
+    formula for every strategy, so a wingless one (G) reports capital 0 and
+    therefore ROI 0 / avg-capital 0 — defect D2, which Phase 3 fixed in
+    base_strategy but not here.
+    """
+    try:
+        return getattr(tax.meta(sid), "capital_basis", "defined_risk") or "defined_risk"
+    except Exception:          # unknown id → the historical default
+        return "defined_risk"
+
+
+def _broker_margin_for(sid: str) -> float:
+    """Per-contract naked-margin floor from the variant's own config, so the
+    dashboard divides by the SAME number the entry gate sized with."""
+    default = BacktestingDBReader.DEFAULT_BROKER_MARGIN_PER_CONTRACT
+    cfg_path = getattr(settings, f"variant_{sid}_config_file", None)
+    if not cfg_path:
+        return default
+    try:
+        cfg = json.loads(Path(cfg_path).read_text()).get("strategy", {})
+        return float(cfg.get("min_buying_power_per_strangle", default))
+    except (OSError, ValueError, TypeError):
+        return default
+
+
 def _reader_for_id(sid: str) -> BacktestingDBReader:
     if sid not in _variant_readers:
         path = getattr(settings, f"variant_{sid}_backtesting_db", None) or settings.backtesting_db
-        _variant_readers[sid] = BacktestingDBReader(path)
+        _variant_readers[sid] = BacktestingDBReader(
+            path,
+            capital_basis=_capital_basis_for(sid),
+            broker_margin_per_contract=_broker_margin_for(sid),
+        )
     return _variant_readers[sid]
 
 
