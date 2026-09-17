@@ -455,6 +455,35 @@ make that error (mutation-tested).
 
 ---
 
+# §A-bis-3. 🔴 DASHBOARD IS BROKEN FOR NON-LIVE VARIANTS — audited 2026-09-17
+
+Full audit: [`DASHBOARD_VARIANT_AUDIT_2026_09_17.md`](DASHBOARD_VARIANT_AUDIT_2026_09_17.md).
+Found the hard way — the dashboard was shown to investors. **I had never audited it**; every "no
+bugs" I gave was scoped to trading deploys.
+
+**There IS a shared model** (all 7 variants return an identical shape via `variant_readers`). These
+are three defects *inside* it, not per-variant one-offs.
+
+| | Bug | Root cause | Blast radius |
+|---|---|---|---|
+| **1** | `total_trades` permanently **0** | `base_strategy.py:5899` initialises it; **nothing ever increments it** | **Every** variant incl. B — breaks win-rate-per-trade, avg-per-trade |
+| **2** | G has **no** return-on-capital / avg-capital-per-day | `_calculate_capital_deployed` does `if entry.spread_width <= 0: continue`; **G is a naked strangle with no wings** → 0 `daily_returns` rows ever | G (and any future undefined-risk strategy). **Also makes G's Sortino meaningless** |
+| **3** | Only **B** shows the previous day | `/api/hydra/summary` + `/api/metrics/cumulative` take **no `strategy_id`** — canonical/live-seat only, while `/api/hydra/entries` + `/api/metrics/daily` were scoped in July (`4b3d6a0`). **That fix was partial.** | Every non-live variant shows the live seat's data or nothing |
+
+**Note on "empty charts pre-market":** partly expected. The per-strategy snapshot has **no
+previous-day concept for ANY variant, B included** — pre-market it returns the freshly-reset day, so
+`entries`/`ohlc`/`spx_open` are legitimately empty for everyone. B only *looks* right because the
+main page reads the unscoped endpoints above.
+
+**Fix order:** (3) scope the two endpoints — highest visible impact, pattern already exists to copy;
+(2) `total_trades` → derive from `total_entries`, which is correct; (1) G's capital model needs a real
+design decision (*what is deployed capital for a naked position?*) and must not be rushed.
+
+**None of this touches trading.** The dashboard is a separate service; restarting it cannot affect
+the bots or the clean-session streak.
+
+---
+
 # §A-bis-2. OPEN FINDINGS from the 2026-09-16 review
 
 ### 🔴 F's daily summary books MORE than the trade could earn
