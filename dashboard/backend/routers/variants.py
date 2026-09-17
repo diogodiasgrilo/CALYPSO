@@ -26,6 +26,8 @@ from typing import Optional
 
 from fastapi import APIRouter, HTTPException
 
+from shared import strategy_taxonomy as tax
+
 from dashboard.backend.config import settings
 from dashboard.backend.services.state_reader import StateFileReader
 from dashboard.backend.services.metrics_reader import MetricsFileReader
@@ -59,7 +61,35 @@ router = APIRouter(prefix="/api/variants", tags=["variants"])
 # comparison/aggregate math here would mis-render (debit shown as credit).
 # Group-scoped comparison for the calendar group is served by /api/strategies via
 # the taxonomy (shared/strategy_taxonomy.py), not by this legacy endpoint.
+#
+# This is the DEFAULT MEMBER SET of the legacy /api/variants/comparison endpoint
+# ONLY. It is deliberately NOT the set of variants that can be READ — see
+# _READABLE_IDS below. Conflating the two is what made F and G invisible: the
+# taxonomy-driven group endpoint resolved ic_0dte's members as [a, b, c, f] and
+# then handed them to build_comparison, which filtered them through readers
+# built from this list, silently dropping F. undefined_risk_0dte (member [g])
+# came back completely empty. Found by the 2026-09-17 visual audit — the F
+# column collapsed to zero width and its em-dashes merged into C's numbers.
 _VARIANT_IDS: list[str] = ["a", "b", "c"]
+
+# Every variant that has a ``variant_<id>_state_file`` setting and is NOT a
+# calendar. Readers are built from THIS set, so build_comparison can serve any
+# member list the taxonomy hands it. Derived from the taxonomy rather than
+# hardcoded so adding a strategy needs no edit here (the playbook's promise).
+def _readable_ids() -> list[str]:
+    ids: list[str] = []
+    for vid in tax.available_ids():
+        vid = vid.lower()
+        # Debit calendars keep their own renderer; the IC math here would
+        # mis-render them, which is the long-standing reason D/E are excluded.
+        if tax.group(vid).pnl_shape == "debit":
+            continue
+        if getattr(settings, f"variant_{vid}_state_file", None) is not None:
+            ids.append(vid)
+    return ids or list(_VARIANT_IDS)
+
+
+_READABLE_IDS: list[str] = _readable_ids()
 
 
 def _variant_paths(vid: str) -> dict:
@@ -79,7 +109,8 @@ def _variant_paths(vid: str) -> dict:
     }
 
 
-_VARIANTS: dict[str, dict] = {vid: _variant_paths(vid) for vid in _VARIANT_IDS}
+# Built over _READABLE_IDS, not _VARIANT_IDS — see the note above.
+_VARIANTS: dict[str, dict] = {vid: _variant_paths(vid) for vid in _READABLE_IDS}
 
 # Reader pools — one per variant. Built lazily so a missing settings field
 # doesn't crash module import, just makes that variant unavailable.
