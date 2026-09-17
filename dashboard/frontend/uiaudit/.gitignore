@@ -1,5 +1,10 @@
 # Captured production payloads + rendered output — regenerate, never commit.
 fixtures/
+fixtures_premarket/
 shots/
+shots_pre/
 findings.json
 structural.json
+# Derived/one-off probes generated during a run.
+audit_pre.mjs
+check-ratios.mjs
