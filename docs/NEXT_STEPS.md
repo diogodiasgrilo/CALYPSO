@@ -484,7 +484,20 @@ G sold ~$1,480 and ~$1,605 of event premium (vs ~$220 on a normal day — the cr
 announcement being priced), had both call sides stopped, and went into the 14:00 announcement holding
 **two naked short puts**. G is dry-run, so this is a research observation, not an incident — but it
 is backwards: the one strategy with unbounded loss is the only one taking Fed-announcement risk,
-while every defined-risk strategy sits out. **If G is ever promoted, that config travels with it.**
+while every defined-risk strategy sits out.
+
+**DECIDED 2026-09-17 — leave it ON in dry-run, gate it at promotion.** Switching the skip on today
+would cost the scarce event-day data (~8 FOMC days/yr) and protect nothing, because nothing is at
+risk in simulation. The danger was never "G trades FOMC in dry-run" — it is G being promoted while
+carrying that default. Recorded as blockers **G-1/G-2/G-3** in
+[`GO_LIVE_MASTER.md` §2-ter](GO_LIVE_MASTER.md), which the Level-I flip section now points at.
+
+**How 2026-09-16 actually ended:** G sold $3,085 of event premium, was whipsawed on BOTH sides
+(4 stops: calls at 11:00/11:47 as SPX ran to 7626, puts at 12:28/13:04 as it reversed to 7510) and
+netted **−$708.80** on a **1.53% range** day — the largest in the dataset, and an independent
+confirmation of the complementarity finding that RANGE is what kills these strategies. A/B/C skipped
+and lost nothing. **G's stops worked** — it was flat before the announcement — but that is path luck:
+stops protect against a move, not a gap. n=1; revisit after ~3 more FOMC days.
 
 ### 📄 CLAUDE.md is stale on FOMC
 

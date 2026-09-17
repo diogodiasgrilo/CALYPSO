@@ -43,6 +43,8 @@ is each variant's `config_variant_*.json` `dry_run` on the VM; this table is the
 | **C** | Brandon Narrow baseline — 0DTE IC | dry-run shadow (was **LIVE-PAPER** through 2026-07-24) | Level I paper-flip (available again via rollback) | live seat handed to it by [`flip_bc_rollback.sh`](../scripts/flip_bc_rollback.sh) if swapped back | [`broker_paper_smoke.py`](../scripts/broker_paper_smoke.py) | Proven live-paper track record through 2026-07-24 (~breakeven); now dry-run shadow alongside B. Its **Entry-Schedule Lock ~mid-Aug** ([NEXT_STEPS §5](NEXT_STEPS.md)) analysis still applies to its historical data. |
 | **D** | DC Time Machine — multi-day SPX calendar (`calendar_multiday`) | dry-run-**LOCKED** | Level I = **a BUILD**, not a flip (DG-1..DG-11) | `flip_d_live.sh` **(NOT BUILT)** | `broker_dc_smoke.py` **(NOT BUILT)** | **NO-GO** ([`D_GOLIVE_SCOPE_AND_AUDIT.md`](migration/D_GOLIVE_SCOPE_AND_AUDIT.md)) — no real-order path; edge **INSUFFICIENT_DATA**. See [`D_GOLIVE_RUNBOOK.md`](migration/D_GOLIVE_RUNBOOK.md). |
 | **E** | SPY Double Calendar — multi-day (`calendar_multiday`) | dry-run-**LOCKED** | Level I = a BUILD ([NEXT_STEPS §2b](NEXT_STEPS.md)) | `flip_e_live.sh` **(NOT BUILT)** | `broker_dc_smoke.py` **(NOT BUILT)** | Edge **INSUFFICIENT_DATA** (n=0); least-documented; SPY assignment/dividend + IV-rank gate unbuilt. E go-live runbook to be modeled on D's. |
+| **F** | Ghauri Mean Reversion — 0DTE one-sided credit spread (`ic_0dte`) | dry-run-**LOCKED** | Level I paper-flip — **BLOCKED**, see §2-ter | `flip_f_live.sh` **(NOT BUILT)** | [`broker_paper_smoke.py`](../scripts/broker_paper_smoke.py) | **Barely any record: 1 recorded entry, 2 stops, lifetime −$14.80.** Entries were NEVER recorded until `88ec8ed` (2026-09-15) — every earlier session is unrecoverable. **Also trades FOMC announcement days** (`fomc_announcement_skip=false`). Needs a real track record before any flip. |
+| **G** | Strangle — 0DTE naked short strangle, **UNDEFINED RISK** (`undefined_risk_0dte`) | dry-run-**LOCKED** | Level I paper-flip — **BLOCKED**, see §2-ter | `flip_g_live.sh` **(NOT BUILT)** | [`broker_paper_smoke.py`](../scripts/broker_paper_smoke.py) | 11 traded days, lifetime **+$1,114.85**. **Sole variant taking FOMC event risk** while every defined-risk variant sits out — on 2026-09-16 it sold $3,085 of event premium, was whipsawed on BOTH sides (4 stops) and netted **−$708.80** on a 1.53% range day. Undefined risk is sized by broker margin, not a defined-risk floor. |
 
 **Level-II (real-money) status for B is measured gate-by-gate in [§2-bis](#2-bis-level-ii-real-money-gate-status--measured-2026-09-12) below.**
 
@@ -50,6 +52,36 @@ is each variant's `config_variant_*.json` `dry_run` on the VM; this table is the
 [RUNBOOKS.md RB-9](migration/RUNBOOKS.md)); A/C are dry-run; **D and E are BUILDS, not flips** (they have no
 real-order path yet) and are calendar-shaped, so the 0DTE readiness checklist (§5) does not transfer to them —
 they need their own gate.
+
+---
+
+## 2-ter. PROMOTION BLOCKERS — per-variant, must be cleared before a Level-I flip
+
+A variant being dry-run is not the same as it being *ready but unflipped*. These are the specific
+reasons each one cannot take a live seat today. **Check this table before running any `flip_*`
+script** — a config that is harmless in simulation travels with the variant when it is promoted, and
+that is the moment nobody re-reads it.
+
+### G — Strangle (undefined risk)
+
+| # | Blocker | Why it matters | Status |
+|---|---|---|---|
+| **G-1** | **`fomc_announcement_skip = false`** | G is the ONLY variant that trades FOMC announcement days; A/B/C all skip them. So the one strategy with **unbounded** loss is the only one taking Fed-event risk. **Deliberately left ON in dry-run** — event days are rare (~8/yr) and the data is scarce and valuable, and nothing is at risk in simulation. It must be a conscious decision at promotion, not an inherited default. | **OPEN — decide at flip** |
+| **G-2** | No live track record on event days | n=1. 2026-09-16 cost −$708.80 on 1 contract (≈ −$4,960 at B's 7c) — but it also collected 8× normal premium, so one bad day is not a policy. | **OPEN — revisit after ~3 more FOMC days** |
+| **G-3** | Undefined risk is not covered by the halt criteria | [`LIVE_HALT_CRITERIA.md`](migration/LIVE_HALT_CRITERIA.md) thresholds were derived from **B**, a defined-risk IC whose per-side loss is capped by spread width. A naked strangle has no such cap, so H1/H2 dollar limits do not transfer. | **OPEN — needs its own thresholds** |
+
+> **What 2026-09-16 actually proved, in G's favour:** its stops worked. All four fired between 11:00
+> and 13:04, so G was flat *before* the announcement. The undefined-risk fear did not materialise.
+> But stops protect against a *move*, not a *gap* — had the announcement produced an instant drop,
+> naked puts would have gapped through them. Treat the good outcome as path luck, not proof.
+
+### F — Ghauri Mean Reversion
+
+| # | Blocker | Why it matters | Status |
+|---|---|---|---|
+| **F-1** | No usable track record | Entries were never recorded before `88ec8ed` (2026-09-15). Lifetime P&L reads −$14.80 from **one** entry and two stops; every earlier session is unrecoverable. | **OPEN — needs weeks of data** |
+| **F-2** | Daily-summary accounting disagrees with the trade tables | 2026-09-15 booked **$195.00 gross against a $127.50 credit** — more than the trade could earn — and `entries_placed=0` despite a recorded entry. See [NEXT_STEPS §A-bis-2](NEXT_STEPS.md). | **OPEN — undiagnosed** |
+| **F-3** | Trades FOMC days | Same class as G-1, but F is defined-risk so the exposure is bounded. | **OPEN — decide at flip** |
 
 ---
 
@@ -124,6 +156,10 @@ live deployment sized so its **purpose is learning, not earning**:
 paper" — A's original 2026-06-02 go-live; kept as a historical example) and
 **[`RUNBOOKS.md` RB-9](migration/RUNBOOKS.md)** — the **current** procedure for moving which 0DTE-IC variant
 holds the live paper seat (executed C→B on 2026-07-24).
+
+> ⚠️ **Check [§2-ter PROMOTION BLOCKERS](#2-ter-promotion-blockers--per-variant-must-be-cleared-before-a-level-i-flip)
+> first.** The two preconditions below are about the broker being healthy; §2-ter is about whether the
+> VARIANT is ready. A config that is harmless in dry-run travels with the variant when it is promoted.
 
 **Two hard preconditions (both must be true, shared by both procedures):**
 1. `calypso-broker` `/health` returns `connected:true` (the shared IBKR session is up).
