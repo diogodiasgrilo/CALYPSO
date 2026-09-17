@@ -274,7 +274,18 @@ class AlertService:
         # auth/network hiccup at process start) on a cooldown instead of
         # staying permanently local-only for the process's whole life. See
         # the lazy-reinit block in send_alert.
-        self._last_init_attempt: float = 0.0
+        # NEGATIVE INFINITY, not 0.0. The cooldown below compares against
+        # `time.monotonic()`, whose ZERO POINT IS MACHINE BOOT — so 0.0 does not
+        # mean "never attempted", it means "attempted at boot". On a host that
+        # has just started, `monotonic() - 0.0` is a small number, the 60s
+        # cooldown reads as NOT elapsed, and the lazy Pub/Sub reinit is
+        # suppressed for the first minute of uptime — exactly when a bot
+        # starting alongside the machine would need it.
+        #
+        # Invisible on a long-running box (this laptop: 1.5M seconds of
+        # uptime, so 0.0 looks like the distant past) and caught only when CI
+        # ran the suite in a container 33 seconds old.
+        self._last_init_attempt: float = float("-inf")
         self._dry_run = os.environ.get("ALERT_DRY_RUN", "").lower() == "true"
 
         # Alert configuration from config file

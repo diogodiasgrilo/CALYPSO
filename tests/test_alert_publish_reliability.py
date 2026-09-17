@@ -234,7 +234,10 @@ def test_uninitialized_publisher_reinits_after_cooldown_and_publishes(monkeypatc
     monkeypatch.delenv("ALERT_DRY_RUN", raising=False)
     monkeypatch.setattr(alert_service_module, "is_running_on_gcp", lambda: True)
     svc = AlertService({"alerts": {"enabled": True}}, "HYDRA_B")
-    svc._last_init_attempt = 0.0  # far in the past -> cooldown elapsed
+    # Genuinely far in the past. 0.0 is NOT: time.monotonic()'s zero point is
+    # machine boot, so on a host up for less than the 60s cooldown (a fresh CI
+    # container) 0.0 reads as "just now" and the reinit is skipped.
+    svc._last_init_attempt = time.monotonic() - 3600
 
     def _fake_reinit():
         svc._initialized = True
@@ -395,3 +398,26 @@ def test_concurrent_dead_letter_writes_produce_valid_jsonl(monkeypatch):
     assert len(records) == n_threads
     titles = {r["title"] for r in records}
     assert titles == {f"concurrent-{i}" for i in range(n_threads)}
+
+
+def test_reinit_is_not_suppressed_on_a_freshly_booted_host():
+    """`_last_init_attempt` must mean "never attempted", not "attempted at boot".
+
+    The cooldown compares against `time.monotonic()`, whose ZERO POINT IS
+    MACHINE BOOT. The old default of 0.0 therefore read as "attempted at boot",
+    so on a host up for less than the 60-second cooldown the lazy Pub/Sub reinit
+    was suppressed — precisely when a bot starting alongside the machine would
+    need it.
+
+    Invisible on a long-running box (a dev laptop with 17.8 days of uptime makes
+    0.0 look like the distant past) and only caught when CI ran the suite inside
+    a container 33 seconds old.
+    """
+    from unittest.mock import patch
+
+    with patch.object(alert_service_module.time, "monotonic", lambda: 33.0):
+        svc = AlertService({"alerts": {"enabled": True}}, "HYDRA_B")
+        assert (33.0 - svc._last_init_attempt) > 60, (
+            "a freshly booted host would skip the lazy reinit for its first "
+            "minute of uptime"
+        )
