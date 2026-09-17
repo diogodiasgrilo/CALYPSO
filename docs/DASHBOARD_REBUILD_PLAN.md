@@ -153,3 +153,64 @@ work. Phases 5 and 6 are independent and can land any time after 1.
 **Nothing here touches trading.** The dashboard is a separate systemd service; restarting it cannot
 affect the bots, the live seat, or the Gate-4 clean-session streak. Phase 3 is the single exception —
 it edits `base_strategy.py`, which the bots do load, so it ships to a dry-run variant first.
+
+---
+
+## 8. STATUS 2026-09-17 — what is actually done, and what is not
+
+### Done: the 8 data-layer defects (D1–D8)
+
+All closed, all deployed, all verified on live data. The Phase 0 contract file
+has **zero xfails**; every former defect is now a permanent guard rail. Suite
+3732 passed.
+
+### NOT done, and I overstated one of them
+
+**`sides` is declared but WIRED NOWHERE.** Phase 2 added it to the taxonomy and
+Phase 4 shipped it via `/api/strategies/meta`, but no component consumes it.
+I described Phase 4 as hiding F's absent side; **it does not**. F still renders a
+phantom call leg wherever entries are drawn.
+
+Measured:
+
+```
+components consulting capital_basis :  2 of 36   (DailyPnLCard, MarketContextBanner)
+components consulting sides         :  0 of 36
+components carrying IC-shape assumptions : 7+   (EntryCard alone: 19 field refs)
+```
+
+**34 of 36 components have never had the shape-aware lens applied.** The 8
+defects were found by auditing the BACKEND (endpoints, taxonomy, snapshot). The
+same audit has not been run on the component layer, so the honest expectation is
+that more of this class exists there.
+
+### Remaining phases
+
+| | Work | Why |
+|---|---|---|
+| **8** | Wire `sides` — hide the side a one-sided strategy never trades | Declared, shipped, unused. F renders a leg it does not have. |
+| **9** | Component-level shape audit — the other 34 | Same lens, layer never checked. `EntryCard`, `icEntryView`, `PositionHeatmap`, `DayDetailEntries`, `SessionReplay`, `Analytics`, `Comparison`. |
+| **10** | G's tail cards | The plan promised "max loss: UNBOUNDED" + distance-to-short. `boundedLoss:false` exists in config; no card renders it yet. |
+| **11** | Visual / UX pass | **Not started, and not assessable from here — see below.** |
+
+### On "beautiful, intuitive, Apple-like" — the honest limit
+
+**I cannot see the dashboard.** Everything above was established by reading code,
+querying APIs and diffing payloads. I have never rendered a page, and I have no
+screenshot. So I can audit *structural* qualities — design-token consistency,
+spacing scales, hardcoded colours, duplicated layout primitives, accessibility
+attributes, responsive breakpoints — but I cannot judge whether it *looks* good,
+and any claim that it does would be unfounded.
+
+Two honest routes, and they compose:
+
+1. **Structural audit I can do now** — enumerate every hardcoded colour/spacing
+   value that bypasses the design tokens, every one-off layout, every
+   inconsistent label. That reliably finds the *incoherence* that reads as
+   "unpolished", without me seeing anything.
+2. **You look, I fix** — screenshots or a list of what feels wrong, which is the
+   only way to get taste-level judgement into this.
+
+Route 1 is real work with a real output and should happen regardless. Route 2 is
+the only path to "Apple-like", because that is a judgement about how it *feels*,
+and I do not have access to that signal.
