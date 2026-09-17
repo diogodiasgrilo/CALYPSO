@@ -9,6 +9,7 @@ from dashboard.backend.services.metrics_reader import MetricsFileReader
 from dashboard.backend.services.db_reader import apply_db_cumulative
 from dashboard.backend.services.variant_readers import (
     canonical_db_reader, reader_for, live_metrics_file, live_baseline_date,
+    metrics_file_for,
 )
 from dashboard.backend.services.live_state import LiveStateProvider
 from dashboard.backend.services.market_status import get_today_et, is_after_market_close
@@ -63,15 +64,19 @@ def _append_today_summary(summaries: list[dict]) -> list[dict]:
 
 
 @router.get("/cumulative")
-async def get_cumulative():
+async def get_cumulative(strategy_id: str = Query(default="")):
     """Lifetime cumulative metrics (DB-canonical — see apply_db_cumulative).
 
     Rebased to settings.baseline_date when set (sums only days >= baseline);
     the resolved baseline is echoed back so the UI can caption "since <date>".
     """
-    data = _live_metrics_reader().read_latest()
-    _baseline = live_baseline_date()
-    overrides = await canonical_db_reader().get_cumulative_overrides(_baseline)
+    reader, is_canonical = reader_for(strategy_id)
+    data = MetricsFileReader(metrics_file_for(strategy_id)).read_latest()
+    # Baseline rebasing is a LIVE-SEAT concept (the B go-live date); applying it
+    # to another variant would silently truncate its history to a date that has
+    # no meaning for it.
+    _baseline = live_baseline_date() if is_canonical else ""
+    overrides = await reader.get_cumulative_overrides(_baseline)
     data = apply_db_cumulative(data, overrides)
     if data is None:
         data = {}
@@ -202,7 +207,13 @@ async def get_performance(strategy_id: str = Query(default="")):
 
 
 @router.get("/range")
-async def get_date_range():
-    """Available date range in database."""
-    info = await canonical_db_reader().get_date_range()
+async def get_date_range(strategy_id: str = Query(default="")):
+    """Available date range in the PICKED variant's database.
+
+    Canonical-only previously, so the History calendar offered the live seat's
+    date span for every strategy — a variant with a shorter history showed
+    selectable days that hold no data for it.
+    """
+    reader, _ = reader_for(strategy_id)
+    info = await reader.get_date_range()
     return info or {"first_date": None, "last_date": None, "total_days": 0}

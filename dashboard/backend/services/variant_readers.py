@@ -122,6 +122,41 @@ def canonical_db_reader() -> BacktestingDBReader:
 canonical_reader = BacktestingDBReader(settings.backtesting_db)
 
 
+def resolve_for(strategy_id: str) -> tuple[str, bool]:
+    """``(variant_id, is_canonical)`` for a picked strategy id.
+
+    The file-path twin of :func:`reader_for`, for the endpoints that read STATE /
+    CONFIG / METRICS files rather than a database. Same degradation contract: an
+    empty, unknown, or live-seat id resolves to the canonical seat with
+    ``is_canonical=True``, so a bad query param renders the live seat instead of
+    500-ing (dashboard rebuild Phase 1).
+    """
+    canonical = live_seat_id()
+    sid = (strategy_id or "").strip().lower()
+    if not sid or sid == canonical:
+        return canonical, True
+    if getattr(settings, f"variant_{sid}_state_file", None) is None:
+        return canonical, True
+    return sid, False
+
+
+def state_file_for(strategy_id: str) -> Path:
+    vid, is_canon = resolve_for(strategy_id)
+    return live_state_file() if is_canon else Path(getattr(settings, f"variant_{vid}_state_file"))
+
+
+def config_file_for(strategy_id: str) -> Path:
+    vid, is_canon = resolve_for(strategy_id)
+    p = None if is_canon else getattr(settings, f"variant_{vid}_config_file", None)
+    return live_config_file() if p is None else Path(p)
+
+
+def metrics_file_for(strategy_id: str) -> Path:
+    vid, is_canon = resolve_for(strategy_id)
+    p = None if is_canon else getattr(settings, f"variant_{vid}_metrics_file", None)
+    return live_metrics_file() if p is None else Path(p)
+
+
 def reader_for(strategy_id: str) -> tuple[BacktestingDBReader, bool]:
     """Return ``(reader, is_canonical)`` for a picked strategy id.
 

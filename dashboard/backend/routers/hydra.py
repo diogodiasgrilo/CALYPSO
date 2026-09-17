@@ -13,6 +13,7 @@ from dashboard.backend.config import settings
 from dashboard.backend.services.state_reader import StateFileReader
 from dashboard.backend.services.variant_readers import (
     reader_for, live_state_file, live_config_file, live_label,
+    resolve_for, state_file_for, config_file_for,
 )
 from dashboard.backend.services.market_status import get_today_et
 
@@ -33,8 +34,27 @@ def _live_state_reader() -> StateFileReader:
     return _state_readers[key]
 
 
+_VARIANT_STATE_READERS: dict[str, "StateFileReader"] = {}
+
+
+def _state_reader_for(strategy_id: str):
+    """StateFileReader for the picked variant; canonical when unknown/empty.
+
+    Cached per variant because StateFileReader holds a read cache — constructing
+    one per request would defeat it and re-read the file on every poll.
+    """
+    vid, is_canonical = resolve_for(strategy_id)
+    if is_canonical:
+        return _live_state_reader()
+    r = _VARIANT_STATE_READERS.get(vid)
+    if r is None:
+        r = StateFileReader(state_file_for(strategy_id))
+        _VARIANT_STATE_READERS[vid] = r
+    return r
+
+
 @router.get("/bot-config")
-async def get_bot_config():
+async def get_bot_config(strategy_id: str = Query(default="")):
     """Read E6/E7 enabled flags + canonical entry schedule from bot config file.
 
     `entry_times` / `conditional_entry_times` are the canonical (pre-VIX-cap)
@@ -47,7 +67,7 @@ async def get_bot_config():
     # variant C, the live canonical strategy). The dry_run flag + schedule here
     # drive the main dashboard's banner/labels, so they must match whichever
     # variant the main page is showing.
-    config_path = live_config_file()
+    config_path = config_file_for(strategy_id)
     try:
         with open(config_path) as f:
             config = json.load(f)
@@ -101,9 +121,15 @@ async def get_bot_config():
 
 
 @router.get("/state")
-async def get_state():
-    """Current HYDRA state from last file read."""
-    data = _live_state_reader().read_latest()
+async def get_state(strategy_id: str = Query(default="")):
+    """Current state, scoped to the picked strategy variant.
+
+    Phase 1 of the dashboard rebuild. This was canonical-only, so the main page
+    showed the LIVE SEAT's state no matter which strategy was picked — right for
+    B, wrong or blank for everyone else. Empty / unknown / live-seat id → the
+    canonical reader, so every existing caller is unchanged.
+    """
+    data = _state_reader_for(strategy_id).read_latest()
     if data is None:
         return {"error": "State file not available"}
     return data
@@ -137,7 +163,7 @@ async def get_entries(date_str: str | None = None, strategy_id: str = Query(defa
 
 
 @router.get("/summary")
-async def get_summary():
+async def get_summary(strategy_id: str = Query(default="")):
     """Today's summary: P&L, entries count, stops, credits.
 
     Delegates to the canonical `_summary_from_state` (variants router) so the
@@ -148,7 +174,8 @@ async def get_summary():
     """
     from dashboard.backend.routers.variants import _summary_from_state
 
-    state = _live_state_reader().get_cached() or _live_state_reader().read_latest()
+    _r = _state_reader_for(strategy_id)
+    state = _r.get_cached() or _r.read_latest()
     if not state:
         return {"error": "State not available"}
 

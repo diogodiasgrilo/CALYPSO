@@ -147,22 +147,24 @@ def test_D3_sortino_distinguishes_no_data_from_zero():
 # D4 / D5 — endpoints that silently answer for the live seat
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, reason="D4: summary + cumulative are canonical-only")
 @pytest.mark.parametrize("router,path", [("hydra", "/summary"), ("metrics", "/cumulative")])
 def test_D4_previous_day_endpoints_are_variant_scoped(router, path):
-    """These feed the summary and cumulative cards. Unscoped, they answer for
-    the LIVE SEAT no matter which strategy is picked — which is precisely why
-    only B appears to show the previous day. The July fix (4b3d6a0) scoped
-    /hydra/entries and /market/replay_pnl and stopped there; this completes it."""
+    """These feed the summary and cumulative cards. Unscoped, they answered for
+    the LIVE SEAT no matter which strategy was picked — which is precisely why
+    only B appeared to show the previous day. The July fix (4b3d6a0) scoped
+    /hydra/entries and /market/replay_pnl and stopped there; Phase 1 completed it.
+
+    FIXED 2026-09-17. Kept as a GUARD RAIL — a regression here silently restores
+    "every strategy shows the live seat's numbers"."""
     assert _is_scoped(router, path), f"{router}{path} takes no strategy_id"
 
 
-@pytest.mark.xfail(strict=True, reason="D5: live-state endpoints are canonical-only")
 @pytest.mark.parametrize(
     "router,path",
     [("hydra", "/state"), ("hydra", "/bot-config"), ("metrics", "/range")],
 )
 def test_D5_live_state_endpoints_are_variant_scoped(router, path):
+    # FIXED in Phase 1 (2026-09-17). Guard rail from here on.
     assert _is_scoped(router, path), f"{router}{path} takes no strategy_id"
 
 
