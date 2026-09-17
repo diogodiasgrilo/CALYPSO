@@ -1,0 +1,128 @@
+# CALYPSO / HYDRA — continuous integration.
+#
+# WHY THIS EXISTS. Until 2026-09-17 there was no CI at all: the test suite, the
+# typecheck, the linter and the 42-surface visual audit were run BY HAND when
+# someone remembered. That is how the dashboard accumulated months of silent
+# drift — fixes landed, nothing guarded them, and the regressions were only
+# found when it was shown to investors.
+#
+# Everything here already existed as a local command. The only new thing is that
+# it now runs on every push, so today's fixes cannot quietly rot.
+#
+# NO SECRETS ARE REQUIRED. The tests are offline; the visual audit renders
+# against SYNTHETIC fixtures generated from the taxonomy
+# (scripts/make_synthetic_fixtures.py), so CI never needs VM access and never
+# handles real positions or P&L.
+
+name: CI
+
+on:
+  push:
+    branches: ["**"]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  tests:
+    name: Python suite
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+      - name: Run the suite
+        # -q keeps the log readable; a failure still prints the full diff.
+        run: python -m pytest tests/ -q
+
+  frontend:
+    name: Typecheck + lint ratchet + build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: dashboard/frontend
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/frontend/package-lock.json
+      - run: npm ci
+      - name: Typecheck
+        run: npx tsc --noEmit -p tsconfig.app.json
+      - name: Lint ratchet
+        # Allows the 15 known, documented errors; fails on anything NEW.
+        # A plain `eslint .` would be red every run and get ignored.
+        working-directory: .
+        run: python3 -m scripts.check_eslint_baseline
+      - name: Production build
+        run: npm run build
+
+  visual:
+    name: 42-surface visual audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: npm
+          cache-dependency-path: dashboard/frontend/package-lock.json
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          cd dashboard/frontend && npm ci
+      - name: Install Chromium
+        run: cd dashboard/frontend && npx playwright install --with-deps chromium
+      - name: Generate synthetic fixtures
+        # Built by calling the REAL router handlers against a synthetic data
+        # tree, so a backend response-shape change updates the fixture instead
+        # of leaving the audit testing a shape that no longer exists.
+        run: python -m scripts.make_synthetic_fixtures --out dashboard/frontend/uiaudit/fixtures_synthetic
+      - name: Build frontend
+        run: cd dashboard/frontend && npm run build
+      - name: Render every surface and collect console errors
+        run: |
+          cd dashboard/frontend/uiaudit
+          FIXTURES=./fixtures_synthetic/ node mock-server.mjs &
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:4178/api/health >/dev/null && break
+            sleep 1
+          done
+          node audit.mjs
+      - name: Responsive sweep (390 / 820 / 1440 / 1920)
+        run: |
+          cd dashboard/frontend/uiaudit
+          node viewports.mjs | tee /tmp/viewports.txt
+          # The dashboard is PWA-installable and ships an iOS widget, so a phone
+          # is a supported surface. Any horizontal overflow fails the build.
+          if grep -q "OVERFLOW" /tmp/viewports.txt; then
+            echo "::error::horizontal overflow at one or more viewports"
+            exit 1
+          fi
+      - name: Upload screenshots
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: dashboard-screenshots
+          path: dashboard/frontend/uiaudit/shots/
+          retention-days: 7
+          if-no-files-found: ignore

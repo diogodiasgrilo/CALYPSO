@@ -66,7 +66,10 @@ for (const sid of STRATS) {
         textLen: text.length,
         blank: text.trim().length < 120,
         hasNaN: /\bNaN\b/.test(text),
-        hasUndefined: /\bundefined\b/.test(text),
+        // NOT a bare \bundefined\b: a real strategy label contains
+        // "undefined-risk", and matching inside a hyphenated compound makes
+        // this fail forever on correct text.
+        hasUndefined: /(^|[^-\w])undefined([^-\w]|$)/.test(text),
         hasInfinity: /Infinity/.test(text),
       });
     } catch (e) {
