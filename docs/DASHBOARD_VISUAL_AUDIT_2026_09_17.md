@@ -234,6 +234,52 @@ Worth recording, because the audit is not a demolition:
 
 ---
 
+## 5a. STATUS — what is fixed and deployed
+
+| | defect | status |
+|---|---|---|
+| §3 | Previous-day cards reachable only from `PrimaryICView` | **FIXED + DEPLOYED** `d61c53d` |
+| §3 | Off-day cards showed the live seat's best/worst/avg for every strategy | **FIXED + DEPLOYED** `d61c53d` |
+| §3 | `OffDaySummaryCards` fetched without `strategy_id` | **FIXED + DEPLOYED** `d61c53d` |
+| — | `MarketContextBanner` conditional hook (rules-of-hooks) | **FIXED + DEPLOYED** `d61c53d` |
+| D9 | F and G dropped from every group comparison | **FIXED + DEPLOYED** `bf287a2` |
+| D10 | Ratio gate counted rows, not traded days | **FIXED + DEPLOYED** `7df9817` |
+| D14 | Group tab asserted a single strategy's identity | **FIXED + DEPLOYED** `134c915` |
+| D17 | Dead `pages/DoubleCalendar.tsx` | **DELETED** `134c915` |
+| D2 | G has no capital history (Return on Margin / Peak Margin blank) | **SCRIPT READY** — `scripts/backfill_capital_deployed.py`; must run AFTER a settlement (see below) |
+| D11 | Analytics + History entirely shape-blind | open — largest remaining |
+| D12 | Missing VIX rendered as `0.0` | open |
+| D13 | "Entries 0" on days with P&L | open |
+| D15 | Two sources of truth for the palette | open |
+| D16 | 105 arbitrary `text-[Npx]` values | open |
+| D18 | `$0` bucket dominates the distribution histogram | open |
+| D19 | Single-member group renders a "leaderboard" | open |
+| — | 19 remaining eslint errors (2 more rules-of-hooks, 12 set-state-in-effect) | open |
+| P8 | Wire `sides` — F renders a leg it does not have | open |
+| P10 | G's tail cards (`UNBOUNDED` max loss, σ-to-breach) | open |
+
+### The G backfill has an ordering constraint
+
+`cumulative_metrics` is loaded **once at startup** (`base_strategy.py:1366`) and the whole file is
+rewritten from that in-memory copy at settlement (`:6511`). Writing underneath a running bot is
+therefore **silently discarded at the next close**. The script refuses to write while the unit is
+active; run it after a settlement completes (or with `--force` plus an immediate restart):
+
+```bash
+python -m scripts.backfill_capital_deployed --variant g            # dry run
+python -m scripts.backfill_capital_deployed --variant g --write    # after the close
+```
+
+Dry-run output, verified against real data — the reconstructed per-day net sums to **$836.45**,
+exactly G's independently-tracked lifetime P&L:
+
+```
+13 rows · avg capital/day $50,769 · net $836.45 · ROI 0.127%
+capital is $30,000 on the four days the two entries did NOT overlap, $60,000 otherwise
+```
+
+---
+
 ## 6. Priority
 
 > Re-rated after measurement: D10 dropped HIGH → MEDIUM once I checked which

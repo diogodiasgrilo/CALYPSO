@@ -193,24 +193,27 @@ that more of this class exists there.
 | **10** | G's tail cards | The plan promised "max loss: UNBOUNDED" + distance-to-short. `boundedLoss:false` exists in config; no card renders it yet. |
 | **11** | Visual / UX pass | **Not started, and not assessable from here — see below.** |
 
-### On "beautiful, intuitive, Apple-like" — the honest limit
+### SUPERSEDED 2026-09-17 — I can see the dashboard now
 
-**I cannot see the dashboard.** Everything above was established by reading code,
-querying APIs and diffing payloads. I have never rendered a page, and I have no
-screenshot. So I can audit *structural* qualities — design-token consistency,
-spacing scales, hardcoded colours, duplicated layout primitives, accessibility
-attributes, responsive breakpoints — but I cannot judge whether it *looks* good,
-and any claim that it does would be unfounded.
+The limit recorded here ("I cannot see the dashboard… I have never rendered a
+page") is **closed**. A Playwright harness now renders all 42 surfaces against
+real captured production payloads, including a WebSocket replay so the live seat
+renders at all:
+[`DASHBOARD_VISUAL_AUDIT_2026_09_17.md`](DASHBOARD_VISUAL_AUDIT_2026_09_17.md).
 
-Two honest routes, and they compose:
+What that changed, concretely:
 
-1. **Structural audit I can do now** — enumerate every hardcoded colour/spacing
-   value that bypasses the design tokens, every one-off layout, every
-   inconsistent label. That reliably finds the *incoherence* that reads as
-   "unpolished", without me seeing anything.
-2. **You look, I fix** — screenshots or a list of what feels wrong, which is the
-   only way to get taste-level judgement into this.
+* It found the mechanism behind the ORIGINAL complaint, which the D1–D8 work had
+  NOT fixed — the previous-day cards were reachable only from `PrimaryICView`.
+  Endpoint scoping was necessary but not sufficient; the view was the gap.
+* It found 11 further defects (D9–D19), four of which are now fixed and
+  deployed, including F and G being silently dropped from every group comparison
+  and the header asserting a false strategy identity on the comparison tab.
+* Its console-error capture is the part code-reading cannot substitute for. It
+  came back clean (0 errors across 42 surfaces), which is itself a result.
 
-Route 1 is real work with a real output and should happen regardless. Route 2 is
-the only path to "Apple-like", because that is a judgement about how it *feels*,
-and I do not have access to that signal.
+Route 1 (structural audit) ran and produced numbers: 105 arbitrary
+`text-[Npx]` values, 29 hex literals across 7 files duplicating CSS tokens, zero
+horizontal overflow, zero clipped text. Route 2 still helps — taste is yours to
+judge — but it is no longer the ONLY path, and the harness catches the class of
+defect that made the investor demo embarrassing.
