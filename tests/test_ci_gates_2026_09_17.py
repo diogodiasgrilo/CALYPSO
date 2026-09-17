@@ -90,3 +90,45 @@ def test_synthetic_fixture_generator_is_importable():
 
     m = importlib.import_module("scripts.make_synthetic_fixtures")
     assert hasattr(m, "main")
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Test isolation — what CI's first real failure exposed
+# ─────────────────────────────────────────────────────────────────────────────
+
+CONFTEST = ROOT / "tests" / "conftest.py"
+
+
+def test_shared_gex_cache_is_isolated_per_test():
+    """gex_shared_cache defaults to /opt/calypso/data/shared, which is the LIVE
+    cache on the VM and a creatable (therefore polluting) path on any Linux
+    runner. On macOS it simply fails to create and the cache silently disables —
+    which is why the suite was green locally and red in CI.
+
+    Without this fixture, running the suite on the VM would read and write the
+    production cache that variants B and C share at entry time."""
+    assert CONFTEST.exists(), "no conftest — the shared GEX cache is unisolated"
+    src = CONFTEST.read_text()
+    assert "autouse=True" in src
+    assert "CALYPSO_GEX_CACHE_DIR" in src
+    assert "tmp_path_factory" in src, (
+        "isolation must use a temp directory, not a fixed path shared between "
+        "tests."
+    )
+
+
+def test_ci_installs_the_dev_requirements():
+    """CI's very first run failed with 'No module named pytest': it installed
+    requirements.txt, which deliberately leaves the test tooling commented out
+    because the trading VM must not carry it."""
+    live = [l for l in CI.read_text().splitlines()
+            if l.strip() and not l.strip().startswith("#")]
+    assert any("requirements-dev.txt" in l for l in live)
+    dev = (ROOT / "requirements-dev.txt")
+    assert dev.exists()
+    body = dev.read_text()
+    assert "-r requirements.txt" in body, (
+        "the dev file must LAYER on the production pins, not duplicate them — "
+        "duplicated versions drift."
+    )
+    assert "pytest==" in body and "httpx==" in body
