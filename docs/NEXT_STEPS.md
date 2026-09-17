@@ -475,9 +475,16 @@ previous-day concept for ANY variant, B included** — pre-market it returns the
 `entries`/`ohlc`/`spx_open` are legitimately empty for everyone. B only *looks* right because the
 main page reads the unscoped endpoints above.
 
-**Fix order:** (3) scope the two endpoints — highest visible impact, pattern already exists to copy;
-(2) `total_trades` → derive from `total_entries`, which is correct; (1) G's capital model needs a real
-design decision (*what is deployed capital for a naked position?*) and must not be rushed.
+**SUPERSEDED by the full audit — see [`DASHBOARD_REBUILD_PLAN.md`](DASHBOARD_REBUILD_PLAN.md).**
+The exhaustive pass found **8 defects, not 3**, and one architectural cause behind most of them:
+`pnl_shape` conflates *how P&L is earned* (credit/debit) with *what capital means* (spread width /
+net debit / broker margin). G earns a credit, so it is tagged `credit` and inherits the iron-condor
+renderer **and its capital model** — which is why ROC is missing rather than merely blank.
+Also newly found: **`/api/dc/status` is hardcoded to `variant_d`, so E can never show its own data**,
+and **F is classified `iron_condor` but trades one-sided**, so it renders a side it never has.
+The plan adds `capital_basis` + `sides` to the taxonomy and gives G margin/tail cards instead of
+return-on-width. 7 phases, each independently shippable; Phase 0 is a contract test that must FAIL
+on today's code.
 
 **None of this touches trading.** The dashboard is a separate service; restarting it cannot affect
 the bots or the clean-session streak.
