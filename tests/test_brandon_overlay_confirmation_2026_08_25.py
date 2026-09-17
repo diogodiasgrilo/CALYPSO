@@ -436,9 +436,20 @@ class TestIndependentStructureTogglesEndToEnd:
             inst._brandon_check_overlay(e)
 
         watch_lines = [r.message for r in caplog.records if "BRANDON-OVERLAY-WATCH" in r.message]
-        assert len(watch_lines) == 1
-        assert "debit_spread DISABLED for this window" in watch_lines[0]
-        assert "gex_confirmed" not in watch_lines[0]
+        # Self-diagnosing: this asserted a bare count and failed as `0 == 1` on
+        # the CI runner while passing on every dev machine, which says nothing
+        # about WHY nothing was captured — no watch line emitted, or the log
+        # record not captured at all. Dump what was actually seen.
+        _ctx = (
+            f"captured {len(caplog.records)} record(s): "
+            + "; ".join(
+                f"[{r.levelname} {r.name}] {r.message[:90]}"
+                for r in caplog.records[:8]
+            )
+        )
+        assert len(watch_lines) == 1, _ctx
+        assert "debit_spread DISABLED for this window" in watch_lines[0], _ctx
+        assert "gex_confirmed" not in watch_lines[0], _ctx
 
 
 class TestPendingTimerClearedWhenSideDies:
