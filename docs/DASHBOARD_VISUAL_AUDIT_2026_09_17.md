@@ -210,6 +210,31 @@ Loss/Profit legend). Sub-10px is below any reasonable floor and bypasses the typ
 
 B: 21 no-trade days pile into one bar (count 24) that compresses the entire real distribution.
 
+### D20 — Two capital definitions coexist · LOW (recorded, not changed)
+
+Found while fixing D2's second location. The dashboard's `capital_deployed` is a
+plain **SUM of every entry's margin**; `base_strategy._calculate_capital_deployed`
+computes **peak CONCURRENT** margin, explicitly because the sum double-counts
+dollars that are reused when one position closes before the next opens.
+
+Measured:
+
+| var | SUM(entry margins) | peak-concurrent | SUM overstates by |
+|---|---|---|---|
+| b | $1,404,000 | $1,372,000 | **2.3%** |
+| g | $780,000 | $660,000 | **18.2%** |
+
+B is barely affected (its slots overlap almost continuously). G is, because its
+two entries often do not overlap at all — so the dashboard shows Peak Margin/Day
+$60,000 where the concurrent figure is $50,769, *understating* G's return
+(0.11% shown vs 0.127%).
+
+**Deliberately not changed.** It errs conservative, it is pre-existing for every
+variant, and correcting it would move the live seat's published ROI — a decision
+worth making explicitly rather than smuggling into a strangle fix. The name
+"Peak Margin / Day" is currently inaccurate for a sum-based number; either the
+computation or the label should change, together.
+
 ### D19 — A single-member group renders a "leaderboard" · LOW
 
 `undefined_risk_0dte` has one member; "TODAY'S LEADER — Tied" is meaningless.
@@ -246,7 +271,8 @@ Worth recording, because the audit is not a demolition:
 | D10 | Ratio gate counted rows, not traded days | **FIXED + DEPLOYED** `7df9817` |
 | D14 | Group tab asserted a single strategy's identity | **FIXED + DEPLOYED** `134c915` |
 | D17 | Dead `pages/DoubleCalendar.tsx` | **DELETED** `134c915` |
-| D2 | G has no capital history (Return on Margin / Peak Margin blank) | **SCRIPT READY** — `scripts/backfill_capital_deployed.py`; must run AFTER a settlement (see below) |
+| D2 | G has no capital history (Return on Margin / Peak Margin blank) | **FIXED + DEPLOYED + VERIFIED ON SCREEN** — backfill run, and D2's 2nd/3rd locations closed. G now renders Return on Margin **+0.11%**, Peak Margin/Day **$60,000**, win rate 61.5% |
+| D20 | Two capital definitions (SUM vs peak-concurrent) | recorded, deliberately not changed — see below |
 | D11 | Analytics + History entirely shape-blind | open — largest remaining |
 | D12 | Missing VIX rendered as `0.0` | open |
 | D13 | "Entries 0" on days with P&L | open |
