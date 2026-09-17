@@ -110,26 +110,39 @@ reads `75—`, `7—`, `2.5—`. G's group page is 18 config rows of nothing (13
 
 This is the exact hardcoded-`_VARIANT_IDS` pattern the taxonomy was introduced to retire.
 
-### D10 — The ratio gate counts calendar days, not traded days · **HIGH**
+### D10 — The ratio gate counts calendar days, not traded days · **MEDIUM** (latent, not live)
 
-`PerformanceMetrics.tsx:145` gates Sharpe/Sortino/Calmar on `n >= 20`, where `n` is
-`performance.count` — which **includes zero-P&L non-traded days**:
+`PerformanceMetrics.tsx:145` gates Sharpe/Sortino/Calmar on `n >= 20`, where `n` was the **row
+count** of `daily_pnls` — which includes zero-P&L days the strategy held nothing:
 
-| var | counted | real (non-zero) | zeros | gate passes? |
-|---|---|---|---|---|
-| a | 147 | 131 | 16 (11%) | yes |
-| b | 94 | 73 | 21 (22%) | yes |
-| c | 68 | 41 | 27 (40%) | yes |
-| **d** | 48 | 14 | **34 (71%)** | **yes** |
-| **e** | 52 | **5** | **47 (90%)** | **yes** |
-| f | 15 | 2 | 13 (87%) | no |
-| g | 15 | 13 | 2 (13%) | no |
+| var | rows | traded | Sharpe(all rows) | Sharpe(traded only) | gate now → fixed |
+|---|---|---|---|---|---|
+| a | 147 | 131 | −0.67 | −0.71 | PASS → PASS |
+| b | 94 | 73 | 2.01 | 2.29 | PASS → PASS |
+| c | 68 | 41 | −2.54 | −3.29 | PASS → PASS |
+| **d** | 48 | 14 | −3.82 | −7.45 | **PASS → hold** |
+| **e** | 52 | **5** | −3.03 | −10.94 | **PASS → hold** |
+| f | 15 | 2 | 3.75 | 9.62 | hold → hold |
+| g | 15 | 13 | 2.32 | 2.48 | hold → hold |
 
-**E's published Sharpe is computed from 5 real days padded with 47 zeros.** Zero-padding crushes the
-standard deviation, so the ratio is not merely noisy — it is inflated in a predictable direction. D
-is the same at 71%. Both clear the gate and display as authoritative numbers.
+**Two corrections to my first write-up of this, both found by actually computing it:**
 
-The gate is sound; its denominator is wrong. Count non-zero days.
+1. **Direction.** I claimed zero-padding "crushes the standard deviation, so the ratio is inflated."
+   That is **wrong**. Padding shrinks the mean by `k = traded/rows` and the deviation by roughly
+   `√k`, so the ratio is **compressed toward zero** — it understates good and bad performance alike
+   (E: −3.03 padded vs −10.94 traded). The defect is the sample size clearing the gate, not an
+   exaggerated number.
+
+2. **Scope.** D and E **never rendered these cards at all** — `PerformanceMetrics` is rendered only
+   by `IronCondorDashboard`; the calendar variants use `CalendarDashboard`, which has no ratio
+   cards. So the user-visible impact today is **zero**, and I should not have rated this HIGH.
+
+It is still worth fixing, and the save is dated: **F sits at 15 rows / 2 traded and gains a row every
+trading day.** Under the old rule, in roughly a week F would have crossed 20 rows and published an
+annualised Sharpe derived from two or three real trades.
+
+The computation deliberately still runs over all rows — correct for the `√252` annualisation, where
+an idle day is a real 0% return on allocated capital. Only the sufficiency test changed.
 
 ### D11 — Analytics and History are entirely shape-blind · **HIGH**
 
@@ -223,11 +236,14 @@ Worth recording, because the audit is not a demolition:
 
 ## 6. Priority
 
+> Re-rated after measurement: D10 dropped HIGH → MEDIUM once I checked which
+> components actually render the ratio cards. See its entry for both corrections.
+
 | | defect | why first |
 |---|---|---|
 | 1 | **§3 previous-day components** | The original complaint. Visible on 6 of 7 strategies. |
 | 2 | **D9** F/G dropped from comparisons | Investor-facing page rendering visible garbage (`75—`). |
-| 3 | **D10** zero-padded ratios | Publishes a wrong number as authoritative — the worst kind. |
+| 3 | **D10** zero-padded ratio gate | Latent, not live (D/E never render the cards) — but F crosses the old threshold within about a week. |
 | 4 | **D11** shape-blind Analytics/History | Largest scope; Phases 8–9 already planned. |
 | 5 | D12–D14 | Data-honesty fixes, small and independent. |
 | 6 | D15–D19 | Polish and hygiene. |

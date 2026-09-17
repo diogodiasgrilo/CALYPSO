@@ -142,8 +142,31 @@ export function PerformanceMetrics({ dailyPnls: dailyPnlsProp }: PerformanceMetr
   // Sharpe explode (e.g. 111), and "no losing day yet" makes the others ∞. Gate
   // them behind a minimum sample and show "—" with a building note until then.
   // Max Drawdown and Expectancy are dollar values that are meaningful earlier.
+  // The gate must count days the strategy was actually EXPOSED, not rows in the
+  // array. `daily_pnls` includes every trading day since the baseline, so a
+  // strategy that trades rarely accumulates $0.00 rows for days it held nothing.
+  // Counting those let a 5-observation sample clear a 20-day gate:
+  //
+  //     variant   rows   traded   Sharpe(all rows)   Sharpe(traded only)
+  //        d        48      14         -3.82               -7.45
+  //        e        52       5         -3.03              -10.94
+  //
+  // Both published a ratio; E's came from FIVE real observations. Padding with
+  // zeros shrinks the mean by k and the deviation by about sqrt(k), so the ratio
+  // is COMPRESSED toward zero — it understates both good and bad performance
+  // rather than exaggerating either. The real harm is the sample size, not the
+  // direction. A/B/C are unaffected (they trade most days and still pass).
+  //
+  // The computation itself still runs over ALL rows, which is correct for the
+  // sqrt(252) annualisation: capital was allocated on the idle days and earned
+  // nothing. Only the SUFFICIENCY test changes.
+  //
+  // `!== 0` is the only exposure proxy available here — `daily_pnls` is a bare
+  // number array with no entry count. A traded day netting exactly $0.00 is
+  // therefore miscounted as idle; that is rare and errs toward withholding a
+  // ratio, which is the safe direction.
   const MIN_DAYS_FOR_RATIOS = 20;
-  const n = effectivePnls?.length ?? 0;
+  const n = effectivePnls?.filter((v) => v !== 0).length ?? 0;
   const enoughForRatios = n >= MIN_DAYS_FOR_RATIOS;
 
   const ratio = (v: number, good: number, ok: number) => {
@@ -167,7 +190,7 @@ export function PerformanceMetrics({ dailyPnls: dailyPnlsProp }: PerformanceMetr
         <h3 className="label-upper">Performance</h3>
         {!enoughForRatios && (
           <span className="text-[10px] text-text-dim">
-            ratios need ≥{MIN_DAYS_FOR_RATIOS} days · have {n}
+            ratios need ≥{MIN_DAYS_FOR_RATIOS} traded days · have {n}
           </span>
         )}
       </div>
