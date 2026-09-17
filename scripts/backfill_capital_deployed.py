@@ -47,6 +47,10 @@ Per-entry margin uses the strategy's OWN ``capital_basis``:
 SAFETY
 ------
   * ``--dry-run`` is the DEFAULT. Writing requires ``--write``.
+  * REFUSES to write while the variant's bot is running. That process loaded
+    the metrics file at ITS startup and rewrites the whole thing from memory at
+    settlement, so a write underneath it is silently discarded hours later.
+    Run after settlement, or pass ``--force`` and restart the bot at once.
   * The metrics file is backed up (timestamped) before any write.
   * Existing rows are NEVER touched — only dates absent from ``daily_returns``
     are added, so a re-run is idempotent and cannot double-count.
@@ -65,6 +69,7 @@ import argparse
 import json
 import shutil
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
@@ -77,6 +82,17 @@ import shared.strategy_taxonomy as tax  # noqa: E402
 
 #: Matches strangle_strategy._min_buying_power_per_unit's default.
 DEFAULT_STRANGLE_BP = 30_000.0
+
+
+def _unit_is_active(unit: str) -> bool:
+    """True if the systemd unit is running. False when systemd is unavailable
+    (e.g. a laptop) — the guard should never block a local dry run."""
+    try:
+        r = subprocess.run(["systemctl", "is-active", unit],
+                           capture_output=True, text=True, timeout=10)
+        return r.stdout.strip() == "active"
+    except (OSError, subprocess.SubprocessError):
+        return False
 
 
 def _to_dt(t, date: str = "") -> Optional[datetime]:
@@ -225,6 +241,10 @@ def main() -> int:
                     help="root holding variant_<id>/ directories")
     ap.add_argument("--write", action="store_true",
                     help="actually write (default is a dry run)")
+    ap.add_argument("--force", action="store_true",
+                    help="write even though the variant's bot is running — you "
+                         "MUST restart it immediately afterwards or the write "
+                         "is discarded at the next settlement")
     args = ap.parse_args()
 
     vid = args.variant.lower()
@@ -275,9 +295,29 @@ def main() -> int:
               f"net ${total_net:,.2f} · "
               f"ROI {total_net / total_cap * 100:.3f}% over {len(rows)} day(s)")
 
+    # A RUNNING bot holds cumulative_metrics in memory from its OWN startup
+    # (base_strategy.py:1366) and rewrites the whole file from that copy at
+    # settlement (:6511). Writing underneath a running process is therefore
+    # SILENTLY DISCARDED at the next close — the worst kind of failure, because
+    # the script reports success and the rows vanish hours later.
+    running = _unit_is_active(f"hydra_variant_{vid}")
+    if running:
+        print(
+            f"\n  WARNING: hydra_variant_{vid} is RUNNING.\n"
+            f"  It loaded hydra_metrics.json at startup and rewrites the whole\n"
+            f"  file from memory at settlement, so anything written now is lost\n"
+            f"  at tonight's close. Do ONE of:\n"
+            f"    (a) run this AFTER the settlement completes, or\n"
+            f"    (b) run it now and then: sudo systemctl restart hydra_variant_{vid}"
+        )
+
     if not args.write:
         print("\n  DRY RUN — re-run with --write to apply.")
         return 0
+    if running and not args.force:
+        print("\n  REFUSING to write under a running bot — pass --force if you "
+              "will restart it immediately afterwards.")
+        return 3
 
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     backup = metrics_path.with_suffix(f".json.pre_backfill_{stamp}")
