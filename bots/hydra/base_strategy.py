@@ -5896,7 +5896,12 @@ class MEICStrategy(abc.ABC):
 
         return {
             "cumulative_pnl": 0.0,
-            "total_trades": 0,
+            # `total_trades` removed 2026-09-17 (dashboard rebuild D1/Phase 7).
+            # It was declared here and incremented NOWHERE, so every variant
+            # reported 0 forever while total_entries held 352 / 84 / 26. A field
+            # that has read 0 since it was written is a trap: the next person to
+            # build a per-trade metric on it gets a plausible, wrong answer.
+            # `total_entries` below is the real count.
             "total_entries": 0,
             "winning_days": 0,
             "losing_days": 0,

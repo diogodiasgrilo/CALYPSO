@@ -129,7 +129,6 @@ export interface HydraState {
 
 export interface CumulativeMetrics {
   cumulative_pnl: number;
-  total_trades: number;
   total_entries: number;
   winning_days: number;
   losing_days: number;

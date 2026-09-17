@@ -93,12 +93,20 @@ class TestWhatAlreadyWorks:
 # D1 — total_trades is a dead field
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, reason="D1: total_trades is initialised to 0 and never incremented")
 def test_D1_total_trades_is_either_populated_or_gone():
     """Measured on the VM: every variant reports total_trades=0 while
     total_entries is 352 / 84 / 26. Anything derived from trade count — win rate
     per trade, average per trade — is therefore broken on EVERY strategy,
-    including B. Fix by removing the field (preferred) or populating it."""
+    including B. Fix by removing the field (preferred) or populating it.
+
+    FIXED 2026-09-17 by removal (Phase 7). Guard rail from here on: it must never
+    be reintroduced as a declared-but-never-incremented field.
+
+    NOTE the separate `total_trades` in shared/logger_service.py is a DIFFERENT
+    dict — the Google-Sheets daily-summary payload, alongside trades_today /
+    winning_trades — and Sheets is disabled on all 7 variants, so that path is
+    dead. Deliberately left alone rather than renamed into a spreadsheet schema
+    nobody is writing to."""
     src = (ROOT / "bots" / "hydra" / "base_strategy.py").read_text()
     declared = '"total_trades": 0' in src
     incremented = any(
