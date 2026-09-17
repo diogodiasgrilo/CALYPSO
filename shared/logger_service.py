@@ -2231,7 +2231,10 @@ class GoogleSheetsLogger:
                     f"{win_rate:.1f}",
                     f"{summary.get('capital_deployed', 0):.2f}",
                     f"{summary.get('return_on_capital', 0):.2f}",
-                    f"{summary.get('sortino_ratio', 0):.2f}",
+                    # sortino_ratio is Optional since 2026-09-17 (D3): None means
+                    # "not enough return history", which must not format as 0.00.
+                    (f"{summary['sortino_ratio']:.2f}"
+                     if summary.get('sortino_ratio') is not None else ""),
                     f"{summary.get('max_loss_stops', 0):.2f}",
                     f"{summary.get('max_loss_catastrophic', 0):.2f}",
                     # MKT-018 Early Close (2 cols)

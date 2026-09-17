@@ -269,6 +269,37 @@ class StrangleStrategy(HydraStrategy):
         cfg = getattr(self, "strategy_config", {}) or {}
         return float(cfg.get("min_buying_power_per_strangle", 30000.0))
 
+    def _entry_margin(self, entry) -> float:
+        """Capital a naked strangle ties up — BROKER MARGIN, not spread width.
+
+        Taxonomy ``capital_basis="broker_margin"``. The base implementation
+        computes ``spread_width x 100 x contracts`` and returns 0 when there is
+        no width; a strangle's legs are permanently wingless, so the base would
+        skip every entry and report capital 0. That is exactly what happened:
+        G had ZERO ``daily_returns`` rows against 26 entries, so return-on-capital
+        and average-capital-per-day could never be computed for it (D2).
+
+        Preference order, most authoritative first:
+
+        1. ``entry.margin_requirement`` — a real broker ``what_if_naked_margin``
+           figure, when the S2 gate managed to obtain one for this entry.
+        2. ``_min_buying_power_per_unit() x contracts`` — the conservative naked
+           floor the strategy ALREADY sizes itself with
+           (``min_buying_power_per_strangle``, default $30,000/contract).
+
+        Using the same number the entry gate used means the reported
+        return-on-capital is a return on the capital the strategy actually
+        required, not a second, invented definition.
+        """
+        contracts = getattr(entry, "contracts", 1) or 1
+        broker_margin = getattr(entry, "margin_requirement", None)
+        try:
+            if broker_margin is not None and float(broker_margin) > 0:
+                return float(broker_margin)
+        except (TypeError, ValueError):
+            pass
+        return float(self._min_buying_power_per_unit()) * contracts
+
     def _calculate_stop_levels_hydra(self, entry: HydraIronCondorEntry) -> None:
         """Strangle stop policy: each naked short stops on ITS OWN credit + buffer.
 

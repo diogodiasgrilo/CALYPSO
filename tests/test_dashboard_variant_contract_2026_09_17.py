@@ -122,27 +122,40 @@ def test_D1_total_trades_is_either_populated_or_gone():
 # D2 / D3 — capital is modelled as spread width, which G does not have
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, reason="D2: _calculate_capital_deployed assumes defined risk")
 def test_D2_capital_model_dispatches_on_capital_basis():
-    """`if entry.spread_width <= 0: continue` skips EVERY entry of a naked
-    strangle, so G has 0 daily_returns rows against 26 entries — no
+    """`if entry.spread_width <= 0: continue` skipped EVERY entry of a naked
+    strangle, so G had 0 daily_returns rows against 26 entries — no
     return-on-capital, no average capital per day. Return on spread width is not
-    missing for G; it is UNDEFINED. The capital model must dispatch on the
-    strategy's capital basis."""
-    from bots.hydra.base_strategy import MEICStrategy
+    missing for G; it is UNDEFINED.
 
-    src = inspect.getsource(MEICStrategy._calculate_capital_deployed)
-    assert "capital_basis" in src, (
-        "capital is computed from spread_width for all strategies; an "
-        "undefined-risk strategy needs a broker-margin basis"
+    FIXED 2026-09-17 (Phase 3) via an overridable per-entry hook rather than a
+    literal basis check inside the sweep — the sweep carries several hard-won
+    timestamp fixes and should not be re-entered. This asserts the PROPERTY
+    (capital varies by basis, and the sweep asks the hook) rather than the
+    spelling, which is what the original version of this test got wrong.
+    """
+    from bots.hydra.base_strategy import MEICStrategy
+    from bots.hydra.strangle_strategy import StrangleStrategy
+
+    assert hasattr(MEICStrategy, "_entry_margin"), "no per-entry capital hook"
+    sweep = inspect.getsource(MEICStrategy._calculate_capital_deployed)
+    assert "_entry_margin(entry)" in sweep, "the sweep does not use the hook"
+    assert "spread_width <= 0" not in sweep, (
+        "the sweep still skips wingless entries inline — a broker-margin "
+        "strategy would report capital 0 again"
+    )
+    assert "_entry_margin" in StrangleStrategy.__dict__, (
+        "the one broker_margin strategy does not override the hook, so it "
+        "silently reverts to defined-risk width"
     )
 
 
-@pytest.mark.xfail(strict=True, reason="D3: Sortino averages an empty daily_returns for G")
 def test_D3_sortino_distinguishes_no_data_from_zero():
     """G's daily_returns is empty, so the Sortino computation averages nothing
     and yields a number. Missing data must read as None/absent, never as 0.0 —
-    a fabricated 0.0 is indistinguishable from a real result."""
+    a fabricated 0.0 is indistinguishable from a real result.
+
+    FIXED 2026-09-17 (Phase 3). Guard rail from here on."""
     from bots.hydra.base_strategy import MEICStrategy
 
     src = inspect.getsource(MEICStrategy._calculate_sortino_ratio)

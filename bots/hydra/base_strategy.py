@@ -6044,6 +6044,33 @@ class MEICStrategy(abc.ABC):
             total += max(0.0, entry_loss)
         return total
 
+    def _entry_margin(self, entry) -> float:
+        """Capital ONE entry ties up, per this strategy's ``capital_basis``.
+
+        Split out of :meth:`_calculate_capital_deployed` 2026-09-17 (dashboard
+        rebuild Phase 3, defect D2) so the basis can vary while the peak-concurrent
+        SWEEP — which carries several hard-won timestamp fixes — stays untouched.
+
+        Base implementation is ``defined_risk``: loss is capped by the spread
+        width, so capital is ``width x 100 x contracts``.
+
+        WHY THIS MATTERS. The old inline version did ``if entry.spread_width <= 0:
+        continue``, which silently skipped EVERY entry of a wingless strategy. A
+        naked strangle therefore reported capital 0, no ``daily_returns`` row was
+        ever written, and return-on-capital came out UNDEFINED rather than
+        merely missing — measured on G: 0 rows against 26 entries. Subclasses
+        whose taxonomy ``capital_basis`` is not ``defined_risk`` MUST override
+        this (strangle: broker margin; calendars already override
+        ``_calculate_capital_deployed`` wholesale).
+
+        Returns 0.0 to mean "this entry ties up no measurable capital", which the
+        sweep skips — never a fabricated number.
+        """
+        width = getattr(entry, "spread_width", 0) or 0
+        if width <= 0:
+            return 0.0
+        return float(width) * 100.0 * (getattr(entry, "contracts", 1) or 1)
+
     def _calculate_capital_deployed(self) -> float:
         """Peak CONCURRENT margin tied up across today's entries.
 
@@ -6101,9 +6128,9 @@ class MEICStrategy(abc.ABC):
         intervals = []
         any_missing_timing = False
         for entry in self.daily_state.entries:
-            if entry.spread_width <= 0:
+            margin = self._entry_margin(entry)
+            if margin <= 0:
                 continue
-            margin = entry.spread_width * 100 * entry.contracts
             open_t = _to_dt(getattr(entry, "entry_time", None))
             if open_t is None:
                 any_missing_timing = True
@@ -6186,13 +6213,16 @@ class MEICStrategy(abc.ABC):
             )
         return peak
 
-    def _calculate_sortino_ratio(self, today_net_pnl: float, today_capital: float) -> float:
+    def _calculate_sortino_ratio(self, today_net_pnl: float, today_capital: float) -> Optional[float]:
         """
         Calculate annualized Sortino ratio from historical daily returns.
 
         Sortino = (mean_return - 0) / downside_deviation * sqrt(252)
         Uses % returns (net_pnl / capital_deployed) for each day.
-        Returns 0.0 if < 2 days of data, 99.99 if no losing days.
+        Returns None if < 2 days of data (2026-09-17, defect D3 — it used to
+        return 0.0, which renders as a real ratio and is indistinguishable from a
+        genuinely flat strategy; G had ZERO return rows and still displayed a
+        number). 99.99 if no losing days.
         """
         daily_returns = self.cumulative_metrics.get("daily_returns", [])
 
@@ -6201,7 +6231,7 @@ class MEICStrategy(abc.ABC):
             all_returns.append(today_net_pnl / today_capital)
 
         if len(all_returns) < 2:
-            return 0.0
+            return None
 
         mean_return = sum(all_returns) / len(all_returns)
         downside_sq = [r ** 2 for r in all_returns if r < 0]
