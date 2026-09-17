@@ -16,3 +16,5 @@ shots_det2/
 census_*.json
 fontcensus.json
 shots_mobile/
+fixtures_replay/
+shots_replay/
