@@ -1,5 +1,7 @@
 /**
- * Calendar (dc_calendar) main-dashboard view — extracted from DoubleCalendar.tsx.
+ * Calendar (dc_calendar) main-dashboard view — extracted from the former
+ * pages/DoubleCalendar.tsx, which was deleted 2026-09-17 once this superseded it
+ * (it had been exported but never imported; /dc redirects to the group page).
  *
  * Debit-native + SHAPE-DISTINCT: net debit, transform credit, open calendars,
  * recent outcomes. NO credit/buffer/spread-width fields (those are IC-only).

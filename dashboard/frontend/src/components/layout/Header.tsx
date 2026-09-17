@@ -104,7 +104,20 @@ export function Header() {
   // Note only on tabs the picker does NOT control (e.g. /comparison, /dc), so
   // they never imply the picker's selection applies to them.
   const primaryName = meta.byId[meta.primaryId]?.display_name;
-  const showOffTabNote = !onPickerTab && !meta.loading && !!strategy && !isPrimarySelected && !!primaryName;
+
+  // A GROUP comparison tab shows a whole cohort, not any single strategy — so
+  // "shows <primary>" is wrong there in a way that misinforms on the most
+  // investor-facing page: standing on G's own group and reading "shows Brandon
+  // Narrow (7-slot)". Name the group instead.
+  const groupMatch = location.pathname.match(/^\/comparison\/([A-Za-z0-9_]+)$/);
+  const groupLabel = groupMatch
+    ? meta.groups?.find((g) => g.id === groupMatch[1])?.label
+    : undefined;
+
+  const showOffTabNote =
+    !onPickerTab && !meta.loading && !groupLabel &&
+    !!strategy && !isPrimarySelected && !!primaryName;
+  const showGroupNote = !!groupLabel && !meta.loading;
 
   return (
     <>
@@ -141,8 +154,10 @@ export function Header() {
         {showPicker && <StrategyPicker />}
 
         {/* Static label fallback when the picker isn't shown (other tabs) or
-            there's only one strategy. The label follows the selection. */}
-        {!showPicker && primaryLabel && (
+            there's only one strategy. The label follows the selection.
+            Suppressed on a group tab, where asserting ONE strategy's identity
+            over a whole-cohort comparison is simply wrong. */}
+        {!showPicker && !showGroupNote && primaryLabel && (
           <span
             className="text-[10px] sm:text-xs font-bold px-2 py-0.5 rounded uppercase tracking-wide whitespace-nowrap"
             style={{
@@ -163,6 +178,20 @@ export function Header() {
             title="History and Analytics show the primary strategy regardless of the dashboard picker selection."
           >
             shows {primaryName}
+          </span>
+        )}
+
+        {/* Group comparison tab — name the COHORT, not a strategy. */}
+        {showGroupNote && (
+          <span
+            className="text-[10px] sm:text-xs font-bold px-2 py-0.5 rounded uppercase tracking-wide whitespace-nowrap"
+            style={{
+              backgroundColor: "rgba(126,232,199,0.18)",
+              color: colors.profit,
+            }}
+            title="This tab compares every strategy in the group — the dashboard picker does not apply here."
+          >
+            {groupLabel} · group
           </span>
         )}
 
