@@ -193,10 +193,19 @@ def _capabilities(m: tax.StrategyMeta) -> dict:
 
     - main_dashboard: every registered strategy can be the picker's selection.
     - comparison: only members of a *comparable* group.
-    - history / analytics: these pages read the IC entry/stop schema, so the
-      gate is ``data_kind == "ic_state"`` — the DATA SHAPE they consume.
-      Calendar strategies expose calendar_cards instead.
+    - history: reads ``daily_summaries`` — date, net P&L, SPX, VIX — which
+      EVERY strategy writes, including the calendars (D has 48 rows, E has 52).
+      So a P&L calendar is meaningful for all of them and this is always True;
+      the columns that are IC-specific (entries / stops) are dropped per-shape
+      by the table itself, not by removing the whole page.
+    - analytics: reads ``trade_entries`` / ``trade_stops`` deeply — entry slots,
+      credit captured, call-vs-put stops — so its gate is
+      ``data_kind == "ic_state"``. Calendar strategies expose calendar_cards.
     - calendar_cards: the DC-native open-calendars/outcomes view (dc_calendar).
+
+    history and analytics deliberately DIFFER: they read different tables. A
+    single flag for both would either delete a working P&L calendar from the
+    calendars or hand them sixteen zeroed 0DTE charts.
 
     CORRECTED 2026-09-17 (defect D11). The gate used to be
     ``structure_family == "iron_condor"``, which is a different question and got
@@ -214,7 +223,7 @@ def _capabilities(m: tax.StrategyMeta) -> dict:
     return {
         "main_dashboard": True,
         "comparison": comparable,
-        "history": reads_ic_schema,
+        "history": True,
         "analytics": reads_ic_schema,
         "calendar_cards": _data_kind(m) == "dc_calendar",
     }

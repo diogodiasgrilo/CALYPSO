@@ -18,6 +18,11 @@ export function History() {
   // History follows the picker's selected strategy (empty = canonical primary).
   const { strategy } = useSelectedStrategy();
   const strategyId = strategy?.id ?? "";
+  // A multi-day strategy books P&L on the day a position CLOSES, which is
+  // usually not a day it opened anything — so per-session entry/stop columns
+  // turn correct rows into ones that look broken (defect D13). Unknown meta
+  // defaults to intraday, i.e. shows MORE rather than hiding something real.
+  const intraday = strategy?.dte_class !== "multi_day";
 
   useEffect(() => {
     setLoading(true);
@@ -130,7 +135,11 @@ export function History() {
 
       {/* Sortable Daily Summary Table */}
       {summaries.length > 0 && (
-        <DailySummaryTable summaries={summaries} onDayClick={handleDayClick} />
+        <DailySummaryTable
+          summaries={summaries}
+          onDayClick={handleDayClick}
+          intraday={intraday}
+        />
       )}
 
       {/* Day Detail Modal */}

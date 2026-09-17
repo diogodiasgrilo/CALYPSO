@@ -20,8 +20,19 @@ Two layers:
 ``structure_family == "iron_condor"``, which declared G (``"strangle"``)
 incapable of History and Analytics even though its data is IC-shaped and both
 pages render it correctly. Honouring the old flags would have REMOVED two
-working pages from G. The gate is now ``data_kind``, which is the question
-actually being asked: what record shape does the page read?
+working pages from G.
+
+And the two capabilities were then SPLIT, because the pages read different
+tables:
+
+  history    reads ``daily_summaries`` (date, net P&L, SPX, VIX) — every
+             strategy writes it, so a P&L calendar is always meaningful and the
+             flag is always True. Only the IC-specific COLUMNS drop out.
+  analytics  reads ``trade_entries`` / ``trade_stops`` deeply, so it gates on
+             ``data_kind == "ic_state"``.
+
+One flag for both would either delete a working P&L calendar from the calendars
+or hand them sixteen zeroed 0DTE charts.
 """
 
 from __future__ import annotations
@@ -52,15 +63,18 @@ ANALYTICS = ROOT / "dashboard" / "frontend" / "src" / "pages" / "Analytics.tsx"
      ("d", False), ("e", False)],
 )
 def test_analytics_capability_follows_data_kind(vid, expected):
+    """ANALYTICS only. `history` deliberately does NOT share this gate — it
+    reads daily_summaries, which every strategy writes. See
+    test_history_and_analytics_capabilities_differ."""
     caps = S._capabilities(tax.meta(vid))
     assert caps["analytics"] is expected
-    assert caps["history"] is expected
 
 
 def test_strangle_keeps_history_and_analytics():
     """The regression the correction exists to prevent. G's structure_family is
     "strangle", so the OLD iron_condor gate declared it incapable — yet its data
     is ic_state and both pages render it correctly today."""
+
     g = tax.meta("g")
     assert g.structure_family == "strangle", "taxonomy changed; re-check this test"
     assert S._data_kind(g) == "ic_state"
@@ -287,3 +301,67 @@ def test_absent_meta_hides_nothing():
     # every fact defaults true in the null branch
     null_branch = block[block.index("if (!s)"): block.index("return {", block.index("if (!s)") + 40)]
     assert "false" not in null_branch
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# History reads DIFFERENT data from Analytics, so it gets its own answer
+# ─────────────────────────────────────────────────────────────────────────────
+
+HISTORY = ROOT / "dashboard" / "frontend" / "src" / "pages" / "History.tsx"
+SUMMARY_TABLE = (ROOT / "dashboard" / "frontend" / "src" / "components" / "history"
+                 / "DailySummaryTable.tsx")
+
+
+@pytest.mark.parametrize("vid", ["a", "b", "c", "d", "e", "f", "g"])
+def test_history_applies_to_every_strategy(vid):
+    """History reads daily_summaries — date, net P&L, SPX, VIX — which every
+    strategy writes, calendars included (D has 48 rows, E has 52). Gating it off
+    would delete a working P&L calendar; only the IC-specific COLUMNS go."""
+    assert S._capabilities(tax.meta(vid))["history"] is True
+
+
+def test_history_and_analytics_capabilities_differ():
+    """They read different tables, so one flag cannot serve both without either
+    deleting a useful page or serving zeroed charts."""
+    e = S._capabilities(tax.meta("e"))
+    assert e["history"] is True and e["analytics"] is False
+
+
+def test_entry_and_stop_columns_are_intraday_only():
+    """D13: a calendar books P&L on a close day that opened nothing, so
+    "0 entries" beside a real P&L reads as broken. Drop the column instead."""
+    src = SUMMARY_TABLE.read_text()
+    block = src[src.index("const COLUMNS"): src.index("];", src.index("const COLUMNS"))]
+    for key in ("entries_placed", "entries_stopped"):
+        row = next(l for l in block.splitlines() if key in l)
+        assert "intradayOnly: true" in row, f"{key} is not marked intraday-only"
+    for key in ("date", "net_pnl", "spx_close", "vix_open"):
+        row = next(l for l in block.splitlines() if f'"{key}"' in l)
+        assert "intradayOnly" not in row, (
+            f"{key} is universal — marking it intraday-only would blank a real "
+            f"column for the calendars."
+        )
+
+
+def test_history_passes_the_horizon_from_the_taxonomy():
+    page = HISTORY.read_text()
+    assert 'strategy?.dte_class !== "multi_day"' in page, (
+        "History no longer derives the horizon from dte_class, so the "
+        "intraday-only columns cannot be dropped for a calendar."
+    )
+    assert "intraday={intraday}" in page
+
+
+def test_missing_vix_renders_as_a_dash_not_zero():
+    """D12: market-holiday rows carry a falsy VIX. `?? 0` printed a literal
+    0.0 — an impossible reading presented as data."""
+    src = SUMMARY_TABLE.read_text()
+    assert "day.vix_open ? day.vix_open.toFixed(1)" in src, (
+        "a falsy VIX is being coerced to a number again"
+    )
+
+
+def test_table_defaults_to_intraday():
+    """Every existing caller omits the prop and must be unchanged."""
+    src = SUMMARY_TABLE.read_text()
+    assert "intraday = true" in src

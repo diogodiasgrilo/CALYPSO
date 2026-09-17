@@ -198,7 +198,13 @@ class TestMeta:
         assert g["capabilities"]["analytics"] is True
         assert g["capabilities"]["calendar_cards"] is False
         assert g["capabilities"]["main_dashboard"] is True
-        assert e["capabilities"]["history"] is False
+        # CORRECTED 2026-09-17 (D11): history and analytics were SPLIT because
+        # the pages read different tables. History reads daily_summaries — which
+        # E writes (52 rows) — so a P&L calendar is meaningful for it and the
+        # flag is True; only the IC-specific entry/stop COLUMNS drop out.
+        # Analytics reads trade_entries/trade_stops deeply and stays False.
+        assert e["capabilities"]["history"] is True
+        assert e["capabilities"]["analytics"] is False
 
         c = next(s for s in body["strategies"] if s["id"] == "c")
         assert c["data_kind"] == "ic_state"
