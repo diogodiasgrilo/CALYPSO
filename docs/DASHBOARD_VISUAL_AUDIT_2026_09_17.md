@@ -273,9 +273,9 @@ Worth recording, because the audit is not a demolition:
 | D17 | Dead `pages/DoubleCalendar.tsx` | **DELETED** `134c915` |
 | D2 | G has no capital history (Return on Margin / Peak Margin blank) | **FIXED + DEPLOYED + VERIFIED ON SCREEN** — backfill run, and D2's 2nd/3rd locations closed. G now renders Return on Margin **+0.11%**, Peak Margin/Day **$60,000**, win rate 61.5% |
 | D20 | Two capital definitions (SUM vs peak-concurrent) | recorded, deliberately not changed — see below |
-| D11 | Analytics + History entirely shape-blind | open — largest remaining |
-| D12 | Missing VIX rendered as `0.0` | open |
-| D13 | "Entries 0" on days with P&L | open |
+| D11 | Analytics + History entirely shape-blind | **FIXED + DEPLOYED** `Analytics` page-gated for calendars + 16 charts declare their taxonomy facts; `History` keeps its P&L calendar and drops the IC columns |
+| D12 | Missing VIX rendered as `0.0` | **FIXED + DEPLOYED** — em dash; zero such cells remain |
+| D13 | "Entries 0" on days with P&L | **FIXED + DEPLOYED** — entry/stop columns are intraday-only |
 | D15 | Two sources of truth for the palette | open |
 | D16 | 105 arbitrary `text-[Npx]` values | open |
 | D18 | `$0` bucket dominates the distribution histogram | open |
