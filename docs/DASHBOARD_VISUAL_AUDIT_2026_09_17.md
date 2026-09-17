@@ -275,7 +275,7 @@ Worth recording, because the audit is not a demolition:
 | D14 | Group tab asserted a single strategy's identity | **FIXED + DEPLOYED** `134c915` |
 | D17 | Dead `pages/DoubleCalendar.tsx` | **DELETED** `134c915` |
 | D2 | G has no capital history (Return on Margin / Peak Margin blank) | **FIXED + DEPLOYED + VERIFIED ON SCREEN** — backfill run, and D2's 2nd/3rd locations closed. G now renders Return on Margin **+0.11%**, Peak Margin/Day **$60,000**, win rate 61.5% |
-| D20 | Two capital definitions (SUM vs peak-concurrent) | **RESOLVED — operator chose peak-concurrent, 2026-09-17.** Dashboard now matches `base_strategy`. A overstated 43.5%, B 2.3%, G 18.2%. Recorded in the trading journal §5. |
+| D20 | Two capital definitions (SUM vs peak-concurrent) | **RESOLVED — operator chose peak-concurrent, 2026-09-17.** Dashboard now matches `base_strategy`. As displayed (baselined): A overstated 43.5%, B 2.4%, G 18.2%. Recorded in the trading journal §5. |
 | D11 | Analytics + History entirely shape-blind | **FIXED + DEPLOYED** `Analytics` page-gated for calendars + 16 charts declare their taxonomy facts; `History` keeps its P&L calendar and drops the IC columns |
 | D12 | Missing VIX rendered as `0.0` | **FIXED + DEPLOYED** — em dash; zero such cells remain |
 | D13 | "Entries 0" on days with P&L | **FIXED + DEPLOYED** — entry/stop columns are intraday-only |

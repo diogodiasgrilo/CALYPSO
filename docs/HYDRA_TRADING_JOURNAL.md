@@ -4951,13 +4951,23 @@ N/A - Entry #3 Call Stopped
 > sum "overstated capital". The dashboard never followed. The sum counts the
 > same dollars again each time a position closes and the next opens.
 >
-> | variant | capital (SUM, old) | capital (PEAK, new) | SUM overstated | ROI old → new |
-> |---|---|---|---|---|
-> | A | $2,561,500 | $1,784,500 | **43.5%** | −0.126% → **−0.180%** |
-> | **B (live seat)** | $1,404,000 | $1,372,000 | 2.3% | 1.731% → **1.770%** |
-> | C | $422,500 | $422,500 | 0.0% | unchanged |
-> | F | $1,000 | $1,000 | 0.0% | unchanged |
-> | G | $780,000 | $660,000 | 18.2% | 0.107% → **0.130%** |
+> Figures below are **as displayed on each strategy's card**, i.e. rebased to
+> that variant's own `baseline_date` where one is set — B to its live-seat date
+> 2026-07-24, C to 2026-06-11. (An earlier draft of this note quoted unbaselined
+> lifetime numbers, which are not what anyone sees.)
+>
+> | variant | baseline | capital (SUM, old) | capital (PEAK, new) | SUM overstated | ROI old → new |
+> |---|---|---|---|---|---|
+> | A | — | $2,561,500 | $1,784,500 | **43.5%** | −0.126% → **−0.180%** |
+> | **B (live seat)** | 2026-07-24 | $294,000 | $287,000 | 2.4% | 2.369% → **2.430%** |
+> | C | 2026-06-11 | $234,500 | $234,500 | 0.0% | −3.689% → −3.690% |
+> | F | — | $1,000 | $1,000 | 0.0% | unchanged |
+> | G | — | $780,000 | $660,000 | 18.2% | 0.107% → **0.130%** |
+>
+> A's 43.5% is the largest because it runs ONE contract on a wide 75pt spread
+> across three slots that rarely overlap, so almost every dollar was counted
+> more than once. C and F are unchanged because their entries genuinely do
+> overlap (C) or there is only one (F).
 >
 > **The correction is not uniformly flattering.** Because ROI = P&L ÷ capital,
 > a smaller denominator raises a profitable strategy's return *and* deepens a
