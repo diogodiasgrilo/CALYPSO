@@ -175,6 +175,18 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
   const totalCredit = entry.call_spread_credit + entry.put_spread_credit;
   const displayLabel = label ?? `E${entry.entry_number}`;
 
+  // Hooks run BEFORE the early returns below (rules-of-hooks). They used to sit
+  // after them, which was a real lint error and a latent crash: React's
+  // didRenderTooFewHooks check is `currentHook !== null && ...`, so a branch
+  // calling ZERO hooks slips through — it tolerated this only because nothing
+  // else hooked above the returns. Adding any hook there would have turned a
+  // routine transition (an entry becoming execution_failed mid-session, as one
+  // did on 2026-08-03) into "Rendered fewer hooks than expected" and taken the
+  // dashboard down. computeEntryPnl is pure, so hoisting costs nothing.
+  const { currentPnl, maxProfit } = computeEntryPnl(entry);
+  const animatedPnl = useAnimatedNumber(currentPnl);
+  const animatedMax = useAnimatedNumber(maxProfit);
+
   // Execution FAILURE (2026-07-31): the broker accepted the order but it never
   // filled after exhausting retries — a broker/execution-layer problem, not a
   // strategic choice. Distinct from "skipped" deliberately: full opacity (not
@@ -254,10 +266,6 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
       </div>
     );
   }
-
-  const { currentPnl, maxProfit } = computeEntryPnl(entry);
-  const animatedPnl = useAnimatedNumber(currentPnl);
-  const animatedMax = useAnimatedNumber(maxProfit);
 
   // Progress toward max profit (0-100%)
   // When maxProfit <= 0 (stopped entry, best outcome is a loss), show full bar

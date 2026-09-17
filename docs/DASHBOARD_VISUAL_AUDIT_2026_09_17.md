@@ -276,11 +276,11 @@ Worth recording, because the audit is not a demolition:
 | D11 | Analytics + History entirely shape-blind | **FIXED + DEPLOYED** `Analytics` page-gated for calendars + 16 charts declare their taxonomy facts; `History` keeps its P&L calendar and drops the IC columns |
 | D12 | Missing VIX rendered as `0.0` | **FIXED + DEPLOYED** — em dash; zero such cells remain |
 | D13 | "Entries 0" on days with P&L | **FIXED + DEPLOYED** — entry/stop columns are intraday-only |
-| D15 | Two sources of truth for the palette | open |
+| D15 | Two sources of truth for the palette | **FIXED + DEPLOYED** — `bgDeep` had ALREADY drifted (`#1a2229` vs CSS `#161d23`); corrected + parity test |
 | D16 | 105 arbitrary `text-[Npx]` values | open |
-| D18 | `$0` bucket dominates the distribution histogram | open |
-| D19 | Single-member group renders a "leaderboard" | open |
-| — | 19 remaining eslint errors (2 more rules-of-hooks, 12 set-state-in-effect) | open |
+| D18 | `$0` bucket dominates the distribution histogram | **FIXED + DEPLOYED** — no-trade days excluded, count shown |
+| D19 | Single-member group renders a "leaderboard" | **FIXED + DEPLOYED** — "sole member of this group" |
+| — | eslint errors | **rules-of-hooks: 3 → 0.** 17 remain and are deliberately NOT chased — see below |
 | P8 | Wire `sides` | **NOT A DEFECT — claim was stale.** Every renderer already guarded F's absent side since 2026-06-15/16. Pinned by 14 regression tests + one genuine hardening in `SessionReplay` (guarded on `entry_type` alone, which can be blank). `sides` IS now wired, via chart applicability. |
 | P10 | G's tail cards | **FIXED + DEPLOYED** — `UndefinedRiskCard`: MAX LOSS UNBOUNDED + nearest short in points and × expected move |
 
@@ -303,6 +303,20 @@ exactly G's independently-tracked lifetime P&L:
 13 rows · avg capital/day $50,769 · net $836.45 · ROI 0.127%
 capital is $30,000 on the four days the two entries did NOT overlap, $60,000 otherwise
 ```
+
+---
+
+## 5b. The 17 remaining eslint errors — a deliberate non-decision
+
+All **3 `rules-of-hooks` errors are fixed** (`MarketContextBanner`, and
+`EntryCard`'s two `useAnimatedNumber` calls). Those were the ones that could
+become crashes. What is left:
+
+| rule | count | why it is not being chased |
+|---|---|---|
+| `react-hooks/set-state-in-effect` | 12 | Performance advice about cascading renders, not correctness. Fixing means restructuring every page's data fetching. |
+| `react-hooks/immutability` | 3 | One is in `useWebSocket`'s reconnect path. **Measured rather than assumed:** a harness that drops the socket server-side shows the client reconnecting in ~1.2s and returning to `Connected`. The circular `useCallback` dependency is self-consistent. Restructuring live reconnect logic to satisfy a linter is the riskier change. `repro-reconnect.mjs` keeps that claim honest. |
+| `react-refresh/only-export-components` | 2 | Dev-server ergonomics only; zero production effect. |
 
 ---
 

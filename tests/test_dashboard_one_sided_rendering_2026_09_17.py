@@ -132,3 +132,29 @@ def test_position_heatmap_requires_a_positive_strike_to_draw_a_bar():
             f"the {side} bar is drawn without checking the strike is positive — "
             f"a one-sided entry would paint a bar at 0."
         )
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Rules of hooks — the latent crash in the same component
+# ─────────────────────────────────────────────────────────────────────────────
+
+def test_entry_card_hooks_run_before_the_early_returns():
+    """EntryCard called useAnimatedNumber TWICE after two early returns.
+
+    It never actually crashed, and a three-arm repro showed why: React's
+    didRenderTooFewHooks check is `currentHook !== null && ...`, so a branch
+    calling ZERO hooks slips through. It was benign only because nothing else
+    hooked above those returns — adding any hook there would have turned a
+    routine transition (an entry becoming execution_failed mid-session, as one
+    did on 2026-08-03) into "Rendered fewer hooks than expected".
+
+    computeEntryPnl is pure, so hoisting costs nothing.
+    """
+    src = (SRC / "components" / "entries" / "EntryCard.tsx").read_text()
+    body = src[src.index("export function EntryCard("):]
+    first_hook = body.index("useAnimatedNumber(")
+    first_return = body.index("return (")
+    assert first_hook < first_return, (
+        "useAnimatedNumber is called after an early return again — React Hooks "
+        "must run in the same order on every render."
+    )
