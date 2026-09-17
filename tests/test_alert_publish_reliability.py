@@ -204,6 +204,32 @@ def test_uninitialized_publisher_does_not_reinit_before_cooldown(monkeypatch):
     assert reinit_calls == []  # cooldown not elapsed, no reinit attempt
 
 
+def _why(svc, extra=""):
+    """Diagnostic for the two reliability tests below.
+
+    `assert result is True` tells you nothing about WHICH of send_alert's four
+    early-return paths fired. These two tests passed on macOS and failed on the
+    Linux CI runner, and a bare boolean gave no way to tell the anti-spam gate
+    from the reinit gate from the publish path. Printed into the assertion
+    message so a CI failure is self-diagnosing.
+    """
+    import shared.alert_service as m
+    try:
+        gcp = m.is_running_on_gcp()
+    except Exception as e:  # noqa: BLE001
+        gcp = f"raised {type(e).__name__}"
+    return (
+        f"{extra} | _enabled={getattr(svc, '_enabled', '?')} "
+        f"_dry_run={getattr(svc, '_dry_run', '?')} "
+        f"_initialized={getattr(svc, '_initialized', '?')} "
+        f"is_running_on_gcp()={gcp} "
+        f"_last_init_attempt={getattr(svc, '_last_init_attempt', '?')} "
+        f"dedup={dict(getattr(svc, '_dedup_last', {}))} "
+        f"buckets={ {str(k): v for k, v in getattr(svc, '_type_buckets', {}).items()} } "
+        f"publisher={type(getattr(svc, '_publisher', None)).__name__}"
+    )
+
+
 def test_uninitialized_publisher_reinits_after_cooldown_and_publishes(monkeypatch):
     monkeypatch.delenv("ALERT_DRY_RUN", raising=False)
     monkeypatch.setattr(alert_service_module, "is_running_on_gcp", lambda: True)
@@ -221,8 +247,8 @@ def test_uninitialized_publisher_reinits_after_cooldown_and_publishes(monkeypatc
     result = svc.send_alert(
         AlertType.BOT_STARTED, "Started", "up", priority=AlertPriority.LOW,
     )
-    assert result is True
-    assert svc._initialized is True
+    assert result is True, _why(svc, "send_alert returned False")
+    assert svc._initialized is True, _why(svc, "reinit never ran")
 
 
 def test_dry_run_never_attempts_reinit(monkeypatch):
@@ -318,7 +344,8 @@ def test_stuck_reinit_does_not_block_a_concurrent_thread_on_the_same_instance(mo
         )
     )
     thread_a.start()
-    assert thread_a_entered_initialize.wait(timeout=2), "thread A never entered _initialize()"
+    assert thread_a_entered_initialize.wait(timeout=2), _why(
+        svc, "thread A never entered _initialize()")
 
     # Thread B (this thread) must return promptly — not block on thread A's
     # hung _initialize(). Bound the wait tightly: the old (buggy) blocking
