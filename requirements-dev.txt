@@ -1,0 +1,23 @@
+# Development / CI dependencies.
+#
+# requirements.txt is the PRODUCTION pin list and deliberately leaves the test
+# tooling commented out — the VM should not carry pytest. CI does need it, and
+# duplicating version numbers in a workflow file is how they drift, so this
+# layers on top of the production pins with the exact versions already recorded
+# there.
+#
+#     pip install -r requirements-dev.txt
+#
+# Keep the pins identical to the commented block at the bottom of
+# requirements.txt; if one moves, move both.
+
+-r requirements.txt
+
+pytest==9.0.3
+pytest-asyncio==1.3.0
+pytest-cov==7.1.0
+
+# starlette's TestClient is httpx-backed; without it every dashboard API test
+# fails at import with a bare "RuntimeError: The starlette.testclient module
+# requires the httpx package".
+httpx==0.28.1
