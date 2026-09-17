@@ -434,6 +434,32 @@ def _read_variant_performance(vid: str) -> dict:
     }
 
 
+def _read_variant_comparisons(vid: str) -> dict:
+    """Best / worst / average day over the variant's OWN daily summaries.
+
+    Same shape ``/api/metrics/comparisons`` returns, so the off-day cards can be
+    fed from the snapshot instead of the WebSocket store. The store holds the
+    LIVE SEAT's comparison stats only, so reading it from a non-primary view
+    showed the seat's numbers under another strategy's name — the same
+    cross-wiring class as the 2026-07-14 fix (4b3d6a0).
+
+    Missing-DB tolerant: returns ``{}``, never raises, matching the sibling
+    ``_read_variant_*`` helpers.
+    """
+    from dashboard.backend.services.db_reader import BacktestingDBReader
+
+    db_path = getattr(settings, f"variant_{vid}_backtesting_db", None)
+    if db_path is None:
+        return {}
+    try:
+        if not Path(db_path).exists():
+            return {}
+        return _run_coro(BacktestingDBReader(Path(db_path)).get_comparison_stats()) or {}
+    except Exception as e:
+        logger.debug(f"snapshot comparisons read failed for {vid}: {e}")
+        return {}
+
+
 def _read_previous_session(vid: str, today: str) -> dict:
     """The last COMPLETED session for this strategy, from its OWN database.
 
@@ -545,6 +571,11 @@ def _ic_snapshot(vid: str, m: tax.StrategyMeta) -> dict:
         "ohlc": _read_variant_ohlc(db_path),
         "cumulative": _read_variant_cumulative(vid),
         "performance": _read_variant_performance(vid),
+        # Best/worst/average day for THIS variant. The off-day cards used to read
+        # these from the WebSocket store, which only ever holds the live seat's —
+        # so every strategy displayed B's +$11,852 best day and B's +$258.53
+        # average, including G whose lifetime total is +$836.
+        "comparisons": _read_variant_comparisons(vid),
         # Phase 5 (D8): the last COMPLETED session, so a pre-market view can show
         # something true instead of a blank chart. Separate from the live fields
         # above — never merged into them — so the UI must label it explicitly.

@@ -10,16 +10,16 @@ import { WebSocketServer } from 'ws';
 
 const PORT = Number(process.env.PORT || 4178);
 const DIST = fileURLToPath(new URL('../dist/', import.meta.url));
-const FIX  = fileURLToPath(new URL('./fixtures/', import.meta.url));
+const FIX  = fileURLToPath(new URL(process.env.FIXTURES || './fixtures/', import.meta.url));
 
 const MIME = { '.html':'text/html', '.js':'text/javascript', '.css':'text/css',
   '.json':'application/json', '.svg':'image/svg+xml', '.png':'image/png',
   '.ico':'image/x-icon', '.webmanifest':'application/manifest+json' };
 
-const fx = (n) => { const p = join(FIX, n + '.json'); return existsSync(p) ? readFileSync(p,'utf8') : null; };
+export const fx = (n) => { const p = join(FIX, n + '.json'); return existsSync(p) ? readFileSync(p,'utf8') : null; };
 
 /** Map a request to a captured fixture; `sid` is the ?strategy_id= param. */
-function resolveFixture(pathname, sid) {
+export function resolveFixture(pathname, sid) {
   const s = sid || 'b';
   const direct = {
     '/api/strategies/meta': 'strategies_meta',
@@ -53,7 +53,7 @@ function resolveFixture(pathname, sid) {
   return null;
 }
 
-const handler = (req, res) => {
+export const handler = (req, res) => {
   const url = new URL(req.url, 'http://x');
   const sid = url.searchParams.get('strategy_id') || '';
   if (url.pathname.startsWith('/api/')) {
@@ -71,10 +71,12 @@ const handler = (req, res) => {
 // The PRIMARY variant renders from the live WebSocket, not from /snapshot
 // (StrategyDashboard.tsx:58). Without a WS the live seat renders an empty
 // shell — so auditing it at all requires replaying the real broadcast payload.
-const server = createServer(handler);
-const wss = new WebSocketServer({ server, path: '/ws/dashboard' });
-wss.on('connection', (sock) => {
-  const snap = fx('ws_snapshot');
-  if (snap) sock.send(snap);
-});
-server.listen(PORT, () => console.log(`ui-audit mock (http+ws) on http://127.0.0.1:${PORT}`));
+if (process.argv[1] && process.argv[1].endsWith('mock-server.mjs')) {
+  const server = createServer(handler);
+  const wss = new WebSocketServer({ server, path: '/ws/dashboard' });
+  wss.on('connection', (sock) => {
+    const snap = fx('ws_snapshot');
+    if (snap) sock.send(snap);
+  });
+  server.listen(PORT, () => console.log(`ui-audit mock (http+ws) on http://127.0.0.1:${PORT}`));
+}

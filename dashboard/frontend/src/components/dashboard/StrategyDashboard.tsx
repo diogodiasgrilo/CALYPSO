@@ -81,7 +81,7 @@ export function StrategyDashboard() {
   }
   return (
     <IronCondorDashboard
-      source={{ body: snapshot.body as ICSnapshotBody, accent }}
+      source={{ body: snapshot.body as ICSnapshotBody, accent, strategyId: strategy.id }}
     />
   );
 }

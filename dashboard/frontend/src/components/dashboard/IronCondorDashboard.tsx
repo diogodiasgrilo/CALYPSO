@@ -90,7 +90,7 @@ function PrimaryICView() {
         ) : (
           <>
             <MarketContextBanner />
-            <OffDaySummaryCards />
+            <OffDaySummaryCards />{/* primary: defaults to the live seat */}
             <PerformanceMetrics />
           </>
         )}
@@ -174,7 +174,9 @@ function coerceOHLC(bars: ICSnapshotOHLCBar[]): OHLCBar[] {
 }
 
 // ── NON-PRIMARY (polled) IC view — full parity with the primary panels ──
-function PolledICView({ body }: { body: ICSnapshotBody; accent: string }) {
+function PolledICView({ body, strategyId }: { body: ICSnapshotBody; accent: string; strategyId?: string }) {
+  const isLive = useHydraStore((s) => s.market?.is_open) === true;
+
   if (!body.available) {
     return (
       <div className="p-6 text-text-secondary">
@@ -191,8 +193,33 @@ function PolledICView({ body }: { body: ICSnapshotBody; accent: string }) {
   const margin = body.min_buffer_margin ?? { call_pct: 100, put_pct: 100 };
   const netPnl = body.summary?.net_pnl ?? 0;
 
+  // Same off-day decision the primary makes. Without it this view rendered the
+  // full layout unconditionally, so pre-market every non-primary strategy drew
+  // an empty chart, an empty P&L curve and an empty grid — which is exactly the
+  // "only B shows the previous day, the rest are empty charts" report. The
+  // previous-day cards were reachable ONLY from PrimaryICView, so no other
+  // strategy could draw one no matter what the endpoints returned.
+  // `isLive` comes from the store because market status is GLOBAL (one
+  // exchange), not per-strategy. Including it matches PrimaryICView exactly —
+  // omit it and a strategy would flip to the off-day cards in the first minutes
+  // of a session, before its first bar has been recorded.
+  const hasEntries = entries.some((e) => e.entry_time);
+  const hasChartData = ohlc.length > 0;
+  const showFullLayout = isLive || hasEntries || hasChartData;
+
   const ambientClass =
     netPnl > 0 ? "ambient-profit" : netPnl < 0 ? "ambient-loss" : "";
+
+  if (!showFullLayout) {
+    return (
+      <div className="relative space-y-3">
+        <MarketContextBanner cumulative={body.cumulative} comparisons={body.comparisons} />
+        <OffDaySummaryCards strategyId={strategyId} comparisons={body.comparisons} />
+        <PerformanceMetrics dailyPnls={body.performance?.daily_pnls ?? []} />
+        <AgentStatusPanel />
+      </div>
+    );
+  }
 
   return (
     <div className="relative">
@@ -249,10 +276,16 @@ function PolledICView({ body }: { body: ICSnapshotBody; accent: string }) {
 }
 
 interface IronCondorDashboardProps {
-  source: "ws" | { body: ICSnapshotBody; accent: string };
+  source: "ws" | { body: ICSnapshotBody; accent: string; strategyId?: string };
 }
 
 export function IronCondorDashboard({ source }: IronCondorDashboardProps) {
   if (source === "ws") return <PrimaryICView />;
-  return <PolledICView body={source.body} accent={source.accent} />;
+  return (
+    <PolledICView
+      body={source.body}
+      accent={source.accent}
+      strategyId={source.strategyId}
+    />
+  );
 }

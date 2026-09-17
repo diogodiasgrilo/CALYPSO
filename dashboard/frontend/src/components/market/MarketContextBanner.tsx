@@ -123,10 +123,50 @@ export function FOMCBanner() {
 }
 
 /** Main context banner — shown in compact layout (market closed, no data). */
-export function MarketContextBanner() {
+/**
+ * The exact cumulative fields this banner reads. Declared structurally (rather
+ * than importing the snapshot type) so the WS store's metrics object and the
+ * polled snapshot's `cumulative` block both satisfy it.
+ */
+interface CumulativeLike {
+  cumulative_pnl?: number;
+  winning_days?: number;
+  losing_days?: number;
+  roi_pct?: number;
+  avg_capital_per_day?: number | null;
+}
+
+/** Best/worst/average day. The WS store holds the LIVE SEAT's only, so any
+ *  non-primary view must be given this explicitly or it shows the seat's. */
+interface ComparisonsLike {
+  best_day?: number | null;
+  worst_day?: number | null;
+  avg_pnl?: number | null;
+}
+
+/**
+ * ``cumulative`` overrides the WS store so a NON-primary strategy can render
+ * this banner from its own polled snapshot. Omit it on the primary and the
+ * store supplies the values, exactly as before.
+ */
+export function MarketContextBanner({
+  cumulative,
+  comparisons: comparisonsProp,
+}: {
+  cumulative?: CumulativeLike;
+  comparisons?: ComparisonsLike;
+} = {}) {
   const market = useHydraStore((s) => s.market);
-  const metrics = useHydraStore((s) => s.metrics);
-  const comparisons = useHydraStore((s) => s.comparisons);
+  const storeMetrics = useHydraStore((s) => s.metrics);
+  const storeComparisons = useHydraStore((s) => s.comparisons);
+  // Hooks must run on EVERY render, so this sits ABOVE the early returns below.
+  // It used to be called after them, which is a rules-of-hooks violation: the
+  // hook count changed when `market` arrived or `is_open` flipped at the open
+  // and close. (Benign only because nothing else hooked in between.)
+  const { strategy: _sel } = useSelectedStrategy();
+
+  const metrics = (cumulative ?? storeMetrics) as typeof storeMetrics;
+  const comparisons = (comparisonsProp ?? storeComparisons) as typeof storeComparisons;
 
   if (!market) return null;
   if (market.is_open) return null;
@@ -135,7 +175,6 @@ export function MarketContextBanner() {
 
   const cumulativePnl = metrics?.cumulative_pnl ?? 0;
   // Capital labels follow the strategy's CAPITAL BASIS (see DailyPnLCard).
-  const { strategy: _sel } = useSelectedStrategy();
   const _basis = capitalBasisConfig(_sel?.capital_basis);
   const _capitalLabel = _basis?.capitalLabel ?? "Capital / Day";
   const _returnLabel = _basis?.returnLabel ?? "ROI (on capital)";
@@ -307,8 +346,19 @@ interface EntryPnL {
 }
 
 /** Two side-by-side summary cards for off-market display. */
-export function OffDaySummaryCards() {
-  const comparisons = useHydraStore((s) => s.comparisons);
+/**
+ * ``strategyId`` scopes BOTH fetches below. They previously carried no
+ * ``strategy_id`` at all, so this card always showed the live seat's last day
+ * regardless of the picked strategy — the same defect class as the 2026-07-14
+ * cross-wiring fix (4b3d6a0), surviving in the component layer after the
+ * endpoints themselves were scoped.
+ */
+export function OffDaySummaryCards({
+  strategyId,
+  comparisons: comparisonsProp,
+}: { strategyId?: string; comparisons?: ComparisonsLike } = {}) {
+  const storeComparisons = useHydraStore((s) => s.comparisons);
+  const comparisons = (comparisonsProp ?? storeComparisons) as typeof storeComparisons;
   const [recentDays, setRecentDays] = useState<DailySummary[]>([]);
   const [lastDayEntries, setLastDayEntries] = useState<EntryPnL[]>([]);
   // EOD auto-update (operator request): these "Last Trading Day" / "Week in
@@ -321,8 +371,10 @@ export function OffDaySummaryCards() {
   const marketOpen = useHydraStore((s) => s.market?.is_open ?? null);
   const metricsUpdated = useHydraStore((s) => s.metrics?.last_updated ?? null);
 
+  const sidParam = strategyId ? `&strategy_id=${strategyId}` : "";
+
   useEffect(() => {
-    fetch("/api/metrics/daily?days=10")
+    fetch(`/api/metrics/daily?days=10${sidParam}`)
       .then((r) => r.json())
       .then((data) => {
         if (data.summaries) {
@@ -330,7 +382,7 @@ export function OffDaySummaryCards() {
           // Fetch entries for the most recent day
           if (data.summaries.length > 0) {
             const lastDate = data.summaries[0].date;
-            fetch(`/api/hydra/entries?date_str=${lastDate}`)
+            fetch(`/api/hydra/entries?date_str=${lastDate}${sidParam}`)
               .then((r) => r.json())
               .then((eData) => {
                 if (eData.entries && eData.entries.length > 0) {
@@ -362,8 +414,9 @@ export function OffDaySummaryCards() {
         }
       })
       .catch(() => {});
-    // marketOpen / metricsUpdated drive the EOD re-fetch (see note above).
-  }, [marketOpen, metricsUpdated]);
+    // marketOpen / metricsUpdated drive the EOD re-fetch (see note above);
+    // sidParam re-fetches when the operator switches strategy.
+  }, [marketOpen, metricsUpdated, sidParam]);
 
   // Last trading day = most recent entry (summaries come DESC from API)
   const lastDay = recentDays.length > 0 ? recentDays[0] : null;

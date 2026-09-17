@@ -141,6 +141,13 @@ export interface ICSnapshotBody {
   ohlc?: ICSnapshotOHLCBar[];
   cumulative?: ICSnapshotCumulative;
   performance?: ICSnapshotPerformance;
+  // Best/worst/average day for THIS strategy. Without it the off-day cards fall
+  // back to the WS store, which only ever holds the live seat's numbers.
+  comparisons?: {
+    best_day?: number | null;
+    worst_day?: number | null;
+    avg_pnl?: number | null;
+  };
 }
 
 // ── Calendar (dc_calendar) body — debit-native, NO IC fields ──
