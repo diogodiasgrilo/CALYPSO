@@ -238,7 +238,6 @@ def test_D7_F_declares_itself_one_sided():
 # D8 — nothing can render a pre-market view
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, reason="D8: the snapshot has no previous-session concept")
 def test_D8_snapshot_exposes_a_previous_session():
     """Pre-market the snapshot returns the freshly-reset day, so entries / ohlc /
     spx_open are empty for EVERY variant including B. B only looks correct
@@ -301,3 +300,46 @@ class TestPhase2GuardRails:
         src = (ROUTERS / "strategies.py").read_text()
         assert '"capital_basis": m.capital_basis' in src
         assert '"sides": m.sides' in src
+
+
+class TestPhase5PreviousSession:
+    """D8 fixed 2026-09-17. Pre-market a bot has reset, so the live fields are
+    legitimately empty — but blank is indistinguishable from broken, which is the
+    impression the dashboard actually gave."""
+
+    SRC = (ROUTERS / "strategies.py").read_text()
+
+    def test_it_reads_the_variants_OWN_database(self):
+        """Reading the canonical DB here would reintroduce the very bug Phase 1
+        fixed: every strategy showing the live seat's last session."""
+        i = self.SRC.index("def _read_previous_session")
+        body = self.SRC[i:i + 2600]
+        assert 'f"variant_{vid}_backtesting_db"' in body
+        assert "canonical_db_reader" not in body
+
+    def test_it_never_returns_todays_row_as_the_previous_session(self):
+        i = self.SRC.index("def _read_previous_session")
+        assert 'd == today' in self.SRC[i:i + 2600]
+
+    def test_it_is_a_SEPARATE_block_not_merged_into_the_live_fields(self):
+        """Back-filling yesterday's numbers into today's fields would be far
+        worse than a blank chart — it would be silently wrong."""
+        i = self.SRC.index('"previous_session":')
+        assert '_read_previous_session(vid,' in self.SRC[i:i + 160]
+
+    def test_missing_data_degrades_to_empty_not_fabricated(self):
+        i = self.SRC.index("def _read_previous_session")
+        body = self.SRC[i:i + 2600]
+        assert body.count("return {}") >= 3, "must degrade to {} on every failure path"
+
+    def test_it_cannot_500_the_snapshot(self):
+        i = self.SRC.index("def _read_previous_session")
+        assert "except Exception" in self.SRC[i:i + 2600]
+
+    def test_calendars_are_deliberately_excluded(self):
+        """D/E hold MULTI-DAY positions that do not reset daily, and their
+        snapshot already carries recent_outcomes. Forcing a 0DTE concept onto
+        them would repeat the mistake this whole rebuild is correcting."""
+        i = self.SRC.index("def _dc_snapshot")
+        j = self.SRC.index("def ", i + 10)
+        assert "previous_session" not in self.SRC[i:j]

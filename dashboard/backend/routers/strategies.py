@@ -434,6 +434,64 @@ def _read_variant_performance(vid: str) -> dict:
     }
 
 
+def _read_previous_session(vid: str, today: str) -> dict:
+    """The last COMPLETED session for this strategy, from its OWN database.
+
+    Dashboard rebuild Phase 5 (defect D8). The snapshot only ever described
+    TODAY, and a bot resets its state at the start of a session — so pre-market
+    every variant returned entries=[], ohlc=[], spx_open=None and rendered blank
+    charts. B only appeared to work because the main page read the (then
+    unscoped) canonical endpoints, which is what Phase 1 fixed.
+
+    Blank is the correct rendering of "today has not happened yet", but it is a
+    terrible thing to show someone: it is indistinguishable from "this strategy
+    is broken", which is exactly the impression the dashboard gave. This block
+    lets the UI say "showing the last completed session, <date>" instead.
+
+    Deliberately SEPARATE from the live fields rather than back-filling them —
+    silently presenting yesterday's numbers as today's would be far worse than a
+    blank chart. The caller labels it.
+
+    Returns ``{}`` when there is no prior session (a brand-new strategy), never
+    a fabricated one. Missing DB / empty table degrade to ``{}``; never raises.
+    """
+    db_path = getattr(settings, f"variant_{vid}_backtesting_db", None)
+    if not db_path:
+        return {}
+    try:
+        if not Path(db_path).exists():
+            return {}
+    except OSError:
+        return {}
+
+    from dashboard.backend.services.db_reader import BacktestingDBReader
+
+    try:
+        reader = BacktestingDBReader(str(db_path))
+        rows = _run_coro(reader.get_daily_summaries(limit=10)) or []
+    except Exception:  # noqa: BLE001 — a display fallback must never 500
+        logger.debug("previous-session read failed for %s", vid, exc_info=True)
+        return {}
+
+    # get_daily_summaries is newest-first; take the newest row that is NOT today.
+    for r in rows:
+        d = r.get("date")
+        if not d or d == today:
+            continue
+        return {
+            "date": d,
+            "net_pnl": r.get("net_pnl"),
+            "gross_pnl": r.get("gross_pnl"),
+            "entries_placed": r.get("entries_placed"),
+            "entries_stopped": r.get("entries_stopped"),
+            "spx_open": r.get("spx_open"),
+            "spx_high": r.get("spx_high"),
+            "spx_low": r.get("spx_low"),
+            "spx_close": r.get("spx_close"),
+        }
+    return {}
+
+
 def _ic_snapshot(vid: str, m: tax.StrategyMeta) -> dict:
     """IC (``ic_state``) per-strategy snapshot — reuses the existing per-variant
     state/summary/entries readers exactly as /api/variants does. Missing state
@@ -487,6 +545,10 @@ def _ic_snapshot(vid: str, m: tax.StrategyMeta) -> dict:
         "ohlc": _read_variant_ohlc(db_path),
         "cumulative": _read_variant_cumulative(vid),
         "performance": _read_variant_performance(vid),
+        # Phase 5 (D8): the last COMPLETED session, so a pre-market view can show
+        # something true instead of a blank chart. Separate from the live fields
+        # above — never merged into them — so the UI must label it explicitly.
+        "previous_session": _read_previous_session(vid, state.get("date") or ""),
     }
     return body
 
