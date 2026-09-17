@@ -365,3 +365,52 @@ def test_table_defaults_to_intraday():
     """Every existing caller omits the prop and must be unchanged."""
     src = SUMMARY_TABLE.read_text()
     assert "intraday = true" in src
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# D18 / D19 — two charts that were technically correct but read as wrong
+# ─────────────────────────────────────────────────────────────────────────────
+
+COMPARISON = ROOT / "dashboard" / "frontend" / "src" / "pages" / "Comparison.tsx"
+
+
+def test_distribution_excludes_no_trade_days():
+    """D18. A no-trade day is not an outcome of size zero — it is the absence of
+    one. B had 21 of them against 73 traded days, and the resulting $0 bar
+    compressed every real outcome into the baseline."""
+    page = ANALYTICS.read_text()
+    block = page[page.index("const histogramData = useMemo"):]
+    block = block[: block.index("}, [summaries]);")]
+    assert "summaries.filter(" in block, (
+        "the histogram consumes every summary again, so no-trade days are back "
+        "in the $0 bucket."
+    )
+    assert "entries_placed" in block, (
+        "exclusion must consider entries_placed — a genuinely traded day can "
+        "net exactly $0 and should still count."
+    )
+
+
+def test_excluded_day_count_is_shown():
+    """Silently dropping data is its own defect; the count must be visible."""
+    page = ANALYTICS.read_text()
+    assert "no-trade day" in page and "noTradeDays" in page
+
+
+def test_a_solo_group_does_not_declare_a_leader():
+    """D19. G's group has one member, and it rendered "Today's Leader — Tied":
+    a comparison between a strategy and nothing."""
+    src = COMPARISON.read_text()
+    assert "soloMember" in src, "no single-member handling in the leaderboard"
+    assert "variantIds.length === 1" in src
+    assert "sole member of this group" in src
+
+
+def test_multi_member_groups_still_show_a_leader():
+    """The fix must not remove the leaderboard from a real comparison."""
+    src = COMPARISON.read_text()
+    assert "Today&apos;s Leader" in src or "Today's Leader" in src
+    assert "!soloMember && pcLeaderLabel" in src, (
+        "the per-contract leader line is equally meaningless with one member "
+        "and must be gated too."
+    )

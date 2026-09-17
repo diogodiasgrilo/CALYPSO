@@ -1,9 +1,25 @@
-/** HYDRA brand color system — 3-level surface depth + semantic colors. */
+/** HYDRA brand color system — 3-level surface depth + semantic colors.
+ *
+ * MUST STAY IN STEP WITH `index.css`. These values are duplicated there as
+ * `--color-*` custom properties: Tailwind classes and plain CSS read the custom
+ * properties, while the charting libraries (recharts, lightweight-charts) need
+ * concrete strings and read THIS object. Two copies of one palette is a drift
+ * hazard, and the drift had already happened when this note was written —
+ * `bgDeep` here said `#1a2229` (a copy of `bg`, labelled "alias for bg") while
+ * `--color-bg-deep` in CSS was `#161d23`. It had no visual effect only because
+ * nothing consumed `colors.bgDeep`; the first caller would have got the wrong
+ * shade.
+ *
+ * `tests/test_dashboard_palette_parity_2026_09_17.py` parses both files and
+ * fails on any mismatch. A runtime read of the custom properties was considered
+ * and rejected: `getComputedStyle` at module load can run before the stylesheet
+ * applies, and a chart silently painted in fallback colours is worse than a
+ * build-time failure. */
 
 export const colors = {
   // Surface depth system (3 elevation levels)
   bg: "#1a2229", // Level 0 — page background
-  bgDeep: "#1a2229", // alias for bg
+  bgDeep: "#161d23", // Level -1 — deepest recess (tab bars, modals)
   card: "#222e35", // Level 1 — cards/panels
   cardHover: "#283338", // Level 1 hover
   bgElevated: "#2d3b43", // Level 2 — modals/tooltips/dropdowns

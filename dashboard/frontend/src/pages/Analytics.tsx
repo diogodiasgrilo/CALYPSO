@@ -420,10 +420,22 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
   }, [summaries]);
 
   // 2. Daily P&L histogram ($50 buckets)
+  // Days the strategy did not trade are EXCLUDED (defect D18). They pile into
+  // the $0 bucket and dominate it — B had 21 of them against 73 traded days, a
+  // bar of 24 that compressed every real outcome into the baseline. The
+  // distribution is meant to show the shape of TRADING outcomes; a no-trade day
+  // is not an outcome of size zero, it is the absence of one. The count is
+  // reported under the chart rather than silently dropped.
+  const noTradeDays = useMemo(
+    () => summaries.filter((s) => !(s.net_pnl || 0) && !(s.entries_placed || 0)).length,
+    [summaries],
+  );
+
   const histogramData = useMemo(() => {
-    if (summaries.length === 0) return [];
+    const traded = summaries.filter((s) => (s.net_pnl || 0) || (s.entries_placed || 0));
+    if (traded.length === 0) return [];
     const bucketSize = 50;
-    const pnls = summaries.map((s) => s.net_pnl || 0);
+    const pnls = traded.map((s) => s.net_pnl || 0);
     const minPnl = Math.floor(Math.min(...pnls) / bucketSize) * bucketSize;
     const maxPnl = Math.ceil(Math.max(...pnls) / bucketSize) * bucketSize;
     const buckets = new Map<number, number>();
@@ -530,8 +542,9 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
       {/* Daily P&L Histogram */}
       <ChartCard title="Daily P&L Distribution">
         {histogramData.length === 0 ? (
-          <EmptyChart message="No daily data yet" />
+          <EmptyChart message="No traded days yet" />
         ) : (
+          <>
           <ResponsiveContainer width="100%" height={200}>
             <BarChart data={histogramData}>
               <XAxis
@@ -558,6 +571,13 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
               </Bar>
             </BarChart>
           </ResponsiveContainer>
+          {noTradeDays > 0 && (
+            <div className="text-[10px] text-text-dim mt-1">
+              excludes {noTradeDays} no-trade day{noTradeDays > 1 ? "s" : ""} —
+              they are not outcomes of size zero
+            </div>
+          )}
+          </>
         )}
       </ChartCard>
 

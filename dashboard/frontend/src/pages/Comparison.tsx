@@ -433,6 +433,11 @@ function Leaderboard({
   winner: string;
   scores: Record<string, number>;
 }) {
+  // A group with ONE member has no leader to declare (defect D19). G's solo
+  // undefined-risk group rendered "Today's Leader — Tied", which is a
+  // comparison between a strategy and nothing. Say what the card actually is.
+  const soloMember = variantIds.length === 1 ? variantIds[0] : null;
+
   const winnerVariant = variants[winner];
   const winnerLabel =
     winner === "tie" ? "Tied" : winner === "n/a" ? "—" : winnerVariant?.label ?? winner;
@@ -461,12 +466,27 @@ function Leaderboard({
       <div className="flex items-baseline justify-between gap-4 max-md:flex-col max-md:items-start">
         <div>
           <div className="text-xs uppercase tracking-wide text-text-secondary">
-            Today's Leader <span className="text-text-dim normal-case">(raw $)</span>
+            {soloMember ? (
+              <>
+                Today
+                <span className="text-text-dim normal-case">
+                  {" "}
+                  — sole member of this group
+                </span>
+              </>
+            ) : (
+              <>
+                Today&apos;s Leader{" "}
+                <span className="text-text-dim normal-case">(raw $)</span>
+              </>
+            )}
           </div>
           <div className="text-2xl font-semibold mt-1" style={{ color: winnerColor }}>
-            {winnerLabel}
+            {soloMember
+              ? variants[soloMember]?.label ?? soloMember.toUpperCase()
+              : winnerLabel}
           </div>
-          {pcLeaderLabel && pcLeader !== winner && (
+          {!soloMember && pcLeaderLabel && pcLeader !== winner && (
             <div className="text-[11px] mt-1" style={{ color: accentFor(pcLeader!) }}>
               Per-contract leader: {pcLeaderLabel}
             </div>
