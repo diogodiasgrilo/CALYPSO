@@ -1,4 +1,10 @@
-import { useEffect, useState, useMemo } from "react";
+import { useEffect, useState, useMemo, createContext, useContext } from "react";
+import {
+  applicableCharts,
+  hiddenReasons,
+  factsFor,
+} from "../lib/chartApplicability";
+import { Link } from "react-router-dom";
 import { useSelectedStrategy } from "../hooks/useSelectedStrategy";
 import {
   BarChart,
@@ -23,7 +29,7 @@ import { formatPnL } from "../lib/formatters";
 import { EquityCurve } from "../components/pnl/EquityCurve";
 import { markersForStrategy } from "../lib/strategyMarkers";
 import { CorrelationHeatmap } from "../components/market/CorrelationHeatmap";
-import { Download } from "lucide-react";
+import { Download, CalendarRange } from "lucide-react";
 import { exportEntriesCSV } from "../lib/exportUtils";
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
@@ -160,8 +166,23 @@ function parseEntryTimeToSlot(timeStr: string): number | null {
   return bestDist <= 10 ? best : null;
 }
 
+/**
+ * Titles applicable to the SELECTED strategy on the CURRENT tab. `null` means
+ * "no filtering" (meta not loaded), which renders the full grid exactly as
+ * before this existed — an unknown strategy must never lose a real chart.
+ *
+ * Done as a context so ChartCard filters itself: the alternative was threading a
+ * prop through four tab components and sixteen call sites, which is a large
+ * diff across 1,300 lines of chart code for a purely declarative concern.
+ */
+const ApplicableCharts = createContext<Set<string> | null>(null);
+
 /** Chart card wrapper */
 function ChartCard({ title, children }: { title: string; children: React.ReactNode }) {
+  const applicable = useContext(ApplicableCharts);
+  // Not merely empty — NOT MEANINGFUL for this strategy. The page names it
+  // below the grid so "does not apply" is distinguishable from "is broken".
+  if (applicable && !applicable.has(title)) return null;
   return (
     <div className="bg-card rounded-lg border border-border-dim p-4">
       <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-3">
@@ -231,6 +252,59 @@ export function Analytics() {
     [summaries],
   );
 
+  // Chart applicability for the SELECTED strategy on the ACTIVE tab.
+  // These are hooks, so they sit ABOVE every early return below — the
+  // conditional-hook mistake already found once today in MarketContextBanner.
+  const facts = useMemo(() => factsFor(strategy), [strategy]);
+  const applicable = useMemo(
+    () => applicableCharts(activeTab, facts),
+    [activeTab, facts],
+  );
+  const hidden = useMemo(
+    () => hiddenReasons(activeTab, facts),
+    [activeTab, facts],
+  );
+
+  // These four tabs read the IC entry/stop schema. A multi-day net-debit
+  // calendar has no rows in it, so every chart rendered an axis of zeros —
+  // "Rolling win rate (10-day)" flat at 0%, "Avg P&L by day of week" for a
+  // position opened Monday and closed Thursday. The backend has declared this
+  // incapability all along in `capabilities.analytics`; the page ignored it.
+  if (strategy && strategy.capabilities?.analytics === false) {
+    return (
+      <div className="space-y-4">
+        <h2 className="text-sm font-semibold text-text-primary">Analytics</h2>
+        {/* Centred in the viewport rather than stranded above a long void —
+            a small card floating over 800px of nothing reads as a broken page,
+            not as a deliberate "this does not apply". */}
+        <div
+          className="bg-card rounded-lg border border-border-dim p-10 text-center
+                     flex flex-col items-center justify-center"
+          style={{ minHeight: "min(60vh, 520px)" }}
+        >
+          <CalendarRange size={28} className="text-text-dim mb-4" />
+          <div className="text-text-primary text-base mb-3">
+            Analytics does not apply to {strategy.display_name}
+          </div>
+          <p className="text-text-secondary text-xs max-w-lg mx-auto leading-relaxed">
+            These charts describe intraday credit structures — entry slots, credit
+            captured, call-vs-put stops. {strategy.display_name} is a multi-day
+            net-debit calendar, so each of them would plot an axis of zeros rather
+            than tell you anything. Its own view carries net debit, transform
+            credit, live mark-to-market and realised outcomes.
+          </p>
+          <Link
+            to="/comparison/calendar_multiday"
+            className="inline-block mt-6 text-xs px-4 py-2 rounded border border-border-dim
+                       text-text-secondary hover:text-text-primary hover:border-text-dim transition-colors"
+          >
+            Open the calendar view →
+          </Link>
+        </div>
+      </div>
+    );
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64 text-text-dim">
@@ -280,7 +354,9 @@ export function Analytics() {
         </button>
       </div>
 
-      {/* Tab content */}
+      {/* Tab content — charts that are not MEANINGFUL for this strategy are
+          filtered out by ChartCard via the context, and named underneath. */}
+      <ApplicableCharts.Provider value={applicable}>
       <div className="grid grid-cols-2 gap-3 max-lg:grid-cols-1">
         {activeTab === "performance" && (
           <>
@@ -309,6 +385,22 @@ export function Analytics() {
           </>
         )}
       </div>
+      </ApplicableCharts.Provider>
+
+      {/* Name what was hidden and why. A reader comparing two strategies has to
+          be able to tell "does not apply here" from "is broken". */}
+      {hidden.length > 0 && (
+        <div className="text-[11px] text-text-dim leading-relaxed px-1">
+          {hidden.length} chart{hidden.length > 1 ? "s" : ""} not shown for{" "}
+          {strategy?.display_name ?? "this strategy"}:{" "}
+          {hidden.map((h, i) => (
+            <span key={h.title}>
+              {i > 0 && " · "}
+              <span className="text-text-secondary">{h.title}</span> ({h.reason})
+            </span>
+          ))}
+        </div>
+      )}
     </div>
   );
 }
@@ -938,7 +1030,9 @@ function StopsTab({
 
   return (
     <>
-      <div className="text-[11px] text-text-secondary mb-1">
+      {/* Spans the grid: as a plain child it consumed a whole chart-sized cell,
+          leaving a tall void beside the first chart. */}
+      <div className="col-span-2 max-lg:col-span-1 text-[11px] text-text-secondary -mb-1">
         Stop-losses only — Brandon take-profit / GEX-breach exits are excluded.
       </div>
       {/* Stop Rate by Time Slot */}

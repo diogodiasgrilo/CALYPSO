@@ -50,6 +50,9 @@ export interface StrategyInfo {
   pnl_shape: PnlShape;
   capital_basis: CapitalBasis;
   sides: Sides;
+  /** Holding horizon — "0DTE" | "multi_day" | "unknown". A chart bucketed by
+   *  day-of-week or entry-slot is meaningless for a multi-day position. */
+  dte_class: string;
   data_kind: DataKind;
   is_live: boolean;
   is_primary: boolean;

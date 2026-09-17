@@ -193,19 +193,29 @@ def _capabilities(m: tax.StrategyMeta) -> dict:
 
     - main_dashboard: every registered strategy can be the picker's selection.
     - comparison: only members of a *comparable* group.
-    - history / analytics: today these pages are hard-bound to the canonical-C
-      IC readers (metrics.py), so only the IC group can drive them until those
-      routers are parameterized (audit AUD-3-F4). Calendar strategies expose
-      calendar_cards instead.
+    - history / analytics: these pages read the IC entry/stop schema, so the
+      gate is ``data_kind == "ic_state"`` — the DATA SHAPE they consume.
+      Calendar strategies expose calendar_cards instead.
     - calendar_cards: the DC-native open-calendars/outcomes view (dc_calendar).
+
+    CORRECTED 2026-09-17 (defect D11). The gate used to be
+    ``structure_family == "iron_condor"``, which is a different question and got
+    G wrong: a short strangle has ``structure_family="strangle"``, so it was
+    declared incapable of History and Analytics even though its data is
+    IC-shaped (``data_kind="ic_state"``) and both pages render it correctly.
+    Honouring the old flags would have REMOVED two working pages from G.
+
+    ``structure_family`` describes the option structure; ``data_kind`` describes
+    the record shape a page has to read. Only the latter can answer "can this
+    page render this strategy".
     """
-    is_ic = m.structure_family == "iron_condor"
+    reads_ic_schema = _data_kind(m) == "ic_state"
     comparable = tax.group(m.id).comparable
     return {
         "main_dashboard": True,
         "comparison": comparable,
-        "history": is_ic,
-        "analytics": is_ic,
+        "history": reads_ic_schema,
+        "analytics": reads_ic_schema,
         "calendar_cards": _data_kind(m) == "dc_calendar",
     }
 
@@ -224,6 +234,11 @@ def _strategy_meta_dict(m: tax.StrategyMeta) -> dict:
         # strategy never trades (F's phantom call leg).
         "capital_basis": m.capital_basis,
         "sides": m.sides,
+        # D11: a chart like "Avg P&L by Day of Week" is meaningless for a
+        # position opened Monday and closed Thursday, so the renderer needs to
+        # know the holding horizon. Present in the taxonomy all along; simply
+        # never exposed, so the frontend could not consult it.
+        "dte_class": m.dte_class,
         "data_kind": _data_kind(m),
         "is_live": _is_live(m.id),
         "is_primary": m.id == _primary_id(),

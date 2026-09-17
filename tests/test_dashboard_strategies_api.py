@@ -183,11 +183,19 @@ class TestMeta:
         assert g["family"] == "strangle"
         assert g["pnl_shape"] == "credit"
         assert g["is_primary"] is False
-        # Solo, non-comparable group + not structure_family="iron_condor" → no
-        # comparison/history/analytics capability (deliberately not built yet).
+        # Solo, non-comparable group → no comparison capability.
         assert g["capabilities"]["comparison"] is False
-        assert g["capabilities"]["history"] is False
-        assert g["capabilities"]["analytics"] is False
+        # CORRECTED 2026-09-17 (defect D11). These two used to assert False,
+        # pinning a gate of structure_family == "iron_condor". That was the
+        # wrong question: History and Analytics read the IC entry/stop SCHEMA,
+        # and G's data_kind is "ic_state" — both pages render G correctly today,
+        # which the 42-surface visual audit confirmed by screenshotting them.
+        # The flag said "incapable" while the reality was "works", and nothing
+        # enforced the flag because the frontend ignored capabilities entirely.
+        # Now that the frontend honours them, leaving these False would DELETE
+        # two working pages from G. The gate is data_kind.
+        assert g["capabilities"]["history"] is True
+        assert g["capabilities"]["analytics"] is True
         assert g["capabilities"]["calendar_cards"] is False
         assert g["capabilities"]["main_dashboard"] is True
         assert e["capabilities"]["history"] is False
