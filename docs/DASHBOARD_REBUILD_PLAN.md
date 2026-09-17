@@ -168,8 +168,17 @@ has **zero xfails**; every former defect is now a permanent guard rail. Suite
 
 **`sides` is declared but WIRED NOWHERE.** Phase 2 added it to the taxonomy and
 Phase 4 shipped it via `/api/strategies/meta`, but no component consumes it.
-I described Phase 4 as hiding F's absent side; **it does not**. F still renders a
-phantom call leg wherever entries are drawn.
+
+> **CORRECTED 2026-09-17.** The second half of this — "F still renders a phantom
+> call leg wherever entries are drawn" — was **wrong**. Rendering F's real
+> `put_only` entry (SC 0.0, call credit 0.0) shows a **PUT ONLY** badge,
+> "C SKIPPED", and `C:skipped` beside `P:7550/7540`. Every one of the eight
+> components that draw a call strike already guards the absent side, and those
+> guards landed in `fb99151` / `de4b895` on **2026-06-15/16** — three months
+> before this document claimed the bug was live. What `sides` is genuinely
+> unwired for is CHART APPLICABILITY, which Phase 9's
+> `lib/chartApplicability.ts` now uses. See
+> `tests/test_dashboard_one_sided_rendering_2026_09_17.py`.
 
 Measured:
 

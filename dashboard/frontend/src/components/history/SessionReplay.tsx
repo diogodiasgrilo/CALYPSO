@@ -349,8 +349,20 @@ export function SessionReplay({ date, strategyId = "" }: { date: string; strateg
                 <span className="text-text-dim">{fmtEntryTime(e.entry_time)}</span>
               </div>
               <div className="flex justify-between text-text-secondary">
-                <span>{(e.entry_type || "").includes("put_only") ? "C: —" : `C:${e.short_call_strike}`}</span>
-                <span>{(e.entry_type || "").includes("call_only") ? "P: —" : `P:${e.short_put_strike}`}</span>
+                {/* Guard on the STRIKE as well as entry_type. entry_type is a
+                    recorded string and can be blank on a legacy/malformed row,
+                    and a one-sided entry stores the absent side at 0.0 — so
+                    entry_type alone would render a phantom "C:0". */}
+                <span>
+                  {(e.entry_type || "").includes("put_only") || !(e.short_call_strike > 0)
+                    ? "C: —"
+                    : `C:${e.short_call_strike}`}
+                </span>
+                <span>
+                  {(e.entry_type || "").includes("call_only") || !(e.short_put_strike > 0)
+                    ? "P: —"
+                    : `P:${e.short_put_strike}`}
+                </span>
               </div>
               <div className="text-right mt-0.5" style={{ color: colors.profit }}>
                 ${(e.total_credit ?? 0).toFixed(2)}

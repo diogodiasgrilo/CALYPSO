@@ -281,8 +281,8 @@ Worth recording, because the audit is not a demolition:
 | D18 | `$0` bucket dominates the distribution histogram | open |
 | D19 | Single-member group renders a "leaderboard" | open |
 | — | 19 remaining eslint errors (2 more rules-of-hooks, 12 set-state-in-effect) | open |
-| P8 | Wire `sides` — F renders a leg it does not have | open |
-| P10 | G's tail cards (`UNBOUNDED` max loss, σ-to-breach) | open |
+| P8 | Wire `sides` | **NOT A DEFECT — claim was stale.** Every renderer already guarded F's absent side since 2026-06-15/16. Pinned by 14 regression tests + one genuine hardening in `SessionReplay` (guarded on `entry_type` alone, which can be blank). `sides` IS now wired, via chart applicability. |
+| P10 | G's tail cards | **FIXED + DEPLOYED** — `UndefinedRiskCard`: MAX LOSS UNBOUNDED + nearest short in points and × expected move |
 
 ### The G backfill has an ordering constraint
 
