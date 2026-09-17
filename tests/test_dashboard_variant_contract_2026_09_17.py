@@ -193,14 +193,22 @@ def test_D5_live_state_endpoints_are_variant_scoped(router, path):
 # D6 — the calendar page can only ever be D
 # ─────────────────────────────────────────────────────────────────────────────
 
-@pytest.mark.xfail(strict=True, reason="D6: routers/dc.py hardcodes variant_d")
 def test_D6_calendar_router_is_not_hardcoded_to_D():
     """E is a double calendar with its own dc_calendar.db, but /api/dc/status
-    reads settings.variant_d_state_file and variant_d_baseline_date. E's
-    calendar view can never show E's own data."""
+    read settings.variant_d_state_file and variant_d_baseline_date, so E's
+    calendar view could never show E's own data.
+
+    FIXED 2026-09-17 (Phase 6). Asserts the ATTRIBUTE ACCESS is gone rather than
+    the word — the module docstring legitimately names the old fields to explain
+    the defect, and a test that forbids describing a bug is a bad test.
+    """
     src = (ROUTERS / "dc.py").read_text()
-    hardcoded = [ln.strip() for ln in src.splitlines() if "variant_d" in ln]
-    assert not hardcoded, f"dc.py hardcodes variant_d: {hardcoded}"
+    hardcoded = [
+        ln.strip() for ln in src.splitlines()
+        if "settings.variant_d_" in ln or 'f"variant_d_' in ln
+    ]
+    assert not hardcoded, f"dc.py still reads D's settings directly: {hardcoded}"
+    assert "strategy_id" in src, "the calendar route is not scoped at all"
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -343,3 +351,27 @@ class TestPhase5PreviousSession:
         i = self.SRC.index("def _dc_snapshot")
         j = self.SRC.index("def ", i + 10)
         assert "previous_session" not in self.SRC[i:j]
+
+
+class TestPhase6CalendarRouter:
+    """D6 fixed 2026-09-17."""
+
+    SRC = (ROUTERS / "dc.py").read_text()
+
+    def test_the_calendar_list_comes_from_the_TAXONOMY(self):
+        """A hardcoded ['d','e'] would reproduce the defect for a third calendar.
+        Driven off pnl_shape == 'debit' so a new one registers itself."""
+        assert 'pnl_shape == "debit"' in self.SRC
+
+    def test_an_unknown_id_degrades_rather_than_404s(self):
+        """Matches reader_for's contract elsewhere: a bad query param renders
+        something sensible instead of an error page."""
+        assert "_DEFAULT_CALENDAR" in self.SRC
+
+    def test_the_response_says_which_strategy_answered(self):
+        """Without this the page can silently show D's calendars under E's
+        name — which is the defect, just harder to notice."""
+        assert '"strategy_id"' in self.SRC
+
+    def test_it_reads_each_strategys_OWN_baseline(self):
+        assert 'f"variant_{vid}_baseline_date"' in self.SRC
