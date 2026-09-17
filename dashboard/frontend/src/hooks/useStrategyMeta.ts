@@ -17,6 +17,18 @@ export type DataKind = "ic_state" | "dc_calendar";
 /** Credit (net-credit IC) vs debit (net-debit calendar). Forbids cross-shape charts. */
 export type PnlShape = "credit" | "debit" | "unknown";
 
+/**
+ * What CAPITAL means for a strategy — a different question from `pnl_shape`,
+ * which is how P&L is EARNED. Conflating them is what made the naked strangle
+ * render as an iron condor: it sells premium (pnl_shape "credit", same as the
+ * ICs) but has no spread width for a return to be a percentage OF, so
+ * return-on-capital was UNDEFINED rather than merely missing.
+ */
+export type CapitalBasis = "defined_risk" | "net_debit" | "broker_margin" | "unknown";
+
+/** Whether a strategy ever places BOTH a call and a put side. */
+export type Sides = "one_sided" | "two_sided" | "unknown";
+
 export interface StrategyCapabilities {
   /** Can be the main-dashboard picker's selection. */
   main_dashboard: boolean;
@@ -36,6 +48,8 @@ export interface StrategyInfo {
   group_id: string;
   family: string; // structure_family: "iron_condor" | "double_calendar" | "unknown"
   pnl_shape: PnlShape;
+  capital_basis: CapitalBasis;
+  sides: Sides;
   data_kind: DataKind;
   is_live: boolean;
   is_primary: boolean;

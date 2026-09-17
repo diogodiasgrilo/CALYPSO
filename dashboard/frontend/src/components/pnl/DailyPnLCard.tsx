@@ -2,6 +2,8 @@ import { useMemo } from "react";
 import { useHydraStore } from "../../store/hydraStore";
 import { formatPnL, winRate } from "../../lib/formatters";
 import { pnlColor, colors } from "../../lib/tradingColors";
+import { capitalBasisConfig } from "../../lib/pnlShape";
+import { useSelectedStrategy } from "../../hooks/useSelectedStrategy";
 import { useAnimatedNumber } from "../../hooks/useAnimatedNumber";
 import type { HydraEntry, CumulativeMetrics } from "../../store/hydraStore";
 import type {
@@ -128,6 +130,21 @@ export function DailyPnLCard({ summary, cumulative, entries: entriesProp }: Dail
   const totalDays = winningDays + losingDays;
   const avgPerDay = totalDays > 0 ? cumulativePnl / totalDays : 0;
   const baselineDate = metrics?.cumulative_baseline_date || "";
+  // Capital labels depend on the strategy's CAPITAL BASIS, not its pnl_shape.
+  // A naked strangle and an iron condor are both credit-shaped, but one has a
+  // spread width and the other a broker-margin requirement — calling the
+  // strangle's denominator "capital (width notional)" is simply false.
+  const { strategy } = useSelectedStrategy();
+  const basis = capitalBasisConfig(strategy?.capital_basis);
+  const capitalLabel = basis?.capitalLabel ?? "Capital / Day";
+  const returnLabel = basis?.returnLabel ?? "ROI (on capital)";
+
+  // A strategy with no capital history must read "—", never "$0" / "0.00%".
+  // G accumulated ZERO daily_returns rows before 2026-09-17 because the capital
+  // model skipped its wingless entries, so a rendered 0 here would be a
+  // fabricated number rather than an absent one.
+  const hasCapitalHistory =
+    metrics?.avg_capital_per_day != null && metrics.avg_capital_per_day > 0;
   const roiPct = metrics?.roi_pct ?? 0;
   const avgCapitalPerDay = metrics?.avg_capital_per_day ?? 0;
 
@@ -254,13 +271,19 @@ export function DailyPnLCard({ summary, cumulative, entries: entriesProp }: Dail
 
         {/* Capital efficiency row — ROI on capital deployed + avg capital/day */}
         <div className="grid grid-cols-2 gap-1 pt-3 mt-3 border-t border-border-dim">
-          <StatCell label="ROI (on capital)">
-            <span style={{ color: pnlColor(roiPct) }}>
-              {roiPct >= 0 ? "+" : ""}{roiPct.toFixed(2)}%
-            </span>
+          <StatCell label={returnLabel}>
+            {hasCapitalHistory ? (
+              <span style={{ color: pnlColor(roiPct) }}>
+                {roiPct >= 0 ? "+" : ""}{roiPct.toFixed(2)}%
+              </span>
+            ) : (
+              <span className="text-text-dim" title="No capital history yet for this strategy">—</span>
+            )}
           </StatCell>
-          <StatCell label="Capital / Day">
-            ${Math.round(avgCapitalPerDay).toLocaleString()}
+          <StatCell label={capitalLabel}>
+            {hasCapitalHistory
+              ? `$${Math.round(avgCapitalPerDay).toLocaleString()}`
+              : <span className="text-text-dim" title={basis?.denominator}>—</span>}
           </StatCell>
         </div>
       </div>

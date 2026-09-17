@@ -1,6 +1,8 @@
 import { useState, useEffect } from "react";
 import { useHydraStore } from "../../store/hydraStore";
 import { formatPnL, winRate } from "../../lib/formatters";
+import { capitalBasisConfig } from "../../lib/pnlShape";
+import { useSelectedStrategy } from "../../hooks/useSelectedStrategy";
 import { pnlColor, colors } from "../../lib/tradingColors";
 import { Calendar, Clock, AlertTriangle, Sun, Coffee } from "lucide-react";
 
@@ -132,6 +134,13 @@ export function MarketContextBanner() {
   const nextOpen = formatNextOpen(market.next_event?.next_open);
 
   const cumulativePnl = metrics?.cumulative_pnl ?? 0;
+  // Capital labels follow the strategy's CAPITAL BASIS (see DailyPnLCard).
+  const { strategy: _sel } = useSelectedStrategy();
+  const _basis = capitalBasisConfig(_sel?.capital_basis);
+  const _capitalLabel = _basis?.capitalLabel ?? "Capital / Day";
+  const _returnLabel = _basis?.returnLabel ?? "ROI (on capital)";
+  const _hasCapital =
+    metrics?.avg_capital_per_day != null && metrics.avg_capital_per_day > 0;
   const winningDays = metrics?.winning_days ?? 0;
   const losingDays = metrics?.losing_days ?? 0;
   const totalDays = winningDays + losingDays;
@@ -213,15 +222,19 @@ export function MarketContextBanner() {
             </div>
           </div>
           <div>
-            <div className="label-upper mb-1">ROI (on capital)</div>
-            <div className="metric-body" style={{ color: pnlColor(roiPct) }}>
-              {roiPct >= 0 ? "+" : ""}{roiPct.toFixed(2)}%
+            <div className="label-upper mb-1">{_returnLabel}</div>
+            <div className="metric-body" style={{ color: _hasCapital ? pnlColor(roiPct) : undefined }}>
+              {_hasCapital
+                ? `${roiPct >= 0 ? "+" : ""}${roiPct.toFixed(2)}%`
+                : <span className="text-text-dim">—</span>}
             </div>
           </div>
           <div>
-            <div className="label-upper mb-1">Capital / Day</div>
+            <div className="label-upper mb-1">{_capitalLabel}</div>
             <div className="metric-body text-text-primary">
-              ${Math.round(avgCapitalPerDay).toLocaleString()}
+              {_hasCapital
+                ? `$${Math.round(avgCapitalPerDay).toLocaleString()}`
+                : <span className="text-text-dim" title={_basis?.denominator}>—</span>}
             </div>
           </div>
           <div>
