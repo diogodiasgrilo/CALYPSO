@@ -261,8 +261,11 @@ account is funded, the only genuinely new thing is a credential file.
      credentials), dashboard `Settings` fields. **No registry row** — it reuses
      `strategy_class="brandon"`, one implementation across B/C/BM. 29 tests,
      12 mutations killed.
-   - S6 live-margin check — **remaining**
-   - ARGUS watching both brokers (§3.3) — **remaining**
+   - ✅ **DONE** — ARGUS watches both brokers (§3.3): both logs scanned and every
+     finding labelled with its broker, and on the real-money broker **every**
+     breaker family is a FAIL rather than just `orders`. 17 tests, 8 mutations
+     killed; verified running clean on the VM (exit 0, PASS).
+   - S6 live-margin check — **the last item in step 1**
 
 > ### 🔴 CORRECTION (2026-09-18) — "run it on paper first" was WRONG and unsafe
 >
