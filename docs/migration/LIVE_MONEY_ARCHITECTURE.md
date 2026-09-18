@@ -249,11 +249,37 @@ account is funded, the only genuinely new thing is a credential file.
      the `live_seat_id()` / `live_money_seat_id()` split. 49 tests, 13 mutations
      all killed, full suite 4159 passed. No trading behaviour changed: every
      variant still declares paper and the live seat still resolves to `b`.
-   - `calypso-broker-live` unit on 8789, **running paper credentials at first**
-     — this proves two brokers coexist and that S1/S2 work, with zero live-money
-     exposure
+   - `calypso-broker-live` unit on 8789 — **written and verified statically, NOT
+     started** (see the correction below)
    - the bm variant: taxonomy row, registry row, config, unit, dashboard
    - S6 live-margin check
+
+> ### 🔴 CORRECTION (2026-09-18) — "run it on paper first" was WRONG and unsafe
+>
+> This section originally said to start `calypso-broker-live` **on paper
+> credentials** first, "to prove two brokers coexist with zero live-money
+> exposure". **Do not do that.** Caught during the audit-before for the unit
+> file, not in production.
+>
+> Two brokers on the paper credentials are two sessions on the **same IBKR
+> username**, and fact 2 in §2 is per-USERNAME. They would evict each other in
+> exactly the crash-loop `calypso-broker` was built to end — taking the **live
+> paper seat offline** in the process. The design is safe precisely *because*
+> paper and live are different usernames; pointing both brokers at paper
+> destroys the premise it rests on.
+>
+> **What can genuinely be verified before live credentials exist:**
+> the unit file statically (`systemd-analyze verify`), the S1/S2 guards (unit
+> tested, 13 mutations killed), and the health-payload contract (against a stub
+> `IBClient`, no session at all). **Two brokers actually running concurrently is
+> only testable once live credentials exist** — and at that point it is no
+> longer a rehearsal, so it gets the full pre-start verification in
+> `deploy/IBKR_CREDENTIALS_SETUP.md` and a first start with **no strategy
+> pointed at it**.
+>
+> The one-session limit is also why the live unit must never be handed the
+> paper credential paths: a test enforces that the two units share no
+> credential file.
 2. **When the IBKR chain completes:** encrypt the live credentials into
    `/etc/calypso/ibkr/live/`, set `CALYPSO_IBKR_ENV=live` on the second broker,
    restart it, and confirm `/health` reports `environment=live` with a

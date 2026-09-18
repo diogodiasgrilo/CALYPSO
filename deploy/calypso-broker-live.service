@@ -1,0 +1,92 @@
+[Unit]
+Description=CALYPSO broker (LIVE MONEY) — shared IBKR session for the funded account
+# ⚠️ THIS SERVICE TRADES REAL MONEY. Sibling of calypso-broker.service, which owns the
+# PAPER session. The two coexist ONLY because IBKR's one-session limit is per USERNAME
+# and paper/live are separate usernames with separate OAuth registrations
+# (docs/migration/LIVE_MONEY_ARCHITECTURE.md §2, fact 2).
+#
+# NEVER point this unit at the paper credentials to "test" it. Two brokers on one
+# username evict each other in the crash-loop calypso-broker exists to end, and would
+# take the LIVE PAPER SEAT offline. That mistake was in this design's own first draft;
+# see the CORRECTION block in §7 of LIVE_MONEY_ARCHITECTURE.md.
+After=network-online.target
+Wants=network-online.target
+# Deliberately NOT After=calypso-broker.service: the two sessions are independent, and
+# coupling them would let a paper-broker fault delay or block the real-money one.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/opt/calypso"
+Environment="GCP_PROJECT=calypso-trading-bot"
+Environment="CALYPSO_BROKER_HOST=127.0.0.1"
+# Port 8789 — the paper broker owns 8788. A strategy reaches exactly one of them via
+# its CALYPSO_BROKER_URL, and (since 2026-09-18) refuses to start if the broker it
+# reached is not the account kind its taxonomy row declares.
+Environment="CALYPSO_BROKER_PORT=8789"
+# Resolved by shared.ib_oauth.resolve_environment(); selects the live credential set and
+# is cross-checked against the account code IBKR returns
+# (IBClient._assert_account_matches_env). Declared-live + a paper-looking account warns;
+# declared-paper + a live-looking account RAISES.
+Environment="CALYPSO_IBKR_ENV=live"
+# Separate log file. Sharing broker.log would interleave two processes' rotation and
+# make the post-mortem record lossy — and ARGUS scans this path to find breaker-OPEN
+# lines, so a shared file would also make "which broker degraded" unanswerable.
+Environment="CALYPSO_BROKER_LOG=/opt/calypso/logs/broker-live/broker.log"
+# Same rate discipline as the paper broker. These are PER SESSION, so the live session
+# gets its own budget rather than sharing one — see calypso-broker.service for the
+# empirical derivation of 5 rps (8 was too thin; ThreadPool/TLS/WAN jitter re-clusters
+# request STARTS into a single rolling second).
+Environment="CALYPSO_IBKR_MAX_RPS=5"
+Environment="CALYPSO_IBKR_CHAIN_CONCURRENCY=4"
+
+# ─── IBKR OAuth 1.0a credentials — LIVE, a SEPARATE keypair ─────────────────
+# Issued against the live username and encrypted independently. ibind is explicit that
+# keys should not be shared between live and paper. These paths MUST NOT overlap with
+# calypso-broker.service's (/etc/calypso/ibkr/*.cred, which are the paper set) — a test
+# asserts the two units share no credential file, because an overlap would mean two
+# sessions on one username.
+#
+# Setup + the three mandatory pre-start checks: deploy/IBKR_CREDENTIALS_SETUP.md.
+# Do NOT `systemctl enable` this unit until all three pass for the LIVE set.
+LoadCredentialEncrypted=ibkr_consumer_key:/etc/calypso/ibkr/live/consumer_key.cred
+LoadCredentialEncrypted=ibkr_access_token:/etc/calypso/ibkr/live/access_token.cred
+LoadCredentialEncrypted=ibkr_access_token_secret:/etc/calypso/ibkr/live/access_token_secret.cred
+LoadCredentialEncrypted=ibkr_signature_pem:/etc/calypso/ibkr/live/signature.pem.cred
+LoadCredentialEncrypted=ibkr_encryption_pem:/etc/calypso/ibkr/live/encryption.pem.cred
+LoadCredentialEncrypted=ibkr_dhparam_pem:/etc/calypso/ibkr/live/dhparam.pem.cred
+
+ExecStart=/opt/calypso/.venv/bin/python -m services.broker.main
+
+Restart=always
+RestartSec=30
+TimeoutStartSec=120
+
+# Same 110s derivation as the paper broker (orders family is never abortable, ~63s worst
+# case, plus alert-path blocking). See calypso-broker.service for the full arithmetic.
+KillSignal=SIGTERM
+TimeoutStopSec=110
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=calypso-broker-live
+
+# ─── Sandboxing ─────────────────────────────────────────────────────────────
+# Identical to the paper broker's. PrivateDevices=yes (NOT ProtectDevices=, which is
+# silently ignored on this host's systemd 252 — verified) gives the process holding the
+# decrypted OAuth private keys a private /dev with only the safe pseudo nodes.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+PrivateDevices=yes
+ReadWritePaths=/opt/calypso
+
+[Install]
+WantedBy=multi-user.target
