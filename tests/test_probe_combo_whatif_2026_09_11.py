@@ -115,8 +115,37 @@ class TestItCallsTheRealSignatures:
         """Over JSON, conid=None becomes `null` and ibind reads the key's
         presence as "provided" -> "Both 'conidex' and 'conid' are provided".
         The direct Python path gets a genuine absence from the dataclass
-        default; the RPC path must omit the key."""
-        assert '"conid"' not in SRC
+        default; the RPC path must omit the key.
+
+        NARROWED 2026-09-18. This banned '"conid"' anywhere in the FILE, which was a
+        fine proxy while every order the script built was a BAG. The script now also
+        previews a SINGLE leg (the control that shows whether IBKR will price any form
+        at all), and a plain order is addressed BY conid and carries no conidex — so the
+        blanket ban started forbidding the correct thing.
+
+        The real invariant was always per-ORDER, not per-file: never both keys on one
+        order. It is now checked that way, in both directions, which is strictly
+        stronger than the original.
+        """
+        import ast
+        tree = ast.parse(SRC)
+        fns = {n.name: ast.get_source_segment(SRC, n)
+               for n in ast.walk(tree) if isinstance(n, ast.FunctionDef)}
+
+        combo = fns.get("preview")
+        assert combo, "the BAG preview function is gone"
+        assert '"conidex"' in combo, "the combo preview no longer sends conidex"
+        assert '"conid"' not in combo, (
+            "the BAG preview sends conid alongside conidex — ibind raises "
+            "\"Both 'conidex' and 'conid' are provided\""
+        )
+
+        plain = fns.get("preview_plain")
+        if plain:  # the single-leg control
+            assert '"conid"' in plain, "the plain preview must address the leg by conid"
+            assert '"conidex"' not in plain, (
+                "the plain preview sends conidex — same collision, other direction"
+            )
 
     def test_the_preview_sends_no_coid(self):
         """A preview needs no server-side dedup key, and reusing one could

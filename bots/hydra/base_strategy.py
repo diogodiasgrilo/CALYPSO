@@ -6856,8 +6856,28 @@ class MEICStrategy(abc.ABC):
         """
         configured = float(self.min_buying_power_per_ic or 0.0)
         try:
-            width = self._get_vix_adjusted_spread_width(
-                float(getattr(self, "current_vix", 0.0) or 0.0), "call"
+            vix = float(getattr(self, "current_vix", 0.0) or 0.0)
+            # BOTH SIDES, take the MAX (2026-09-18). This asked only for the "call"
+            # width, while _get_vix_adjusted_spread_width's own docstring states the
+            # invariant it must satisfy:
+            #
+            #     "MKT-028: Separate floors for calls (60pt) and puts (75pt) ...
+            #      margin = max(call_width, put_width)"
+            #
+            # An iron condor's requirement is the GREATER of its two verticals — only
+            # one side can finish in the money — so deriving the floor from the
+            # NARROWER side under-provisions by exactly their ratio. With the documented
+            # 60/75 floors that is 20%.
+            #
+            # LATENT, NOT ACTIVE: every live config today sets call_min == put_min == 25,
+            # so the two widths are identical and the old call resolved correctly by
+            # coincidence. It becomes real the moment anyone sets the asymmetric floors
+            # MKT-028 was designed around — which is precisely the kind of tuning that
+            # happens later, to a config, by someone who will not re-read this function.
+            # Fixed before real money rather than after.
+            width = max(
+                self._get_vix_adjusted_spread_width(vix, "call"),
+                self._get_vix_adjusted_spread_width(vix, "put"),
             )
             derived = float(width) * 100.0
             if derived > configured:
