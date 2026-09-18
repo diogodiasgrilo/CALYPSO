@@ -4568,9 +4568,32 @@ class HydraStrategy(MEICStrategy):
         """
         estimated_call, estimated_put = self._estimate_entry_credit(entry)
 
-        # If we couldn't estimate credit, signal that estimation failed
-        # MKT-010 will run as fallback
-        if estimated_call == 0.0 and estimated_put == 0.0:
+        # MKT-011B (2026-09-18): fall back to MKT-010 only when estimation genuinely
+        # FAILED — not merely because it returned zero.
+        #
+        # This used to branch on `estimated_call == 0.0 and estimated_put == 0.0`, which
+        # conflates four different situations the estimator expresses with the same value.
+        # One of them is a spread that was priced perfectly well and is worth exactly
+        # nothing. Reading that as "could not estimate" turned a correct measurement into
+        # a green light, because the fallback route skips the thresholds, the MKT-029
+        # ladder AND the MKT-048 fillability veto below.
+        #
+        # The codebase contradicted itself on what 0.0 means: _estimate_entry_credit_ib
+        # sets a side to 0.0 for an unquoted leg and its own comment says it is "treating
+        # this side as NON-VIABLE" — don't trade it — while this gate read the same value
+        # as "couldn't tell, proceed". Two functions, opposite meanings, and the
+        # disagreement resolved in favour of trading.
+        #
+        # Cost on the live seat, 2026-09-18: VIX 15.4 put the 8-delta strikes far enough
+        # out that adjacent strikes quoted IDENTICALLY, so both sides computed to exactly
+        # 0.0. Entry #7 proceeded, bought both protective longs, could not sell either
+        # short (5 attempts), and GUARD-FLOOR unwound it for -$137.20. Entries #1-#6 the
+        # same day priced non-zero, were vetoed by MKT-048, and cost nothing.
+        #
+        # A genuine (0.0, 0.0) now falls through to the normal path, where both sides are
+        # below every threshold and every MKT-029 fallback, and the entry is skipped —
+        # which is what entries #1-#6 did.
+        if not getattr(entry, "_credit_estimate_ok", False):
             logger.warning(
                 f"MKT-011: Could not estimate credit for Entry #{entry.entry_number} - "
                 f"falling back to MKT-010 illiquidity check"

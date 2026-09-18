@@ -58,12 +58,24 @@ def _gate_strat(*, vix=17.4, put_only_max_vix=25.0, one_sided=True,
     return s
 
 
-def _with_estimate(s, mid_call, mid_put, fill_call, fill_put):
+def _with_estimate(s, mid_call, mid_put, fill_call, fill_put, estimate_ok=True):
     """Wire _estimate_entry_credit to return the MID tuple and stash the
-    per-share fillable credits, exactly as _estimate_entry_credit_ib does."""
+    per-share fillable credits, exactly as _estimate_entry_credit_ib does.
+
+    UPDATED 2026-09-18 (MKT-011B): the real estimator now also stashes
+    ``_credit_estimate_ok``, and ``_check_credit_gate`` branches on it instead of on
+    ``(0.0, 0.0)``. A harness that stops mirroring the thing it doubles stops testing
+    anything — without this, every case here silently took the MKT-010 fallback and the
+    gate logic under test never ran. Nine tests failed the moment the flag was added,
+    which is the harness doing its job.
+
+    ``estimate_ok=False`` doubles a genuine estimation FAILURE (no expiry, unresolvable
+    conids, exception) as distinct from a successful estimate that happens to be zero.
+    """
     def _est(entry):
         entry._fillable_call_ps = fill_call
         entry._fillable_put_ps = fill_put
+        entry._credit_estimate_ok = estimate_ok
         return (mid_call, mid_put)
     s._estimate_entry_credit = _est
 

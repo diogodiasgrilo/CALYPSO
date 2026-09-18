@@ -2264,6 +2264,24 @@ class MEICStrategy(abc.ABC):
         """
         entry._fillable_call_ps = None
         entry._fillable_put_ps = None
+        # MKT-011B (2026-09-18): did this call actually COMPUTE the estimate, or bail?
+        #
+        # The return value alone cannot say. ``(0.0, 0.0)`` is produced by four different
+        # situations — no expiry, unresolvable conids, an unquoted leg (deliberately
+        # "treating this side as non-viable", see below), and a spread whose mid-credit is
+        # genuinely and exactly zero. ``_check_credit_gate`` read all four as "estimation
+        # failed → proceed", so a CORRECT measurement of "this trade pays nothing" became
+        # a green light.
+        #
+        # That is not hypothetical: on 2026-09-18 at VIX 15.4 the 8-delta strikes were far
+        # enough out that adjacent strikes carried IDENTICAL quotes ($0.10/$0.15 both
+        # legs), so both sides computed to exactly 0.0. Entries #1-#6 that day priced
+        # normally and were correctly vetoed; entry #7 hit this path, bought both
+        # protective longs, could not sell either short, and unwound for -$137.20.
+        #
+        # Stashed on the entry rather than widening the return type, mirroring
+        # _fillable_*_ps immediately above — same function, same consumer, same reason.
+        entry._credit_estimate_ok = False
 
         expiry = self._get_todays_expiry()
         if not expiry:
@@ -2418,6 +2436,17 @@ class MEICStrategy(abc.ABC):
                 sp_bid, lp_mid = _sane_bid(sp), _mid(lp)
                 if sp_bid is not None and lp_mid > 0:
                     entry._fillable_put_ps = round(sp_bid - lp_mid, 2)
+
+            # MKT-011B: the ONLY return that reaches here has actually priced the needed
+            # side(s) from real quotes. Every other exit is a structural bail-out and
+            # deliberately leaves the flag False. The one partial-success return above —
+            # `(estimated_call_credit, 0.0)` — is guarded by `estimated_call_credit > 0`,
+            # so it can never produce the (0.0, 0.0) the gate branches on.
+            #
+            # NOTE this is set even when the computed credit is 0.0. That is the whole
+            # point: zero is an ANSWER, not a failure to answer, and the gate must run its
+            # normal thresholds on it (which then find it non-viable and skip).
+            entry._credit_estimate_ok = True
 
             logger.debug(
                 f"Credit estimation (IB) for Entry #{entry.entry_number}: "

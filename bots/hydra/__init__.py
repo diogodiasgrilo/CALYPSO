@@ -36,6 +36,53 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-18 MKT-011B: A CREDIT OF EXACTLY $0.00 WAS READ AS "I COULD NOT MEASURE THE
+  CREDIT". Cost the live seat -$137.20 the day it was found. NOT a regression — the
+  branch traces to 0e73b42, the original MEIC->HYDRA rename (v1.5.0).
+
+  `_check_credit_gate` opened with `if estimated_call == 0.0 and estimated_put == 0.0:
+  return ("proceed", ...)`, routing to the MKT-010 fallback. But
+  `_estimate_entry_credit_ib` produces (0.0, 0.0) for FOUR different situations: no
+  expiry (failure), unresolvable conids (failure), an unquoted leg (a DECISION — its own
+  comment says "treating this side as NON-VIABLE"), and `round((short_mid - long_mid) *
+  100, 2) == 0` (a MEASUREMENT: the spread is worth nothing). Only the first two are
+  failures. Reading the fourth as "could not estimate" turned a CORRECT measurement into
+  a green light — and the fallback route skips the thresholds, the MKT-029 ladder AND the
+  MKT-048 fillability veto that sit below it.
+
+  The codebase contradicted itself about what 0.0 means: the estimator writes it to mean
+  "do not trade this side"; the gate read it as "couldn't tell, proceed". Two functions,
+  opposite meanings for one number, and the disagreement resolved in favour of trading.
+
+  WHY "RARE EDGE CASE" UNDERSTATES IT. Options quote in $0.05 ticks. At VIX 15.4 the
+  8-delta strikes sat ~65pt OTM, far enough that ADJACENT strikes carried identical
+  quotes — short call 7685 at $0.10/$0.15 and long call 7690 at $0.10/$0.15, both mid
+  $0.125, difference exactly 0.0; same on the puts. So the trapdoor opens precisely when
+  the spread is worthless, i.e. exactly when declining matters most. B's entries #1-#6
+  that day priced non-zero and were correctly vetoed by MKT-048 at zero cost; #7 hit this
+  path, bought both protective longs, could not sell either short in 5 attempts, and
+  GUARD-FLOOR unwound it (-$35.00 call, -$70.00 put, $32.20 commission).
+
+  FIX: `_estimate_entry_credit_ib` stashes `_credit_estimate_ok`, mirroring the
+  `_fillable_*_ps` stash it already performs for MKT-048 a few lines below — same
+  function, same consumer, same reason — and the gate branches on that instead of on the
+  value. Set True ONLY on the computing return; every structural bail-out (no expiry,
+  conids, exception) leaves it False. Deliberately set even when the computed credit is
+  zero: that is the entire point. A genuine zero now falls through to the normal path,
+  lands below every threshold and every MKT-029 floor, and is skipped exactly as #1-#6
+  were. Blast radius is narrow by construction — only the both-sides-exactly-zero case
+  changes; anything with a number on either side is untouched.
+
+  Second-order effect checked rather than assumed: `_mkt011_est_call/_put` now store 0.0
+  where they stored None, so the realized-credit guard's Rule 2 receives a zero. It is
+  guarded by `est_dollars_pc > 0` and goes inert — no division by zero, no fabricated
+  violation.
+
+  14 new tests + 6 mutations, all killed — including the bug REWORN (flagging success
+  only for a non-zero credit), which is the most likely way to reintroduce it. Nine
+  existing MKT-048 tests failed the moment the flag landed, because their harness claimed
+  to mirror the estimator and had stopped doing so; fixed there rather than worked around.
+
 - 2026-09-18 NOTHING STOPPED A STRATEGY TRADING THE WRONG ACCOUNT. Foundation for
   running real money alongside paper (docs/migration/LIVE_MONEY_ARCHITECTURE.md
   §3.1/§3.2). NO TRADING BEHAVIOUR CHANGES — every variant still declares paper and
