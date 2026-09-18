@@ -15,9 +15,20 @@ Environment="CALYPSO_BROKER_URL=http://127.0.0.1:8788"
 # --place = full 1-contract round trip (buy-to-open → confirm fill → close).
 # The script refuses to write unless the broker account is paper (DU…).
 ExecStart=/opt/calypso/.venv/bin/python /opt/calypso/scripts/broker_paper_smoke.py --place
-# CONDITIONAL AUTO-FLIP. systemd runs ExecStartPost ONLY if ExecStart exited 0
-# (a full paper round-trip PASS). The `+` runs it as root (this unit is
-# User=calypso, which cannot restart hydra). It flips ONLY variant A to
-# dry_run:false and restarts it; B/C stay dry-run. If the smoke FAILS, this
-# never runs and A stays in dry-run.
-ExecStartPost=+/opt/calypso/scripts/flip_a_live.sh
+# AUTO-FLIP REMOVED 2026-09-18. This unit used to carry
+#   ExecStartPost=+/opt/calypso/scripts/flip_a_live.sh
+# which flipped variant A to dry_run:false and restarted it whenever the smoke
+# passed. That coupling made sense in June, when A going live WAS the point of
+# running the smoke.
+#
+# It has been a landmine since the 2026-07-24 B<->C swap. B is the live paper
+# seat now, and LIVE_READINESS_CHECKLIST Gate 3 tells an operator to run exactly
+# this unit to collect evidence:
+#     sudo systemctl start broker-paper-smoke
+# On a PASS that would have flipped A live TOO — two variants placing real
+# orders on the same account, from a command documented as a test.
+#
+# The smoke's job is to prove the order path works. Putting a variant live is a
+# separate, deliberate decision with its own runbook (RB-8 / RB-9 and the flip
+# scripts). They are decoupled now. flip_a_live.sh also gained its own Guard 0
+# the same day, as defence in depth.

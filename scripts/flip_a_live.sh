@@ -17,6 +17,23 @@ CFG=/opt/calypso/bots/hydra/config/config.json
 VENV=/opt/calypso/.venv/bin/python
 log() { echo "flip_a_live: $*"; }
 
+# Guard 0 — refuse to run while B holds the live paper seat (added 2026-09-18).
+# flip_ac_live.sh got this guard at the 2026-07-24 swap; this script did NOT,
+# and it was wired as ExecStartPost on broker-paper-smoke.service — the very
+# unit Gate 3 tells an operator to run. A passing smoke would have put A live
+# alongside B: two strategies placing real paper orders on one account, from a
+# command documented as a test. The ExecStartPost is gone as well; this guard
+# is the second line.
+B_CFG=/opt/calypso/bots/hydra/config/config_variant_b.json
+b_dry=$(runuser -u calypso -- "$VENV" -c \
+    "import json;print(json.load(open('$B_CFG')).get('dry_run'))" 2>/dev/null || echo ERR)
+if [ "$b_dry" = "False" ]; then
+    log "ABORT: B is currently the LIVE paper seat (dry_run=False in $B_CFG)."
+    log "       Flipping A live now would run A and B live simultaneously."
+    log "       Hand the seat over deliberately (RUNBOOKS.md RB-9) instead."
+    exit 1
+fi
+
 # Guard 1 — broker session must be live RIGHT NOW (never flip A onto a dead session).
 h=$(curl -s --max-time 6 http://127.0.0.1:8788/health 2>/dev/null || true)
 if ! echo "$h" | grep -qE '"connected": ?true'; then
