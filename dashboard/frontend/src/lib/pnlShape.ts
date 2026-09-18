@@ -121,12 +121,26 @@ const ACCENT_PALETTE: Record<string, string> = {
   c: colors.profit, // mint
   d: colors.loss, // coral
   e: "#a97af7", // purple
+  // bm (real money) — pink, 7.38:1 on card / 8.55:1 on bg. Added 2026-09-18 when the
+  // variant landed: without an entry it fell through to hashedHue(), which happened to
+  // return a violet at 3.41:1 and failed the contrast probe on the comparison page.
+  bm: "#f0a6d8",
 };
 
+/**
+ * Deterministic accent for an id with no palette entry.
+ *
+ * LIGHTNESS IS 72%, NOT 62%, AND THAT IS LOAD-BEARING. At 62% the worst hue (240, blue)
+ * scores 2.88:1 on the card background — far under the 4.5:1 this app holds itself to —
+ * so the fallback was deterministic but not SAFE, and any unlisted variant could land in
+ * a failing band. 72% is the measured minimum at which EVERY hue 0-359 clears 4.5:1
+ * against both `card` (#222e35) and `bg` (#1a2229); the worst case there is 4.65:1 at
+ * hue 240. Lower it and the guarantee goes with it — a test walks all 360 hues.
+ */
 function hashedHue(id: string): string {
   let h = 0;
   for (let i = 0; i < id.length; i++) h = (h * 31 + id.charCodeAt(i)) >>> 0;
-  return `hsl(${h % 360}, 60%, 62%)`;
+  return `hsl(${h % 360}, 60%, 72%)`;
 }
 
 /** Stable accent color for a strategy/variant id (case-insensitive). */
