@@ -249,10 +249,16 @@ account is funded, the only genuinely new thing is a credential file.
      the `live_seat_id()` / `live_money_seat_id()` split. 49 tests, 13 mutations
      all killed, full suite 4159 passed. No trading behaviour changed: every
      variant still declares paper and the live seat still resolves to `b`.
-   - `calypso-broker-live` unit on 8789 — **written and verified statically, NOT
-     started** (see the correction below)
-   - the bm variant: taxonomy row, registry row, config, unit, dashboard
-   - S6 live-margin check
+   - ✅ **DONE** — `calypso-broker-live` unit on 8789, written and
+     `systemd-analyze verify`-clean, **NOT started** (see the correction below).
+     21 tests, 8 mutations killed.
+   - ✅ **DONE** — the `bm` variant: taxonomy row (`account_kind="live_money"`),
+     config (ships `dry_run=true`, 1 contract), unit (aimed at :8789, carries no
+     credentials), dashboard `Settings` fields. **No registry row** — it reuses
+     `strategy_class="brandon"`, one implementation across B/C/BM. 29 tests,
+     12 mutations killed.
+   - S6 live-margin check — **remaining**
+   - ARGUS watching both brokers (§3.3) — **remaining**
 
 > ### 🔴 CORRECTION (2026-09-18) — "run it on paper first" was WRONG and unsafe
 >
