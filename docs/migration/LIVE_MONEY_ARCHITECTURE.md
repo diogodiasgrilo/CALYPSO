@@ -1,6 +1,10 @@
 # Running real money alongside paper — design
 
-**Status:** DESIGN, not built. Written 2026-09-18, before any code.
+**Status:** written 2026-09-18 as a design, **before** any code — the audit in §3 and
+the correction in §7 both came out of writing it first. Step 1 of the rollout is now
+largely BUILT (see §7 for what is done and what remains). **Nothing built so far can
+trade:** the live broker has no credentials, `bm` ships `dry_run=true`, and neither is
+installed on the VM.
 **Goal:** run one or more strategies on a **funded live account** while the
 existing paper fleet keeps trading **exactly as it does today**, and make
 promoting a strategy from paper to live a config-level action.
