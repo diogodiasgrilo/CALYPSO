@@ -115,8 +115,13 @@ def test_token_bucket_limits_same_type_burst():
 
 
 def test_take_type_token_capacity_then_empty():
+    # Fixed base, NOT time.monotonic(): its origin is the host's boot, so
+    # seeding from it samples a different float magnitude on every machine and
+    # makes the result depend on uptime. That is precisely how this test passed
+    # locally for weeks and then failed on a fresh CI runner — see
+    # test_refill_is_independent_of_the_machines_uptime below.
     svc = _svc()
-    now = time.monotonic()
+    now = 1000.0
     assert svc._take_type_token(AlertType.GAP_WARNING, now) is True
     assert svc._take_type_token(AlertType.GAP_WARNING, now) is True
     assert svc._take_type_token(AlertType.GAP_WARNING, now) is True
@@ -261,3 +266,83 @@ def test_rollup_note_appended_after_suppression(monkeypatch):
         {"entry_number": None}, send_email=True)
     assert allow is True
     assert "2 similar suppressed" in note
+
+
+# ─── Token-bucket float precision (CI failure, 2026-09-18) ────────────────
+
+#: The exact monotonic value a GitHub runner produced when this first failed.
+#: (654.496627912 + 600.0) - 654.496627912 == 599.9999999999999, not 600.0, so
+#: the bucket credited 0.9999999999999998 tokens and `>= 1.0` denied it. Most
+#: bases are exact; this one is not. Pinned as a literal so the case cannot
+#: regress on a machine that happens to be luckier.
+CI_OBSERVED_MONOTONIC = 654.496627912
+
+
+def test_exactly_one_refill_interval_yields_a_token_at_the_ci_value():
+    """A bucket that has waited precisely one refill interval must get its
+    token. It is not acceptable for that to depend on the host's uptime."""
+    svc = _svc()
+    t0 = CI_OBSERVED_MONOTONIC
+    for _ in range(int(svc._BUCKET_CAPACITY)):
+        assert svc._take_type_token(AlertType.GAP_WARNING, t0) is True
+    assert svc._take_type_token(AlertType.GAP_WARNING, t0) is False
+    assert svc._take_type_token(AlertType.GAP_WARNING, t0 + svc._BUCKET_REFILL_S) is True, (
+        "one full refill interval elapsed and the bucket still refused a token "
+        "— float error in (now - last) / refill can land a hair under 1.0"
+    )
+
+
+@pytest.mark.parametrize("base", [
+    654.496627912,      # the CI failure
+    0.0, 3.7, 1234.5678901234, 99999.123456789, 1_000_000.1,
+    1_585_381.41231525,  # a dev laptop, ~18 days of uptime
+    16_500_000.0,        # the VM, ~191 days
+])
+def test_refill_is_independent_of_the_machines_uptime(base):
+    """The regression class, not just the one value.
+
+    ``time.monotonic()``'s origin is the host's boot, so a test seeded from it
+    silently samples a different float magnitude on every machine — which is
+    exactly how this passed locally for weeks and failed on a fresh runner.
+    """
+    svc = _svc()
+    for _ in range(int(svc._BUCKET_CAPACITY)):
+        svc._take_type_token(AlertType.GAP_WARNING, base)
+    assert svc._take_type_token(AlertType.GAP_WARNING, base) is False
+    assert svc._take_type_token(
+        AlertType.GAP_WARNING, base + svc._BUCKET_REFILL_S) is True
+
+
+def test_a_hair_under_one_interval_still_refuses():
+    """CONTROL. The tolerance must absorb float noise, not hand out a free
+    token to anything that waited a bit less than the interval."""
+    svc = _svc()
+    t0 = 1000.0
+    for _ in range(int(svc._BUCKET_CAPACITY)):
+        svc._take_type_token(AlertType.GAP_WARNING, t0)
+    assert svc._take_type_token(AlertType.GAP_WARNING, t0) is False
+    # 1% short of a refill — a real shortfall, not rounding.
+    assert svc._take_type_token(
+        AlertType.GAP_WARNING, t0 + svc._BUCKET_REFILL_S * 0.99) is False
+
+
+def test_the_bucket_never_goes_negative():
+    """Invariant, and the reason the subtraction is clamped.
+
+    The tolerance admits a token at 0.9999999999999998, and subtracting a whole
+    token from that leaves ~-2e-16. Numerically harmless — the debt is repaid by
+    the next microsecond of refill — but a token bucket holding a negative
+    balance is a wrong state to be able to observe, and it would compound if the
+    tolerance were ever widened. Clamped at zero, and pinned here because
+    mutation testing showed nothing else caught its removal.
+    """
+    svc = _svc()
+    t0 = CI_OBSERVED_MONOTONIC
+    for _ in range(int(svc._BUCKET_CAPACITY)):
+        svc._take_type_token(AlertType.GAP_WARNING, t0)
+    svc._take_type_token(AlertType.GAP_WARNING, t0)
+    svc._take_type_token(AlertType.GAP_WARNING, t0 + svc._BUCKET_REFILL_S)
+    assert svc._type_buckets[AlertType.GAP_WARNING]["tokens"] >= 0.0, (
+        f"bucket went negative: "
+        f"{svc._type_buckets[AlertType.GAP_WARNING]['tokens']!r}"
+    )

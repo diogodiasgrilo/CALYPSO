@@ -954,6 +954,7 @@ class AlertService:
     # just enough to dodge content-dedup (e.g. a loop that embeds a live price).
     _BUCKET_CAPACITY = 3.0
     _BUCKET_REFILL_S = 600.0            # +1 token / 10 min
+    _TOKEN_EPS = 1e-9                   # float-noise tolerance, see _take_type_token
 
     # Hard global ceiling on EMAILS across a rolling window. Over the ceiling,
     # non-NEVER_SUPPRESS alerts downgrade to Telegram-only (they still deliver,
@@ -1026,8 +1027,17 @@ class AlertService:
             b['tokens'] + (now - b['last']) / self._BUCKET_REFILL_S,
         )
         b['last'] = now
-        if b['tokens'] >= 1.0:
-            b['tokens'] -= 1.0
+        # Tolerance, not laxity. `now` is time.monotonic(), whose magnitude is
+        # the host's uptime, so `(now - last)` for an EXACTLY-one-interval wait
+        # is not always exactly the interval: at now=654.496627912 (a real
+        # GitHub runner value, 2026-09-18) (now + 600.0) - now is
+        # 599.9999999999999, crediting 0.9999999999999998 tokens and denying an
+        # alert that had waited the full window. Whether that happens depends on
+        # how long the machine has been up, which is not a property anything
+        # should depend on. 1e-9 of a token is ~0.6 microseconds of refill — far
+        # below any real shortfall, far above float noise.
+        if b['tokens'] >= 1.0 - self._TOKEN_EPS:
+            b['tokens'] = max(0.0, b['tokens'] - 1.0)
             return True
         return False
 
