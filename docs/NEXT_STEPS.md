@@ -493,7 +493,50 @@ the bots or the clean-session streak.
 
 # §A-bis-2. OPEN FINDINGS from the 2026-09-16 review
 
-### 🔴 F's daily summary books MORE than the trade could earn
+### ✅ F's daily summary books MORE than the trade could earn — DIAGNOSED + FIXED 2026-09-18
+
+**Three bugs, one commit (`9906839`).** Deployed, historical rows corrected, F restarted.
+
+1. **The P&L was booked twice.** `_close_entry_early` books the side itself via
+   `_book_early_close_side_pnl`, *unconditionally*. In dry-run there is no fill, so
+   `side_close_cost` arrives as 0 and it books the FULL credit as if the position closed free.
+   Brandon corrects for this by booking `-close_cost` afterwards
+   (`brandon/strategy.py:1313`, `:1330`); Ghauri booked `credit - close_cost` — a second full
+   booking. `2 × 127.50 − 60.00 = 195.00`, exactly what was stored. Ghauri's docstring claimed
+   "the live booking path inside `_close_entry_early` doesn't fire in dry-run" — false on both
+   counts.
+2. **`entries_completed` was never incremented**, so `entries_placed` was 0 on every F trading
+   day and cumulative `total_entries` stayed 0. **Every traded-day analysis filters on
+   `entries_placed > 0`** (`complementarity.py`, `variant_performance.py`), so F was silently
+   excluded from all of them while still accumulating P&L.
+3. **The opening commission was never charged** — only the close side landed (from
+   `strategy.py:3709`), hence $2.30 for what is a $4.60 round trip.
+
+Root cause of 2 and 3 is the same as the 2026-09-15 entry-recording bug, in the same method:
+F's `_initiate_entry` deliberately bypasses `HydraStrategy._initiate_entry` and re-implements
+only the parts someone noticed. An AST sweep now enforces the invariant fleet-wide — F was the
+lone outlier; A/B/C, D, E and G all did it correctly.
+
+| date | gross | commission | net | entries |
+|---|---|---|---|---|
+| 2026-09-14 | −12.50 (unchanged) | 2.30 → **4.60** | −14.80 → **−17.10** | 0 → **1** |
+| 2026-09-15 | 195.00 → **67.50** | 2.30 → **4.60** | 192.70 → **62.90** | 0 → **1** |
+
+**F's lifetime: $177.90 → $45.80.** The repair script recovered the close cost algebraically
+(`cost = 2·credit − stored_gross`) and landed on **exactly $60.00** — the value in the log line
+`TP fired: SV $60.00` — an independent confirmation the model of the bug was right.
+
+Checked and NOT affected: G never calls `_close_entry_early` or `_book_realized_pnl`; Brandon's
+four sites all book `-close_cost`; B is live so its `if self.dry_run:` branch never fires.
+
+⚠️ **An existing test was asserting the bug.** `test_take_profit_fires_and_closes` stubbed
+`_close_entry_early` so it booked *nothing*, then asserted the handler books `credit − cost`.
+The stub did not behave like the collaborator it replaced, so it encoded the same
+misunderstanding as the docstring and the two held the double-count in place for the life of the
+strategy. Worth remembering as a pattern: **a stub that is wrong about its collaborator can
+pin a bug in place indefinitely.**
+
+### 🔴 *(original text, kept for the record)* F's daily summary books MORE than the trade could earn
 
 ```
 trade_entries    2026-09-15 e#1  put 7550/7540  total_credit $127.50
