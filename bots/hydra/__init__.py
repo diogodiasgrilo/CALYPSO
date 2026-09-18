@@ -36,6 +36,65 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-18 NOTHING STOPPED A STRATEGY TRADING THE WRONG ACCOUNT. Foundation for
+  running real money alongside paper (docs/migration/LIVE_MONEY_ARCHITECTURE.md
+  §3.1/§3.2). NO TRADING BEHAVIOUR CHANGES — every variant still declares paper and
+  the live seat still resolves to B; the no-op controls in
+  tests/test_live_money_account_guard_2026_09_18.py exist to PROVE that, because this
+  lands while B is mid-Gate-4.
+
+  THE HOLE. A strategy is bound to an account by exactly one line — CALYPSO_BROKER_URL
+  in its unit file — and nothing verified the far end. `/health` reported
+  {status, connected, authenticated, competing}: whether the broker was WELL, never WHO
+  it was. Harmless with one broker. Once a paper broker (:8788) and a real-money broker
+  (:8789) both run, one mistyped port routes a paper-intended variant onto the funded
+  account and it places REAL orders — no error, no alert, nothing unusual in any log.
+  IBClient._assert_account_matches_env was already the right pattern but sits one layer
+  too low: it validates the broker's session against the broker's own declaration, and
+  cannot see that a STRATEGY dialled the wrong port.
+
+  FIX, in three parts. (1) BrokerDispatcher._identity() publishes `environment` and
+  `account` on EVERY /health return path, degraded ones included — "which broker is
+  sick" is what an operator needs when two are running — degrading to None rather than
+  raising, since account_id raises by contract before connect() resolves it. (2) A new
+  taxonomy axis `account_kind: paper|live_money`, deliberately NOT configurable per-VM:
+  it lives in committed source keyed on the variant letter, so moving a strategy onto
+  real money is a reviewed code change, never a config flip on a file a `git pull` has
+  silently reverted before. (3) main.py fail-stops at startup when the broker it reached
+  disagrees with what the variant declares, ASYMMETRICALLY on unknown: fatal for a
+  live_money variant (never trade real money against an unverifiable broker), tolerated
+  for paper (failing closed there would take all seven strategies down on a deploy-order
+  mistake to protect against nothing). Deliberately placed OUTSIDE the connect-retry
+  loop — that loop waits 15s x 48 for a transient BrokerError, and a mismatch is
+  permanent, so retrying would only bury the reason.
+
+  SECOND DEFECT, and a correction worth keeping: the first draft claimed adding a
+  real-money variant breaks live_seat_id() outright. WRONG — a new id is not in the
+  hardcoded LIVE_SEAT_IDS = ("b","c"), so it would not be seen at all. The real defect
+  is a fork where BOTH branches fail: leave it out and the real-money bot is invisible
+  to "which is the bot"; add it and two dry_run=false seats fail the len==1 test and
+  fall back to "c" — a DRY-RUN variant — declared "the bot" exactly when real money is
+  at stake. Root cause is one field carrying two facts (dry_run says whether orders are
+  PLACED, nothing said what they were placed AGAINST), the same shape as the pnl_shape
+  bug that forced the dashboard rebuild. live_seat_id() now derives candidates from the
+  taxonomy and falls back to the DECLARED live seat; live_money_seat_id() is its
+  separate, currently-None counterpart.
+
+  THREE TESTS WERE PINNING A STALE WORLD. primary_id == "c" and c.is_primary == True
+  have been asserting the pre-2026-07-24 world for two months — they passed only because
+  the frozen fallback happened to match it. Updated, with the reasoning recorded in
+  place rather than the expected values quietly flipped.
+
+  MUTATION-TESTED, 13 mutations, all killed — and it earned its keep twice. Deleting the
+  startup guard entirely left all 44 tests GREEN, because the source check matched
+  `_broker_account_kind`'s own docstring rather than the call (the comment-substring trap,
+  13th occurrence in one day); the wiring tests are AST-based now, which removes the whole
+  class. Dropping identity from one of the two identical degraded returns also survived,
+  exposing an uncovered branch. Also fixed: the broker's startup banner hardcoded "paper
+  account" three lines above resolving the environment dynamically, and the 2026-09-11
+  call-site guard checked one SPELLING rather than the property — it is now AST-based and
+  bans ANY string literal, where before `load_credentials("live")` would have passed.
+
 - 2026-09-18 Variant F's day accounting was wrong in three ways, and a sweep of
   every hand-rolled entry/exit path found one more.
 

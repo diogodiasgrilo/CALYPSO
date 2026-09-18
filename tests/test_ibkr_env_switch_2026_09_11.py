@@ -151,10 +151,41 @@ class TestTheCallSitesAreWired:
     """A resolver nothing calls is decoration."""
 
     @pytest.mark.parametrize("path", ["bots/hydra/main.py", "services/broker/main.py"])
-    def test_no_hardcoded_paper_literal_remains(self, path):
-        src = (Path(__file__).resolve().parents[1] / path).read_text()
-        assert 'load_credentials("paper")' not in src
-        assert "load_credentials(resolve_environment())" in src
+    def test_no_hardcoded_environment_literal_remains(self, path):
+        """STRENGTHENED 2026-09-18 — was a substring check for the exact spelling
+        ``load_credentials(resolve_environment())``.
+
+        That pinned one FORM rather than the property it cares about, so it broke when
+        services/broker/main.py hoisted the call to ``_env = resolve_environment()`` in
+        order to log the real environment in its startup banner (which had hardcoded
+        "paper" three lines above resolving it dynamically — harmless with one broker,
+        misleading with two).
+
+        The AST version enforces the actual invariant, and enforces MORE of it: no
+        ``load_credentials`` call anywhere in these modules may take a string literal.
+        The old check banned only the literal ``"paper"``; ``load_credentials("live")``
+        would have sailed straight through it.
+        """
+        import ast
+
+        tree = ast.parse((Path(__file__).resolve().parents[1] / path).read_text())
+        calls = [n for n in ast.walk(tree)
+                 if isinstance(n, ast.Call)
+                 and ((isinstance(n.func, ast.Name) and n.func.id == "load_credentials")
+                      or (isinstance(n.func, ast.Attribute) and n.func.attr == "load_credentials"))]
+        assert calls, f"{path} never calls load_credentials"
+        for c in calls:
+            for arg in list(c.args) + [kw.value for kw in c.keywords]:
+                assert not isinstance(arg, ast.Constant) or not isinstance(arg.value, str), (
+                    f"{path}:{c.lineno} passes the hardcoded environment "
+                    f"{arg.value!r} to load_credentials — it must be resolved at runtime"
+                )
+        resolves = [n for n in ast.walk(tree)
+                    if isinstance(n, ast.Call)
+                    and ((isinstance(n.func, ast.Name) and n.func.id == "resolve_environment")
+                         or (isinstance(n.func, ast.Attribute)
+                             and n.func.attr == "resolve_environment"))]
+        assert resolves, f"{path} never calls resolve_environment()"
 
     def test_discover_account_id_runs_the_assertion(self):
         import inspect

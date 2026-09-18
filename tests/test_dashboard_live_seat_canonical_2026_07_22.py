@@ -71,8 +71,22 @@ def test_reader_for_treats_the_live_seat_as_canonical(tmp_path, monkeypatch):
     assert is_canonical_c is False
 
 
-def test_falls_back_to_c_when_ambiguous(tmp_path, monkeypatch):
+def test_falls_back_to_the_declared_seat_when_ambiguous(tmp_path, monkeypatch):
+    """UPDATED 2026-09-18 — this used to assert the fallback was ``"c"``.
+
+    The intent was always "must not pick arbitrarily", and that intent is unchanged.
+    What changed is the answer: the fallback was a frozen ``FALLBACK_SEAT_ID = "c"``,
+    and since the 2026-07-24 B<->C swap that constant has named a **dry-run** variant.
+    Answering "which bot is trading" with one that places no orders is a worse failure
+    than admitting ambiguity, and it is the defect LIVE_MONEY_ARCHITECTURE.md §3.2
+    describes: a second ``dry_run=false`` seat fails the ``len == 1`` test and lands
+    here.
+
+    The fallback is now the seat the TAXONOMY declares live (``status="live"`` among
+    ``account_kind="paper"`` variants) — i.e. B — which is both non-arbitrary and
+    actually true.
+    """
     _point_configs(tmp_path, monkeypatch, b_dry=True, c_dry=True)    # neither live
-    assert VR.live_seat_id() == "c"
+    assert VR.live_seat_id() == "b"
     _point_configs(tmp_path, monkeypatch, b_dry=False, c_dry=False)  # both live (shouldn't happen)
-    assert VR.live_seat_id() == "c"
+    assert VR.live_seat_id() == "b"

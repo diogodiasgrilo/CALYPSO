@@ -249,19 +249,63 @@ class BrokerDispatcher:
         self._health_cache_at = now
         return result
 
+    def _identity(self) -> dict:
+        """WHICH ACCOUNT this broker holds a session for. Never raises.
+
+        Added 2026-09-18 (docs/migration/LIVE_MONEY_ARCHITECTURE.md §3.1). Until this
+        existed ``/health`` answered only "am I healthy", so a strategy had no way to
+        learn which account it had reached — and once a paper broker and a real-money
+        broker both run, the ONLY thing binding a strategy to an account is the
+        ``CALYPSO_BROKER_URL`` in its unit file. A typo would have routed a
+        paper-intended variant onto the live account with no error anywhere. This is the
+        fact that lets ``strategy_taxonomy.assert_account_matches`` refuse to start.
+
+        ``environment`` is the broker's own DECLARATION (which credential set it loaded);
+        ``account`` is the code IBKR actually returned. They are published separately on
+        purpose — ``IBClient._assert_account_matches_env`` already refuses to serve a
+        session where the two disagree in the money-losing direction, so publishing both
+        lets an operator see the same cross-check the broker made.
+
+        Both degrade to ``None`` rather than raising: ``account_id`` raises by contract
+        before ``connect()`` resolves it, and health must stay fail-closed and silent.
+        """
+        env = None
+        account = None
+        try:
+            creds = getattr(getattr(self._ib, "cfg", None), "credentials", None)
+            raw = getattr(creds, "environment", None)
+            if isinstance(raw, str) and raw.strip():
+                env = raw.strip().lower()
+        except Exception:  # noqa: BLE001 — identity must never break health
+            pass
+        try:
+            raw_account = self._ib.account_id
+            if isinstance(raw_account, str) and raw_account.strip():
+                account = raw_account.strip()
+        except Exception:  # noqa: BLE001 — unresolved before connect(), by contract
+            pass
+        return {"environment": env, "account": account}
+
     def _probe_health(self) -> dict:
-        """One authoritative, fail-closed auth/status probe. Never raises."""
+        """One authoritative, fail-closed auth/status probe. Never raises.
+
+        Identity (``environment``/``account``) is merged into EVERY return path,
+        degraded ones included: "which broker is sick" is exactly what an operator needs
+        when two are running, and it is knowable even when the session is not usable.
+        """
+        base = self._identity()
         check = getattr(self._ib, "check_auth_status", None)
         try:
             status = check() if callable(check) else None
             if not isinstance(status, dict):
                 # No authoritative signal available → fail closed.
-                return {"status": "degraded", "connected": False}
+                return {**base, "status": "degraded", "connected": False}
             authenticated = bool(status.get("authenticated"))
             connected = bool(status.get("connected"))
             competing = bool(status.get("competing"))
             live = authenticated and connected and not competing
             return {
+                **base,
                 "status": "ok" if live else "degraded",
                 "connected": live,
                 "authenticated": authenticated,
@@ -270,7 +314,7 @@ class BrokerDispatcher:
         except Exception as e:  # noqa: BLE001 — health must never raise
             logger.warning("broker health check failed: %s: %s",
                            type(e).__name__, e)
-            return {"status": "degraded", "connected": False}
+            return {**base, "status": "degraded", "connected": False}
 
 
 def create_app(dispatcher: BrokerDispatcher):

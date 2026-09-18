@@ -41,6 +41,11 @@ from typing import Dict, List, Optional
 # The variant whose HYDRA_VARIANT_ID env var is unset (the original single-bot / poller-owner).
 DEFAULT_ID = "a"
 
+# The two account kinds a strategy's orders can land on. See StrategyMeta.account_kind.
+PAPER = "paper"
+LIVE_MONEY = "live_money"
+VALID_ACCOUNT_KINDS = (PAPER, LIVE_MONEY)
+
 
 @dataclass(frozen=True)
 class GroupMeta:
@@ -127,6 +132,34 @@ class StrategyMeta:
     # draws both sides shows a side F never trades — the phantom short_call=0.0
     # seen in F's first recorded entry.
     sides: str = "two_sided"
+
+    # ── Added 2026-09-18 (live-money architecture — docs/migration/LIVE_MONEY_ARCHITECTURE.md §3.2) ──
+    #
+    # account_kind answers "are this strategy's orders against PAPER or REAL
+    # MONEY", which is NOT the same question as ``dry_run`` ("does it place real
+    # orders at all") and NOT the same as ``status`` ("live" here has always meant
+    # *the live PAPER seat*). Nothing in this codebase could express real money
+    # before this field existed.
+    #
+    #   "paper"       orders go to the IBKR paper account (every variant today)
+    #   "live_money"  orders go to a funded account and can lose real money
+    #
+    # WHY A NEW FIELD, not a new ``status`` value — this is the same mistake
+    # ``capital_basis`` was added to undo. ``status`` is display metadata and is
+    # also read as "is this the canonical seat"; overloading it would make
+    # "which variant is the live paper seat" and "which variant trades real
+    # money" the same query, and they must never be. Concretely, ``live_seat_id()``
+    # resolves the seat by scanning for dry_run=false: with a real-money variant
+    # ALSO at dry_run=false it saw two, failed its len(...)==1 test, and fell back
+    # to naming a DRY-RUN variant as "the bot".
+    #
+    # DELIBERATELY NOT CONFIGURABLE PER-VM. This is keyed on the variant letter in
+    # committed source, so moving a strategy onto real money is a reviewed code
+    # change, never a config flip on the box. ``config_variant_*.json`` is
+    # gitignored/skip-worktree and has been silently reverted by a ``git pull``
+    # before (see CLAUDE.md) — that is not a file the paper/real-money boundary
+    # should depend on.
+    account_kind: str = "paper"
 
 
 # ---------------------------------------------------------------------------
@@ -422,6 +455,94 @@ def assert_class_matches(vid: str, resolved_class: str) -> None:
             f"strategy_class={expected!r} but registry resolved {resolved_class!r}. "
             "A systemd unit is likely pointed at the wrong --config; refusing to start."
         )
+
+
+def assert_account_matches(vid: str, actual_kind: Optional[str]) -> None:
+    """Fail-stop guardrail: the account a variant REACHED must match the one it DECLARES.
+
+    Sibling of :func:`assert_class_matches`, for the same class of defect — a mis-pointed
+    systemd unit — but with real money on the other side of it. A strategy is bound to an
+    account by exactly one line, ``CALYPSO_BROKER_URL``, and until this existed nothing
+    verified the far end. A paper-intended variant pointed at the live broker would have
+    placed REAL orders with no error, no alert and nothing unusual in the log.
+
+    ``actual_kind`` is what the broker reports about itself (``None`` when it cannot say —
+    an older broker that predates the identity fields, or a health read that failed).
+
+    ASYMMETRIC ON UNKNOWN, matching ``IBClient._assert_account_matches_env``'s own
+    reasoning, because the two unknowns are not equally dangerous:
+
+    * declared ``live_money`` + broker cannot say  -> **RAISE**. Never place real orders
+      against a broker whose identity is unverifiable.
+    * declared ``paper`` + broker cannot say       -> **PASS** (caller warns). The worst
+      case is paper orders on a paper account. Failing closed here would instead take all
+      seven strategies down the first time someone restarts them before the broker — the
+      2026-06-08 deploy-order bug — to protect against nothing.
+
+    A KNOWN mismatch always raises, in BOTH directions. The reverse (a real-money variant
+    reaching the paper broker) loses no money, but it would place that variant's orders
+    into the paper account alongside the paper seat's own positions, corrupting the very
+    record being used to decide whether to scale up.
+    """
+    declared = meta(vid).account_kind
+    if declared not in VALID_ACCOUNT_KINDS:
+        raise ValueError(
+            f"variant {vid!r} declares account_kind={declared!r}, which is not one of "
+            f"{VALID_ACCOUNT_KINDS}; refusing to start."
+        )
+    if actual_kind is None:
+        if declared == LIVE_MONEY:
+            raise ValueError(
+                f"variant {vid!r} declares account_kind={LIVE_MONEY!r} but the broker did "
+                f"not report its identity, so the account cannot be verified. Refusing to "
+                f"place real-money orders against an unverifiable broker — check that "
+                f"calypso-broker is running code new enough to report `environment`."
+            )
+        return
+    if actual_kind not in VALID_ACCOUNT_KINDS:
+        raise ValueError(
+            f"broker reported an unrecognised account kind {actual_kind!r} for variant "
+            f"{vid!r}; refusing to start rather than guess."
+        )
+    if actual_kind != declared:
+        raise ValueError(
+            f"ACCOUNT MISMATCH for variant {vid!r}: it declares account_kind={declared!r} "
+            f"but the broker it reached is {actual_kind!r}. A systemd unit is almost "
+            f"certainly pointed at the wrong CALYPSO_BROKER_URL; refusing to start."
+        )
+
+
+def account_kind_for_environment(environment: Optional[str]) -> Optional[str]:
+    """Translate the BROKER's vocabulary into the taxonomy's. ``None`` when unknown.
+
+    The broker reports ``environment`` as ``paper``/``live`` — the IBKR credential
+    environment, the same token ``$CALYPSO_IBKR_ENV`` and ``_keys_dir()`` use. The
+    taxonomy says ``paper``/``live_money``, because "live" in this codebase already
+    means *the live PAPER seat* and reusing it here is precisely the conflation
+    LIVE_MONEY_ARCHITECTURE.md §3.2 exists to undo.
+
+    One translation site on purpose: the broker stays free of strategy vocabulary and
+    keeps publishing raw facts, and no consumer has to re-derive this mapping.
+    Anything unrecognised returns ``None`` (= "cannot say") rather than guessing, which
+    routes into ``assert_account_matches``'s asymmetric unknown handling.
+    """
+    if not isinstance(environment, str):
+        return None
+    env = environment.strip().lower()
+    if env == "paper":
+        return PAPER
+    if env == "live":
+        return LIVE_MONEY
+    return None
+
+
+def ids_for_account_kind(kind: str) -> List[str]:
+    """Variant letters whose orders land on ``kind``, in definition order.
+
+    Replaces hardcoded seat tuples (``LIVE_SEAT_IDS = ("b", "c")``) so a new variant is
+    picked up by existing code instead of needing an edit nobody remembers to make.
+    """
+    return [sid for sid, m in STRATEGIES.items() if m.account_kind == kind]
 
 
 def available_ids() -> List[str]:

@@ -256,6 +256,11 @@ def _strategy_meta_dict(m: tax.StrategyMeta) -> dict:
         "dte_class": m.dte_class,
         "data_kind": _data_kind(m),
         "is_live": _is_live(m.id),
+        # Live-money architecture 2026-09-18: whether this strategy's orders land on
+        # the paper account or a funded one. The UI must never present a real-money
+        # variant with the same affordances as a paper one, and "dry_run" cannot carry
+        # that — it says whether orders are placed, not what they are placed against.
+        "account_kind": m.account_kind,
         "is_primary": m.id == _primary_id(),
         "available": _is_available_meta(m),
         "capabilities": _capabilities(m),

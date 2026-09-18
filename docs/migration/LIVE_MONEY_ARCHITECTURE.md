@@ -244,9 +244,11 @@ no dependency on IBKR.** That is the point of the split: by the time the
 account is funded, the only genuinely new thing is a credential file.
 
 1. **Now, in parallel with funding** — all testable on the PAPER account:
-   - S1 `/health` publishes environment + account code; S2 strategy-side
-     assertion; the §3.1b banner fix
-   - `account_kind` taxonomy axis + the `live_seat_id()` split (§3.2)
+   - ✅ **DONE** — S1 `/health` publishes environment + account code; S2
+     strategy-side assertion; the §3.1b banner fix; `account_kind` taxonomy axis;
+     the `live_seat_id()` / `live_money_seat_id()` split. 49 tests, 13 mutations
+     all killed, full suite 4159 passed. No trading behaviour changed: every
+     variant still declares paper and the live seat still resolves to `b`.
    - `calypso-broker-live` unit on 8789, **running paper credentials at first**
      — this proves two brokers coexist and that S1/S2 work, with zero live-money
      exposure
@@ -344,6 +346,17 @@ which renders `id.toUpperCase()` in a space built for one or two characters.
 Pairs naturally with `account_kind="live_money"`. Data lands in
 `data/variant_bm/`, logs in `logs/hydra_variant_bm/`, unit
 `hydra_variant_bm.service`.
+
+**Integration requirement found while building §3.2** (surfaced by a test fixture,
+not by reading): the dashboard's `Settings` is a pydantic model with `extra`
+disallowed, so `variant_bm_*` attributes cannot simply appear at runtime —
+`setattr` raises `ValueError: "Settings" object has no field "variant_bm_config_file"`.
+Adding `bm` therefore requires **explicit `variant_bm_state_file` /
+`_config_file` / `_backtesting_db` / `_metrics_file` / `_log_file` fields in
+`dashboard/backend/config.py`**. The taxonomy row alone is not enough, and the
+failure mode is silent in the other direction: without those fields the seat
+resolver simply skips `bm` and it stays invisible — exactly the §3.2 branch
+where the real-money bot is never followed by anything.
 
 ---
 

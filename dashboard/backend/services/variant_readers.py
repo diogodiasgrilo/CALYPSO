@@ -33,34 +33,89 @@ from dashboard.backend.services.db_reader import BacktestingDBReader
 # Brandon seats b/c, so a C<->B live-paper swap moves the whole canonical view
 # onto the new live seat with NO code change — request endpoints follow instantly
 # (they call live_seat_id() per request), the WS broadcaster at its next start.
-LIVE_SEAT_IDS = ("b", "c")
+LIVE_SEAT_IDS = ("b", "c")  # DEPRECATED — see _paper_seat_candidates(). Kept only so an
+                            # external reader of the name does not break; nothing in-tree
+                            # reads it any more.
 FALLBACK_SEAT_ID = "c"
 
 
-def live_seat_id() -> str:
-    """The live Brandon seat (b or c) — SINGLE SOURCE OF TRUTH for "the bot".
+def _dry_run_false_ids(candidate_ids) -> list:
+    """Of these variants, which have ``dry_run=false`` (i.e. place REAL orders).
 
-    Reads each seat's config ``dry_run``; the single live one (dry_run=false)
-    wins. Falls back to ``FALLBACK_SEAT_ID`` when neither/both are live or a
-    config is unreadable (e.g. briefly during a swap restart). Never raises.
-    ``routers.strategies._primary_id`` delegates here so both agree.
+    Read from each variant's config per call, not cached, so a live-seat swap is
+    reflected immediately. Unreadable/missing configs are skipped, never raise — this
+    runs on every dashboard request and a briefly-missing file during a restart must not
+    500 the page.
     """
-    live = []
-    for vid in LIVE_SEAT_IDS:
+    out = []
+    for vid in candidate_ids:
         cfg = getattr(settings, f"variant_{vid}_config_file", None)
         if cfg is None:
             continue
         try:
             with open(cfg) as fh:
                 if not bool(json.load(fh).get("dry_run", True)):
-                    live.append(vid)
+                    out.append(vid)
         except Exception:
             continue
-    return live[0] if len(live) == 1 else FALLBACK_SEAT_ID
+    return out
 
 
-# Backwards-compat static alias (a few call sites still read this name). Prefer
-# live_seat_id() anywhere that must follow the swap.
+def _declared_seat(kind: str):
+    """The variant the TAXONOMY declares as the seat for ``kind``, or None.
+
+    Used only to break a tie. Strictly better than the old constant fallback, which
+    returned a hardcoded ``"c"`` — a DRY-RUN variant — and so answered "which is the
+    bot" with a bot that places no orders at all.
+    """
+    for vid in tax.ids_for_account_kind(kind):
+        if tax.meta(vid).status == "live":
+            return vid
+    return None
+
+
+def live_seat_id() -> str:
+    """The live PAPER seat — SINGLE SOURCE OF TRUTH for "the bot" on the paper account.
+
+    Candidates come from the taxonomy (``account_kind == "paper"``) rather than a
+    hardcoded ``("b", "c")``, so a variant added later is considered automatically
+    instead of needing an edit to a tuple nobody remembers exists.
+
+    NOTE THE SCOPE, which is the whole point of the 2026-09-18 split
+    (LIVE_MONEY_ARCHITECTURE.md §3.2): this answers *paper* only. A real-money variant
+    is a different question with a different answer — :func:`live_money_seat_id` — and
+    conflating them is what made a second ``dry_run=false`` seat fail the ``len == 1``
+    test and fall through to naming a dry-run variant as "the bot".
+
+    Ties break to the taxonomy's declared live seat, then to ``FALLBACK_SEAT_ID``.
+    Never raises. ``routers.strategies._primary_id`` delegates here so both agree.
+    """
+    live = _dry_run_false_ids(tax.ids_for_account_kind(tax.PAPER))
+    if len(live) == 1:
+        return live[0]
+    return _declared_seat(tax.PAPER) or FALLBACK_SEAT_ID
+
+
+def live_money_seat_id():
+    """The variant trading REAL MONEY, or ``None`` when there is not one.
+
+    ``None`` is the correct and expected answer today — no variant declares
+    ``account_kind="live_money"`` yet — and callers must handle it rather than assume a
+    seat exists. A real-money variant sitting at ``dry_run=true`` is not trading, so it
+    is deliberately not returned.
+    """
+    live = _dry_run_false_ids(tax.ids_for_account_kind(tax.LIVE_MONEY))
+    if len(live) == 1:
+        return live[0]
+    if not live:
+        return None
+    return _declared_seat(tax.LIVE_MONEY)
+
+
+# DEPRECATED static alias. Its comment used to claim "a few call sites still read this
+# name"; as of 2026-09-18 a repo-wide search finds ZERO readers. It is a frozen "c" that
+# never followed a swap, so anything that did read it would have been wrong since
+# 2026-07-24. Use live_seat_id().
 PRIMARY_ID = FALLBACK_SEAT_ID
 
 

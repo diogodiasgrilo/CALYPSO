@@ -146,10 +146,20 @@ def _shutdown_broker(ib: IBClient, stop: threading.Event,
 
 
 def main() -> None:
-    logger.info("calypso-broker starting — paper account, single shared session")
+    # The environment is resolved below, so this line must NOT hardcode one. It said
+    # "paper account" until 2026-09-18, three lines above the call that picks the
+    # environment dynamically — harmless while only a paper broker existed, actively
+    # misleading the moment a second broker runs, and journal lines are what an operator
+    # reads during an incident.
+    _env = resolve_environment()
+    logger.info("calypso-broker starting — %s account, single shared session", _env)
     # connect() raises on failure → systemd Restart=always retries (matches the
     # bots' fail-closed behavior; we never serve on a dead session).
-    ib = IBClient(IBConfig(credentials=load_credentials(resolve_environment())))
+    # Reuse the SAME resolved value the banner logged — calling resolve_environment()
+    # twice would let the log and the credentials disagree if the env var were ever
+    # mutated in between, which is exactly the "declaration that isn't a fact" problem
+    # _assert_account_matches_env was added to close.
+    ib = IBClient(IBConfig(credentials=load_credentials(_env)))
     ib.connect()
 
     # P5a: breaker + warmup ALERTING lives HERE now (the breakers live in this

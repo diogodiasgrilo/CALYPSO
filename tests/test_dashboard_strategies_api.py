@@ -153,7 +153,11 @@ class TestMeta:
         r = client.get("/api/strategies/meta")
         assert r.status_code == 200
         body = r.json()
-        assert body["primary_id"] == "c"
+        # UPDATED 2026-09-18: was "c". No variant configs exist under the test
+        # environment, so this asserts the FALLBACK — and the old frozen "c" had been
+        # describing the pre-2026-07-24 world for two months. B has held the live seat
+        # since that swap; the taxonomy-declared fallback now says so.
+        assert body["primary_id"] == "b"
 
         group_ids = {g["id"] for g in body["groups"]}
         assert group_ids == {"ic_0dte", "calendar_multiday", "undefined_risk_0dte"}
@@ -208,8 +212,17 @@ class TestMeta:
 
         c = next(s for s in body["strategies"] if s["id"] == "c")
         assert c["data_kind"] == "ic_state"
-        assert c["is_primary"] is True
+        # UPDATED 2026-09-18, same root cause as primary_id above: with no variant
+        # configs in the test environment this is the FALLBACK, and the old frozen "c"
+        # had been asserting a pre-2026-07-24 world. C is a dry-run shadow now — marking
+        # it primary is precisely the wrong answer LIVE_MONEY_ARCHITECTURE.md §3.2
+        # describes.
+        assert c["is_primary"] is False
         assert c["capabilities"]["history"] is True
+
+        b = next(s for s in body["strategies"] if s["id"] == "b")
+        assert b["is_primary"] is True, "the live seat (B) must be primary"
+        assert b["account_kind"] == "paper"
 
     def test_no_filesystem_paths_leaked(self, client):
         # The whole /meta payload must NOT contain any path-ish string.
@@ -396,18 +409,25 @@ def test_primary_id_falls_back_when_ambiguous(tmp_path, monkeypatch):
     monkeypatch.setattr(settings, "variant_b_config_file", b, raising=False)
     monkeypatch.setattr(settings, "variant_c_config_file", c, raising=False)
 
-    # both dry -> fallback c
+    # UPDATED 2026-09-18: the fallback is the TAXONOMY-DECLARED live seat, not a frozen
+    # "c". See test_dashboard_live_seat_canonical_2026_07_22.py for the full reasoning —
+    # in short, "c" has named a dry-run variant since the 2026-07-24 swap, so the old
+    # fallback answered "which bot is trading" with one that places no orders.
+    # "must not pick arbitrarily" still holds; the non-arbitrary answer is now correct
+    # rather than merely stable.
+
+    # both dry -> declared seat
     _write_cfg(b, True); _write_cfg(c, True)
-    assert S._primary_id() == S.PRIMARY_FALLBACK_ID == "c"
+    assert S._primary_id() == "b"
 
-    # both live (should never happen, but must not pick arbitrarily) -> fallback c
+    # both live (should never happen, but must not pick arbitrarily) -> declared seat
     _write_cfg(b, False); _write_cfg(c, False)
-    assert S._primary_id() == "c"
+    assert S._primary_id() == "b"
 
-    # unreadable configs -> fallback c (never raises)
+    # unreadable configs -> declared seat (never raises)
     monkeypatch.setattr(settings, "variant_b_config_file", tmp_path / "nope_b.json", raising=False)
     monkeypatch.setattr(settings, "variant_c_config_file", tmp_path / "nope_c.json", raising=False)
-    assert S._primary_id() == "c"
+    assert S._primary_id() == "b"
 
 
 # ---------------------------------------------------------------------------

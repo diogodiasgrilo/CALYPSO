@@ -315,6 +315,49 @@ def _build_broker():
     return IBClient(IBConfig(credentials=load_credentials(resolve_environment())))
 
 
+def _broker_account_kind(broker):
+    """Which account kind the broker we ACTUALLY reached is holding, or None.
+
+    Added 2026-09-18 (docs/migration/LIVE_MONEY_ARCHITECTURE.md §3.1). Feeds
+    ``strategy_taxonomy.assert_account_matches``, which fail-stops this process when the
+    answer disagrees with what this variant declares. Before that pair existed, a
+    strategy was bound to an account by exactly one line — ``CALYPSO_BROKER_URL`` — that
+    nothing verified, so once a paper broker and a real-money broker both run, a typo
+    would silently place REAL orders from a paper-intended variant.
+
+    Returns ``None`` for "cannot say" rather than guessing, on every failure path. That
+    is not a cop-out: ``assert_account_matches`` treats unknown asymmetrically — fatal
+    for a real-money variant, tolerated for a paper one — so the safe-but-vague answer
+    is handled correctly at exactly one place instead of being second-guessed here.
+    """
+    from shared import strategy_taxonomy as _tax
+
+    if isinstance(broker, BrokerClient):
+        # Broker mode: only the broker knows, and it says so in /health. One extra
+        # loopback GET at startup; the broker caches health for HEALTH_CACHE_S anyway.
+        try:
+            health = broker.health()
+        except Exception:  # noqa: BLE001 — unverifiable is a valid answer here
+            return None
+        if not isinstance(health, dict):
+            return None
+        return _tax.account_kind_for_environment(health.get("environment"))
+
+    # Legacy direct-IBClient path. The credential environment is the declaration, and
+    # IBClient._assert_account_matches_env has ALREADY refused the session if the
+    # account code IBKR returned disagreed with it in the money-losing direction — so by
+    # the time we are here it is a verified fact, not a claim.
+    #
+    # Read `environment` rather than the `is_paper` bool on purpose: is_paper is
+    # `environment == "paper"`, so False conflates "live" with "some value we do not
+    # recognise". Mapping the raw string keeps an unrecognised value as None.
+    try:
+        creds = getattr(getattr(broker, "cfg", None), "credentials", None)
+        return _tax.account_kind_for_environment(getattr(creds, "environment", None))
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config_path: str = "bots/hydra/config/config.json"):
     """Run the main trading bot loop."""
     global shutdown_requested
@@ -398,6 +441,32 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
         # this is behavior-identical for the current config.
         from bots.hydra.registry import build_strategy, resolve_strategy_name
         from shared import strategy_taxonomy as _tax
+
+        # Guardrail (LIVE_MONEY_ARCHITECTURE.md §3.1): does the broker we reached hold
+        # the account this variant is supposed to trade? Sibling of the class guard
+        # below and the same root cause — a mis-pointed systemd unit — but this one has
+        # real money on the other side of it, so it runs FIRST.
+        #
+        # Deliberately here and NOT inside the connect() retry loop above: that loop
+        # treats BrokerError as transient and waits 15s x 48 before giving up, which is
+        # right for "the broker has not got a session yet" and wrong for an account
+        # mismatch. A mismatch is permanent — retrying it for twelve minutes would just
+        # bury the reason. Fail-stop immediately instead.
+        _actual_account = _broker_account_kind(broker)
+        _declared_account = _tax.meta(_tax.variant_id()).account_kind
+        if _actual_account is None and _declared_account == _tax.PAPER:
+            trade_logger.log_event(
+                f"ACCOUNT-ASSERT: broker did not report its identity — proceeding "
+                f"unverified because variant {_tax.variant_id().upper()} declares "
+                f"account_kind={_declared_account!r} (paper cannot lose real money). "
+                f"Upgrade calypso-broker to restore verification."
+            )
+        _tax.assert_account_matches(_tax.variant_id(), _actual_account)
+        trade_logger.log_event(
+            f"ACCOUNT-ASSERT OK: variant {_tax.variant_id().upper()} declares "
+            f"{_declared_account!r}; broker reports {_actual_account!r}"
+        )
+
         selected = resolve_strategy_name(config)
         # Guardrail (audit AUD-4-F1): the variant->class binding is config-driven
         # (which --config the unit passes) and enforced nowhere, so a mis-pointed
