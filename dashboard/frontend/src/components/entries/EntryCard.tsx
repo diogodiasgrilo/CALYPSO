@@ -367,8 +367,8 @@ export function EntryCard({ entry, isConditional, label }: EntryCardProps) {
             <span
               className="text-3xs px-1 py-0.5 rounded"
               style={{
-                backgroundColor: `${entry.put_only ? "#a371f7" : colors.info}15`,
-                color: entry.put_only ? "#a371f7" : colors.info,
+                backgroundColor: `${entry.put_only ? "#a97af7" : colors.info}15`,
+                color: entry.put_only ? "#a97af7" : colors.info,
               }}
             >
               {entry.put_only ? "PUT ONLY" : "CALL ONLY"}

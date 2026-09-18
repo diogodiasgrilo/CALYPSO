@@ -21,24 +21,24 @@ export const colors = {
   bg: "#1a2229", // Level 0 — page background
   bgDeep: "#161d23", // Level -1 — deepest recess (tab bars, modals)
   card: "#222e35", // Level 1 — cards/panels
-  cardHover: "#283338", // Level 1 hover
+  cardHover: "#1d282e", // Level 1 hover
   bgElevated: "#2d3b43", // Level 2 — modals/tooltips/dropdowns
   border: "#3d5058",
   borderDim: "rgba(255, 255, 255, 0.06)",
 
   // P&L
   profit: "#7ee8c7",
-  profitMuted: "#5a9e8a",
-  loss: "#f85149",
+  profitMuted: "#5ca18d",
+  loss: "#f95f58",
   lossMuted: "#c9413a",
   warning: "#d29922",
   warningMuted: "#a67b1a",
-  info: "#58a6ff",
+  info: "#5da8ff",
 
   // Text
   textPrimary: "#e8edf3",
-  textSecondary: "#8b9bb0",
-  textDim: "#5e6e82",
+  textSecondary: "#c2cad5",
+  textDim: "#98a5b5",
 } as const;
 
 /**

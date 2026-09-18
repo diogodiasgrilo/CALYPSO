@@ -112,7 +112,7 @@ const SLOT_LABELS: Record<number, string> = {
 // ── Shared Styles ───────────────────────────────────────────────────────────
 
 const chartTooltipStyle = {
-  backgroundColor: colors.bgElevated,
+  backgroundColor: colors.card,
   border: `1px solid ${colors.border}`,
   borderRadius: 6,
   fontSize: 11,

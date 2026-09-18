@@ -10,6 +10,32 @@ const MONTH_NAMES = [
 
 const WEEKDAY_LABELS = ["M", "T", "W", "T", "F"];
 
+/* Heat ramps for the P&L calendar.
+ *
+ * These replace `rgba(126,232,199, 0.15 + intensity*0.6)` and its red twin.
+ * Fading a bright colour toward the surface with RISING alpha meant the
+ * strongest P&L days produced the LIGHTEST cells — and their day numbers fell
+ * to 2.03:1 against white, so legibility was inversely correlated with how much
+ * the day mattered. Measured 2026-09-18; see
+ * tests/test_dashboard_contrast_aa_2026_09_18.py.
+ *
+ * No choice of text colour could rescue the old ramp: at the crossover
+ * luminance neither white nor near-black reaches 4.5:1 (the best available is
+ * 3.80:1). So the fill has to DARKEN as it saturates instead of lightening,
+ * which these do — every step clears 4.5:1 with --color-text-primary, and the
+ * test pins monotonicity as well as the endpoints, because a ramp that
+ * brightened only in the middle would pass a per-step check and still
+ * reintroduce the bug at whatever intensity happened not to be sampled.
+ */
+const PROFIT_HEAT = ["#1a3630", "#1c4a3d", "#1a5e4a", "#147055", "#0a7858"];
+const LOSS_HEAT = ["#3b1f1f", "#4e2421", "#642823", "#7c2a24", "#962c24"];
+
+/** Map a 0..1 intensity onto a ramp step. */
+function heatStep(ramp: readonly string[], intensity: number): string {
+  const i = Math.round(Math.max(0, Math.min(1, intensity)) * (ramp.length - 1));
+  return ramp[i];
+}
+
 /** Group summaries by month key (YYYY-MM) in chronological order. */
 export function groupByMonth(summaries: DaySummary[]): Map<string, DaySummary[]> {
   const map = new Map<string, DaySummary[]>();
@@ -140,9 +166,9 @@ export function MonthCalendar({
               const intensity = Math.min(Math.abs(pnl) / monthMax, 1);
               const bgColor =
                 pnl > 0
-                  ? `rgba(126, 232, 199, ${0.15 + intensity * 0.6})`
+                  ? heatStep(PROFIT_HEAT, intensity)
                   : pnl < 0
-                  ? `rgba(248, 81, 73, ${0.15 + intensity * 0.6})`
+                  ? heatStep(LOSS_HEAT, intensity)
                   : "rgba(90, 100, 120, 0.2)";
 
               return (

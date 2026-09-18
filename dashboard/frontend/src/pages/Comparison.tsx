@@ -1175,7 +1175,7 @@ function PnLChart({
           />
           <Tooltip
             contentStyle={{
-              backgroundColor: colors.bgElevated,
+              backgroundColor: colors.card,
               border: `1px solid ${colors.border}`,
               borderRadius: 4,
               fontSize: 12,
@@ -1497,7 +1497,7 @@ function H2HCumulativeChart({
           />
           <Tooltip
             contentStyle={{
-              backgroundColor: colors.bgElevated,
+              backgroundColor: colors.card,
               border: `1px solid ${colors.border}`,
               borderRadius: 4,
               fontSize: 12,
@@ -1567,7 +1567,7 @@ function H2HDailyDeltaChart({
             />
             <Tooltip
               contentStyle={{
-                backgroundColor: colors.bgElevated,
+                backgroundColor: colors.card,
                 border: `1px solid ${colors.border}`,
                 borderRadius: 4,
                 fontSize: 12,
@@ -1628,7 +1628,7 @@ function H2HDailyDeltaChart({
           />
           <Tooltip
             contentStyle={{
-              backgroundColor: colors.bgElevated,
+              backgroundColor: colors.card,
               border: `1px solid ${colors.border}`,
               borderRadius: 4,
               fontSize: 12,

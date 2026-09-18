@@ -232,7 +232,7 @@ function CumulativeChart({ agg, memberIds }: { agg: CalendarAggregatePayload | n
           <XAxis dataKey="date" stroke={colors.textSecondary} tick={{ fontSize: 10 }} interval="preserveStartEnd" />
           <YAxis stroke={colors.textSecondary} tick={{ fontSize: 10 }} tickFormatter={(v) => `$${v}`} />
           <Tooltip
-            contentStyle={{ backgroundColor: colors.bgElevated, border: `1px solid ${colors.border}`, borderRadius: 4, fontSize: 12 }}
+            contentStyle={{ backgroundColor: colors.card, border: `1px solid ${colors.border}`, borderRadius: 4, fontSize: 12 }}
             formatter={(value, name) => {
               const label = labelByKey[String(name)] ?? String(name);
               if (value === null || value === undefined) return ["—", label];

@@ -11,6 +11,7 @@ census_*.json
 fontcensus.json
 findings.json
 structural.json
+contrast.json
 
 # One-off probes written during a single investigation, not part of the harness.
 audit_pre.mjs

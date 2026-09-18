@@ -89,7 +89,7 @@ export function PnLCurve({ pnlHistory: pnlHistoryProp }: PnLCurveProps = {}) {
             />
             <Tooltip
               contentStyle={{
-                backgroundColor: colors.bgElevated,
+                backgroundColor: colors.card,
                 border: `1px solid ${colors.border}`,
                 borderRadius: 6,
                 fontSize: 11,

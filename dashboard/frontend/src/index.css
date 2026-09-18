@@ -10,19 +10,19 @@
   --color-border-dim: rgba(255, 255, 255, 0.06);
 
   --color-profit: #7ee8c7;
-  --color-profit-muted: #5a9e8a;
-  --color-loss: #f85149;
+  --color-profit-muted: #5ca18d;
+  --color-loss: #f95f58;
   --color-loss-muted: #c9413a;
   --color-warning: #d29922;
   --color-warning-muted: #a67b1a;
-  --color-info: #58a6ff;
+  --color-info: #5da8ff;
 
   --color-text-primary: #e8edf3;
-  --color-text-secondary: #8b9bb0;
-  --color-text-dim: #5e6e82;
+  --color-text-secondary: #c2cad5;
+  --color-text-dim: #98a5b5;
 
   --color-card: #222e35;
-  --color-card-hover: #283338;
+  --color-card-hover: #1d282e;
 
   /* ── Type scale below Tailwind's `xs` (12px) ──────────────────────────────
    * A dense financial UI legitimately needs sub-12px text, but Tailwind's

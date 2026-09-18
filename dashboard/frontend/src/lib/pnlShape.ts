@@ -120,7 +120,7 @@ const ACCENT_PALETTE: Record<string, string> = {
   b: colors.warning, // amber
   c: colors.profit, // mint
   d: colors.loss, // coral
-  e: "#a371f7", // purple
+  e: "#a97af7", // purple
 };
 
 function hashedHue(id: string): string {
