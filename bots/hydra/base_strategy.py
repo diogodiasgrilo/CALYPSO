@@ -5491,52 +5491,24 @@ class MEICStrategy(abc.ABC):
         else:
             logger.debug("Skipping orphan cleanup in dry-run mode")
 
-        # Check if any of our tracked positions are missing from the broker.
+        # DEF-7's Saxo per-leg loop was DELETED here on 2026-09-18.
         #
-        # AUD2-M6 / DEF-7: this per-leg loop gates on `*_position_id` which
-        # is Saxo-era. On IBKR `*_position_id` is ALWAYS None (no per-leg
-        # position id), so `if pos_id and pos_id not in valid_ids:` below
-        # never fires — the entire mid-session POS-003 reconciliation is
-        # dormant on IBKR. Settlement reconciliation
-        # (`check_after_hours_settlement` → `_side_positions_gone`) and
-        # the stop monitor both use the conid model and still function.
+        # It iterated LEG_NAMES comparing `*_position_id` against the broker's
+        # id list. It was dead on BOTH paths: on IBKR every `*_position_id` is
+        # None (there is no per-leg position id), and in dry-run this method
+        # returns above before reaching it. So it never fired, either way.
         #
-        # DEF-7 trigger (see docs/migration/DEFERRED_WORK.md): if mid-session
-        # manual-close detection becomes a requirement, rewrite this loop
-        # to iterate `*_uic` (conid) and use the `_position_is_open(conid,
-        # side)` predicate. For paper-only single-bot HYDRA, the dormancy
-        # is acceptable.
-        for entry in self.daily_state.active_entries:
-            missing_legs = []
-
-            for leg_name in LEG_NAMES:
-                pos_id = getattr(entry, f"{leg_name}_position_id")
-                if pos_id and pos_id not in valid_ids:
-                    missing_legs.append(leg_name)
-                    # Unregister the missing position
-                    try:
-                        self.registry.unregister(pos_id)
-                    except Exception as e:
-                        logger.error(f"Registry error unregistering {pos_id}: {e}")
-                    setattr(entry, f"{leg_name}_position_id", None)
-                    # FIX (2026-02-04): Also clear UIC to prevent IllegalInstrumentId errors
-                    setattr(entry, f"{leg_name}_uic", None)
-
-            if missing_legs:
-                logger.warning(f"Entry #{entry.entry_number}: Missing legs in Saxo: {missing_legs}")
-                self._log_safety_event(
-                    "POSITION_MISSING",
-                    f"Entry #{entry.entry_number} missing {missing_legs} - closed externally?"
-                )
-
-                # Determine if entire side was stopped
-                if "short_call" in missing_legs and "long_call" in missing_legs:
-                    entry.call_side_stopped = True
-                    logger.warning(f"Entry #{entry.entry_number}: Call side marked as stopped (external close)")
-
-                if "short_put" in missing_legs and "long_put" in missing_legs:
-                    entry.put_side_stopped = True
-                    logger.warning(f"Entry #{entry.entry_number}: Put side marked as stopped (external close)")
+        # It was worse than merely dead. For months DEFERRED_WORK DEF-7 recorded
+        # it as an OPEN GAP IN LIVE POSITION SAFETY — "mid-session POS-003
+        # reconciliation does nothing on IBKR" — when POS-003 in the conid model
+        # (`strategy.py:_check_hourly_reconciliation`) had been running hourly
+        # the whole time, diffing `_expected_position_quantities()` against
+        # `_read_open_positions()` with a 60s settle window. Dead code that
+        # LOOKS like the implementation is how a non-existent gap stays on a
+        # go-live register.
+        #
+        # If mid-session manual-close detection ever needs extending, extend
+        # _check_hourly_reconciliation. It is the one that runs.
 
         # Update state file
         self._save_state_to_disk()

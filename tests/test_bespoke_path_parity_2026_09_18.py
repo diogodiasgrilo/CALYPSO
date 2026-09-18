@@ -50,6 +50,8 @@ from pathlib import Path
 
 import pytest
 
+from tests.conftest import strip_comments
+
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
@@ -198,4 +200,51 @@ def test_bespoke_entry_paths_persist_their_entry(module):
     assert ("_record_entry_to_db" in seg or "record_calendar_entry" in seg
             or "_dc_recorder" in seg), (
         f"{module}:_initiate_entry opens a position and records it nowhere"
+    )
+
+
+# ── The dead code the audit surfaced, now removed ──────────────────────────
+
+def test_the_saxo_reconciliation_loop_is_gone():
+    """DEF-7's loop iterated LEG_NAMES comparing `*_position_id` against the
+    broker's id list. Dead on BOTH paths — None on IBKR, unreachable in dry-run
+    because the method returns above it.
+
+    Worse than dead: for months DEFERRED_WORK recorded it as an OPEN GAP IN
+    LIVE POSITION SAFETY, when POS-003 in the conid model had been running
+    hourly the whole time. Dead code that LOOKS like the implementation is how
+    a non-existent gap stays on a go-live register.
+    """
+    src = (HYDRA / "base_strategy.py").read_text()
+    body = src[src.index("def _reconcile_positions"):]
+    body = body[: body.index("\n    def ", 10)]
+    assert "_position_id" not in body or "DELETED" in body, (
+        "the Saxo per-leg reconciliation loop is back in _reconcile_positions"
+    )
+    assert not re.search(r"for leg_name in LEG_NAMES:", body), (
+        "the dead per-leg loop has returned"
+    )
+
+
+def test_state002_still_checks_the_state_machine():
+    """CONTROL, and the point of the split. Only the dead COUNT comparison was
+    removed. The state-machine half must survive — it caught a real transition
+    on the live seat at 09:46 on the day this was written."""
+    src = (HYDRA / "strategy.py").read_text()
+    body = src[src.index("def _check_state_consistency"):]
+    body = body[: body.index("\n    def ", 10)]
+    # EVERY check here strips comments first. The first version checked the
+    # state-machine strings in the RAW body on the reasoning that "they are
+    # code" — but the comment recording the deletion QUOTES them, so deleting
+    # the real return statement left the test green. Twelfth occurrence of that
+    # trap in one day, and the second in this single test.
+    code = strip_comments(body, "py")
+    assert "MONITORING but no active entries" in code, (
+        "STATE-002 no longer detects MONITORING-with-no-entries — that half is "
+        "live and caught a real transition on the live seat"
+    )
+    assert "IDLE but have" in code
+    assert "registry_count" not in code, "the dead registry comparison is back"
+    assert "all_position_ids" not in code, (
+        "STATE-002 counts *_position_id again — always zero on IBKR"
     )

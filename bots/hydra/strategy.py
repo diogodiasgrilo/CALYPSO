@@ -12705,7 +12705,6 @@ class HydraStrategy(MEICStrategy):
         from bots.hydra.base_strategy import MEICState
 
         active_entries = len(self.daily_state.active_entries)
-        my_positions = self.registry.get_positions(self.BOT_NAME)  # Use HYDRA, not MEIC
 
         # Check state vs position count
         if self.state == MEICState.MONITORING and active_entries == 0:
@@ -12729,11 +12728,23 @@ class HydraStrategy(MEICStrategy):
             return None
 
         # Cross-check with Position Registry
-        expected_positions = sum(len(e.all_position_ids) for e in self.daily_state.active_entries)
-        registry_count = len(my_positions)
-
-        if abs(expected_positions - registry_count) > 2:  # Allow small discrepancy
-            return f"Position count mismatch: expected {expected_positions}, registry has {registry_count}"
+        # DEF-4's registry count comparison was DELETED here on 2026-09-18.
+        #
+        # It compared `sum(len(e.all_position_ids))` against the Position
+        # Registry's count. On IBKR BOTH sides are permanently zero:
+        # all_position_ids is built from `*_position_id`, which has no IBKR
+        # equivalent, and the registry is vestigial (always empty). It compared
+        # 0 with 0 and could never report a mismatch.
+        #
+        # The protection it was meant to give — "the positions I think I hold
+        # are not the positions the broker shows" — is provided in the conid
+        # model by POS-003 (_check_hourly_reconciliation, hourly during market
+        # hours) and POS-004 at settlement. Those are the real checks; this was
+        # never the authority on IBKR.
+        #
+        # The STATE-MACHINE half of STATE-002 above is untouched and still
+        # fires: "MONITORING but no active entries", "IDLE but N active
+        # entries". That half caught a real transition on B at 09:46 today.
 
         return None
 
