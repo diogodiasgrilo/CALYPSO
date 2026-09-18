@@ -102,16 +102,16 @@ return live[0] if len(live) == 1 else FALLBACK_SEAT_ID   # FALLBACK_SEAT_ID = "c
 ```
 
 **A first draft of this section claimed adding B-live breaks it outright. That
-was wrong, and being wrong about it is instructive** — a new `bl` id is *not in
+was wrong, and being wrong about it is instructive** — a new `bm` id is *not in
 the tuple*, so `live_seat_id()` would not see it and would keep returning `"b"`
 correctly. The real finding is a fork where **both branches are wrong**:
 
-- **Leave `bl` out of the tuple** (the default if nobody thinks about it): the
+- **Leave `bm` out of the tuple** (the default if nobody thinks about it): the
   real-money bot is structurally invisible to "which is the bot" — it can never
   be primary, and `reader_for()`, the WS broadcaster and the agent suite will
   never follow it. Silent, and it degrades the moment live matters most.
-- **Add `bl` to the tuple** (what any reasonable person would do, since it
-  plainly *is* a live seat): now paper-B and live-B are both `dry_run=false`,
+- **Add `bm` to the tuple** (what any reasonable person would do, since it
+  plainly *is* a live seat): now paper-B and bm are both `dry_run=false`,
   `len(live) == 2`, and the function returns the fallback — the dashboard
   silently declares **C**, a dry-run variant, to be "the bot".
 
@@ -188,22 +188,23 @@ Added alongside:
     CALYPSO_IBKR_ENV=paper                 CALYPSO_IBKR_ENV=live
     /etc/calypso/ibkr/paper/*.cred         /etc/calypso/ibkr/live/*.cred
         ↑                                      ↑
-  hydra, variant_{b,c,d,e,f,g}           hydra_variant_bl   (B-live)
+  hydra, variant_{b,c,d,e,f,g}           hydra_variant_bm   (B, money)
     dry_run per config                     dry_run=false
     account_kind=paper                     account_kind=live_money
                                            contracts_per_entry=1
 ```
 
-Live is **purely additive**. Rollback is `systemctl stop hydra_variant_bl` —
+Live is **purely additive**. Rollback is `systemctl stop hydra_variant_bm` —
 nothing else is touched. That is a far better rollback story than flipping a
 shared session, where recovery means re-authenticating everything.
 
 ### 4.1 An unexpected benefit
 
-Paper-B and live-B run the **same strategy, same signals, same days**, one on
+Paper-B and `bm` run the **same strategy, same signals, same days**, one on
 each account. The difference between them *is* the execution drag — currently
 estimated at ~30% of B's edge and never measured. This design measures it as a
-side effect.
+side effect, which is also the strongest argument for keeping paper-B running
+rather than retiring it once real money starts.
 
 ## 5. Safety design
 
@@ -216,7 +217,7 @@ all of the ones that apply to it.
 | S2 | Strategy refuses to start when the broker's account kind ≠ its declared `account_kind` | NEW | Catches the mis-pointed unit — the one gap nothing else covers |
 | S3 | `_assert_account_matches_env()` | **exists** | Declared paper + live account ⇒ raise, before the session is served |
 | S4 | The four `SAFETY-DRY` order gates | **exists** | A `dry_run` strategy cannot place an order on ANY session |
-| S5 | `contracts_per_entry=1` on B-live for week 1 | config | Gate 8 |
+| S5 | `contracts_per_entry=1` on bm for week 1 | config | Gate 8 |
 | S6 | Live margin via `what_if_order`, replacing the paper-derived `min_buying_power_per_ic=500` | NEW | ORDER-004 gates entries on a number currently calibrated to paper |
 
 Worth being precise about what S3+S4 already cover, because it is most of the
@@ -249,13 +250,13 @@ account is funded, the only genuinely new thing is a credential file.
    - `calypso-broker-live` unit on 8789, **running paper credentials at first**
      — this proves two brokers coexist and that S1/S2 work, with zero live-money
      exposure
-   - the B-live variant: taxonomy row, registry row, config, unit, dashboard
+   - the bm variant: taxonomy row, registry row, config, unit, dashboard
    - S6 live-margin check
 2. **When the IBKR chain completes:** encrypt the live credentials into
    `/etc/calypso/ibkr/live/`, set `CALYPSO_IBKR_ENV=live` on the second broker,
    restart it, and confirm `/health` reports `environment=live` with a
-   non-`D` account code. Only then start B-live, at 1 contract.
-3. **Rollback:** `systemctl stop hydra_variant_bl`. Nothing else is touched,
+   non-`D` account code. Only then start bm, at 1 contract.
+3. **Rollback:** `systemctl stop hydra_variant_bm`. Nothing else is touched,
    and paper is unaffected at every step.
 
 The step-1/step-2 boundary is deliberate: step 1 changes **no** trading
@@ -277,7 +278,7 @@ normal deploy discipline rather than waiting for a big-bang cutover.
   broker that answers `/health` without the new fields at all (an old broker
   against a new strategy — the exact 2026-06-08 deploy-order bug shape, where a
   strategy forwarded something an un-restarted broker could not serve).
-- **`live_seat_id()` regression** — with paper-B and live-B both
+- **`live_seat_id()` regression** — with paper-B and bm both
   `dry_run=false`, the paper seat still resolves to `"b"`. This is the
   "changes nothing today" guarantee; it should fail loudly if that stops being
   true.
@@ -290,17 +291,59 @@ normal deploy discipline rather than waiting for a big-bang cutover.
   removed. A guard that has never been seen to fail has not been tested.
 - **Full suite + chaos test (RB-10)** against the two-broker topology.
 
-## 9. Open questions
+## 9. Decisions taken (operator, 2026-09-18)
 
-1. **Which DB does the agent suite read** when both paper-B and live-B exist?
-   HERMES/CLIO/HOMER point at the live variant's `backtesting.db`. Proposal:
-   they follow the **paper** seat until live has a meaningful record, but this
-   is the operator's call.
-2. **Alert identity.** B-live must be unmistakable in Telegram. Proposal: a
-   distinct `bot_name_base` and a real-money marker on every alert.
-3. **Variant id.** `bl` is terse; `b_live` collides with the "live seat" wording
-   this design is trying to disambiguate. Naming to be settled before the
-   taxonomy row is written.
+### 9.1 The agent suite follows the REAL-MONEY seat
+
+**Decided against the recommendation in this doc's first draft, deliberately.**
+The proposal was to keep HERMES/CLIO/HOMER on paper-B for statistical
+continuity; the operator chose to repoint them at real money once it runs. That
+is a coherent preference — the nightly analysis should be about the account
+that can actually lose money — and the cost is understood and accepted:
+
+- the first weeks of reports analyse a handful of 1-contract trades, so
+  **treat early HERMES/CLIO conclusions as anecdote, not signal**;
+- `docs/HYDRA_TRADING_JOURNAL.md` becomes the **real-money** record from the
+  switchover date. Worth a dividing line in the journal on that day so the two
+  eras are never read as one series.
+
+*Implementation:* `read_db` is a literal path string in `agents_config.json`
+(`"read_db": "data/variant_c/backtesting.db"` in the template — note the
+template is **stale**, production was repointed to `variant_b` at the 2026-07-24
+swap). Switching is a one-line VM edit to `data/variant_bm/backtesting.db` at
+step 2. Any code that derives this should follow `live_money_seat_id()` when one
+exists and fall back to the paper seat otherwise — and the stale template should
+be corrected in the same pass, since the repo currently lies to the next reader.
+
+### 9.2 A money marker leads every real-money alert
+
+Every alert from `bm` is prefixed so it is unmistakable in a phone notification
+preview, where the first characters are all you get.
+
+*Implementation:* reuse the existing mechanism rather than inventing one —
+`alert_service.py:555-559` already auto-prefixes `[{N}c]` to the title when
+`contracts > 1`, for exactly this "readable on a phone" reason. The marker goes
+in the same place.
+
+*A trap checked and cleared:* `_VOLATILE_TOKEN_RE` (line 966) strips `[Nc]`,
+dollar amounts and percentages before fingerprinting for dedup, so the obvious
+worry is a real-money marker being stripped and a real alert collapsing into a
+paper one. It cannot happen — `self._dedup_last` is **instance** state
+(line 306), and paper-B and `bm` are separate processes with separate
+`AlertService` instances, so their dedup caches never meet. The marker's
+treatment in that regex is therefore immaterial; no change needed.
+
+### 9.3 The variant id is `bm` — "B, money"
+
+Chosen over `b_live` specifically to avoid the word **live**, which in this
+codebase already means *the live PAPER seat*. Reusing it would produce "the live
+seat" and "B-live" meaning different things in the same sentence — the exact
+conflation §3.2 exists to undo. `bm` also fits the dashboard's letter badge,
+which renders `id.toUpperCase()` in a space built for one or two characters.
+
+Pairs naturally with `account_kind="live_money"`. Data lands in
+`data/variant_bm/`, logs in `logs/hydra_variant_bm/`, unit
+`hydra_variant_bm.service`.
 
 ---
 
