@@ -100,6 +100,24 @@ class StrategyMeta:
     # test_no_filesystem_paths_leaked, which asserts no path separator appears
     # ANYWHERE in the payload — a blunt but effective guard that "7 entries/day"
     # tripped on its first run. Use "slots", not "per day".
+    # The name as the UI shows it. Falls back to display_name when empty.
+    #
+    # THREE name fields is a smell and worth saying so: display_name is the
+    # ALERT IDENTITY (Telegram/email on the live seat), short_name is the
+    # compact tag for widgets and logs, and this is the dashboard label. They
+    # exist because the three contexts genuinely differ — but the real reason
+    # this one was ADDED rather than display_name being edited is that
+    # renaming display_name changes what arrives in Telegram for the only
+    # variant placing real orders. Not worth it for a label. Worth consolidating
+    # once the live seat is not mid-Gate-4.
+    #
+    # The rule these values follow: the NAME says WHICH one, the SUBTITLE says
+    # WHAT it is, and never both. Every deletion below removes something the
+    # subtitle already states — "(7-slot)" against "7 slots", "SPY" against
+    # "Multi-day SPY double calendar", "HYDRA" against a wordmark two inches to
+    # its left.
+    ui_name: str = ""
+
     subtitle: str = ""
 
     capital_basis: str = "defined_risk"
@@ -164,6 +182,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         capital_basis="defined_risk",
         sides="two_sided",
         subtitle="0DTE SPX iron condor · 2 slots · 1 contract",
+        ui_name="Baseline",
     ),
     "b": StrategyMeta(
         id="b",
@@ -186,6 +205,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         capital_basis="defined_risk",
         sides="two_sided",
         subtitle="0DTE SPX iron condor · 7 slots · 7 contracts",
+        ui_name="Brandon Narrow",
     ),
     "c": StrategyMeta(
         id="c",
@@ -201,6 +221,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         capital_basis="defined_risk",
         sides="two_sided",
         subtitle="0DTE SPX iron condor · 3 slots · 7 contracts",
+        ui_name="Brandon Narrow",
     ),
     "d": StrategyMeta(
         id="d",
@@ -216,6 +237,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         capital_basis="net_debit",
         sides="two_sided",
         subtitle="Multi-day SPX double calendar · net debit",
+        ui_name="Time Machine",
     ),
     "e": StrategyMeta(
         id="e",
@@ -231,6 +253,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         capital_basis="net_debit",
         sides="two_sided",
         subtitle="Multi-day SPY double calendar · net debit",
+        ui_name="Double Calendar",
     ),
     "f": StrategyMeta(
         id="f",
@@ -256,6 +279,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         capital_basis="defined_risk",
         sides="one_sided",  # a true one-sided subset of a 4-leg IC
         subtitle="0DTE SPX credit vertical · fades the expected-move boundary",
+        ui_name="Ghauri",
     ),
     "g": StrategyMeta(
         id="g",
@@ -284,6 +308,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         capital_basis="broker_margin",  # naked shorts: margin, not width
         sides="two_sided",  # two naked shorts — two-sided, just wingless  # matches StrangleStrategy.BOT_NAME (not "HYDRA")
         subtitle="0DTE SPX naked strangle · undefined risk",
+        ui_name="Strangle",
     ),
 }
 

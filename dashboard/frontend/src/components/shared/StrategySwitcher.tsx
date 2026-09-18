@@ -130,7 +130,7 @@ export function StrategySwitcher() {
             argument for leading with it), so [B] + LIVE is enough at 390px
             and the popover carries every detail. */}
         <span className="max-sm:hidden text-xs font-semibold text-text-primary truncate min-w-0">
-          {current?.display_name ?? currentId.toUpperCase()}
+          {current?.ui_name || current?.display_name || currentId.toUpperCase()}
         </span>
         {current?.is_live && <LiveBadge />}
         <ChevronDown size={12} className="text-text-dim shrink-0" />
@@ -175,7 +175,7 @@ export function StrategySwitcher() {
                       <span className="min-w-0 flex-1">
                         <span className="flex items-center gap-1.5">
                           <span className="text-xs font-semibold text-text-primary truncate">
-                            {s.display_name}
+                            {s.ui_name || s.display_name}
                           </span>
                           {s.is_live && <LiveBadge />}
                           {!s.available && (

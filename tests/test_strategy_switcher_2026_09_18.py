@@ -157,7 +157,7 @@ def test_the_phone_trigger_drops_the_name_not_the_market_data():
     """Measured: showing the full name at 390px pushed the SPX price off the
     header entirely. The badge is the identity, so the NAME is what gives way."""
     src = SWITCHER.read_text()
-    m = re.search(r'<span className="([^"]*)"[^>]*>\s*\{current\?\.display_name', src)
+    m = re.search(r'<span className="([^"]*)"[^>]*>\s*\{current\?\.ui_name', src)
     assert m, "could not find the trigger's name span"
     assert "max-sm:hidden" in m.group(1), (
         f"the name is still shown at phone width: {m.group(1)!r}"
@@ -203,3 +203,73 @@ def test_comparisons_are_visually_separated_from_the_views():
 def test_the_per_strategy_views_are_still_present(view):
     """CONTROL. The split must not have dropped a destination."""
     assert view in APP.read_text()
+
+
+# ── The naming rule (Apple's, applied) ─────────────────────────────────────
+
+def test_the_name_carries_no_spec_detail():
+    """THE RULE: the NAME says which one, the SUBTITLE says what it is.
+
+    A first version of this banned ANY shared token and flagged E's
+    "Double Calendar" against "…double calendar…". That is stricter than Apple's
+    own practice — "MacBook Pro" and "14-inch, M3 Pro" share a token quite
+    happily. The category word is allowed in both; what must never be in the
+    name is a SPEC DETAIL: the underlying, a count, a size. Those are exactly
+    what was in "SPY Double Calendar", "(7-slot)" and "(3-slot)".
+    """
+    from shared.strategy_taxonomy import STRATEGIES
+
+    offenders = []
+    for sid, m in STRATEGIES.items():
+        name = m.ui_name or ""
+        if re.search(r"\b(SPX|SPY|QQQ|IWM)\b", name, re.I):
+            offenders.append(f"{sid}: {name!r} names the underlying — that is spec")
+        if re.search(r"\d", name):
+            offenders.append(f"{sid}: {name!r} contains a number — that is spec")
+    assert not offenders, "spec detail in a name:\n  " + "\n  ".join(offenders)
+
+
+def test_no_ui_name_carries_a_parenthetical():
+    """A parenthetical in a name is nearly always a spec that escaped into it —
+    "(7-slot)", "(3-slot)", "(0DTE Naked)" were all already in the subtitle."""
+    from shared.strategy_taxonomy import STRATEGIES
+
+    bad = [(sid, m.ui_name) for sid, m in STRATEGIES.items() if "(" in (m.ui_name or "")]
+    assert not bad, f"ui_names with a parenthetical: {bad}"
+
+
+def test_no_ui_name_repeats_the_product_name():
+    """'HYDRA Baseline' sat inches from the HYDRA wordmark in the same header.
+    That is the redundancy to cut first."""
+    from shared.strategy_taxonomy import STRATEGIES
+
+    bad = [(sid, m.ui_name) for sid, m in STRATEGIES.items()
+           if "hydra" in (m.ui_name or "").lower()]
+    assert not bad, f"ui_name repeats the product wordmark: {bad}"
+
+
+def test_every_strategy_has_a_ui_name():
+    from shared.strategy_taxonomy import STRATEGIES
+
+    missing = [sid for sid, m in STRATEGIES.items() if not m.ui_name]
+    assert not missing, f"no ui_name: {missing}"
+
+
+def test_ui_name_is_separate_from_the_alert_identity():
+    """The entire reason ui_name exists. If a future tidy-up collapses them,
+    a dashboard label change silently becomes a Telegram change on the live
+    seat."""
+    from shared.strategy_taxonomy import STRATEGIES
+
+    b = STRATEGIES["b"]
+    assert b.display_name == "Brandon Narrow (7-slot)", "B's alert identity moved"
+    assert b.ui_name == "Brandon Narrow"
+    assert b.ui_name != b.display_name, (
+        "ui_name and display_name have been collapsed — a label edit now "
+        "changes what the live seat sends to Telegram"
+    )
+
+
+def test_the_switcher_renders_the_ui_name():
+    src = SWITCHER.read_text()
+    assert "ui_name" in src, "the switcher still renders the alert-identity name"

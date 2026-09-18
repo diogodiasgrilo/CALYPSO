@@ -45,6 +45,10 @@ export interface StrategyCapabilities {
 export interface StrategyInfo {
   id: string; // lowercase letter key ("a".."e")
   display_name: string;
+  /** Dashboard label. The NAME says which one; `subtitle` says what it is,
+   *  and never both. Distinct from display_name, which is the live seat's
+   *  alert identity and must not change for a UI tidy-up. */
+  ui_name?: string;
   /** One-line spec rendered under the name in the switcher (taxonomy, 2026-09-18). */
   subtitle?: string;
   short_name?: string;
