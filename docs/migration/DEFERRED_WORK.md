@@ -111,6 +111,27 @@ whole salvage path end-to-end on IBKR.
 
 ## DEF-4: STATE-002 `_check_state_consistency` keyed on registry + `PositionId`
 
+> 🟡 **OPEN — NON-BLOCKING (reviewed 2026-09-18).** Only HALF of STATE-002 is
+> inert on IBKR, and the half that matters most still works.
+>
+> - **Still live:** the state-machine checks — "MONITORING but no active
+>   entries", "IDLE but N active entries" — run and fire normally.
+> - **Inert:** the position-COUNT comparison. `expected_positions` sums
+>   `len(e.all_position_ids)`, which is built from `*_position_id` and is
+>   therefore always 0 on IBKR; `registry_count` is also always 0 because the
+>   Position Registry is vestigial. It compares 0 against 0 and can never
+>   report a mismatch.
+> - **Why that is non-blocking:** the protection it would have given —
+>   "the positions I think I hold are not the positions the broker shows" — is
+>   provided in the conid model by **POS-003**
+>   (`strategy.py:_check_hourly_reconciliation`, hourly during market hours,
+>   diffs `_expected_position_quantities()` against `_read_open_positions()`
+>   with a 60s settle delay) and **POS-004** at settlement. Those are the real
+>   checks; the registry count was never the authority on IBKR.
+>
+> **Remaining work is cleanup, not protection:** delete the dead count
+> comparison, or re-express it on `_expected_position_quantities`.
+
 **What**: `_check_state_consistency` computes `expected_positions` from
 `sum(len(e.all_position_ids) …)` and compares against the Position
 Registry count. `all_position_ids` is built from `*_position_id`; on
@@ -154,6 +175,24 @@ defining what (if anything) replaces `*_position_id`.
 
 ## DEF-6: settlement P&L value-verification (Fix #87) has no IBKR equivalent
 
+> ✅ **RESOLVED IN SUBSTANCE — 2026-09-10.** The trigger below said: probe
+> `get_balance()` / account-summary for a "today realized P&L" field; if one
+> exists, implement option B. One does — `raw_ledger.USD.realizedpnl` — and
+> `strategy.py:_reconcile_pnl_against_broker` now runs at settlement, right
+> after the in-process reconcile, and logs the drift. It shares no code path
+> with our own accumulator, which is the whole point: every prior
+> "reconciliation" compared the same number against itself.
+>
+> **Two deliberate limits, both documented in `bots/hydra/__init__.py`:**
+> live seat only (a dry-run variant's simulated P&L against the broker's real
+> ledger would alarm on every close), and it **logs rather than alerts**
+> because IBKR's `realizedpnl` semantics are unverified — whether it is net of
+> commission, and exactly when it resets. It reads against BOTH our gross and
+> our net so the first real trading day shows which one tracks.
+>
+> **Remaining:** verify those semantics on a live trading day, then promote
+> from log to alert. That is a data question, not an engineering one.
+
 **What**: `_verify_settlement_pnl_from_saxo` (Fix #87) cross-checks the
 bot's computed daily P&L against Saxo's `/cs/v1/reports/closedPositions`
 report (`PnLAccountCurrency` per closed position) and corrects
@@ -182,6 +221,28 @@ if not, accept POS-004's leg-level check as sufficient and retire
 Fix #87 on IBKR explicitly.
 
 ## DEF-7 — POS-003 mid-session reconciliation not ported to conids
+
+> ⚠️ **OBSOLETE AS WRITTEN — corrected 2026-09-18.** The claim below, that
+> "mid-session POS-003 reconciliation does nothing" on IBKR, **is not true.**
+>
+> `strategy.py:_check_hourly_reconciliation` IS POS-003 in the conid model:
+> called from the monitoring loop (`base_strategy.py:1506`), it runs hourly
+> during market hours, diffs `_expected_position_quantities()` against
+> `_read_open_positions()`, holds a discrepancy for a 60-second settle window
+> before alerting, and hands persistent mismatches to
+> `_handle_position_discrepancies`. Manual mid-session closes ARE detected.
+>
+> What this entry actually describes is the Saxo-era per-leg loop inside
+> `base_strategy._reconcile_positions`, which still runs (it is called from
+> three sites) and does nothing on IBKR because every `*_position_id` is None.
+> That is **dead code burning cycles, not a hole in position safety.**
+>
+> Recorded because the distinction is easy to lose: this is NOT the same
+> POS-003 work as the **merged-leg resolver** deployed 2026-09-15, which
+> attributes a vanished leg among several sharing a strike. Two different
+> things under one label.
+>
+> **Remaining work:** delete the dead loop.
 
 `_reconcile_positions` (base) detects legs closed manually during the
 session. Its per-leg loop keys on Saxo `*_position_id`, which is
@@ -215,6 +276,17 @@ leg's `*_uic` against `_position_is_open` (the same conid predicate
 - **DEF-5** — `_process_expired_credits` settlement detection →
   conid-model `_side_positions_gone`. Resolved in F6.6.
 
-DEF-1 / DEF-2 are superseded by the F5 design (F5.2 / F5.5). DEF-4
-(STATE-002), DEF-6 (settlement P&L value-verification) and DEF-7
-(POS-003 conid reconciliation) remain open — see their entries above.
+DEF-1 / DEF-2 are superseded by the F5 design (F5.2 / F5.5).
+
+**Reviewed 2026-09-18 against the current code**, because Gate 2 requires every
+open entry to carry an explicit non-blocking justification and three of them
+carried none:
+
+| | state | why it does not block go-live |
+|---|---|---|
+| DEF-4 | 🟡 open | Only the position-COUNT half of STATE-002 is inert; the state-machine half runs. The protection it would have given is provided by POS-003 (hourly, conid) and POS-004 (settlement). Remaining work is cleanup. |
+| DEF-6 | ✅ resolved in substance | Option B shipped 2026-09-10 (`_reconcile_pnl_against_broker` vs `raw_ledger.USD.realizedpnl`). Logs rather than alerts until IBKR's semantics are verified on a live day. |
+| DEF-7 | ⚠️ obsolete as written | Mid-session POS-003 DOES run on IBKR (`_check_hourly_reconciliation`). Only a dead Saxo loop remains. Not to be confused with the merged-leg resolver also called POS-003. |
+
+None of the three is a gap in live-trading position safety. Two reduce to dead-code
+removal; one is waiting on a trading day's data.

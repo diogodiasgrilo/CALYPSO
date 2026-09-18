@@ -22,7 +22,7 @@
 >   to whichever variant `variant_readers.live_seat_id()` reports, and read `hydra.service` /
 >   `config.json` below as *"the live variant's unit / config"*. Today that is `hydra_variant_b.service` and
 >   `config_variant_b.json`.
-> - **Gate 3's "~1918 passed" baseline is long stale** — the suite is at **3608 passed / 16 skipped** as of
+> - **Gate 3's "~1918 passed" baseline is long stale** — the suite is at **4063 passed / 16 skipped** as of
 >   2026-09-12. The rule was always *0 failed at the current baseline*, never the literal number.
 >
 > **A measured, gate-by-gate status snapshot lives in [`GO_LIVE_MASTER.md` §2-bis](../GO_LIVE_MASTER.md).**
@@ -69,7 +69,7 @@
 
 ## Gate 3 — Test state
 
-- [ ] Full test suite passes (**3608 passed / 16 skipped**, 0 failed — baseline as of 2026-09-12; the count grows every week, so the gate is **0 failed at the then-current baseline**, never the literal number)
+- [ ] Full test suite passes (**4063 passed / 16 skipped**, 0 failed — baseline as of 2026-09-18; the count grows every week, so the gate is **0 failed at the then-current baseline**, never the literal number)
   ```bash
   # RUN LOCALLY, against the deployed commit — NOT on the VM.
   # pytest / pip-audit / coverage are DELIBERATELY excluded from the production venv
