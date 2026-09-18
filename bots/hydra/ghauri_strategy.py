@@ -557,14 +557,30 @@ class GhauriMeanReversionStrategy(HydraStrategy):
             if not success:
                 self._current_entry = None
                 self.state = MEICState.MONITORING if self.daily_state.active_entries else MEICState.WAITING_FIRST_ENTRY
-                self._record_skipped_entry(
+                # A broker placement failure is an execution INCIDENT, not a
+                # strategic skip. Recording it as a skip (what this did until
+                # 2026-09-18) put it in `skipped_entries` — the counterfactual
+                # table that asks "what would this entry have done if the gate
+                # had let it through" — and left `entries_failed` at zero, so
+                # execution failures were invisible. See _record_failed_entry's
+                # docstring: that method exists because this exact class of gap
+                # produced NO operator-visible signal on 2026-07-31. G was fixed
+                # then; F was written a month later and repeated it.
+                self.daily_state.entries_failed += 1
+                self._record_failed_entry(
                     entry_num,
                     f"{fire_side.title()} spread order placement failed at the "
                     f"EM-touch trigger — see logs.",
-                    send_alert=True,
+                    used_retry_loop=False,
                 )
-                return f"GHAURI entry #{entry_num} skipped - order placement failed"
+                return f"GHAURI entry #{entry_num} failed - order placement failed"
 
+            # `active_entries` (base_strategy) branches on is_complete and only
+            # falls through to an "any leg has a position id?" check for PARTIAL
+            # entries. F's fully-placed entries were being monitored by that
+            # fallback — a safety net for half-filled entries, not the intended
+            # route. Every sibling sets this; F alone did not.
+            entry.is_complete = True
             self.daily_state.entries.append(entry)
             self.daily_state.one_sided_entries += 1
 

@@ -2911,7 +2911,25 @@ class HydraStrategy(MEICStrategy):
         active_snapshot = list(self.daily_state.active_entries)
 
         for entry in active_snapshot:
+            # Dry-run cost correction, mirroring _execute_eod_flatten and
+            # _check_eod_flatten_recheck. _close_entry_early books the side via
+            # _book_early_close_side_pnl UNCONDITIONALLY, and in dry-run there
+            # is no simulated fill — side_close_cost arrives as 0, so it books
+            # the FULL credit as though the position closed for free.
+            #
+            # MKT-018 is disabled on all seven variants and defaults False in
+            # code, so this path is dormant; the correction is added anyway
+            # because the omission was a trap armed for whoever re-enables it.
+            # Found 2026-09-18 by sweeping every caller of _close_entry_early
+            # rather than by tripping over it — the same defect cost variant A
+            # a day that read +$24.85 against a true ~-$40 on 2026-08-20.
+            call_expired_before = entry.call_side_expired
+            put_expired_before = entry.put_side_expired
             entry_legs_closed, entry_legs_failed, entry_deferred = self._close_entry_early(entry)
+            if entry.call_side_expired and not call_expired_before:
+                self._eod_flatten_dry_run_correct(entry, "call")
+            if entry.put_side_expired and not put_expired_before:
+                self._eod_flatten_dry_run_correct(entry, "put")
             legs_closed += entry_legs_closed
             legs_failed += entry_legs_failed
             deferred_legs.extend(entry_deferred)
