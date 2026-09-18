@@ -37,16 +37,6 @@ function heatStep(ramp: readonly string[], intensity: number): string {
 }
 
 /** Group summaries by month key (YYYY-MM) in chronological order. */
-export function groupByMonth(summaries: DaySummary[]): Map<string, DaySummary[]> {
-  const map = new Map<string, DaySummary[]>();
-  const sorted = [...summaries].sort((a, b) => a.date.localeCompare(b.date));
-  for (const s of sorted) {
-    const key = s.date.slice(0, 7);
-    if (!map.has(key)) map.set(key, []);
-    map.get(key)!.push(s);
-  }
-  return map;
-}
 
 /** Cell in the calendar grid — null means slot is outside the month. */
 type GridCell = { dayNum: number; date: string; summary: DaySummary | null } | null;

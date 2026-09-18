@@ -12,6 +12,7 @@ export function useAnimatedNumber(target: number, duration = 300): number {
     const diff = target - from;
 
     if (Math.abs(diff) < 0.01) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- short-circuit when the delta is below the animation threshold: there is nothing to animate, so the value is set once rather than driving a rAF loop
       setDisplay(target);
       prevRef.current = target;
       return;

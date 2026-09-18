@@ -151,6 +151,7 @@ export function useWebSocket() {
         return;
       }
       setConnectionStatus("disconnected");
+      // eslint-disable-next-line react-hooks/immutability -- a socket event handler, which by definition runs after render — that is what an event handler IS
       scheduleReconnect();
     };
 

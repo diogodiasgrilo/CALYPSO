@@ -33,6 +33,7 @@ export function DayDetailModal({
 
   // Fetch detail data
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset-then-load: the modal navigates between dates IN PLACE, so the last date's entries must be cleared before the new fetch resolves
     setLoading(true);
     setEntries([]);
     setStops([]);

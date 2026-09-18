@@ -286,6 +286,7 @@ export function SPXChart({ ohlc: ohlcProp, entries: entriesProp, date: dateProp 
       }
       seriesRef.current = makeSeries(chartRef.current, desired);
       seriesTypeRef.current = desired;
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- bumps a version counter after swapping the series type, which is what forces markers and strike lines to re-attach to the NEW series
       setSeriesVersion((v) => v + 1); // force markers/lines to re-attach
     }
 

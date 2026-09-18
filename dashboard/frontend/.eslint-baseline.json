@@ -1,19 +1,3 @@
 {
-  "errors": [
-    "src/components/dashboard/icEntryView.tsx::react-refresh/only-export-components",
-    "src/components/history/DayDetailModal.tsx::react-hooks/set-state-in-effect",
-    "src/components/history/MonthCalendar.tsx::react-refresh/only-export-components",
-    "src/components/history/SessionReplay.tsx::react-hooks/set-state-in-effect",
-    "src/components/market/SPXChart.tsx::react-hooks/set-state-in-effect",
-    "src/components/pnl/EquityCurve.tsx::react-hooks/immutability",
-    "src/components/shared/CommandPalette.tsx::react-hooks/set-state-in-effect",
-    "src/hooks/useAnimatedNumber.ts::react-hooks/set-state-in-effect",
-    "src/hooks/useFlashOnChange.ts::react-hooks/set-state-in-effect",
-    "src/hooks/useStrategyMeta.ts::react-hooks/set-state-in-effect",
-    "src/hooks/useStrategySnapshot.ts::react-hooks/set-state-in-effect",
-    "src/hooks/useWebSocket.ts::react-hooks/immutability",
-    "src/pages/Analytics.tsx::react-hooks/immutability",
-    "src/pages/GroupComparison.tsx::react-hooks/set-state-in-effect",
-    "src/pages/History.tsx::react-hooks/set-state-in-effect"
-  ]
+  "errors": []
 }

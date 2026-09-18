@@ -1,17 +1,35 @@
 #!/usr/bin/env python3
 """Ratchet for frontend lint debt: allow what exists, block what's new.
 
-The frontend carries 17 known eslint errors, each deliberately deferred with a
-recorded reason (see docs/DASHBOARD_VISUAL_AUDIT_2026_09_17.md §5b):
+The baseline is now EMPTY (2026-09-18) — the ratchet is fully tight, and any new
+error fails CI.
 
-    react-hooks/set-state-in-effect   12   performance advice, not correctness
-    react-hooks/immutability           3   one is in the WS reconnect path,
-                                           MEASURED as reconnecting correctly
-    react-refresh/only-export-comps    2   dev-server ergonomics only
+It did not start that way. It carried 15 deferred errors, and clearing them split
+three ways rather than one:
 
-A plain `eslint .` in CI would be red on every run and everyone would learn to
-ignore it, which is worse than no gate at all. `--max-warnings 0` does not help
-either — these are errors, not warnings.
+    react-refresh/only-export-components   2   GENUINELY FIXED. Two modules
+                                               exported a component AND a plain
+                                               function, which breaks Fast
+                                               Refresh. Split into
+                                               groupByMonth.ts and
+                                               icEntryModel.ts — better code
+                                               regardless of the rule.
+    react-hooks/set-state-in-effect       10   NOT defects. Every one is
+                                               reset-then-load: setLoading(true)
+                                               and clear the old rows before an
+                                               async fetch. The extra render the
+                                               rule objects to IS the loading
+                                               state.
+    react-hooks/immutability               3   NOT defects. Local running totals
+                                               inside useMemo, whose entire
+                                               lifetime is that synchronous
+                                               callback, plus one socket event
+                                               handler.
+
+The 13 that are not defects became INLINE suppressions carrying their specific
+reason at the site, which is strictly better than a JSON file listing them: the
+justification is where the next reader will be looking. Contorting correct code
+to satisfy an advisory rule would have been the worse trade.
 
 So: compare the CURRENT set of (file, rule) pairs against a committed baseline.
 Anything not in the baseline FAILS. Anything in the baseline that has been fixed

@@ -140,6 +140,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       // since the element is gone and stealing focus back would fight the
       // route change.
       const previouslyFocused = document.activeElement as HTMLElement | null;
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- resetting the query and selection when the palette opens; it stays mounted while closed, so this effect is the only 'just opened' moment
       setQuery("");
       setSelectedIndex(0);
       setTimeout(() => inputRef.current?.focus(), 50);
@@ -152,6 +153,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
   }, [open]);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- resetting the query and selection when the palette opens; it stays mounted while closed, so this effect is the only 'just opened' moment
     setSelectedIndex(0);
   }, [query]);
 

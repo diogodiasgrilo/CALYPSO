@@ -79,6 +79,7 @@ export function SessionReplay({ date, strategyId = "" }: { date: string; strateg
 
   // Load all data in parallel
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset-then-load on a strategy or date change; the extra render IS the loading state
     setState("loading");
     // ticks = variant-agnostic SPX/VIX track; entries + replay P&L are scoped to
     // the picked variant so the replay matches the strategy shown in History.
@@ -186,6 +187,7 @@ export function SessionReplay({ date, strategyId = "" }: { date: string; strateg
   }, []);
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset-then-load on a strategy or date change; the extra render IS the loading state
     if (state === "playing") play();
   }, [speed, play]);
 

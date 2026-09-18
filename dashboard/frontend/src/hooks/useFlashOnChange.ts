@@ -8,6 +8,7 @@ export function useFlashOnChange(value: number): "up" | "down" | null {
 
   useEffect(() => {
     if (value > prevRef.current) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the flash IS a transient side effect of a value change, cleared by a timer 600ms later; it cannot be derived during render
       setFlash("up");
     } else if (value < prevRef.current) {
       setFlash("down");

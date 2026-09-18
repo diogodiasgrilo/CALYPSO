@@ -28,6 +28,7 @@ export function EquityCurve({ dailySummaries, markers }: EquityCurveProps) {
     let peak = 0;
     return dailySummaries.map((s) => {
       const pnl = Number.isFinite(s.net_pnl) ? s.net_pnl : 0;
+      // eslint-disable-next-line react-hooks/immutability -- a local running total inside useMemo. Its entire lifetime is this synchronous callback, so it is never reassigned 'after render completes'
       cumulative += pnl;
       if (cumulative > peak) peak = cumulative;
       const drawdown = peak - cumulative;

@@ -88,6 +88,7 @@ export function GroupComparison() {
 
   useEffect(() => {
     let mounted = true;
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset-then-load when the group changes; the extra render IS the loading state
     setComparison(null);
     setAggregate(null);
     setNotFound(false);

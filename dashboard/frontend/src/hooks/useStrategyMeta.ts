@@ -153,6 +153,7 @@ export function useStrategyMeta(): StrategyMeta {
 
   useEffect(() => {
     if (_cached) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- the module cache can be populated between this hook's useState initialiser (render) and this effect (commit). Without the sync, a component mounting inside that window shows EMPTY_META forever, because it was not subscribed yet either
       setMeta(_cached);
       return;
     }

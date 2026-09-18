@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { ChevronDown, Download } from "lucide-react";
-import { MonthCalendar, groupByMonth } from "../components/history/MonthCalendar";
+import { MonthCalendar } from "../components/history/MonthCalendar";
+import { groupByMonth } from "../components/history/groupByMonth";
 import { DailySummaryTable } from "../components/history/DailySummaryTable";
 import { DayDetailModal } from "../components/history/DayDetailModal";
 import { PeriodSummary } from "../components/history/PeriodSummary";
@@ -25,6 +26,7 @@ export function History() {
   const intraday = strategy?.dte_class !== "multi_day";
 
   useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- reset-then-load when the year or strategy changes; the extra render IS the loading state
     setLoading(true);
     fetch(`/api/metrics/daily?year=${selectedYear}&strategy_id=${strategyId}`)
       .then((r) => r.json())

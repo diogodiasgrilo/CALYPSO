@@ -414,6 +414,7 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
   const cumulativeData = useMemo(() => {
     let running = 0;
     return summaries.map((s) => {
+      // eslint-disable-next-line react-hooks/immutability -- a local running total inside useMemo; its whole lifetime is this synchronous callback
       running += s.net_pnl || 0;
       return { date: s.date.slice(5), cumPnl: running, rawDate: s.date };
     });

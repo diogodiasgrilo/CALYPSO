@@ -223,6 +223,7 @@ export function useStrategySnapshot(
 
   useEffect(() => {
     if (!enabled || !strategyId) {
+      // eslint-disable-next-line react-hooks/set-state-in-effect -- clearing the previous strategy's snapshot when the selection changes; showing another strategy's data would be worse than an extra render
       setSnapshot(null);
       setLoading(false);
       return;
