@@ -142,6 +142,41 @@ def preview(conidex: str, side: str, price: float, qty: int, label: str) -> dict
     return {"label": label, "ok": True, "initial_change": change, "blocks": blocks}
 
 
+def preview_plain(conid: int, side: str, qty: int, label: str) -> dict:
+    """Single-leg whatif — the CONTROL, and the shape that is known to work.
+
+    ``IBClient.what_if_naked_margin`` previews exactly this (plain order, real conid,
+    MKT) per leg and returns real numbers for variant G. So if the single leg prices and
+    the combo does not, the machinery is fine and it is specifically the BAG form IBKR
+    will not margin on this account — which is a much sharper finding than "whatif is
+    broken".
+
+    Still read-only: ``what_if_order`` posts to /orders/whatif, a different endpoint from
+    /orders, with no reply loop. It cannot place.
+    """
+    print(f"\n--- {label} ---")
+    print(f"  conid={conid}  side={side}  qty={qty}  (plain, not BAG)")
+    order = {
+        "conid": int(conid),
+        "side": side,
+        "order_type": "MKT",
+        "quantity": float(qty),
+        "tif": "DAY",
+    }
+    try:
+        blocks = rpc("what_if_order", order) or {}
+    except Exception as e:
+        print(f"  REJECTED: {e}")
+        return {"label": label, "ok": False, "reason": str(e)}
+    if not blocks:
+        print("  INCONCLUSIVE — empty block.")
+        return {"label": label, "ok": False, "reason": "empty"}
+    init = (blocks.get("initial") or {})
+    change = _money(init.get("change"))
+    print(f"  initial.change : {init.get('change')!r}  -> {change}")
+    return {"label": label, "ok": True, "initial_change": change, "blocks": blocks}
+
+
 def main(argv=None) -> int:
     p = argparse.ArgumentParser(description="Read-only 4-leg combo margin preview.")
     p.add_argument("--symbol", default="SPX")
@@ -215,11 +250,21 @@ def main(argv=None) -> int:
             f"{conids['sp']}/-1,{conids['lp']}/1")
     est_credit = round(a.width * 0.25, 2)   # a plausible SELL limit; preview only
 
+    # The CALL VERTICAL alone (2 legs). An iron condor's Reg T requirement is the
+    # GREATER of its two verticals, not their sum — both sides cannot lose at once — so
+    # a 2-leg number is the one a defined-risk gate would actually need.
+    call_vertical = f"{conids['sc']}/-1,{conids['lc']}/1"
+
     results = [
         preview(f"{SPREAD_TEMPLATE_CONID};;;{legs}", "SELL", est_credit,
                 a.quantity, "BARE template (what the code builds today)"),
         preview(f"{SPREAD_TEMPLATE_CONID}@CBOE;;;{legs}", "SELL", est_credit,
                 a.quantity, "@CBOE-routed template (guaranteed-combo candidate)"),
+        preview(f"{SPREAD_TEMPLATE_CONID};;;{call_vertical}", "SELL",
+                round(est_credit / 2, 2), a.quantity,
+                "2-LEG call vertical (what a defined-risk gate would ask for)"),
+        preview_plain(conids["sc"], "SELL", a.quantity,
+                      "1-LEG naked short call (CONTROL — the shape G already uses)"),
     ]
 
     defined_risk = a.width * 100 * a.quantity
