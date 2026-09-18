@@ -93,8 +93,17 @@ export function DailySummaryTable({
             {sorted.map((day) => (
               <tr
                 key={day.date}
-                className="border-b border-border-dim/50 hover:bg-bg-elevated/50 cursor-pointer transition-colors"
+                role="button"
+                tabIndex={0}
+                aria-label={`Open ${day.date}`}
+                className="border-b border-border-dim/50 hover:bg-bg-elevated/50 cursor-pointer transition-colors focus-visible:outline-2 focus-visible:outline-info"
                 onClick={() => onDayClick(day.date)}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter" || e.key === " ") {
+                    e.preventDefault();
+                    onDayClick(day.date);
+                  }
+                }}
               >
                 <td className="px-3 py-1.5 text-text-primary">
                   {formatDateShort(day.date)}

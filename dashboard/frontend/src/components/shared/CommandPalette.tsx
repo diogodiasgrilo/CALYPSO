@@ -1,4 +1,4 @@
-import { useState, useEffect, useRef, useCallback, useId } from "react";
+import { useState, useEffect, useRef, useCallback, useId, type KeyboardEvent as ReactKeyboardEvent } from "react";
 import { useNavigate } from "react-router-dom";
 import { Search, LayoutDashboard, CalendarDays, BarChart3, Scale, Layers, Download, Volume2, VolumeX, Eye } from "lucide-react";
 import { useHydraStore } from "../../store/hydraStore";
@@ -129,12 +129,24 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
 
   useEffect(() => {
     if (open) {
+      // Remember what had focus so closing can hand it back. Measured
+      // 2026-09-18: focus was on the strategy picker before Ctrl+K and on
+      // <body> after Escape, dropping a keyboard user at the top of the
+      // document with no idea where they were.
+      //
+      // Captured here rather than in a ref initialiser because the palette
+      // stays mounted while closed — this effect is the only point that
+      // corresponds to "just opened". Skipped when a command navigated away,
+      // since the element is gone and stealing focus back would fight the
+      // route change.
+      const previouslyFocused = document.activeElement as HTMLElement | null;
       setQuery("");
       setSelectedIndex(0);
       setTimeout(() => inputRef.current?.focus(), 50);
       document.body.style.overflow = "hidden";
       return () => {
         document.body.style.overflow = "";
+        if (previouslyFocused?.isConnected) previouslyFocused.focus?.();
       };
     }
   }, [open]);
@@ -175,6 +187,27 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
     [filtered.length, executeSelected, onClose]
   );
 
+  // Escape at the DIALOG level, not on the input.
+  //
+  // It used to live only on the search input's onKeyDown, so it stopped working
+  // the moment Tab moved focus to a command button. Measured 2026-09-18 with
+  // uiaudit/diag-keyboard.mjs: the palette closed on Escape after 0 Tabs and
+  // did NOT close after 3.
+  //
+  // Only Escape moves up here, deliberately. The arrow/Enter keys are combobox
+  // behaviour belonging to the input: handling Enter at this level would
+  // activate the HIGHLIGHTED row rather than the button that actually holds
+  // focus — a different command from the one the user is looking at.
+  const handleDialogKeyDown = useCallback(
+    (e: ReactKeyboardEvent<HTMLDivElement>) => {
+      if (e.key === "Escape") {
+        e.stopPropagation();
+        onClose();
+      }
+    },
+    [onClose]
+  );
+
   if (!open) return null;
 
   return (
@@ -183,6 +216,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
         role="dialog"
         aria-modal="true"
         aria-label="Command palette"
+        onKeyDown={handleDialogKeyDown}
         className="bg-bg-elevated rounded-xl border border-border-dim shadow-2xl w-full max-w-md overflow-hidden"
         onClick={(e) => e.stopPropagation()}
       >

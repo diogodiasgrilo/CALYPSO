@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useState, useRef } from "react";
 import { createPortal } from "react-dom";
 import { ChevronLeft, ChevronRight, X } from "lucide-react";
 import { DayDetailSummary } from "./DayDetailSummary";
@@ -24,6 +24,7 @@ export function DayDetailModal({
   onNavigate: (date: string) => void;
   onClose: () => void;
 }) {
+  const panelRef = useRef<HTMLDivElement>(null);
   const [entries, setEntries] = useState<DayEntry[]>([]);
   const [stops, setStops] = useState<DayStop[]>([]);
   const [bars, setBars] = useState<OHLCBar[]>([]);
@@ -76,6 +77,57 @@ export function DayDetailModal({
     return () => document.removeEventListener("keydown", handleKey);
   }, [onClose, onNavigate, prevDate, nextDate]);
 
+  // Focus trap + restore.
+  //
+  // Measured 2026-09-18 with uiaudit/diag-keyboard.mjs: this modal had five tab
+  // stops, after which Tab walked the ENTIRE page behind it — header, strategy
+  // picker, mute, sign-out, all five nav links, the year picker, Export CSV —
+  // every one of them hidden behind the backdrop. WCAG 2.4.3.
+  //
+  // Listens in the CAPTURE phase so it sees Tab before anything inside the
+  // panel can consume it, and restores focus to whatever opened the modal on
+  // unmount; without that a keyboard user is dropped at the top of the
+  // document. Runs once per mount — navigating between days re-renders but
+  // does not remount, which is correct: focus should stay where the user put
+  // it while stepping through dates.
+  useEffect(() => {
+    const previouslyFocused = document.activeElement as HTMLElement | null;
+    panelRef.current?.focus();
+
+    function trap(e: KeyboardEvent) {
+      if (e.key !== "Tab") return;
+      const panel = panelRef.current;
+      if (!panel) return;
+      const focusable = Array.from(
+        panel.querySelectorAll<HTMLElement>(
+          'button:not([disabled]), a[href], select, input, textarea, [tabindex]:not([tabindex="-1"])'
+        )
+      ).filter((el) => el.offsetParent !== null);
+      if (focusable.length === 0) {
+        e.preventDefault();
+        panel.focus();
+        return;
+      }
+      const first = focusable[0];
+      const last = focusable[focusable.length - 1];
+      const active = document.activeElement;
+      const inside = panel.contains(active);
+      if (e.shiftKey && (active === first || !inside)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || !inside)) {
+        e.preventDefault();
+        first.focus();
+      }
+    }
+
+    document.addEventListener("keydown", trap, true);
+    return () => {
+      document.removeEventListener("keydown", trap, true);
+      previouslyFocused?.focus?.();
+    };
+  }, []);
+
   // Lock body scroll
   useEffect(() => {
     document.body.style.overflow = "hidden";
@@ -102,7 +154,14 @@ export function DayDetailModal({
       />
 
       {/* Panel */}
-      <div className="fixed inset-4 z-50 bg-bg-deep rounded-xl border border-border overflow-y-auto max-sm:inset-0 max-sm:rounded-none">
+      <div
+        ref={panelRef}
+        tabIndex={-1}
+        role="dialog"
+        aria-modal="true"
+        aria-label={`Trading detail for ${dateFormatted}`}
+        className="fixed inset-4 z-50 bg-bg-deep rounded-xl border border-border overflow-y-auto max-sm:inset-0 max-sm:rounded-none focus:outline-none"
+      >
         {/* Header */}
         <div className="sticky top-0 z-10 flex items-center justify-between px-5 py-3 bg-bg-deep border-b border-border-dim">
           <div className="flex items-center gap-2">

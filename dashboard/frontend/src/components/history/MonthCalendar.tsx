@@ -174,10 +174,21 @@ export function MonthCalendar({
               return (
                 <div
                   key={di}
-                  className="flex-1 h-8 rounded-sm flex items-center justify-center text-3xs font-mono cursor-pointer hover:ring-1 hover:ring-text-dim/50 hover:brightness-125 transition-all"
+                  role="button"
+                  tabIndex={0}
+                  aria-label={`${date}: ${formatPnL(pnl)}`}
+                  className="flex-1 h-8 rounded-sm flex items-center justify-center text-3xs font-mono cursor-pointer hover:ring-1 hover:ring-text-dim/50 hover:brightness-125 transition-all focus-visible:ring-2 focus-visible:ring-info focus-visible:outline-none"
                   style={{ backgroundColor: bgColor }}
                   title={`${date}: ${formatPnL(pnl)} | ${summary.entries_placed} entries, ${summary.actual_stops ?? summary.entries_stopped ?? 0} stops`}
                   onClick={() => onDayClick(date)}
+                  onKeyDown={(e) => {
+                    // Both keys: Space alone scrolls the page, Enter alone
+                    // breaks the platform convention for role="button".
+                    if (e.key === "Enter" || e.key === " ") {
+                      e.preventDefault();
+                      onDayClick(date);
+                    }
+                  }}
                 >
                   {dayNum}
                 </div>
