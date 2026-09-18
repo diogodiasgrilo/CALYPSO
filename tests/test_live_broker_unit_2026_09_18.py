@@ -35,6 +35,8 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
+from shared import strategy_taxonomy as tax  # noqa: E402
+
 PAPER = ROOT / "deploy" / "calypso-broker.service"
 LIVE = ROOT / "deploy" / "calypso-broker-live.service"
 
@@ -190,7 +192,12 @@ def test_live_broker_is_not_wired_to_start_automatically_anywhere():
     pull the real-money broker up as a side effect."""
     offenders = []
     for unit in list((ROOT / "deploy").glob("*.service")) + list((ROOT / "deploy").glob("*.timer")):
-        if unit.name == "calypso-broker-live.service":
+        # The broker itself, and the ONE variant that legitimately needs it. `bm`
+        # cannot run without the live session, and starting `bm` is itself a
+        # deliberate act — so Wants=/After= there is correct, not a side effect.
+        # Everything else must stay out: a timer or an unrelated service pulling the
+        # real-money broker up is the Gate-3 smoke landmine in a new costume.
+        if unit.name in ("calypso-broker-live.service", "hydra_variant_bm.service"):
             continue
         for line in directives(unit):
             if re.match(r"^(Wants|Requires|After|BindsTo)=.*calypso-broker-live", line):
@@ -200,13 +207,25 @@ def test_live_broker_is_not_wired_to_start_automatically_anywhere():
     )
 
 
-def test_no_strategy_unit_points_at_the_live_broker_yet():
-    """No variant declares live_money, so none may be aimed at :8789. When `bm` is added
-    this test is updated deliberately — which is the point: aiming a unit at the
-    real-money broker should require touching a file called 'test'."""
-    offenders = []
+def test_only_the_declared_real_money_variant_points_at_the_live_broker():
+    """UPDATED 2026-09-18 when `bm` was added — exactly as this test's previous version
+    said it would be, and that IS the mechanism: aiming a unit at the real-money broker
+    requires editing a file called "test".
+
+    The rule is now an equality, not an absence. Every unit pointed at :8789 must be a
+    variant the taxonomy declares ``account_kind="live_money"``. A paper variant
+    appearing here means a mis-pointed unit about to trade real money.
+    """
+    aimed = set()
     for unit in (ROOT / "deploy").glob("hydra*.service"):
         for line in directives(unit):
             if "CALYPSO_BROKER_URL" in line and "8789" in line:
-                offenders.append(f"{unit.name}: {line}")
-    assert not offenders, f"strategy unit(s) already aimed at the live broker: {offenders}"
+                aimed.add(unit.stem.replace("hydra_variant_", ""))
+
+    declared = {sid for sid, m in tax.STRATEGIES.items()
+                if m.account_kind == tax.LIVE_MONEY}
+    assert aimed == declared, (
+        f"units aimed at the real-money broker: {aimed or '{}'}; variants DECLARING "
+        f"real money: {declared or '{}'}. These must match exactly — a unit in the "
+        f"first set but not the second is about to trade real money by mistake."
+    )

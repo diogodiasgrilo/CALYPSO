@@ -165,7 +165,12 @@ class TestMeta:
         # ic_0dte = credit, calendar_multiday = debit; members derived from taxonomy.
         by_id = {g["id"]: g for g in body["groups"]}
         assert by_id["ic_0dte"]["pnl_shape"] == "credit"
-        assert by_id["ic_0dte"]["member_ids"] == ["a", "b", "c", "f"]  # F (Ghauri) joined ic_0dte
+        # 2026-09-18: `bm` (real money) joined ic_0dte. It is STRUCTURALLY identical to B
+        # — same class, same shape, same capital basis — so it belongs on the same P&L
+        # axis, and paper-B vs bm on identical signals is the execution-drag measurement.
+        # What makes the money real is `account_kind`, not group membership; the group is
+        # about structure, which is exactly the separation capital_basis established.
+        assert by_id["ic_0dte"]["member_ids"] == ["a", "b", "bm", "c", "f"]
         assert by_id["calendar_multiday"]["pnl_shape"] == "debit"
         assert by_id["calendar_multiday"]["member_ids"] == ["d", "e"]
         # baseline is the first member, not hardcoded "a".

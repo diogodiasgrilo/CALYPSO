@@ -61,13 +61,33 @@ MAIN_PY = ROOT / "bots" / "hydra" / "main.py"
 # NO-OP CONTROLS — prove this changed nothing about today
 # ══════════════════════════════════════════════════════════════════════════════
 
-def test_every_strategy_still_declares_paper():
-    """No variant trades real money yet. If this ever fails without someone having
-    DELIBERATELY promoted a strategy, a default has drifted and real orders are one
-    restart away."""
-    wrong = {sid: m.account_kind for sid, m in tax.STRATEGIES.items()
-             if m.account_kind != tax.PAPER}
-    assert not wrong, f"variant(s) no longer declare paper: {wrong}"
+def test_exactly_one_variant_declares_real_money():
+    """NARROWED 2026-09-18 — this asserted that EVERY variant declared paper, and it
+    failed the moment `bm` was added. That is the test working, not breaking: its whole
+    purpose is to fail when a variant stops declaring paper.
+
+    So it is narrowed rather than weakened. The live-money set must be EXACTLY {"bm"} —
+    a drift on any of A/B/C/D/E/F/G still fails, and adding a SECOND real-money variant
+    also fails, which is correct: that should require a deliberate edit here.
+    """
+    live = {sid for sid, m in tax.STRATEGIES.items() if m.account_kind == tax.LIVE_MONEY}
+    assert live == {"bm"}, (
+        f"the set of real-money variants is {live or '{}'}, expected exactly "
+        f"{{'bm'}} — a default has drifted, or a promotion happened without updating "
+        f"this test"
+    )
+
+
+def test_the_real_money_variant_ships_not_trading():
+    """account_kind says WHICH account; dry_run says whether it trades at all. `bm`
+    declares real money and must still ship simulating — going live is a deliberate
+    operator flip, never a checked-in default."""
+    cfg = json.loads((ROOT / "bots" / "hydra" / "config"
+                      / "config_variant_bm.json").read_text())
+    assert cfg["dry_run"] is True, (
+        "config_variant_bm.json ships with dry_run=false — a fresh checkout would place "
+        "REAL orders the moment the unit starts"
+    )
 
 
 def test_account_kind_values_are_valid():

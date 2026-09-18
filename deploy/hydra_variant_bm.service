@@ -1,0 +1,118 @@
+[Unit]
+Description=HYDRA Variant BM (Brandon stack — REAL MONEY, funded account, 1 contract)
+# ⚠️ THIS VARIANT TRADES REAL MONEY when dry_run is flipped false. It runs the SAME
+# BrandonHydraStrategy as B and C — one implementation, three configurations — against
+# the FUNDED account via calypso-broker-live on :8789.
+# Ships with dry_run=true in its config; going live is a deliberate operator flip.
+# Design: docs/migration/LIVE_MONEY_ARCHITECTURE.md
+# OAuth 1.0a is gateway-free and headless — no IB Gateway, no token-keeper
+# service. network-online.target so the OAuth handshake to api.ibkr.com
+# has DNS+TLS available at startup. P7-audit / Polish A-X2: the previous
+# version of this file depended on token_keeper.service which is dead on
+# this branch — variant would have failed to start on a clean VM.
+After=network-online.target
+Wants=network-online.target
+# Audit #2: this variant MUST proxy through the shared calypso-broker session
+# (CALYPSO_BROKER_URL below). IBKR allows ONE brokerage session per username,
+# so if this unit started without the URL it would open its OWN session and
+# re-trigger the eviction crash-loop. Order after the LIVE broker (:8789) — the
+# paper broker on :8788 holds a DIFFERENT account and this unit must never reach it.
+Wants=calypso-broker-live.service
+After=calypso-broker-live.service
+# Restart rate-limiter. StartLimitIntervalSec/StartLimitBurst MUST be in
+# [Unit]; in [Service] systemd silently ignores them (P7-audit H5).
+# 2026-06-03: 5→20 so a multi-min broker blip (broker self-heals) auto-recovers
+# instead of going permanently 'failed'; the bot also now WAITS for the broker
+# (main.py). Backstop only; still catches a genuine crash-loop.
+StartLimitIntervalSec=600
+StartLimitBurst=20
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+Environment="HYDRA_VARIANT_ID=bm"
+Environment="PYTHONUNBUFFERED=1"
+# Matches calypso-broker.service's existing setting — see hydra.service's
+# copy of this comment for the full reasoning (2026-08-04).
+Environment="GCP_PROJECT=calypso-trading-bot"
+# Route all IBKR access through the shared broker (drop-in default committed so
+# a clean redeploy reproduces broker-proxy mode, not direct-session mode).
+Environment="CALYPSO_BROKER_URL=http://127.0.0.1:8789"
+
+# Variant-isolated state file paths (Polish Item 5 — pre-start snapshot).
+# Each variant has its own data/variant_<id>/ tree so the variants don't
+# collide on state writes. The snapshot script reads these env vars to
+# pick the right state file + snapshot dir.
+Environment="STATE_FILE=/opt/calypso/data/variant_bm/hydra_state.json"
+Environment="SNAPSHOT_DIR=/opt/calypso/data/variant_bm/state_snapshots"
+
+# ─── NO OAuth credentials here, DELIBERATELY ────────────────────────────────
+# B and C carry LoadCredentialEncrypted= lines that CLAUDE.md documents as a
+# now-UNUSED fallback (broker mode disables the direct-IBClient branch). This unit
+# carries none, on purpose, and the reason is stronger than tidiness:
+#
+#   * PAPER credentials here would be actively wrong — if the direct branch were ever
+#     reached, this variant would trade the PAPER account while declaring live_money,
+#     and _assert_account_matches_env only WARNS in that direction.
+#   * LIVE credentials here would put the decrypted real-money private keys into an
+#     eighth process that has no use for them. calypso-broker-live owns the session.
+#
+# With neither, a missing CALYPSO_BROKER_URL fails CLOSED: _build_broker() would fall
+# to a direct IBClient, find no $CREDENTIALS_DIRECTORY, and refuse to start.
+
+# Polygon API key for the Brandon GEX features. Create /etc/calypso/polygon.env
+# with:  POLYGON_API_KEY=pk_xxxxxxxxxxxxxxxxxxxxxxxx
+# The leading dash makes it optional — if the file is absent, GEX features
+# silently disable (logged warning, no crash) and only TP + narrow_spread
+# stay active.
+EnvironmentFile=-/etc/calypso/polygon.env
+
+# Pre-start state-file snapshot (Polish Item 5). Variant-aware via the
+# STATE_FILE / SNAPSHOT_DIR env vars set above.
+ExecStartPre=/opt/calypso/scripts/pre_start_snapshot.sh
+
+ExecStart=/opt/calypso/.venv/bin/python -m bots.hydra.main --config bots/hydra/config/config_variant_bm.json
+
+TimeoutStartSec=120
+Restart=always
+RestartSec=30
+# 100s (was 30s, bumped 75s on 2026-08-03, bumped again 2026-08-04 when the
+# direct-Telegram bypass alert channel added new worst-case blocking time
+# to the same failure tail): safety margin while a same-day shutdown-delay
+# finding on this process family was ROOT-CAUSED AND FIXED on 2026-09-05
+# (commit 3986cdf): CPython's Py_FinalizeEx blocked on grpc-core's
+# process-global native threads; _hard_exit()/os._exit() under the __main__
+# guard bypasses it. Verified: zero "stop-sigterm timed out" across 9 clean
+# B stops since. TimeoutStopSec STAYS AT 100s anyway — do NOT lower it. The
+# APP-phase shutdown legitimately reaches 71s observed / 88s worst case, so a
+# shorter timeout would SIGKILL the live seat mid-order-placement. The margin
+# is for the in-flight work below, not for the (now fixed) hang.
+# — see bots/hydra/__init__.py version history and hydra.service's
+# TimeoutStopSec comment for the exact worst-case math this must exceed:
+# 55s order-fill HTTP call + 11s Pub/Sub alert retry + 2s dead-letter flock
+# + 10s Telegram-bypass credential fetch + 10s Telegram POST retry = 88s).
+KillSignal=SIGTERM
+TimeoutStopSec=100
+
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=hydra_variant_bm
+
+# ─── Sandboxing (defense-in-depth, parity with hydra.service) ────────────
+# Same posture as every sibling. This unit holds NO decrypted OAuth keys (see the
+# credentials note above), so the sandbox is protecting the ORDER PATH and the state
+# files rather than key material — which on a real-money variant is the part that
+# matters most.
+NoNewPrivileges=yes
+PrivateTmp=yes
+ProtectSystem=strict
+ProtectControlGroups=yes
+ProtectKernelTunables=yes
+# AUD2-L4 — PrivateDevices=yes (ProtectDevices is ignored on systemd 252; see hydra.service)
+PrivateDevices=yes
+ReadWritePaths=/opt/calypso
+
+[Install]
+WantedBy=multi-user.target

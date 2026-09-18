@@ -49,7 +49,10 @@ def test_a_group_has_exactly_one_pnl_shape():
 
 
 def test_known_membership_today():
-    assert tax.members("ic_0dte") == ["a", "b", "c", "f"]  # F (Ghauri) joined ic_0dte
+    # 2026-09-18: `bm` (real money) joined ic_0dte. Structurally identical to B — same
+    # class, shape and capital basis — so it belongs on the same P&L axis. What makes
+    # the money real is account_kind, not group membership.
+    assert tax.members("ic_0dte") == ["a", "b", "bm", "c", "f"]
     assert tax.members("calendar_multiday") == ["d", "e"]  # E (SPY double calendar) joined D
     assert tax.members("undefined_risk_0dte") == ["g"]  # Strangle, solo group (see its GroupMeta)
 
@@ -59,9 +62,10 @@ def test_known_membership_today():
 # ---------------------------------------------------------------------------
 
 def test_comparable_with_is_same_group_only():
-    assert sorted(tax.comparable_with("a")) == ["b", "c", "f"]
-    assert sorted(tax.comparable_with("b")) == ["a", "c", "f"]
-    assert sorted(tax.comparable_with("f")) == ["a", "b", "c"]  # F (Ghauri) joined ic_0dte
+    assert sorted(tax.comparable_with("a")) == ["b", "bm", "c", "f"]
+    assert sorted(tax.comparable_with("b")) == ["a", "bm", "c", "f"]
+    assert sorted(tax.comparable_with("bm")) == ["a", "b", "c", "f"]
+    assert sorted(tax.comparable_with("f")) == ["a", "b", "bm", "c"]  # F (Ghauri) joined ic_0dte
     assert tax.comparable_with("d") == ["e"]  # D and E share the calendar group
     assert tax.comparable_with("e") == ["d"]
     assert tax.comparable_with("g") == []  # solo group, and not comparable=True (nothing to compare yet)

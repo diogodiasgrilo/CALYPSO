@@ -97,6 +97,24 @@ class Settings(BaseSettings):
     variant_b_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_b.json")
     variant_b_label: str = "B · LIVE (Brandon narrow, 7-slot grid)"
 
+    # Variant BM ("B, money") — the SAME Brandon strategy B runs, against the FUNDED
+    # account via calypso-broker-live on :8789. account_kind="live_money" in the taxonomy;
+    # ships dry_run=true, because going live is a deliberate operator flip.
+    #
+    # THESE FIELDS ARE NOT OPTIONAL PLUMBING. Settings is a pydantic model with `extra`
+    # disallowed, so a variant with no fields here cannot be introduced by the taxonomy
+    # alone — and the failure is SILENT in the dangerous direction: the seat resolver
+    # simply skips the id and the real-money variant becomes invisible to
+    # live_money_seat_id(), reader_for(), the WS broadcaster and the agent suite. That is
+    # exactly the branch of LIVE_MONEY_ARCHITECTURE.md §3.2 where the real-money bot is
+    # never followed by anything. Surfaced by a test fixture, not by reading.
+    variant_bm_state_file: Path = Path("/opt/calypso/data/variant_bm/hydra_state.json")
+    variant_bm_metrics_file: Path = Path("/opt/calypso/data/variant_bm/hydra_metrics.json")
+    variant_bm_backtesting_db: Path = Path("/opt/calypso/data/variant_bm/backtesting.db")
+    variant_bm_log_file: Path = Path("/opt/calypso/logs/hydra_variant_bm/bot.log")
+    variant_bm_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_bm.json")
+    variant_bm_label: str = "BM · REAL MONEY (Brandon narrow, 1 contract)"
+
     # Variant C — Brandon Trojan Horse stack + Brandon's narrow 5/10pt spreads.
     # Same Brandon stack as B; only spread width differs (narrow_spread.enabled=true
     # overrides MKT-027 with 5pt at VIX<22, 10pt at VIX>=22).

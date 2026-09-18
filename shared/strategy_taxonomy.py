@@ -240,6 +240,44 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         subtitle="0DTE SPX iron condor · 7 slots · 7 contracts",
         ui_name="Brandon Narrow",
     ),
+    "bm": StrategyMeta(
+        id="bm",
+        # "B, money". The SAME strategy B runs, against the FUNDED account.
+        #
+        # The id deliberately avoids the word "live": in this codebase "the live seat"
+        # has always meant the live PAPER seat, and reusing it would give "the live seat"
+        # and "B-live" two different meanings in one sentence — the conflation
+        # LIVE_MONEY_ARCHITECTURE.md §3.2 exists to undo. "bm" also fits the dashboard's
+        # letter badge, which renders id.toUpperCase() in a one-to-two character space.
+        #
+        # strategy_class is "brandon", the SAME registry entry as B and C — one
+        # implementation, three configurations. No registry row is needed or wanted: a
+        # forked class would let the real-money path drift away from the one exercised
+        # daily on paper.
+        #
+        # Same group as B on purpose. It is structurally identical, so it belongs on the
+        # same P&L axis — and paper-B vs bm on the same signals IS the execution-drag
+        # measurement. account_kind is what tells a renderer the money is real; the group
+        # is about STRUCTURE, which is the distinction Phase 2 added capital_basis to make.
+        display_name="Brandon Narrow (real money)",
+        short_name="BRANDON-BM",
+        strategy_class="brandon",
+        group_id="ic_0dte",
+        structure_family="iron_condor",
+        pnl_shape="credit",
+        dte_class="0DTE",
+        # NOT "live". `status` has always meant "the live PAPER seat" and is read that
+        # way by live_seat_id()'s tie-breaker; claiming it here would make this variant
+        # compete for the paper seat it has nothing to do with. Real money is
+        # account_kind's job, and dry_run says whether it is trading at all.
+        status="dry_run_locked",
+        bot_name_base="HYDRA",
+        capital_basis="defined_risk",
+        sides="two_sided",
+        subtitle="0DTE SPX iron condor · REAL MONEY · 1 contract",
+        ui_name="Brandon Narrow",
+        account_kind=LIVE_MONEY,
+    ),
     "c": StrategyMeta(
         id="c",
         display_name="Brandon Narrow (3-slot)",
