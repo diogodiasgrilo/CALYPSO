@@ -11,8 +11,9 @@
 #   1. HYDRA process is running
 #   2. HYDRA state-file heartbeat — `last_heartbeat_at` < 5 min old
 #      during regular market hours
-#   3. Circuit-breaker state — `orders` family OPEN in last 15 min = FAIL,
-#      any other family OPEN = WARN
+#   3. Circuit-breaker state, across BOTH brokers (paper :8788 + real-money :8789):
+#      on the PAPER broker `orders` OPEN in last 15 min = FAIL, any other family = WARN;
+#      on the REAL-MONEY broker ANY family OPEN = FAIL. Each finding names its broker.
 #   4. Disk usage <= 85%
 #   5. Memory usage <= 90%
 #   6. Log staleness (market hours only) — last journal entry < 30 min
@@ -36,7 +37,10 @@
 set -uo pipefail
 
 # --- Configuration ---
-CALYPSO_DIR="/opt/calypso"
+# Overridable ONLY so the breaker scan can be exercised against a fixture tree
+# (tests/test_argus_watches_both_brokers_2026_09_18.py). argus.service sets no
+# CALYPSO_DIR, so production resolves to the same literal it always did.
+CALYPSO_DIR="${CALYPSO_DIR:-/opt/calypso}"
 VENV_PYTHON="${CALYPSO_DIR}/.venv/bin/python"
 HEALTH_LOG="${CALYPSO_DIR}/intel/argus/health_log.jsonl"
 INCIDENT_DIR="${CALYPSO_DIR}/intel/argus/incidents"
@@ -63,6 +67,13 @@ GCS_BACKUPS="gs://calypso-backups"
 # this file for the breaker-OPEN line. Path matches services/broker/main.py:54
 # (CALYPSO_BROKER_LOG default) + entry_window_watch.py:48.
 BROKER_LOG="${CALYPSO_DIR}/logs/broker/broker.log"
+# The REAL-MONEY broker (calypso-broker-live, :8789) writes here — see
+# deploy/calypso-broker-live.service's CALYPSO_BROKER_LOG. Added 2026-09-18: until then
+# ARGUS scanned ONE hardcoded path, so a circuit breaker opening on the funded account's
+# session would have been seen by NOBODY — the one session where an unnoticed outage
+# costs real money. Absent until that broker runs; a missing file is skipped silently, so
+# this is inert today.
+BROKER_LIVE_LOG="${CALYPSO_DIR}/logs/broker-live/broker.log"
 
 # Thresholds
 STATE_HEARTBEAT_MAX_AGE_MIN=5   # State-file `last_heartbeat_at` older than this during market = FAIL
@@ -70,6 +81,15 @@ DISK_WARN_PCT=85
 MEMORY_WARN_PCT=90
 LOG_STALE_MIN=30
 BREAKER_OPEN_FAIL_FAMILIES=("orders")  # OPEN on these = FAIL; any other family OPEN = WARN
+# ON THE REAL-MONEY BROKER, EVERY FAMILY IS A FAIL (2026-09-18).
+#
+# The paper split is right for paper: a `market` breaker there means degraded quotes, the
+# bot skips entries, and nothing is harmed. The SAME breaker on the funded account means
+# real positions are being managed blind — and `session`/`portfolio` OPEN means the bot
+# cannot read its own positions on an account holding real money. "Warning" is the wrong
+# word for that. Costs no noise today: the live broker is not running, and a missing log
+# is skipped silently.
+BREAKER_LIVE_MONEY_ALL_FAMILIES_FAIL=true
 
 # --- Ensure output directories exist ---
 mkdir -p "$(dirname "${HEALTH_LOG}")" "${INCIDENT_DIR}"
@@ -333,10 +353,15 @@ fi
 
 # =========================================================================
 # CHECK 3: Circuit-breaker OPEN events in last 15 minutes (NEW IBKR-era)
-# Polish Item 2: scan the broker log for the canonical breaker-OPEN log line
+# Polish Item 2: scan the broker logs for the canonical breaker-OPEN log line
 # from shared/ib_retry.py:137 — "CircuitBreaker[ib.<family>] <state> → OPEN — <reason>".
-# Any match on a BREAKER_OPEN_FAIL_FAMILIES family = FAIL. Any other
-# family OPEN = WARN.
+# PAPER broker: a match on a BREAKER_OPEN_FAIL_FAMILIES family = FAIL, any other = WARN.
+# REAL-MONEY broker: ANY family = FAIL (BREAKER_LIVE_MONEY_ALL_FAMILIES_FAIL).
+#
+# 2026-09-18: this scanned ONE hardcoded path. With a second broker that meant a breaker
+# opening on the FUNDED account would have been seen by nobody. Both logs are scanned now
+# and every matched line is labelled with its broker, because "a breaker opened" without
+# saying which account is close to useless when the two have different consequences.
 #
 # SOURCE: the five ib.* breakers live in the calypso-broker process's
 # IBClient (shared/ib_client.py:560), NOT in hydra — the strategies use a
@@ -368,7 +393,16 @@ line_re = re.compile(r'^(\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2})')
 # is actually detected (the safety-critical FAIL path).
 open_re = re.compile(r'CircuitBreaker\[ib\.[a-z_]+\] (?:closed|half_open) . OPEN', re.IGNORECASE)
 out = []
-for path in ('${BROKER_LOG}', '${BROKER_LOG}.1'):
+# (label, path) — every matched line is PREFIXED with 'BROKER=<label> ' so the bash side
+# can say WHICH broker degraded. With two sessions running, an unlabelled 'a breaker
+# opened' is close to useless: the two accounts have completely different consequences.
+sources = (
+    ('paper', '${BROKER_LOG}'),
+    ('paper', '${BROKER_LOG}.1'),
+    ('live-money', '${BROKER_LIVE_LOG}'),
+    ('live-money', '${BROKER_LIVE_LOG}.1'),
+)
+for label, path in sources:
     try:
         with open(path, 'r', encoding='utf-8', errors='replace') as fh:
             for ln in fh:
@@ -377,13 +411,13 @@ for path in ('${BROKER_LOG}', '${BROKER_LOG}.1'):
                 m = line_re.match(ln)
                 if not m:
                     # No parseable timestamp — keep it (fail closed: don't drop a real OPEN)
-                    out.append(ln.rstrip('\n'))
+                    out.append('BROKER=' + label + ' ' + ln.rstrip('\n'))
                     continue
                 ts = datetime.strptime(m.group(1), '%Y-%m-%d %H:%M:%S')
                 if et:
                     ts = ts.replace(tzinfo=et)
                 if ts >= cutoff:
-                    out.append(ln.rstrip('\n'))
+                    out.append('BROKER=' + label + ' ' + ln.rstrip('\n'))
     except FileNotFoundError:
         continue
     except Exception:
@@ -392,20 +426,32 @@ print('\n'.join(out))
 " 2>/dev/null)
 if [[ -n "${breaker_log}" ]]; then
     breaker_opens_today=$(echo "${breaker_log}" | wc -l | tr -d ' ')
-    # Check if any of our FAIL families are in the matched lines.
-    fail_match=""
-    for family in "${BREAKER_OPEN_FAIL_FAMILIES[@]}"; do
-        if echo "${breaker_log}" | grep -q "CircuitBreaker\[ib\.${family}\]"; then
-            fail_match="${family}"
-            break
-        fi
-    done
-    if [[ -n "${fail_match}" ]]; then
-        breaker_status="fail_family_open"
-        FAILURES+=("Circuit breaker '${fail_match}' tripped OPEN in last 15min (see RUNBOOKS.md RB-2)")
+
+    # REAL MONEY FIRST. Any family OPEN on the live-money broker is a FAIL — see
+    # BREAKER_LIVE_MONEY_ALL_FAMILIES_FAIL above for why the paper split does not
+    # transfer. Checked before the paper families so the message names the account that
+    # can actually lose money.
+    live_hits=$(echo "${breaker_log}" | grep "^BROKER=live-money " || true)
+    if [[ "${BREAKER_LIVE_MONEY_ALL_FAMILIES_FAIL}" == "true" && -n "${live_hits}" ]]; then
+        live_family=$(echo "${live_hits}" | grep -o "CircuitBreaker\[ib\.[a-z_]*\]" | head -1)
+        breaker_status="fail_live_money_open"
+        FAILURES+=("REAL-MONEY broker: circuit breaker ${live_family:-(family unparsed)} tripped OPEN in last 15min — the funded account's session is degraded (see RUNBOOKS.md RB-2)")
     else
-        breaker_status="non_fail_family_open"
-        WARNINGS+=("Circuit breaker OPEN events in last 15min: ${breaker_opens_today} (non-fail families)")
+        # Paper broker: only the safety-critical families fail.
+        fail_match=""
+        for family in "${BREAKER_OPEN_FAIL_FAMILIES[@]}"; do
+            if echo "${breaker_log}" | grep -q "CircuitBreaker\[ib\.${family}\]"; then
+                fail_match="${family}"
+                break
+            fi
+        done
+        if [[ -n "${fail_match}" ]]; then
+            breaker_status="fail_family_open"
+            FAILURES+=("Circuit breaker '${fail_match}' tripped OPEN in last 15min on the PAPER broker (see RUNBOOKS.md RB-2)")
+        else
+            breaker_status="non_fail_family_open"
+            WARNINGS+=("Circuit breaker OPEN events in last 15min: ${breaker_opens_today} (non-fail families, PAPER broker)")
+        fi
     fi
 fi
 
