@@ -17,11 +17,26 @@ StartLimitBurst=5
 # Environment
 Environment=PYTHONPATH=/opt/calypso
 Environment=DASHBOARD_CALYPSO_ROOT=/opt/calypso
-Environment=DASHBOARD_HYDRA_STATE_FILE=/opt/calypso/data/hydra_state.json
-Environment=DASHBOARD_HYDRA_METRICS_FILE=/opt/calypso/data/hydra_metrics.json
-Environment=DASHBOARD_BACKTESTING_DB=/opt/calypso/data/backtesting.db
-Environment=DASHBOARD_HYDRA_LOG_FILE=/opt/calypso/logs/hydra/bot.log
 Environment=DASHBOARD_AGENT_INTEL_DIR=/opt/calypso/intel
+
+# 2026-09-18: the four DASHBOARD_{HYDRA_STATE,HYDRA_METRICS,BACKTESTING_DB,HYDRA_LOG}
+# variables were REMOVED from this unit. Do not reintroduce them.
+#
+# They pinned the dashboard's fallback data paths to variant A. A VM-only drop-in
+# (dashboard.service.d/primary-c.conf, written 2026-06-02 and never committed) then
+# overrode them to variant C. Meanwhile config.py's own defaults said something else
+# again — THREE sources of truth for one value, two of them naming a variant that
+# stopped being the live seat on 2026-07-24, and the winner decided by systemd's
+# drop-in precedence rather than by anyone's intent.
+#
+# These paths are LAST-RESORT FALLBACKS. Real resolution is dynamic and follows a
+# live-seat swap with no config change at all:
+#     variant_readers.live_seat_id() -> _seat_field() -> variant_<seat>_*
+# The fallbacks now live in exactly one place, dashboard/backend/config.py, where
+# test_dashboard_fallback_paths_track_the_live_seat pins them to the taxonomy's
+# declared live seat — so the next swap fails a test instead of rotting silently.
+#
+# Setting them here again would re-establish an override that no test can see.
 # Expose the A-vs-B-vs-C comparison view (/api/variants/*). The variant
 # readers point at data/variant_{b,c}/ state + metrics + backtesting.db, which
 # the broker-backed B/C now populate. (Off on Saxo too — this enables the full

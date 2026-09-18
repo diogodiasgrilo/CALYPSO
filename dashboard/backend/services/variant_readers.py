@@ -226,9 +226,15 @@ def canonical_db_reader() -> BacktestingDBReader:
     return _reader_for_id(live_seat_id())
 
 
-# Backwards-compat: a module-level reader on the FALLBACK seat's DB for any
-# legacy importer. NEW code must call canonical_db_reader() so it follows a swap.
-canonical_reader = BacktestingDBReader(settings.backtesting_db)
+# DELETED 2026-09-18: `canonical_reader = BacktestingDBReader(settings.backtesting_db)`.
+#
+# A module-level reader kept "for any legacy importer" — and a repo-wide search found
+# ZERO importers, so it had been dead since it was written. Worse than dead: it was
+# named `canonical_reader` while being the one reader that could NOT follow a live-seat
+# swap, and it was built bare so it silently carried the defined-risk capital formula
+# (defect D2). A trap named like the truth.
+#
+# Use canonical_db_reader() — it resolves per call and is basis-aware.
 
 
 def resolve_for(strategy_id: str) -> tuple[str, bool]:

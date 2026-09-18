@@ -8,43 +8,56 @@ class Settings(BaseSettings):
     # Base path for CALYPSO installation (dashboard reads HYDRA's data from here)
     calypso_root: Path = Path("/opt/calypso")
 
-    # ── PRIMARY (main page) data source ──────────────────────────────────
-    # The main dashboard page + WebSocket + widget read these "canonical"
-    # paths. 2026-06-02: the operator made variant C the LIVE canonical
-    # strategy, so these point at C's data (data/variant_c/*). A is demoted to
-    # a dry-run shadow and is surfaced as an explicit variant "a" on
-    # /comparison (its real paths are the variant_a_* fields below).
-    # `primary_label` is shown in the header so it's unambiguous which strategy
-    # the main page is displaying. (To switch the primary back to A, point
-    # these four at data/hydra_* + logs/hydra/ and set primary_label/bot_config_file.)
-    # 2026-07-24: live seat swapped C->B. The dashboard follows the LIVE seat
-    # dynamically (variant_readers.live_seat_id); these static defaults are fallbacks.
-    # Fallback header label only — the header actually shows live_label() (the
-    # live seat's variant_*_label), which follows a B<->C swap. Kept in sync with
-    # the live seat as a belt-and-braces default. (2026-07-24: B is the live seat.)
+    # ── LAST-RESORT FALLBACKS for the main page / WebSocket / widget ─────
+    #
+    # THESE ARE NOT "THE PRIMARY". Every one of them is reached only when the
+    # live seat has no `variant_<seat>_<field>` of its own — which, for a
+    # registered variant, never happens. The real resolution is dynamic and
+    # follows a live-seat swap with no code change:
+    #
+    #     variant_readers.live_seat_id() -> _seat_field(...) -> variant_<seat>_*
+    #
+    # REWRITTEN 2026-09-18, because the comment here had become a palimpsest of
+    # three eras contradicting each other — "the operator made variant C the LIVE
+    # canonical strategy" sat directly above "2026-07-24: live seat swapped C->B"
+    # — while the values below still named C, two months after C became a dry-run
+    # shadow. A stale fallback is survivable; a comment that asserts a stale fact
+    # in the present tense is how the next reader gets it wrong.
+    #
+    # They now name the CURRENT live seat (B), matching primary_label, so nothing
+    # in this block contradicts anything else in it. That alignment is not left to
+    # diligence: test_dashboard_fallback_paths_track_the_live_seat asserts these
+    # agree with the taxonomy's declared live seat, so the next swap FAILS LOUDLY
+    # here instead of rotting quietly for two months the way this block did.
+    #
+    # `primary_label` is the fallback header label; the header actually shows
+    # live_label() (the live seat's variant_*_label).
     primary_label: str = "B · LIVE (Brandon narrow, 7-slot grid)"
-    bot_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_c.json")
-    hydra_state_file: Path = Path("/opt/calypso/data/variant_c/hydra_state.json")
-    hydra_metrics_file: Path = Path("/opt/calypso/data/variant_c/hydra_metrics.json")
-    backtesting_db: Path = Path("/opt/calypso/data/variant_c/backtesting.db")
+    bot_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_b.json")
+    hydra_state_file: Path = Path("/opt/calypso/data/variant_b/hydra_state.json")
+    hydra_metrics_file: Path = Path("/opt/calypso/data/variant_b/hydra_metrics.json")
+    backtesting_db: Path = Path("/opt/calypso/data/variant_b/backtesting.db")
     position_registry_file: Path = Path("/opt/calypso/data/position_registry.json")
 
-    # Log file (primary = C)
-    hydra_log_file: Path = Path("/opt/calypso/logs/hydra_variant_c/bot.log")
+    # Fallback log file — the live seat's, per the note above.
+    hydra_log_file: Path = Path("/opt/calypso/logs/hydra_variant_b/bot.log")
 
     # ── MARKET-DATA (SPX/VIX price chart) source ─────────────────────────
-    # The SPX/VIX price chart is ACCOUNT-AGNOSTIC — every variant (A/B/C)
-    # watches the SAME S&P 500 index, so the candle chart should come from the
-    # DENSEST recorder, independent of which variant is "primary" for trades.
-    # Variant A samples ~4-8 ticks/min (real candle bodies + wicks); variant C
-    # samples ~1 tick/min (every 1-min bar collapses to a flat doji → the
-    # "spare crosses" look). Pointing the price chart at A's dense DB/log gives
-    # full, accurate candlesticks while the trade overlay (strikes, entries,
-    # stops, P&L) stays on the primary's data above. Override with
+    # The SPX/VIX price chart is ACCOUNT-AGNOSTIC — every variant watches the SAME
+    # S&P 500 index, so the candle chart comes from the DENSEST recorder, entirely
+    # independently of which variant holds the live seat. Variant A samples ~4-8
+    # ticks/min (real candle bodies + wicks); a ~1-tick/min recorder collapses every
+    # 1-min bar to a flat doji (the "spare crosses" look). Override with
     # DASHBOARD_MARKET_DATA_DB / DASHBOARD_MARKET_LOG_FILE if A is ever retired
-    # (point at whichever variant samples densest). If this source has no data,
-    # the chart falls back to the primary's sparse data and the frontend renders
-    # a clean line instead of crosses (never broken-looking).
+    # (point at whichever variant samples densest).
+    #
+    # THIS PIN IS DELIBERATE AND MUST NOT BE ROUTED THROUGH live_seat_id(): it is
+    # chosen for SAMPLING DENSITY, not for whose account the data belongs to. It is
+    # the one variant-pinned reader in the dashboard that is correct as a pin.
+    #
+    # If this source has no data, the chart falls back to the LIVE SEAT's own
+    # sparser ticks (resolved per request — see routers/market.py) and the frontend
+    # renders a clean line instead of crosses, never broken-looking.
     market_data_db: Path = Path("/opt/calypso/data/backtesting.db")
     market_log_file: Path = Path("/opt/calypso/logs/hydra/bot.log")
 
