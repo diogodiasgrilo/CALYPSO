@@ -205,16 +205,35 @@ def test_the_paper_variant_was_not_touched():
 # Dashboard wiring — the silent-failure one
 # ══════════════════════════════════════════════════════════════════════════════
 
-@pytest.mark.parametrize("field", [
-    "variant_bm_state_file", "variant_bm_metrics_file", "variant_bm_backtesting_db",
-    "variant_bm_log_file", "variant_bm_config_file", "variant_bm_label",
-])
-def test_the_dashboard_has_settings_fields_for_bm(field):
-    """Without these the seat resolver silently SKIPS bm and the real-money variant is
-    invisible to every dashboard surface and to the agent suite. pydantic's `extra`
-    ban means the taxonomy row alone cannot introduce them."""
+def test_the_dashboard_has_every_settings_field_bm_needs():
+    """DERIVED, not hand-listed — and that distinction is why this test exists.
+
+    The first version enumerated six field names by hand. It passed, and CI broke
+    minutes later on the SEVENTH: `variant_bm_baseline_date`, which
+    scripts/make_synthetic_fixtures.py assigns for every taxonomy variant. A hand-written
+    list can only ever check what its author already thought of, which is precisely the
+    failure mode being guarded against.
+
+    The authoritative requirement is "whatever an established variant has", so the set is
+    read off variant B. Add a field to B and this fails until bm gets it too.
+
+    Why it matters: pydantic's `extra` ban means a missing field is not a soft default —
+    `setattr` RAISES. Downstream, the seat resolver silently SKIPS the id instead, so the
+    real-money variant becomes invisible to live_money_seat_id(), reader_for(), the WS
+    broadcaster and the agent suite.
+    """
     from dashboard.backend.config import Settings
-    assert field in Settings.model_fields, f"{field} missing from dashboard settings"
+
+    def suffixes(vid):
+        pre = f"variant_{vid}_"
+        return {n[len(pre):] for n in Settings.model_fields if n.startswith(pre)}
+
+    missing = suffixes("b") - suffixes("bm")
+    assert not missing, (
+        f"variant_bm_* is missing field(s) that variant_b_* has: {sorted(missing)}. "
+        f"pydantic's extra-ban makes each of these a hard ValueError at setattr, not a "
+        f"default."
+    )
 
 
 def test_the_dashboard_paths_are_bm_specific():

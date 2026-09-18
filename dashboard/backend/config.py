@@ -114,6 +114,12 @@ class Settings(BaseSettings):
     variant_bm_log_file: Path = Path("/opt/calypso/logs/hydra_variant_bm/bot.log")
     variant_bm_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_bm.json")
     variant_bm_label: str = "BM · REAL MONEY (Brandon narrow, 1 contract)"
+    # Empty until the seat has a go-live date, exactly like a fresh variant. Missing it
+    # broke CI's fixture generator, which iterates EVERY taxonomy variant and assigns
+    # variant_<id>_baseline_date — the same pydantic `extra`-ban this block warns about,
+    # caught one field short. The completeness check is now derived rather than
+    # hand-listed (test_bm_variant_2026_09_18.py).
+    variant_bm_baseline_date: str = ""
 
     # Variant C — Brandon Trojan Horse stack + Brandon's narrow 5/10pt spreads.
     # Same Brandon stack as B; only spread width differs (narrow_spread.enabled=true
