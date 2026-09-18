@@ -9256,6 +9256,64 @@ When reviewing performance after implementing improvements, fill in this section
 
 **Sep 17 Assessment**: Today was a planned FOMC T+1 blackout: all 7 Variant B grid slots (09:45–12:45) were suppressed via `fomc_t1_skip_enabled` before any credit evaluation, strike selection, or MKT-011 gate could run, producing $0 P&L against an estimated −$900 expected loss from trading T+1. SPX opened at 7,633.84 and traded a 33.95-point range (7,612.19–7,646.14) in VIX Regime 0 (open 15.43), but market conditions were irrelevant — the blackout is binary and pre-committed. Cumulative P&L stands at $24,302.02 with the $0 result leaving the record and streak unchanged; the operator should verify the state file clears both FOMC flags before the 09:45 first slot on September 18.
 
+## 10. Reporting Definition Changes
+
+> **Human-owned section.** HOMER rebuilds sections 1, 2, 3, 4, 5, 8 and 9 from
+> scratch on every run, so anything recorded there is destroyed the same night.
+> This note originally went into section 5 and was gone within hours. Definition
+> changes belong here, where they survive.
+
+### 2026-09-17 — reported capital is now PEAK CONCURRENT, not a running sum
+
+**Reported ROI stepped UP on this date with no change in trading.** The cause is
+a corrected definition, recorded so the step has a written reason rather than
+looking like performance.
+
+Two definitions of "deployed capital" had coexisted. The dashboard **summed**
+every entry's margin; the bot's own `base_strategy._calculate_capital_deployed`
+computes **peak concurrent** margin per day — and had done since 2026-05-08, its
+docstring noting the prior sum "overstated capital". The dashboard never
+followed. The sum counts the same dollars again each time a position closes and
+the next opens.
+
+Figures **as displayed on each strategy's card**, i.e. rebased to that variant's
+own `baseline_date` where one is set (B to its live-seat date 2026-07-24, C to
+2026-06-11):
+
+| variant | baseline | capital (SUM, old) | capital (PEAK, new) | SUM overstated | ROI old → new |
+|---|---|---|---|---|---|
+| A | — | $2,561,500 | $1,784,500 | **43.5%** | −0.126% → **−0.180%** |
+| **B (live seat)** | 2026-07-24 | $294,000 | $287,000 | 2.4% | 2.369% → **2.430%** |
+| C | 2026-06-11 | $234,500 | $234,500 | 0.0% | −3.689% → −3.690% |
+| F | — | $1,000 | $1,000 | 0.0% | unchanged |
+| G | — | $780,000 | $660,000 | 18.2% | 0.107% → **0.130%** |
+
+**The correction is not uniformly flattering.** Because ROI = P&L ÷ capital, a
+smaller denominator raises a profitable strategy's return *and* deepens a losing
+one's: A's reported loss rate gets **worse**. A's 43.5% is the largest because it
+runs one contract on a wide 75pt spread across three slots that rarely overlap,
+so almost every dollar was counted more than once. C and F are unchanged because
+their entries genuinely do overlap, or there is only one.
+
+It also resolved a contradiction *inside* the metrics file: the `daily_returns`
+rows already used peak-concurrent, so the card and the rows disagreed.
+
+Dashboard read path only — no trading logic, no strategy config, no effect on
+the Gate-4 clean-session streak. Defect D20 in
+`docs/DASHBOARD_VISUAL_AUDIT_2026_09_17.md`; decision taken by the operator.
+
+### 2026-09-18 — a skipped entry no longer counts as deployed capital
+
+G's `daily_returns` row for 2026-09-17 read `net_pnl 0.0` with
+`capital_deployed $60,000` on a day it placed **nothing** (both entries skipped
+for the FOMC T+1 blackout). The `broker_margin` basis returns a flat
+per-contract floor, so it counted skipped entries; the `defined_risk` basis
+filtered them only by accident (no spread width). This inflated the ROI
+denominator on every no-trade day. Corrected in the capital sweep, where
+placement is checked once for every basis.
+
+---
+
 ## Appendix A: Raw EMA Divergence Data (From VM Logs)
 
 **Source**: `journalctl -u hydra` on calypso-bot VM, pulled Feb 17 2026.
