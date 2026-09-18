@@ -1,6 +1,30 @@
 /** Financial performance statistics computed from daily P&L values. */
 
 /** Annualized Sharpe Ratio: mean/std * sqrt(252). */
+/** Coerce an incoming series to finite numbers, dropping anything else.
+ *
+ * Every function here is typed `number[]`, and TypeScript enforces that at the
+ * call site — but the values come from an API, so the compiler is describing a
+ * promise the network does not keep. SQLite returns TEXT for a column written
+ * as text, and a JSON round-trip preserves that.
+ *
+ * The failure is quiet and specific: comparisons coerce, so `v > 0` filters
+ * wins and losses correctly, but `reduce((a, b) => a + b, 0)` CONCATENATES —
+ * `0 + "100"` is `"0100"` — so every average becomes NaN. Measured 2026-09-18
+ * with uiaudit/diag-degraded.mjs: the dashboard rendered `EXPECTANCY $NaN`
+ * while the surrounding cards showed plausible-looking numbers.
+ */
+export function toFiniteNumbers(
+  series: readonly unknown[] | null | undefined,
+): number[] {
+  const out: number[] = [];
+  for (const v of series ?? []) {
+    const n = typeof v === "number" ? v : Number(v);
+    if (Number.isFinite(n)) out.push(n);
+  }
+  return out;
+}
+
 export function sharpeRatio(dailyPnls: number[]): number {
   if (dailyPnls.length < 2) return 0;
   const mean = dailyPnls.reduce((a, b) => a + b, 0) / dailyPnls.length;

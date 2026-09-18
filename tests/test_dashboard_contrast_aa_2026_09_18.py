@@ -269,3 +269,83 @@ def test_hover_tints_do_not_drop_text_below_aa():
         f"card-hover {t['card-hover']} is lighter than card {t['card']} — every "
         f"text colour loses contrast on hover"
     )
+
+
+# ── Status badges: 11 states, of which fixtures render ONE ─────────────────
+
+BADGE = SRC / "components" / "shared" / "StatusBadge.tsx"
+TRADING_COLORS = SRC / "lib" / "tradingColors.ts"
+
+
+def _status_color_map() -> dict[str, str]:
+    """status -> token name, parsed from statusColor()'s switch."""
+    src = TRADING_COLORS.read_text()
+    body = src[src.index("export function statusColor"):]
+    body = body[: body.index("\n}")]
+    out = {}
+    for case, tok in re.findall(r'case "(\w+)":\s*(?:\n\s*)?return colors\.(\w+);', body):
+        out[case] = tok
+    return out
+
+
+def _pill_mix() -> float:
+    """The mix factor pillBackground() applies toward black."""
+    src = BADGE.read_text()
+    m = re.search(r"Math\.round\(v \* ([0-9.]+)\)", src)
+    assert m, "pillBackground no longer mixes toward black"
+    return float(m.group(1))
+
+
+def test_every_status_badge_clears_aa():
+    """Seven of eleven failed before this — worst 3.88:1 on `stopped`
+    (Double Stop) and `failed` (Execution Failed).
+
+    Only `skipped` ever appeared in the browser audit, because the synthetic
+    fixtures never produce the other ten states. That is the same blind spot as
+    the calendar's max-intensity heat step and the low-cushion readout: a probe
+    can only score what the data makes it draw, so the exhaustive check has to
+    be arithmetic.
+    """
+    t = tokens()
+    camel = {"info": "info", "warning": "warning", "profit": "profit",
+             "loss": "loss", "textDim": "text-dim", "textSecondary": "text-secondary",
+             "profitMuted": "profit-muted"}
+    mix = _pill_mix()
+    statuses = _status_color_map()
+    assert len(statuses) >= 10, f"only parsed {len(statuses)} statuses: {statuses}"
+
+    for status, tok in sorted(statuses.items()):
+        assert tok in camel, f"statusColor returns an unmapped token: {tok}"
+        fg = t[camel[tok]]
+        r, g, b = (int(fg.lstrip("#")[i:i + 2], 16) for i in (0, 2, 4))
+        pill = "#%02x%02x%02x" % tuple(round(v * mix) for v in (r, g, b))
+        got = contrast(fg, pill)
+        assert got >= AA_NORMAL, (
+            f"badge '{status}' ({tok} {fg} on pill {pill}) is {got:.2f}:1"
+        )
+
+
+def test_the_pill_is_opaque_and_surface_independent():
+    """Two reasons, both learned the hard way.
+
+    An ALPHA pill composites with whatever is behind it, so the same badge
+    passes on one surface and fails on another — and a self-tint can never
+    reach AA for the loss red at any alpha. An opaque pill mixed toward black
+    is strictly darker than every surface, so one check covers all of them.
+
+    It must also not be a `backgroundImage` scrim: gradients are invisible to
+    `getComputedStyle().backgroundColor`, so the browser probe cannot see them
+    and reported a genuinely-fixed badge as still failing.
+    """
+    # Comments stripped: pillBackground's own docstring QUOTES the
+    # `${color}20` self-tint it replaced, so a bare ban matched the
+    # explanation. Ninth occurrence of that trap in this repo.
+    src = re.sub(r"/\*.*?\*/", "", BADGE.read_text(), flags=re.S)
+    src = re.sub(r"^\s*//.*$", "", src, flags=re.M)
+    style = src[src.index("backgroundColor: pillBackground"):][:200]
+    assert "backgroundImage" not in style, (
+        "the pill uses a gradient scrim; the contrast probe cannot measure it"
+    )
+    assert not re.search(r"\$\{color\}[0-9a-f]{2}", src), (
+        "the pill is back to an alpha self-tint of its own text colour"
+    )

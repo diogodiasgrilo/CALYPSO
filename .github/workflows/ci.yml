@@ -132,7 +132,7 @@ jobs:
         run: |
           cd dashboard/frontend/uiaudit
           fail=0
-          for probe in diag-contrast diag-focus diag-keyboard diag-login; do
+          for probe in diag-contrast diag-focus diag-keyboard diag-login diag-degraded; do
             echo "── $probe ──"
             node "$probe.mjs" || { echo "::error::$probe reported findings"; fail=1; }
           done

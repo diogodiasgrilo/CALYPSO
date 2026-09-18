@@ -8,6 +8,7 @@ import {
   profitFactor,
   expectancy,
   avgWinLossRatio,
+  toFiniteNumbers,
 } from "../../lib/statsUtils";
 import { formatPnL } from "../../lib/formatters";
 import { colors, pnlColor } from "../../lib/tradingColors";
@@ -78,7 +79,12 @@ export function PerformanceMetrics({ dailyPnls: dailyPnlsProp }: PerformanceMetr
 
   // Prop mode: use the supplied array. WS mode: WebSocket-pushed data (after
   // market close) if available, otherwise API data.
-  const effectivePnls = usingProps ? dailyPnlsProp : (performancePnls ?? dailyPnls);
+  // Coerced at the boundary, which fixes all seven statistics at once rather
+  // than patching each. See toFiniteNumbers for why the `number[]` type is not
+  // a guarantee when the values came off the wire.
+  const effectivePnls = toFiniteNumbers(
+    usingProps ? dailyPnlsProp : (performancePnls ?? dailyPnls)
+  );
 
   // useMemo MUST be called unconditionally (Rules of Hooks — no hooks after early returns)
   const stats = useMemo(() => {

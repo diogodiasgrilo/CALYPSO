@@ -2,6 +2,7 @@ import { useState, useCallback } from "react";
 import { Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
 import { LayoutDashboard, CalendarDays, BarChart3, Scale } from "lucide-react";
 import { DashboardLayout } from "./components/layout/DashboardLayout";
+import { ErrorBoundary } from "./components/shared/ErrorBoundary";
 import { Dashboard } from "./pages/Dashboard";
 import { History } from "./pages/History";
 import { Analytics } from "./pages/Analytics";
@@ -101,12 +102,12 @@ function App() {
       <NavTabs />
       <div className="mt-3">
         <Routes>
-          <Route path="/" element={<Dashboard />} />
-          <Route path="/history" element={<History />} />
-          <Route path="/analytics" element={<Analytics />} />
+          <Route path="/" element={<ErrorBoundary label="Dashboard"><Dashboard /></ErrorBoundary>} />
+          <Route path="/history" element={<ErrorBoundary label="History"><History /></ErrorBoundary>} />
+          <Route path="/analytics" element={<ErrorBoundary label="Analytics"><Analytics /></ErrorBoundary>} />
           {/* New group-scoped comparison. Route always registered so a direct
               URL works; the page self-handles unknown/unavailable groups. */}
-          <Route path="/comparison/:groupId" element={<GroupComparison />} />
+          <Route path="/comparison/:groupId" element={<ErrorBoundary label="Comparison"><GroupComparison /></ErrorBoundary>} />
           {/* Legacy redirects into the new structure. */}
           <Route path="/comparison" element={<LegacyComparisonRedirect />} />
           <Route path="/dc" element={<LegacyDcRedirect />} />

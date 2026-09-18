@@ -202,7 +202,7 @@ def test_ci_workflow_is_valid_yaml():
         assert job.get("steps"), f"job {job_name} has no steps"
 
 
-@pytest.mark.parametrize("probe", ["diag-contrast", "diag-focus", "diag-keyboard", "diag-login"])
+@pytest.mark.parametrize("probe", ["diag-contrast", "diag-focus", "diag-keyboard", "diag-login", "diag-degraded"])
 def test_ci_runs_the_accessibility_probes(probe):
     """The unit suite pins these as SOURCE rules — cheap, and blind to anything
     that only shows up once the page is painted. Each of these four caught
@@ -218,7 +218,7 @@ def test_ci_runs_the_accessibility_probes(probe):
 def test_accessibility_probes_exist_and_exit_nonzero_on_findings():
     """A probe that always exits 0 is a green tick over an unread report."""
     uiaudit = ROOT / "dashboard" / "frontend" / "uiaudit"
-    for probe in ("diag-contrast", "diag-focus", "diag-keyboard", "diag-login"):
+    for probe in ("diag-contrast", "diag-focus", "diag-keyboard", "diag-login", "diag-degraded"):
         path = uiaudit / f"{probe}.mjs"
         assert path.exists(), f"{probe}.mjs is wired into CI but missing"
         src = path.read_text()
