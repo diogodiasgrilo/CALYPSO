@@ -567,6 +567,30 @@ class GhauriMeanReversionStrategy(HydraStrategy):
 
             self.daily_state.entries.append(entry)
             self.daily_state.one_sided_entries += 1
+
+            # ── DAY BOOKKEEPING (added 2026-09-18) ───────────────────────────
+            # The SAME omission as the 2026-09-15 fix below, in the same method
+            # and for the same reason: bypassing HydraStrategy._initiate_entry
+            # skips everything it does, and only the parts someone noticed were
+            # re-implemented. An AST sweep of every _initiate_entry that appends
+            # to daily_state.entries showed F alone missing both of these —
+            # A/B/C, D, E and G all do them.
+            #
+            # entries_completed feeds daily_summaries.entries_placed, and every
+            # traded-day analysis filters on `entries_placed > 0`
+            # (complementarity.py, variant_performance.py). Leaving it at 0
+            # meant F booked P&L over, by its own records, ZERO entries — and
+            # was silently excluded from each of those analyses.
+            #
+            # The CLOSE commission is charged by _close_entry_early regardless,
+            # so only the open side depended on this path: F's 2026-09-15 day
+            # was billed $2.30 for what is a $4.60 round trip. Two legs — this
+            # is a one-sided vertical, never a four-leg condor.
+            self.daily_state.entries_completed += 1
+            self.daily_state.total_credit_received += entry.total_credit
+            entry.open_commission = 2 * self.commission_per_leg * self.contracts_per_entry
+            self.daily_state.total_commission += entry.open_commission
+
             self._current_entry = None
             self.state = MEICState.MONITORING
 
@@ -722,11 +746,25 @@ class GhauriMeanReversionStrategy(HydraStrategy):
         return None
 
     def _ghauri_close_for_take_profit(self, entry: "GhauriEntry", side: str, tp_decision) -> Optional[str]:
-        """Mirrors BrandonHydraStrategy._brandon_check_take_profit's exact
-        close pattern: _close_entry_early (generic per-side, live-mode P&L
-        booking happens inside it) + a dry-run-only manual _book_realized_pnl
-        (matching Brandon's own `if self.dry_run:` branch, since the live
-        booking path inside _close_entry_early doesn't fire in dry-run).
+        """Mirrors BrandonHydraStrategy._brandon_check_take_profit's close
+        pattern: ``_close_entry_early`` followed by a dry-run-only CORRECTION.
+
+        The correction is ``-close_cost``, not ``credit - close_cost``.
+
+        ``_close_entry_early`` books the side's P&L itself, via
+        ``_book_early_close_side_pnl``, and it does so UNCONDITIONALLY — in
+        dry-run there is no simulated fill, ``side_close_cost`` arrives as 0,
+        and that helper books the FULL credit as though the position closed for
+        free. Brandon's ``if self.dry_run:`` branch therefore subtracts the
+        estimated cost (brandon/strategy.py:1313 and :1330); it does not book a
+        second time.
+
+        Until 2026-09-18 this booked ``credit - close_cost`` on top of that,
+        giving ``2 × credit − cost``. On 2026-09-15 a $127.50 credit closed at
+        a $60.00 mark was recorded as $195.00 — more than the spread could
+        possibly earn — instead of $67.50. The docstring this replaces asserted
+        that "the live booking path inside _close_entry_early doesn't fire in
+        dry-run", which is simply not true of that method.
         """
         logger.info(f"GHAURI-TP E#{entry.entry_number} {side}: {tp_decision.reason}")
         try:
@@ -750,8 +788,10 @@ class GhauriMeanReversionStrategy(HydraStrategy):
         if not getattr(entry, actual_debit_attr, 0):
             setattr(entry, actual_debit_attr, close_cost)
         if self.dry_run:
-            credit = entry.call_spread_credit if side == "call" else entry.put_spread_credit
-            self._book_realized_pnl(credit - close_cost, entry)
+            # Correction only — see the docstring. _close_entry_early has
+            # already booked the credit; this removes the cost of buying it
+            # back, leaving credit − close_cost in total_realized_pnl.
+            self._book_realized_pnl(-close_cost, entry)
         entry.close_reason = "TP"
 
         self.alert_service.send_alert(

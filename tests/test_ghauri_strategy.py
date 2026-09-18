@@ -665,21 +665,40 @@ class TestCheckStopLossesOrchestration:
     (shared with TestStopFormula/TestTrailToBreakeven)."""
 
     def test_take_profit_fires_and_closes(self, monkeypatch):
+        """CORRECTED 2026-09-18 — this test used to assert the bug.
+
+        Its stub for ``_close_entry_early`` booked NOTHING, and it then asserted
+        the handler books ``credit - close_cost``. The real method books the
+        side's P&L itself via ``_book_early_close_side_pnl``, unconditionally,
+        and in dry-run with no fill it books the FULL credit. So the stub did
+        not behave like the collaborator it replaced, the assertion encoded the
+        same misunderstanding as the handler's old docstring, and together they
+        held a double-count in place: a $127.50 credit closed at a $60.00 mark
+        was recorded live as $195.00.
+
+        The stub now calls the REAL ``_book_early_close_side_pnl``, and the
+        assertion is on the RESULTING TOTAL rather than on one call's argument —
+        which is the property that actually matters and the one no stub can
+        fake. See tests/test_ghauri_accounting_2026_09_18.py.
+        """
         inst, entry = _inst_with_entry("put", credit=100.0, ghauri_profit_target_pct=0.50)
         monkeypatch.setattr(
             type(entry), "put_spread_value", property(lambda self: 40.0),
         )
+        inst.daily_state.total_realized_pnl = 0.0
 
         def fake_close(e, skip_sides=None):
             # Real _close_entry_early marks the closed side expired as a side
             # effect — set it here rather than pre-setting it before the call
             # (pre-setting would make the loop's own already-closed guard skip
-            # the entry before take-profit is ever evaluated).
+            # the entry before take-profit is ever evaluated). It ALSO books the
+            # side through _book_early_close_side_pnl with a close cost of 0 in
+            # dry-run, which is the half this stub used to omit.
             e.put_side_expired = True
+            inst._book_early_close_side_pnl(e, "put", e.put_spread_credit, 0.0)
             return (2, 0, [])
 
         inst._close_entry_early = MagicMock(side_effect=fake_close)
-        inst._book_realized_pnl = MagicMock()
         inst.alert_service = MagicMock()
 
         result = inst._check_stop_losses()
@@ -688,10 +707,9 @@ class TestCheckStopLossesOrchestration:
         assert entry.put_side_stopped is True
         assert entry.close_reason == "TP"
         inst._close_entry_early.assert_called_once()
-        inst._book_realized_pnl.assert_called_once()
-        # credit=100, close_cost=40 -> booked profit = 60
-        booked_amount = inst._book_realized_pnl.call_args[0][0]
-        assert booked_amount == pytest.approx(60.0)
+        # credit=100, close_cost=40 -> the DAY's realized P&L is 60, once.
+        # 140 would mean the credit was booked twice.
+        assert inst.daily_state.total_realized_pnl == pytest.approx(60.0)
 
     def test_take_profit_not_reached_falls_through_to_stop_check(self, monkeypatch):
         inst, entry = _inst_with_entry("call", credit=100.0, ghauri_profit_target_pct=0.50)
