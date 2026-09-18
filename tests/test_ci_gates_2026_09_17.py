@@ -182,3 +182,52 @@ def test_every_binding_site_is_listed():
         f"module(s) bind is_running_on_gcp but are not isolated in conftest: "
         f"{sorted(missing)} — add them to _GCP_PROBE_SITES."
     )
+
+
+# ── Added 2026-09-18 with the accessibility probes ─────────────────────────
+
+def test_ci_workflow_is_valid_yaml():
+    """Until PyYAML was added as a dev dependency, NOTHING checked this.
+
+    A malformed workflow is the one failure CI cannot report on itself: the run
+    never starts, so there is no red check to notice — you find out because the
+    gate you were relying on quietly stopped running.
+    """
+    import yaml
+
+    data = yaml.safe_load(CI.read_text())
+    assert isinstance(data, dict) and "jobs" in data
+    assert set(data["jobs"]) >= {"tests", "frontend", "visual"}
+    for job_name, job in data["jobs"].items():
+        assert job.get("steps"), f"job {job_name} has no steps"
+
+
+@pytest.mark.parametrize("probe", ["diag-contrast", "diag-focus", "diag-keyboard", "diag-login"])
+def test_ci_runs_the_accessibility_probes(probe):
+    """The unit suite pins these as SOURCE rules — cheap, and blind to anything
+    that only shows up once the page is painted. Each of these four caught
+    something the source rules could not have, so they run on every push."""
+    import yaml
+
+    data = yaml.safe_load(CI.read_text())
+    steps = data["jobs"]["visual"]["steps"]
+    runs = "\n".join(s.get("run", "") for s in steps)
+    assert probe in runs, f"{probe}.mjs is not run by CI"
+
+
+def test_accessibility_probes_exist_and_exit_nonzero_on_findings():
+    """A probe that always exits 0 is a green tick over an unread report."""
+    uiaudit = ROOT / "dashboard" / "frontend" / "uiaudit"
+    for probe in ("diag-contrast", "diag-focus", "diag-keyboard", "diag-login"):
+        path = uiaudit / f"{probe}.mjs"
+        assert path.exists(), f"{probe}.mjs is wired into CI but missing"
+        src = path.read_text()
+        # Must exit on something OTHER than a literal 0. The first version of
+        # this assertion was `process\.exit\(\s*\w+`, which happily matched
+        # `process.exit(0)` — `0` is a word character — so a probe hard-wired
+        # to always succeed passed the test that exists to prevent exactly
+        # that. Caught by mutation testing.
+        assert re.search(r"process\.exit\(\s*(?!0\s*\))", src), (
+            f"{probe}.mjs exits 0 unconditionally, so CI shows a green tick "
+            f"over an unread report"
+        )

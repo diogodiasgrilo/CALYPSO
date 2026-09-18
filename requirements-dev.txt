@@ -21,3 +21,9 @@ pytest-cov==7.1.0
 # fails at import with a bare "RuntimeError: The starlette.testclient module
 # requires the httpx package".
 httpx==0.28.1
+
+# Parses .github/workflows/ci.yml in tests/test_ci_gates_*.py. Until this was
+# added, NOTHING verified that the workflow file was even valid YAML — a bad
+# edit was only discovered by pushing it and watching the run fail to start,
+# which is the one failure mode CI cannot report on itself.
+PyYAML==6.0.2

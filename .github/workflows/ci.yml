@@ -118,11 +118,33 @@ jobs:
             echo "::error::horizontal overflow at one or more viewports"
             exit 1
           fi
+      - name: Accessibility probes (contrast / focus / keyboard / login gate)
+        # The unit suite pins these as SOURCE rules, which is the cheap guard.
+        # These are the expensive one: they score the rendered pixels and press
+        # real keys, and they exist because every one of them caught something
+        # the source rules could not have. Each exits non-zero on a finding.
+        #
+        # Run against the same synthetic fixtures as the audit above. Note the
+        # known limitation recorded in the contrast test: synthetic P&L is
+        # effectively binary, so the calendar's max-intensity heat step is never
+        # rendered here — that step is covered by the unit test's full-matrix
+        # check, not by this probe.
+        run: |
+          cd dashboard/frontend/uiaudit
+          fail=0
+          for probe in diag-contrast diag-focus diag-keyboard diag-login; do
+            echo "── $probe ──"
+            node "$probe.mjs" || { echo "::error::$probe reported findings"; fail=1; }
+          done
+          exit $fail
+
       - name: Upload screenshots
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: dashboard-screenshots
-          path: dashboard/frontend/uiaudit/shots/
+          path: |
+            dashboard/frontend/uiaudit/shots/
+            dashboard/frontend/uiaudit/shots_login/
           retention-days: 7
           if-no-files-found: ignore
