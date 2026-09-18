@@ -1,21 +1,17 @@
 # Captured production payloads + rendered output — regenerate, never commit.
-fixtures/
-fixtures_premarket/
-fixtures_risk/
-fixtures_f/
-shots/
-shots_pre/
-findings.json
-structural.json
-# Derived/one-off probes generated during a run.
-audit_pre.mjs
-check-ratios.mjs
-shots_baseline/
-shots_det1/
-shots_det2/
+#
+# Globbed rather than enumerated. The previous version listed each directory by
+# name and had been amended five times as new probes were added; the sixth
+# (shots_login/) slipped through and showed up as untracked, which matters here
+# because HOMER runs `git add -A` on the VM and would have committed a few
+# hundred screenshots. Anything matching these shapes is derived output.
+fixtures*/
+shots*/
 census_*.json
 fontcensus.json
-shots_mobile/
-fixtures_replay/
-shots_replay/
-fixtures_synthetic/
+findings.json
+structural.json
+
+# One-off probes written during a single investigation, not part of the harness.
+audit_pre.mjs
+check-ratios.mjs

@@ -15,7 +15,7 @@
  */
 
 import { useEffect, useState, type FormEvent, type ReactNode } from "react";
-import { Lock, ShieldCheck, Loader2, KeyRound, Copy, Check } from "lucide-react";
+import { Lock, ShieldCheck, Loader2, KeyRound, Copy, Check, AlertTriangle } from "lucide-react";
 import * as auth from "../../auth";
 import { colors } from "../../lib/tradingColors";
 import { useHydraStore } from "../../store/hydraStore";
@@ -26,6 +26,7 @@ type Step =
   | "changePassword"
   | "totp"
   | "recoveryCodes"
+  | "recoveryUsed"
   | "authed";
 
 export function LoginGate({ children }: { children: ReactNode }) {
@@ -45,6 +46,7 @@ export function LoginGate({ children }: { children: ReactNode }) {
   const [qrDataUri, setQrDataUri] = useState("");
   const [totpSecret, setTotpSecret] = useState("");
   const [recoveryCodes, setRecoveryCodes] = useState<string[]>([]);
+  const [recoveryRemaining, setRecoveryRemaining] = useState<number | null>(null);
 
   // Step-local form fields
   const [newPassword, setNewPassword] = useState("");
@@ -136,6 +138,13 @@ export function LoginGate({ children }: { children: ReactNode }) {
       if (res.recovery_codes && res.recovery_codes.length > 0) {
         setRecoveryCodes(res.recovery_codes);
         setStep("recoveryCodes");
+      } else if (res.recovery_code_used) {
+        // Signing in this way SPENDS one of ten single-use codes that only an
+        // operator can replace. Falling straight through to the dashboard (what
+        // this did until 2026-09-18) means the balance is only ever discovered
+        // by hitting zero — at which point a lost authenticator is a lockout.
+        setRecoveryRemaining(res.recovery_codes_remaining ?? null);
+        setStep("recoveryUsed");
       } else {
         setStep("authed");
       }
@@ -192,6 +201,7 @@ export function LoginGate({ children }: { children: ReactNode }) {
             {step === "changePassword" && "Set a new password"}
             {step === "totp" && (totpEnabled ? "Enter your 2FA code" : "Set up two-factor auth")}
             {step === "recoveryCodes" && "Save your recovery codes"}
+            {step === "recoveryUsed" && "Recovery code used"}
           </p>
         </div>
 
@@ -320,7 +330,7 @@ export function LoginGate({ children }: { children: ReactNode }) {
             <button
               type="button"
               onClick={copyRecoveryCodes}
-              className="w-full rounded-lg border border-border-dim py-2 text-xs font-medium text-text-secondary flex items-center justify-center gap-2 transition-colors hover:text-text-primary"
+              className="w-full min-h-11 rounded-lg border border-border-dim py-2 text-xs font-medium text-text-secondary flex items-center justify-center gap-2 transition-colors hover:text-text-primary"
             >
               {codesCopied ? <Check size={13} /> : <Copy size={13} />}
               {codesCopied ? "Copied" : "Copy to clipboard"}
@@ -328,10 +338,55 @@ export function LoginGate({ children }: { children: ReactNode }) {
             <button
               type="button"
               onClick={() => setStep("authed")}
-              className="w-full rounded-lg py-2.5 text-sm font-bold tracking-wide"
+              className="w-full min-h-11 flex items-center justify-center rounded-lg py-2.5 text-sm font-bold tracking-wide"
               style={{ backgroundColor: colors.profit, color: "#0d1117" }}
             >
               I've saved these — continue
+            </button>
+          </div>
+        )}
+
+        {step === "recoveryUsed" && (
+          <div className="mt-7 space-y-3">
+            <div
+              className="rounded-lg px-3 py-2.5 text-xs leading-relaxed"
+              style={{
+                color: recoveryRemaining === 0 ? colors.loss : colors.warning,
+                backgroundColor:
+                  recoveryRemaining === 0
+                    ? "rgba(248, 81, 73, 0.10)"
+                    : "rgba(230, 180, 40, 0.10)",
+              }}
+            >
+              <span className="flex items-center gap-1.5 font-semibold">
+                <AlertTriangle size={13} />
+                {recoveryRemaining === 0
+                  ? "That was your last recovery code"
+                  : "You signed in with a recovery code"}
+              </span>
+              <p className="mt-1.5">
+                {recoveryRemaining === null
+                  ? "It has been used up and will not work again."
+                  : recoveryRemaining === 0
+                    ? "None remain. If you lose your authenticator now you will not be able to sign in at all."
+                    : `It has been used up and will not work again. ${recoveryRemaining} ${
+                        recoveryRemaining === 1 ? "code remains" : "codes remain"
+                      }.`}
+              </p>
+            </div>
+            <p className="text-text-secondary text-xs leading-relaxed">
+              Recovery codes are single-use and cannot be replaced from here. To
+              get a fresh set — or to re-pair an authenticator — ask the operator
+              to run <span className="font-mono text-2xs">reset-2fa</span> for
+              your account.
+            </p>
+            <button
+              type="button"
+              onClick={() => setStep("authed")}
+              className="w-full min-h-11 flex items-center justify-center rounded-lg py-2.5 text-sm font-bold tracking-wide"
+              style={{ backgroundColor: colors.profit, color: "#0d1117" }}
+            >
+              Continue to dashboard
             </button>
           </div>
         )}
@@ -344,8 +399,15 @@ export function LoginGate({ children }: { children: ReactNode }) {
   );
 }
 
+// min-h-11 is 44px — the Apple HIG minimum for anything a finger has to hit.
+// Measured 2026-09-18 with uiaudit/diag-login.mjs: at 390px every control on
+// this gate was under it (inputs 42px, buttons 40px, the copy button 34px),
+// which had never shown up because the visual audit reached the app through a
+// mock server with auth switched off and so never rendered this screen at all.
+// The floor is set with min-h rather than more padding so it survives a future
+// change to the type scale.
 const inputClass =
-  "w-full rounded-lg border border-border-dim bg-bg px-3 py-2.5 text-text-primary text-sm outline-none transition-colors";
+  "w-full min-h-11 rounded-lg border border-border-dim bg-bg px-3 py-2.5 text-text-primary text-sm outline-none transition-colors";
 const inputStyle = { caretColor: colors.profit };
 
 function ErrorLine({ error }: { error: string }) {
@@ -372,7 +434,7 @@ function SubmitButton({
     <button
       type="submit"
       disabled={submitting || disabled}
-      className="w-full rounded-lg py-2.5 text-sm font-bold tracking-wide transition-opacity disabled:opacity-50"
+      className="w-full min-h-11 flex items-center justify-center rounded-lg py-2.5 text-sm font-bold tracking-wide transition-opacity disabled:opacity-50"
       style={{ backgroundColor: colors.profit, color: "#0d1117" }}
     >
       {submitting ? (

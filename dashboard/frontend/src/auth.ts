@@ -54,8 +54,14 @@ export async function setupTotp(pendingToken: string): Promise<SetupTotpResponse
 export interface VerifyTotpResponse {
   ok: boolean;
   username: string;
+  /** First-time enrollment only: the full set, shown once and never again. */
   recovery_codes?: string[];
+  /** Set when the submitted code was a recovery code rather than a TOTP digit. */
   recovery_code_used?: boolean;
+  /** How many remain after this one was consumed. Present only alongside
+   *  recovery_code_used — they are single-use and cannot be regenerated
+   *  without an operator, so zero means the next lost phone locks you out. */
+  recovery_codes_remaining?: number;
 }
 
 export async function verifyTotp(pendingToken: string, code: string): Promise<VerifyTotpResponse> {

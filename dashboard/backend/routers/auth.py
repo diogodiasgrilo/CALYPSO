@@ -13,6 +13,7 @@ Flow: POST /login (password) -> pending_token
       POST /logout -> revokes the session, clears the cookie
 """
 
+import json
 import logging
 import secrets
 import time
@@ -255,6 +256,7 @@ async def verify_totp(body: VerifyTotpRequest, request: Request, response: Respo
 
     ok = auth_crypto.verify_totp_code(user["totp_secret"], body.code)
     recovery_used = False
+    recovery_remaining: Optional[int] = None
     if not ok and not first_enrollment and user["recovery_codes_hash"]:
         matched, updated_hashes = auth_crypto.consume_recovery_code(
             user["recovery_codes_hash"], body.code
@@ -262,6 +264,15 @@ async def verify_totp(body: VerifyTotpRequest, request: Request, response: Respo
         if matched:
             ok = True
             recovery_used = True
+            # Recovery codes are finite (10), single-use, and cannot be
+            # regenerated without an operator running manage_dashboard_users
+            # reset-2fa over SSH. Reaching zero without an authenticator means
+            # being locked out of your own dashboard, so the count has to travel
+            # back to the person spending it — see the gate's recoveryUsed step.
+            try:
+                recovery_remaining = len(json.loads(updated_hashes))
+            except (ValueError, TypeError):
+                recovery_remaining = None
             auth_db.set_recovery_codes(settings.dashboard_auth_db, user["id"], updated_hashes)
 
     if not ok:
@@ -298,6 +309,14 @@ async def verify_totp(body: VerifyTotpRequest, request: Request, response: Respo
         result["recovery_codes"] = recovery_codes_out
     if recovery_used:
         result["recovery_code_used"] = True
+        if recovery_remaining is not None:
+            result["recovery_codes_remaining"] = recovery_remaining
+        if recovery_remaining == 0:
+            logger.warning(
+                "%s signed in with their LAST recovery code — a further lost "
+                "authenticator needs manage_dashboard_users reset-2fa",
+                user["username"],
+            )
     return result
 
 
