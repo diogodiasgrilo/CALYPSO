@@ -84,6 +84,24 @@ class StrategyMeta:
     # the comparison AXIS, and G genuinely belongs on the credit axis. Overloading
     # it would silently make G non-comparable to A/B/C on P&L, which is a
     # different wrong answer.
+    # ── Added 2026-09-18 (navigation revamp) ──────────────────────────────
+    #
+    # A one-line SPEC, rendered under display_name in the strategy switcher.
+    # The names alone carried four different conventions across seven items and
+    # two of them (B and C) differed only by a parenthetical, so a reader could
+    # not tell what any of them actually traded. This is the "14-inch, M3" line
+    # under the product name.
+    #
+    # Deliberately a NEW field rather than a rewrite of display_name:
+    # display_name is the ALERT IDENTITY on the live seat (see B's note below),
+    # and renaming it would change what arrives in Telegram and email for the
+    # only variant that places real orders. Not worth it for a label.
+    # NOTE: no "/" in a subtitle. /api/strategies/meta is guarded by
+    # test_no_filesystem_paths_leaked, which asserts no path separator appears
+    # ANYWHERE in the payload — a blunt but effective guard that "7 entries/day"
+    # tripped on its first run. Use "slots", not "per day".
+    subtitle: str = ""
+
     capital_basis: str = "defined_risk"
 
     # sides answers "does this strategy ever place BOTH a call and a put side".
@@ -145,6 +163,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         bot_name_base="HYDRA",
         capital_basis="defined_risk",
         sides="two_sided",
+        subtitle="0DTE SPX iron condor · 2 slots · 1 contract",
     ),
     "b": StrategyMeta(
         id="b",
@@ -166,6 +185,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         bot_name_base="HYDRA",
         capital_basis="defined_risk",
         sides="two_sided",
+        subtitle="0DTE SPX iron condor · 7 slots · 7 contracts",
     ),
     "c": StrategyMeta(
         id="c",
@@ -180,6 +200,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         bot_name_base="HYDRA",
         capital_basis="defined_risk",
         sides="two_sided",
+        subtitle="0DTE SPX iron condor · 3 slots · 7 contracts",
     ),
     "d": StrategyMeta(
         id="d",
@@ -194,6 +215,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         bot_name_base="DCTM",
         capital_basis="net_debit",
         sides="two_sided",
+        subtitle="Multi-day SPX double calendar · net debit",
     ),
     "e": StrategyMeta(
         id="e",
@@ -208,6 +230,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         bot_name_base="SPYDC",
         capital_basis="net_debit",
         sides="two_sided",
+        subtitle="Multi-day SPY double calendar · net debit",
     ),
     "f": StrategyMeta(
         id="f",
@@ -232,6 +255,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         bot_name_base="HYDRA",
         capital_basis="defined_risk",
         sides="one_sided",  # a true one-sided subset of a 4-leg IC
+        subtitle="0DTE SPX credit vertical · fades the expected-move boundary",
     ),
     "g": StrategyMeta(
         id="g",
@@ -259,6 +283,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         bot_name_base="STRANGLE",
         capital_basis="broker_margin",  # naked shorts: margin, not width
         sides="two_sided",  # two naked shorts — two-sided, just wingless  # matches StrangleStrategy.BOT_NAME (not "HYDRA")
+        subtitle="0DTE SPX naked strangle · undefined risk",
     ),
 }
 

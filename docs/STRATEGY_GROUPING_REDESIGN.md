@@ -101,7 +101,7 @@ etc.) with one data structure. Comparison refuses credit-vs-debit *by constructi
 **Frontend — data-driven, no hardcoded letters:**
 - `useStrategyMeta()` hook fetches `/api/strategies/meta` once (replaces the ad-hoc `useComparisonEnabled`
   / `useDcEnabled` probes in `App.tsx`).
-- **Main-dashboard picker** — `StrategyPicker.tsx` in the Header (grouped dropdown of strategies whose
+- **Main-dashboard picker** — `StrategySwitcher.tsx` in the Header (a grouped popover — letter badge, name, spec line and LIVE badge per strategy; replaced the native `<select>` on 2026-09-18) of strategies whose
   `capabilities.main_dashboard`), selection in the Zustand store, persisted to `localStorage`
   (`calypso-selected-strategy`), default = `is_primary`. `Dashboard.tsx` becomes a thin
   `<StrategyDashboard>` that dispatches by `data_kind`: the current IC layout → `IronCondorDashboard.tsx`,
@@ -266,7 +266,7 @@ tests stay green under a faithful lift):
 5. **Dashboard backend**: `/api/strategies/*` + a **shape-distinct** `DCDBReader` (debit-native; no IC-field
    leakage; P&L by `close_date`) + group-scoped comparison. Register `/api/strategies` under `_api_guard`; tests
    for read-only + missing-file tolerance + "no IC keys in calendar payload." Old endpoints preserved.
-6. **Dashboard frontend**: `useStrategyMeta`, `StrategyPicker`, `StrategyDashboard` dispatch, `GroupComparison`
+6. **Dashboard frontend**: `useStrategyMeta`, `StrategySwitcher`, `StrategyDashboard` dispatch, `GroupComparison`
    tabs, shape-aware renderers. **+ audit (blocking):** decide the per-strategy live-state model (header chrome
    re-binds to the selection via the snapshot envelope; stop-toasts don't cross strategies); scope the picker to
    the Dashboard tab until History/Analytics are parameterized. `tsc -b` + `vite build` clean.

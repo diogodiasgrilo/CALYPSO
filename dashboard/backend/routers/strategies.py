@@ -234,6 +234,11 @@ def _strategy_meta_dict(m: tax.StrategyMeta) -> dict:
     return {
         "id": m.id,
         "display_name": m.display_name,
+        # Navigation revamp 2026-09-18: the switcher renders badge + name +
+        # SPEC. Without this the four naming conventions across seven items
+        # were all the reader had, and B/C differed only by a parenthetical.
+        "subtitle": m.subtitle,
+        "short_name": m.short_name,
         "group_id": m.group_id,
         "family": m.structure_family,  # spec: family (= structure_family)
         "pnl_shape": m.pnl_shape,

@@ -411,7 +411,7 @@ export function LoginGate({ children }: { children: ReactNode }) {
 // both fields were byte-identical focused and unfocused, and a real keyboard
 // Tab landed on the username field with `outline: none`. A keyboard user could
 // not see which field they were in — on the sign-in form, the first screen of
-// the app. `focus:border-info` is the pattern StrategyPicker already uses and
+// the app. `focus-visible:border-info` is the pattern StrategySwitcher uses and
 // which the same probe confirms working (border goes to #58a6ff).
 const inputClass =
   "w-full min-h-11 rounded-lg border border-border-dim bg-bg px-3 py-2.5 text-text-primary text-sm outline-none transition-colors focus:border-info";

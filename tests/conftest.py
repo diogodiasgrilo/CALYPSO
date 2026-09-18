@@ -89,3 +89,30 @@ def _isolate_shared_gex_cache(tmp_path_factory, monkeypatch):
         "CALYPSO_GEX_CACHE_DIR",
         str(tmp_path_factory.mktemp("gex_cache")),
     )
+
+
+def strip_comments(src: str, lang: str = "auto") -> str:
+    """Remove comments and docstrings before searching source for a token.
+
+    SHARED because this trap has now fired TEN times in a single day, each time
+    in a test that was itself documenting the trap. The pattern is always the
+    same: a test bans a token, and the comment explaining WHY it is banned
+    contains the token, so the test passes (or fails) on its own prose instead
+    of on the code.
+
+    Every source-scanning test should call this first. Handles JS/TS (`//`,
+    block comments) and Python (`#`, module/function docstrings).
+
+        assert "badThing" not in strip_comments(path.read_text())
+    """
+    import re as _re
+
+    if lang in ("auto", "js", "ts"):
+        src = _re.sub(r"/\*.*?\*/", "", src, flags=_re.S)
+        src = _re.sub(r"^\s*//.*$", "", src, flags=_re.M)
+    if lang in ("auto", "py"):
+        # Triple-quoted blocks first, then trailing # comments.
+        src = _re.sub(r'"""(?:.|\n)*?"""', "", src)
+        src = _re.sub(r"'''(?:.|\n)*?'''", "", src)
+        src = _re.sub(r"(?m)^\s*#.*$", "", src)
+    return src

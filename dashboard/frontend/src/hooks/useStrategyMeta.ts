@@ -45,6 +45,9 @@ export interface StrategyCapabilities {
 export interface StrategyInfo {
   id: string; // lowercase letter key ("a".."e")
   display_name: string;
+  /** One-line spec rendered under the name in the switcher (taxonomy, 2026-09-18). */
+  subtitle?: string;
+  short_name?: string;
   group_id: string;
   family: string; // structure_family: "iron_condor" | "double_calendar" | "unknown"
   pnl_shape: PnlShape;

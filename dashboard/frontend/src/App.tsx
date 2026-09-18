@@ -53,6 +53,23 @@ function NavTabs() {
         <BarChart3 size={14} />
         Analytics
       </NavLink>
+      {/* Two DIFFERENT axes lived in one undifferentiated row until 2026-09-18.
+          Dashboard/History/Analytics are views OF the selected strategy; the
+          comparison links LEAVE that strategy and show a whole group. Rendered
+          identically, nothing told you that clicking one abandoned your
+          context. A tab bar means "same thing, different view", and half of
+          this one did not. Separated with a rule and labelled. */}
+      {comparableGroups.length > 0 && (
+        <>
+          <span
+            className="self-center h-4 w-px bg-border-dim mx-1.5 shrink-0"
+            aria-hidden
+          />
+          <span className="self-center text-3xs font-bold uppercase tracking-wider text-text-dim pr-0.5 shrink-0">
+            Compare
+          </span>
+        </>
+      )}
       {comparableGroups.map((g) => (
         <NavLink key={g.id} to={`/comparison/${g.id}`} className={linkClass}>
           <Scale size={14} />

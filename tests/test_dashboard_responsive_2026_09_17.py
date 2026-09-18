@@ -48,7 +48,7 @@ sys.path.insert(0, str(ROOT))
 SRC = ROOT / "dashboard" / "frontend" / "src"
 APP = SRC / "App.tsx"
 HEADER = SRC / "components" / "layout" / "Header.tsx"
-PICKER = SRC / "components" / "shared" / "StrategyPicker.tsx"
+SWITCHER = SRC / "components" / "shared" / "StrategySwitcher.tsx"
 CSS = SRC / "index.css"
 COMPARISON = SRC / "pages" / "Comparison.tsx"
 CAL_COMPARISON = SRC / "components" / "comparison" / "CalendarComparison.tsx"
@@ -132,12 +132,22 @@ def test_picker_group_can_shrink():
 
 
 def test_picker_width_is_capped_more_tightly_on_phones():
-    src = PICKER.read_text()
-    assert re.search(r"max-w-\[[\d.]+rem\]\s+sm:max-w-\[14rem\]", src), (
-        "the picker no longer has a tighter phone cap — a 14rem select does "
-        "not fit a 390px header alongside the logo, price and icons."
+    # REWRITTEN 2026-09-18. The old assertion was about a `<select>`, which
+    # claims the intrinsic width of its LONGEST option and therefore needed an
+    # explicit max-width cap. The switcher that replaced it is a button sized by
+    # its own content, so that cap is not just unnecessary — the mechanism it
+    # guarded no longer exists.
+    #
+    # The PROPERTY still matters and is unchanged: the trigger must not blow out
+    # a 390px header. Measured — showing the full name there pushed the SPX price
+    # off screen entirely — so the name is hidden below `sm` and the letter badge
+    # carries the identity.
+    src = SWITCHER.read_text()
+    assert "max-sm:hidden" in src, (
+        "the switcher shows its full name at phone width; that pushed the SPX "
+        "price off the header when it was measured."
     )
-    assert "min-w-0" in src, "the picker cannot shrink inside its group"
+    assert "min-w-0" in src, "the switcher cannot shrink inside its header group"
 
 
 def test_wordmark_yields_before_information():
@@ -170,7 +180,11 @@ def test_icon_buttons_have_a_real_hit_area():
 
 def test_touch_targets_are_taller_on_phones():
     assert "max-sm:py-2.5" in APP.read_text(), "nav tabs lost their touch height"
-    assert "max-sm:py-2" in PICKER.read_text(), "the picker lost its touch height"
+    # The switcher sets an explicit 44px floor (min-h-11) rather than relying on
+    # padding, which is stronger: it survives a change to the type scale.
+    assert "min-h-11" in SWITCHER.read_text(), (
+        "the strategy switcher lost its 44px tap floor"
+    )
 
 
 @pytest.mark.parametrize("path,expr", [

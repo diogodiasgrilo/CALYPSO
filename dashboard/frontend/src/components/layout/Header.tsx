@@ -11,7 +11,7 @@ import { useBotConfig } from "../../hooks/useBotConfig";
 import { useStrategyMeta } from "../../hooks/useStrategyMeta";
 import { useSelectedStrategy } from "../../hooks/useSelectedStrategy";
 import { useSelectedSnapshotStore } from "../dashboard/selectedSnapshotStore";
-import { StrategyPicker } from "../shared/StrategyPicker";
+import { StrategySwitcher } from "../shared/StrategySwitcher";
 import type { ICSnapshotBody } from "../../hooks/useStrategySnapshot";
 
 export function Header() {
@@ -162,7 +162,7 @@ export function Header() {
         </span>
 
         {/* Strategy picker (dashboard tab only). */}
-        {showPicker && <StrategyPicker />}
+        {showPicker && <StrategySwitcher />}
 
         {/* Static label fallback when the picker isn't shown (other tabs) or
             there's only one strategy. The label follows the selection.
