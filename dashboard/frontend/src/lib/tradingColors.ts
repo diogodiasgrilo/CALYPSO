@@ -30,7 +30,7 @@ export const colors = {
   profit: "#7ee8c7",
   profitMuted: "#5ca18d",
   loss: "#f95f58",
-  lossMuted: "#c9413a",
+  lossMuted: "#cd5049",
   warning: "#d29922",
   warningMuted: "#a67b1a",
   info: "#5da8ff",
