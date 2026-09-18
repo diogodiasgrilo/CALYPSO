@@ -406,8 +406,15 @@ export function LoginGate({ children }: { children: ReactNode }) {
 // mock server with auth switched off and so never rendered this screen at all.
 // The floor is set with min-h rather than more padding so it survives a future
 // change to the type scale.
+// `outline-none` removes the browser's own focus ring, so something has to
+// replace it. Nothing did: measured 2026-09-18 with uiaudit/diag-focus.mjs,
+// both fields were byte-identical focused and unfocused, and a real keyboard
+// Tab landed on the username field with `outline: none`. A keyboard user could
+// not see which field they were in — on the sign-in form, the first screen of
+// the app. `focus:border-info` is the pattern StrategyPicker already uses and
+// which the same probe confirms working (border goes to #58a6ff).
 const inputClass =
-  "w-full min-h-11 rounded-lg border border-border-dim bg-bg px-3 py-2.5 text-text-primary text-sm outline-none transition-colors";
+  "w-full min-h-11 rounded-lg border border-border-dim bg-bg px-3 py-2.5 text-text-primary text-sm outline-none transition-colors focus:border-info";
 const inputStyle = { caretColor: colors.profit };
 
 function ErrorLine({ error }: { error: string }) {
