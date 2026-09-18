@@ -55,13 +55,13 @@
 
 ## Gate 2 — Audit state
 
-- [ ] `docs/migration/P7_AUDIT_FINDINGS.md` shows **0 OPEN findings**
+- [x] `docs/migration/P7_AUDIT_FINDINGS.md` shows **0 OPEN findings** — ✅ verified 2026-09-18 (0 rows marked OPEN).
   ```bash
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="grep -c '| OPEN |' /opt/calypso/docs/migration/P7_AUDIT_FINDINGS.md"
   # MUST output: 0
   ```
-- [ ] `docs/migration/DEFERRED_WORK.md` — every open DEF entry has an explicit non-blocking justification
-- [ ] No `# TODO` / `# FIXME` / `# XXX` markers in `bots/hydra/` or `shared/ib_*.py`
+- [x] `docs/migration/DEFERRED_WORK.md` — every open DEF entry has an explicit non-blocking justification
+- [x] No `# TODO` / `# FIXME` / `# XXX` markers in `bots/hydra/` or `shared/ib_*.py` — ✅ verified 2026-09-18 (grep count 0).
   ```bash
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="grep -rn '# TODO\|# FIXME\|# XXX' /opt/calypso/bots/hydra/ /opt/calypso/shared/ib_*.py 2>/dev/null | wc -l"
   # MUST output: 0
@@ -69,7 +69,7 @@
 
 ## Gate 3 — Test state
 
-- [ ] Full test suite passes (**4063 passed / 16 skipped**, 0 failed — baseline as of 2026-09-18; the count grows every week, so the gate is **0 failed at the then-current baseline**, never the literal number)
+- [x] Full test suite passes (**4063 passed / 16 skipped**, 0 failed — baseline as of 2026-09-18; the count grows every week, so the gate is **0 failed at the then-current baseline**, never the literal number)
   ```bash
   # RUN LOCALLY, against the deployed commit — NOT on the VM.
   # pytest / pip-audit / coverage are DELIBERATELY excluded from the production venv
@@ -101,7 +101,7 @@
   > session — verified against a stub broker in all four states. Override for a genuine maintenance
   > window only, with `calypso-broker` **stopped**: `ALLOW_SESSION_EVICTION=1`.
 
-- [ ] `pip-audit` returns zero **High** or **Critical** CVEs in the IBKR stack
+- [x] `pip-audit` returns zero **High** or **Critical** CVEs in the IBKR stack — ✅ verified 2026-09-18 ("No known vulnerabilities found").
   ```bash
   # LOCALLY (pip-audit is deliberately not on the VM — see the note above).
   .venv/bin/pip-audit -r requirements.txt
@@ -240,7 +240,7 @@ So Gate 5 is now purely operational.
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="systemctl list-timers db_backup.timer --no-pager"
   # CHECK: NEXT shows tonight's run, LAST shows yesterday's success
   ```
-- [ ] Yesterday's snapshot is visible in GCS
+- [x] Yesterday's snapshot is visible in GCS — ✅ verified 2026-09-18 (`variant_g_hydra_state_20260917.json` et al in `gs://calypso-backups/`).
   ```bash
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso gsutil ls gs://calypso-backups/ | tail -3"
   # MUST include yesterday's date in filename

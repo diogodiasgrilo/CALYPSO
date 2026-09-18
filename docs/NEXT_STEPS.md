@@ -13,62 +13,58 @@
 
 ---
 
-# §A0. WHERE WE ARE — 2026-09-15 (Tue, pre-market)
+# §A0. WHERE WE ARE — 2026-09-18 (Fri)
 
-**Fleet:** all 9 units active · broker `connected/authenticated/not competing` · account FLAT ·
-settlement complete for Monday · VM and origin in sync.
+**Fleet:** all 9 units active · broker `connected/authenticated/not competing` · VM tree clean ·
+VM and origin in sync. **B is flat and trading today** (7 slots from 09:45 ET) — its first session
+since Monday, because 09-16 was the FOMC announcement skip and 09-17 the T+1 blackout. Both were
+correct behaviour, verified in the logs, not faults.
 
-### Deployed and VERIFIED
+### Closed since 2026-09-15
 
 | | What | Evidence |
 |---|---|---|
-| ✅ | **Dependency CVEs: 44 → 0** | `pip-audit` clean on `requirements.txt`, the lock file, **and the VM's installed set**. Root cause was the unpinned dashboard stack — now pinned. |
-| ✅ | **`main` merged** (613 commits, `--no-ff`) | `main` at `59a1fc7`; suite green *on the merge result*; every doc-cited SHA still resolves. |
-| ✅ | **Backups now cover the live seat** | They never did — `db_backup.sh` protected a dry-run shadow. Found by the first RB-7 rehearsal, which then PASSED. |
-| ✅ | **Chaos test PASSED** | First ever. 33s restart, state intact, no orphans. `RUNBOOKS.md` RB-10. |
-| ✅ | **Schema v17 on all 7 DBs** | Migrated offline — it never needed the broker. |
-| ✅ | **Halt criteria + week-1 plan drafted** | `LIVE_HALT_CRITERIA.md`, thresholds from B's real loss distribution, **per contract**. Held on first contact Monday (−$1,756 vs −$2,800 limit). |
+| ✅ | **Dashboard rebuild — all 8 defects** | Phases 0–10 (`890f748`…`ba4395b`). §A-bis-3 below is CLOSED. |
+| ✅ | **F booked every take-profit TWICE** | `9906839`. Also counted **no entries at all**, so it was excluded from every `entries_placed > 0` analysis while still accumulating P&L. Lifetime corrected **$177.90 → $45.80**. |
+| ✅ | **Bespoke-path sweep** | `2dfbce7`. Three more omissions in F/MKT-018 fixed — and a **clean negative**: F's double-count was the ONLY one in the fleet; Brandon's four sites (live on B/C) are correct. |
+| ✅ | **A skipped entry deploys no capital** | `9536170`. G had booked $60,000 "deployed" on a day both entries were blackout-skipped. |
+| ✅ | **monotonic()'s zero is BOOT** | `eeb02b2`, `85775cb`, `8f3eb39`. Five sites. Latent on a 191-day-uptime VM, would bite on the first restart after a reboot. |
+| ✅ | **Accessibility + degraded-data** | Contrast 281 failing nodes → 0; login gate audited for the first time; 4 keyboard defects; **a backend 500 rendered a WHITE PAGE** — no error boundary existed anywhere in the app. |
+| ✅ | **CI now gates all of it** | Suite + typecheck + lint ratchet + visual audit + responsive sweep + 5 browser probes, on every push. PyYAML added so a malformed `ci.yml` fails a test rather than silently not running. |
+| ✅ | **Gate 2 clean** | 0 TODO/FIXME, 0 open P7 findings, and every open DEF entry now carries a verified justification — see below. |
 
-### Verification status of the 2026-09-15 deploys
+### The deferred-work register was wrong
 
-1. **Variant F entry recording — ✅ VERIFIED 2026-09-16.** `variant_f.trade_entries` has its first
-   row ever: `2026-09-15 e#1 put 7550/7540, credit $127.50`. The fix works.
-2. **POS-003 merged-leg resolver — ⏳ STILL UNVERIFIED.** Not because it failed: **B had 0 stops on
-   2026-09-15**, so no leg vanished and no discrepancy arose to resolve. 10 reconciliations ran, all
-   "0 mismatched". **It needs a day with both an overlap AND a stop.**
+Reviewing it against the code (rather than stamping it) found **DEF-7 obsolete**: it had been listed
+for months as "mid-session POS-003 reconciliation does nothing on IBKR", and that is **not true** —
+`strategy.py:_check_hourly_reconciliation` IS POS-003 in the conid model and runs hourly during
+market hours. Only a dead Saxo loop remains. **DEF-6** turned out resolved since 2026-09-10. Only
+**DEF-4** is genuinely open, and only half of it is inert. None is a gap in live-trading position
+safety. ⚠️ Note the confusable: DEF-7's "POS-003" is NOT the merged-leg resolver also called POS-003.
 
-   **What that day showed instead is how common the overlap is** — far more than the Sep-11 evidence
-   suggested. On a single session B had **8 strikes carrying more than one leg**:
+### Still unverified in production
 
-   ```
-   7620: e#4 short_call, e#5 short_call, e#6 long_call, e#7 long_call   <- FOUR legs
-   7625: e#3 short_call, e#4 long_call,  e#5 long_call
-   7530 / 7535 / 7540 / 7625 : opposite-sign short/long pairs
-   7555 / 7550 : same-sign pairs across entries
-   ```
-
-   ⚠️ **A 4-leg strike like 7620 (2 shorts + 2 longs) is NOT fully solved by the fix.** If one short
-   closes, two subsets explain it equally, so the resolver correctly REFUSES and sends it to manual
-   review — the entries' credits differ, so guessing would mis-attribute P&L. The fix resolves the
-   2-leg opposite-sign case (the Sep-11 incident); it does not eliminate every manual-review case,
-   and should not be described as if it did.
+- **POS-003 merged-leg resolver** (deployed 09-15). Needs a session with **both** a stop **and** an
+  overlapping strike. 09-15 had 8 overlapping strikes but zero stops; 09-16/17 had no trading.
+- **GEX veto EV** — data-blocked until ~20 vetoes carry both strikes AND credit (~2 weeks).
 
 ### Next actions, in order
 
-1. **[today, RTH]** `scripts/broker_paper_smoke.py` check-only → closes **Gate 3**'s last item. Needs
-   live quotes; exit 0 = PASS, 75 = skipped/market-closed.
-2. **[today, post-close]** Verify the two items above; re-run `scripts/verify_pnl_vs_account.py` with
-   a flat account for a clean drift reading.
-3. **[this week]** **Change freeze on B.** Gate 4 restarts from 0 — deliberately reset by today's
-   deploy. See the note below.
-4. **[~2 weeks]** GEX veto EV becomes answerable once ~20 vetoes carry both strikes AND credit.
+1. **[today]** Let B's session run clean. It is **Gate 4 day 1**.
+2. **[queued, needs a restart anyway]** Two pure dead-code deletions the audit surfaced: the Saxo
+   loop behind DEF-7, and STATE-002's dead count comparison. Batched deliberately — each would
+   otherwise cost a Gate 4 day for zero behaviour change.
+3. **[near cutover, NOT now]** The armed paper order-path smoke. Gate 3 wants a pass **in the last
+   7 days**, and go-live is 4–6 weeks out, so a run today expires before it counts. It also adds
+   nothing B does not already prove daily by filling real paper orders.
+4. **[~2 weeks]** GEX veto EV, once the telemetry has accumulated.
 
 ### Blocked on the operator — the critical path
 
-**FUND THE LIVE ACCOUNT** (created, not funded; confirm it is a **margin** account). Then:
-funded → options-spread permissions → live market-data subscriptions → OAuth keypair → ~2wk
-activation. **4–6 weeks, all calendar, none of it engineering.** Everything else queues behind it.
-Also yours: review the halt thresholds, then the approval commit (Gate 9).
+**FUND THE LIVE ACCOUNT** (created, not funded; confirm it is a **margin** account). Then, strictly
+ordered: permissions → live market-data subscriptions → a new OAuth keypair (~2wk activation).
+**4–6 weeks, all calendar, none of it engineering.** Also yours: the halt thresholds and the
+approval commit (Gate 9).
 
 ### Gate board
 
@@ -76,11 +72,13 @@ Also yours: review the halt thresholds, then the approval commit (Gate 9).
 |---|---|---|---|---|---|---|---|---|---|
 | 🟡 | 🟢 | 🟡 | 🔴 | 🟡 | ⚪ | 🟢 | 🔴 | 🟡 | 🟡 |
 
-Gate 4 is 🔴 at **streak 0** — reset on purpose today. **Why that was right:** Gate 4 is FOUR
-requirements, not one, and also demands the 5 sessions net **≥ $0**. The streak being protected had
-day 1 = −$1,756 against B's +$216/traded-day average, so it could never have passed. **Fix first,
-then freeze on the code you actually go live with.** Gate 8 is 🔴 only because B runs 7 contracts vs
-a mandated 1 — a cutover-time change, not work.
+Gate 4 restarted at **day 1 on 2026-09-18** — B was restarted that morning to pick up the alert and
+capital fixes. The gate counts **any** code-reason restart as intervention, and rightly so: the point
+is five sessions on ONE unchanged build, not five sessions that happen to be quiet.
+**This is cheap right now** — funding is 4–6 weeks out, so the clock can reset many times and still
+not be the bottleneck. The real freeze belongs near cutover, when it is the last thing standing
+between here and live. Gate 8 is 🔴 only because B runs 7 contracts against a mandated 1 — a
+cutover-time config change, not work.
 
 ---
 
@@ -455,7 +453,18 @@ make that error (mutation-tested).
 
 ---
 
-# §A-bis-3. 🔴 DASHBOARD IS BROKEN FOR NON-LIVE VARIANTS — audited 2026-09-17
+# §A-bis-3. ✅ DASHBOARD BROKEN FOR NON-LIVE VARIANTS — CLOSED 2026-09-17/18
+
+> **All 8 defects closed.** Phases 0–10 shipped (`890f748` contract test → `5c6ca5c` endpoint
+> scoping → `4876db6`/`5161303` the taxonomy axis → `c29bb59` per-strategy capital → `c26d51a`
+> previous-session block → `5972f46` the calendar page can show E → `ebc5be4` total_trades deleted →
+> `f5a026b` undefined-risk card → `ba4395b` one-sided rendering). The architectural cause — `pnl_shape`
+> conflating how P&L is earned with what capital means — was split into `capital_basis` and `sides`.
+>
+> Kept below as the record of what was wrong and why, because the root cause is worth remembering:
+> **the dashboard had been shown to investors and had never been audited** — every "no bugs" given
+> before 2026-09-17 was scoped to trading deploys.
+
 
 Full audit: [`DASHBOARD_VARIANT_AUDIT_2026_09_17.md`](DASHBOARD_VARIANT_AUDIT_2026_09_17.md).
 Found the hard way — the dashboard was shown to investors. **I had never audited it**; every "no
@@ -578,7 +587,12 @@ confirmation of the complementarity finding that RANGE is what kills these strat
 and lost nothing. **G's stops worked** — it was flat before the announcement — but that is path luck:
 stops protect against a move, not a gap. n=1; revisit after ~3 more FOMC days.
 
-### 📄 CLAUDE.md is stale on FOMC
+### ✅ CLAUDE.md is stale on FOMC — FIXED
+
+> Corrected in CLAUDE.md, which now reads "**ENABLED on A/B/C**" with the 2026-09-16 live evidence
+> and an explicit warning that **F and G have it FALSE and DO trade announcement days** — including
+> G, the undefined-risk naked strangle. This note is retained only so the correction is traceable.
+
 
 It states *"FOMC Announcement Skip: DISABLED. Bot trades normally on FOMC days."* The live configs
 say `fomc_announcement_skip=True` on A/B/C, and B demonstrably skipped 2026-09-16. The memory

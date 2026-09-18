@@ -2,11 +2,27 @@
 
 **This file is the single-source-of-truth for the current state of the `hydra-ibkr-standalone` branch.** Any Claude session arriving at this repo should read this file first, before CLAUDE.md. CLAUDE.md is the operator reference (what the bot does, how to deploy, troubleshoot); this file is the *project state* (what's been done, what's in flight, what's blocked).
 
-**Last updated:** 2026-07-24 (B↔C live-paper swap recorded — see the dated section below; the rest of this file's narrative still stops at 2026-06-16 and is due a fuller refresh, see `docs/NEXT_STEPS.md` §10 for in-flight doc-consolidation work)
-**Base branch:** `hydra-ibkr-standalone` — last commit `d83d50b` + the AUD5 remediation commit (use `git rev-parse HEAD` to verify).
-**Active feature branch:** `feat/strategy-grouping-spy-calendar` (commits `f9e7d2a`…`9f9e7ad`, off `hydra-ibkr-standalone`) — strategy taxonomy/grouping + Strategy D go-live work + new Strategy E (SPY double calendar). **NOT merged.** See the "Strategy D go-live + Strategy E + strategy-grouping" section immediately below.
-**Commits ahead of `main`:** 153 + the AUD5 remediation commit (base branch) (use `git log --oneline main..HEAD | wc -l` to verify)
-**Test suite:** unit suite passes; integration/optional tests skipped pending live paper account. Re-run `pytest` for the exact current count (it grew past the old 953 snapshot after the 2026-05-31 30-agent audit, `38ac9d6`); see CI / run `python -m pytest tests/ -q`. The suite is deterministic at any wall-clock hour (the intraday-OHLC tests were time-gated; fixed 2026-05-28).
+**Last updated:** 2026-09-18. ⚠️ **The header facts below are current; the dated narrative further down still stops in June/July and is HISTORY, not state.** For the live one-screen picture read [`docs/NEXT_STEPS.md`](../NEXT_STEPS.md) §A0 — it is refreshed per session and this file is not.
+**Base branch:** `hydra-ibkr-standalone` @ `62d3773` (verify with `git rev-parse HEAD`).
+**Feature branches:** none outstanding. `feat/strategy-grouping-spy-calendar` (taxonomy/grouping + Strategy D go-live + Strategy E) is **MERGED** — the "NOT merged" line that stood here until 2026-09-18 was two months stale.
+**Commits ahead of `main`:** 93 (`main` @ `59a1fc7`, merged forward 2026-09-15 with 613 commits, `--no-ff`).
+**Test suite:** **4063 passed / 16 skipped** (2026-09-18). CI runs it on every push (`.github/workflows/ci.yml`) along with a typecheck, a lint ratchet, a 42-surface visual audit, a responsive sweep, and five accessibility/degraded-data browser probes.
+
+> ### ⚠️ THE MOST IMPORTANT CORRECTION TO THIS FILE (2026-09-18)
+> Everything below about go-live sequencing describes **June 2026** and is
+> superseded. The current facts:
+> - **B is the LIVE PAPER SEAT** (`dry_run=false`, 7 contracts, alerts on) and has
+>   been since the **2026-07-24 B↔C swap**. The narrative below still says
+>   "B/C stay dry-run" and "variant A will auto-flip" — both long dead.
+> - **A and C are dry-run shadows.** D, E, F, G are dry-run-locked.
+> - **Seven variants run**, not three: A/B/C (0DTE IC), D/E (multi-day calendars),
+>   F (Ghauri mean-reversion), G (naked strangle).
+> - **The critical path is FUNDING THE LIVE ACCOUNT** — created, not funded.
+>   Then permissions → market data → a new OAuth keypair (~2wk activation).
+>   4–6 weeks, all calendar, no engineering. Everything else queues behind it.
+> - **Gate board:** 2, 7 🟢 · 1, 3, 5, 9, 10 🟡 · 4 🔴 (streak restarted
+>   2026-09-18) · 8 🔴 (a cutover-time config change, not work).
+
 **Branch is pushed to `origin`** (github.com/diogodiasgrilo/CALYPSO) as of 2026-05-29 — no longer laptop-only.
 
 > ## ⚡ CUTOVER EXECUTED 2026-05-29 (~12:40 ET) — read this first

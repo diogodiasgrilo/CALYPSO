@@ -36,6 +36,98 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-18 Variant F's day accounting was wrong in three ways, and a sweep of
+  every hand-rolled entry/exit path found one more.
+
+  F BOOKED EVERY TAKE-PROFIT TWICE. `_close_entry_early` books the side itself
+  via `_book_early_close_side_pnl`, UNCONDITIONALLY. In dry-run there is no
+  simulated fill, so `side_close_cost` arrives as 0 and it books the FULL credit
+  as though the position closed for free. Brandon has always corrected for this
+  by booking the NEGATIVE close cost afterwards; Ghauri was written against
+  Brandon's shape but booked `credit - close_cost` — a second full booking.
+  2 x 127.50 - 60.00 = 195.00, which is exactly what 2026-09-15 stored for a
+  trade that made $67.50. Its docstring asserted the live booking path "doesn't
+  fire in dry-run"; both halves of that were false.
+
+  F COUNTED NO ENTRIES AT ALL. `entries_completed` was never incremented, so
+  `daily_summaries.entries_placed` was 0 on every F trading day and cumulative
+  `total_entries` stayed 0. Every traded-day analysis filters on
+  `entries_placed > 0` (complementarity.py, variant_performance.py), so F was
+  silently EXCLUDED from all of them while still accumulating P&L. The opening
+  commission was never charged either — only the close side landed, so a $4.60
+  round trip was billed at $2.30. Both come from the same root as the 09-15
+  recording bug, in the same method: F's `_initiate_entry` bypasses the shared
+  one and re-implements only the parts someone remembered.
+
+  Historical rows corrected: F's lifetime P&L 177.90 -> 45.80. The repair
+  recovered the close cost algebraically (cost = 2*credit - stored_gross) and
+  landed on exactly $60.00 — the value in the log — which is independent
+  confirmation the model of the bug was right.
+
+  AN EXISTING TEST WAS ASSERTING THE BUG. `test_take_profit_fires_and_closes`
+  stubbed `_close_entry_early` so it booked NOTHING, then asserted the handler
+  books credit-minus-cost. The stub did not behave like the collaborator it
+  replaced, so it encoded the same misunderstanding as the docstring and the two
+  held the double-count in place for the life of the strategy, with CI green.
+
+  THE SWEEP. Diffing every bespoke `_initiate_entry` and every caller of
+  `_close_entry_early` against the shared path found: F never set
+  `entry.is_complete` (monitoring worked only via `active_entries`' partial-entry
+  fallback); F recorded broker PLACEMENT FAILURES as strategic SKIPS, leaving
+  `entries_failed` at zero and polluting the `skipped_entries` counterfactual
+  table; and `_execute_early_close` (MKT-018) omitted the dry-run cost correction
+  its two sibling callers perform — dormant, since `early_close_enabled` is False
+  on all seven variants, but a trap armed for whoever re-enables it. All fixed.
+  The clean negative matters too: every OTHER site books `-close_cost`, so F's
+  double-count was the only one in the fleet and Brandon's four sites (live on B
+  and C) are correct.
+
+  A SKIPPED ENTRY DEPLOYS NO CAPITAL. `_calculate_capital_deployed` counted an
+  entry that never opened a position toward capital-at-risk. The `defined_risk`
+  basis filtered them by accident (a skipped entry's width is 0), but the
+  `broker_margin` basis returns a flat per-contract floor and had no such
+  accident — so G booked $60,000 of "deployed capital" on 2026-09-17, a day both
+  its entries were skipped for the FOMC T+1 blackout and it traded nothing.
+  Inflates the ROI denominator on every no-trade day.
+
+  ALERT TOKEN BUCKET. Admission was `tokens >= 1.0`, and `(now + 600.0) - now`
+  is not always exactly 600.0 — at monotonic()=654.496627912 (a real CI value) it
+  is 599.9999999999999, crediting 0.9999999999999998 tokens and refusing an alert
+  that had waited its full cooldown. Whether that happens depends on the host's
+  UPTIME, which nothing should depend on. Now tolerates 1e-9 of a token (~0.6
+  microseconds of refill) and clamps the subtraction at zero.
+
+- 2026-09-17 monotonic()'s zero point is BOOT, not "never".
+
+  Several places initialised a "last time this happened" timestamp to 0.0 meaning
+  "never". `time.monotonic()` counts from the machine's boot, so on a
+  freshly-restarted host 0.0 means "a few seconds ago" and the code concludes the
+  event just happened — suppressing the FIRST occurrence after every reboot. On a
+  long-uptime machine it works by accident, which is why the VM (191 days) never
+  showed it and a fresh CI runner did. Fixed in `alert_service._last_init_attempt`,
+  `claude_client._last_call_at`, `logger_service`'s three write timers, and
+  `brandon/strategy.py`'s overlay-watch log throttle — all to float("-inf").
+
+  TAXONOMY PHASE 2/3: `capital_basis` and `sides` added as first-class axes, so a
+  wingless strategy (G's naked strangle) can have a capital figure at all —
+  previously the defined-risk width formula returned 0 for it. `total_trades`,
+  a dashboard field that read 0 forever, deleted rather than left to mislead.
+
+- 2026-09-15 Variant F had never recorded a single entry — only its losses.
+
+  F's `_initiate_entry` bypasses `HydraStrategy._initiate_entry` and silently
+  dropped both the immediate state save and the SQLite entry record. Stops ARE
+  recorded, because they run through the INHERITED `_execute_stop_loss` — so
+  `trade_entries` stayed empty while `trade_stops` filled up, and F's entire
+  recorded history read as pure loss in every report and analyzer.
+
+  POS-003 now works out WHICH merged leg vanished instead of giving up. When
+  several legs share a strike and one closes, the resolver attributes it rather
+  than sending the whole entry to manual review. NOT fully general: a 4-leg
+  strike (2 shorts + 2 longs) still has two subsets that explain a single close
+  equally, and the resolver correctly REFUSES those — the entries' credits
+  differ, so guessing would mis-attribute P&L.
+
 - 2026-09-12 The counterfactual writer finally has a caller, and the backup that
   guards it was wrong in three ways. `DataRecorder.update_skipped_entry_backtest`
   writes `would_have_stopped` / `theoretical_pnl` onto a skipped entry and had
