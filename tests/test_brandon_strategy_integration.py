@@ -124,6 +124,9 @@ class TestCapitalDeployedSweep:
         e.put_side_skipped = False
         e.call_side_stopped = False
         e.call_side_expired = False
+        # MagicMock auto-creates attributes and they are TRUTHY, so an unset
+        # `execution_failed` would make this entry look like it never opened.
+        e.execution_failed = False
         return e
 
     def _strategy(self, entries):

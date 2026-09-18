@@ -6044,6 +6044,23 @@ class MEICStrategy(abc.ABC):
             total += max(0.0, entry_loss)
         return total
 
+    @staticmethod
+    def _entry_never_opened(entry) -> bool:
+        """True when this entry never put a position on — so it ties up NOTHING.
+
+        Basis-INDEPENDENT, and deliberately checked in the sweep rather than in
+        `_entry_margin`, so an override cannot forget it. The base
+        `defined_risk` margin happened to filter these by accident (a skipped
+        entry's width is 0, and `width <= 0` returns 0.0); the `broker_margin`
+        override returns a flat per-contract floor and had no such accident, so
+        G booked $60,000 of "deployed capital" on 2026-09-17 — a day its two
+        entries were BOTH skipped for the FOMC T+1 blackout and it traded
+        nothing at all. That inflates the ROI denominator on every no-trade day.
+        """
+        skipped = (getattr(entry, "call_side_skipped", False)
+                   and getattr(entry, "put_side_skipped", False))
+        return bool(skipped or getattr(entry, "execution_failed", False))
+
     def _entry_margin(self, entry) -> float:
         """Capital ONE entry ties up, per this strategy's ``capital_basis``.
 
@@ -6127,7 +6144,14 @@ class MEICStrategy(abc.ABC):
 
         intervals = []
         any_missing_timing = False
+        any_opened = False
         for entry in self.daily_state.entries:
+            # A skipped or failed entry never opened a position, so it ties up
+            # no margin regardless of capital basis. Checked HERE so no
+            # `_entry_margin` override can omit it.
+            if self._entry_never_opened(entry):
+                continue
+            any_opened = True
             margin = self._entry_margin(entry)
             if margin <= 0:
                 continue
@@ -6184,6 +6208,13 @@ class MEICStrategy(abc.ABC):
             intervals.append((open_t, close_t, margin))
 
         if not intervals:
+            # Distinguish the two ways of getting here. If NOTHING opened (an
+            # all-skipped day, e.g. an FOMC blackout) the honest answer is zero
+            # — falling through to the summed estimate below would report
+            # capital for a day that deployed none, which is the very bug this
+            # placement check was added to fix.
+            if not any_opened:
+                return 0.0
             return sum(
                 e.spread_width * 100 * e.contracts
                 for e in self.daily_state.entries
