@@ -125,8 +125,11 @@ correctly marked NOT BUILT, and Gate 2's audit claims re-measure clean (0 OPEN, 
 ### B has taken no entry since 2026-09-15 — and a third of its sessions are like that
 
 Surfaced by the RB-7 rehearsal (the restored DB's latest trade was 09-15, not 09-18). Three
-consecutive zero-entry sessions: **09-16** (FOMC, a correct skip), **09-17** and **09-18** (MKT-048
-vetoed the entries as unfillable; 09-18 also carries the −$137.20 from the MKT-011B defect).
+consecutive zero-entry sessions — and **two of the three are policy, not market conditions**:
+**09-16** FOMC announcement skip, **09-17** **FOMC T+1 blackout** (7 of 7 slots; `fomc_t1_skip_enabled`
+does exactly this), **09-18** credit gate on 6 slots plus the entry-#7 execution failure that cost
+−$137.20. *(An earlier version of this section said 09-17 was a fillability veto. It was not — it
+was the T+1 blackout, which is deliberate. Corrected from `skipped_entries.skip_reason`.)*
 
 **A VIX-threshold explanation was tested and REFUTED.** The obvious hypothesis — that B's narrow
 5pt spreads stop clearing the fillability floor below some VIX level — does not survive contact
@@ -141,6 +144,30 @@ The ranges overlap almost entirely. B traded on the two **lowest**-VIX days of t
 14.28) and took nothing at 20.25. VIX close does not discriminate — though note it is the *close*,
 while entries are decided 10:15–12:45, so intraday VIX at decision time is the better variable and
 has not been tested.
+
+**The dominant cause is the GEX adjuster, not thin premium.** `skipped_entries.skip_reason`
+across all 13 drought days (76 recorded skips):
+
+| cause | skips | days it dominates |
+|---|---|---|
+| **GEX accel-zone → require-both-sides** | **36** | 07-31, 08-10, 08-11, 08-12, 08-25, 08-27 |
+| credit gate (premium too thin) | 21 | 08-21, 09-18 |
+| FOMC blackout (deliberate policy) | 14 | 07-30, 09-17 |
+| delta floor / chain under-hydrated | 4 | 08-03 |
+| execution failure | 1 | 09-18 |
+
+On five of those days the GEX adjuster alone took 6 or 7 of the 7 slots: one short strike landed in
+a gamma-acceleration zone, the adjuster dropped that side, and `one_sided_entries_enabled=false`
+turned a one-sided entry into no entry. **So roughly half of B's inactivity traces to a gate that is
+already documented as structurally broken** (`gex_gate_broken_and_shadow_2026_09_05`: single-strike
+"walls", whole-chain normalization, a sign convention inverse to SpotGamma, the put branch blind
+0/843).
+
+⚠️ **This measures the COST, not the net.** It does not show the vetoes were wrong — the
+2026-09-06 verdict found vetoed shorts breached 5/43 vs 0/38 for placed ones (p=0.038), i.e. the
+veto looked protective. What is new is that the cost side is now quantified: **36 suppressed
+entries across 7 sessions.** The EV question stays data-blocked until ~20 vetoes carry both strikes
+and credit; this is an input to it, not an answer.
 
 **What IS true, and what matters for go-live: B produces no entries in ~33% of sessions (13 of
 40).** The current three-day run is not an anomaly — 07-29 through 08-03 was a four-session
