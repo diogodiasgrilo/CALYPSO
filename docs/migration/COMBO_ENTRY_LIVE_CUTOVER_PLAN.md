@@ -21,10 +21,43 @@
 > Reg-T table (naked short SPX put ≈ $107,150/contract at SPX 7,630 vs an iron
 > condor's `width × 100` = $500/contract — a 214× ratio). The **order-check-level
 > netting is theoretically expected but empirically unmeasured.**
-> **SETTLE IT FIRST, FREE:** call `what_if_order` with a conidex/BAG
-> `OrderRequest` on the LIVE account. Both the method (`ib_client.py:3629`) and
-> the field exist today. It places **no order** and returns IBKR's own
-> initial-margin block. Do this before sizing to 10c.
+> ~~**SETTLE IT FIRST, FREE:** call `what_if_order` with a conidex/BAG
+> `OrderRequest`~~ — **ATTEMPTED 2026-09-19, AND IT DOES NOT WORK ON PAPER.**
+> The method and field do exist and the call is genuinely free, but the paper
+> account will not return a margin block for a BAG:
+>
+> | form previewed | result |
+> |---|---|
+> | 4-leg SPX IC, bare conidex template | **em-dash placeholders** in `initial`, `maintenance` and `amount` — no numbers |
+> | 4-leg, `@CBOE`-routed | identical placeholders |
+> | 2-leg call vertical (BAG) | **timed out**, and the retries **opened the `ib.orders` circuit breaker** |
+> | 1-leg naked short call (plain, the control) | **full, correct block** |
+>
+> All four legs were snapshot first, so this is not the missing-snapshot artifact
+> `ibind`'s own whatif docstring warns about — the BAG form specifically is what
+> IBKR will not margin here. That is consistent with the rest of the paper combo
+> story (`combos_not_operable_on_ibkr_paper`): the lifecycle is broken, and now
+> the *preview* is too.
+>
+> **Two things the attempt did settle, both useful:**
+> - **The naked figure is now MEASURED, not imported.** A single-leg whatif of one
+>   naked SPX short call returned `initial.change` = **$109,213** (amount 225 USD,
+>   commission 1.63). The "~$110k/contract" above was an inference from a
+>   different, near-the-money 2026-06-04 rejection; it is now a direct reading at
+>   this plan's own far-OTM strikes, and it corroborates the Reg-T table.
+> - **`what_if_naked_margin` — variant G's gate — is NOT inert**, since single-leg
+>   previews are exactly what it issues.
+>
+> ⚠️ **Do NOT put a whatif call in the entry path.** `what_if_order` is on the
+> **orders** family, so a margin probe shares a retry/breaker budget with real
+> placement — which is how the 2-leg attempt above took the breaker down for ~34s.
+>
+> **C1 therefore stays OPEN.** Order-check-level netting cannot be measured on
+> paper by this method. The remaining options are (a) measure it on the live
+> account once funded, or (b) preview the SHORT leg while its protective LONG is
+> already held — which is how HYDRA legs in anyway, needs only single-leg previews
+> (which work), and is testable on paper during RTH. (b) is untried and is the
+> cheaper next step.
 >
 > **C2 — the `allOrNone` claim in the code is FALSE.** `ib_client.py:3050-3055`
 > asserts the ticket "DOES expose `allOrNone` … pass `allOrNone=True` via
