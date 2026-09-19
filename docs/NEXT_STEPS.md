@@ -866,9 +866,15 @@ Keep this short: date, what happened, what it proved. Detail belongs in the link
 - **A2 %-of-width stop: keep B at 0.40.** Validated on 63,807 spread snapshots over 58 C sessions; beats
   credit+buffer 5-for-5 (+$2,450, sign test p=0.031). Costs $0 — B already runs it.
 - **GEX sign convention: do NOT flip.** Direction confirmed but the cost is ~−$535, and the two sampled
-  sessions had zero stop-losses, so the sample can measure the gate's cost and never its benefit. The
-  windowed normalization is measured inert (0/217 predicates changed) and must never be proposed as a
-  remedy for over-vetoing.
+  sessions had zero stop-losses, so the sample can measure the gate's cost and never its benefit.
+  ⚠️ **Correction 2026-09-19 — "windowed normalization is measured inert (0/217 predicates changed)"
+  was an artifact of the measurement, not a property of the variant.** The count came from comparing it
+  against the `live` entry in `shadow_json`, which omits the peak-persistence gate exactly as `windowed`
+  does — so the comparison was like-with-like and found nothing by construction. Measured against what
+  the gate actually recorded, `windowed` differs on **2 of 41** call decisions, in the direction of
+  **more** vetoing. **The instruction stands and is now better supported** (it is still no remedy for
+  over-vetoing — it vetoes more, not less), but do not repeat "0 predicates changed" as a measurement.
+  Same applies to `legacy_no_floor`. See the analyzer fix in §A0.
 - **`TimeoutStopSec`: do NOT lower it.** The shutdown hang was fixed 2026-09-05; post-fix shutdowns still
   legitimately reach 71s during a 7-contract entry. A 25s timeout would SIGKILL the live seat mid-order.
 - **Brandon overlay hedges: OFF on B** since 2026-09-04. Hedge debits ($1,925–$2,240) exceeded the IC-side
