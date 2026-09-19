@@ -91,6 +91,37 @@ the next commit touches the same surface, and nothing in the process notices —
 restart ritual, the dashboard does not. Worth checking the built asset hash against the last
 frontend commit whenever §A0 claims the dashboard is current.
 
+### Pre-cutover documentation re-measurement — 2026-09-19
+
+The go-live documents were re-measured claim by claim against the code and the VM, rather than
+re-read. **Six defects, every one of them in an instruction that gets executed.**
+
+| Where | What it told you to do | Consequence |
+|---|---|---|
+| `IBKR_CREDENTIALS_SETUP.md` | Encrypt the LIVE credentials into `/etc/calypso/ibkr/` (it is paper-only throughout, and says "use the paper-account keypair") | **Overwrites the six paper credentials B is trading on.** Broker returns authenticated to the wrong account, the guard refuses the session, live paper seat down |
+| `LIVE_READINESS_CHECKLIST` Gate 5 | Update `calypso-broker.service` to the live credential paths | Moves **all seven** paper strategies onto a real-money account |
+| `LIVE_READINESS_CHECKLIST` Gate 6 | `hydra.service` must be `inactive` at the flip | Stops the paper control and the Gate-4 streak for no reason |
+| `LIVE_READINESS_CHECKLIST` sign-off | `systemctl restart calypso-broker  # picks up the live creds` | The same mistake as a copy-pasteable command, in the block used at the moment of going live |
+| `LIVE_MONEY_ARCHITECTURE` §8 | "Two brokers on paper credentials — zero live-money risk" | §7's own 🔴 correction forbids exactly this: same IBKR username, they evict each other, B goes offline |
+| `RUNBOOKS.md` ×7 sites | "If unsure, stop the bot: `systemctl stop hydra`" | `hydra` is variant **A**, a dry-run shadow. **Halts no trading at all** while the live seat keeps going |
+
+All corrected. Two more were structural rather than dangerous: the credential directory moved out
+of the paper directory (`/etc/calypso/ibkr-live/`, a sibling — free to change only while nothing is
+deployed), and `RUNBOOKS.md` gained a **STEP 0: which broker are you fixing**, since it had 26
+references to `calypso-broker` and none to the live one.
+
+Smaller drift fixed in passing: Gate 8 graded contracts against B (so B's 7 read as a failure when
+the real-money variant `bm` already ships 1) · Gate 6 required `/api/health` to return
+`"status":"healthy"`, which it has never returned · Gate 4's null-VIX query read variant A's
+database · Gate 9's halt rehearsal named the wrong unit · the test baseline and a
+`requirements.txt` line reference.
+
+**The pattern, which is the real finding:** every one was true when written. They rot because the
+*architecture* moved (cutover → alongside) or the *roles* moved (A → B as the live seat), and a
+document that describes an action has no way to notice either. Verified as sound and needing no
+change: every script the runbooks reference exists, the three unbuilt calendar scripts are
+correctly marked NOT BUILT, and Gate 2's audit claims re-measure clean (0 OPEN, 0 TODO markers).
+
 ### Still unverified in production
 
 - **POS-003 merged-leg resolver** (deployed 09-15) — still needs a session with both a stop and an
