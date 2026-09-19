@@ -100,7 +100,7 @@ re-read. **Six defects, every one of them in an instruction that gets executed.*
 |---|---|---|
 | `IBKR_CREDENTIALS_SETUP.md` | Encrypt the LIVE credentials into `/etc/calypso/ibkr/` (it is paper-only throughout, and says "use the paper-account keypair") | **Overwrites the six paper credentials B is trading on.** Broker returns authenticated to the wrong account, the guard refuses the session, live paper seat down |
 | `LIVE_READINESS_CHECKLIST` Gate 5 | Update `calypso-broker.service` to the live credential paths | Moves **all seven** paper strategies onto a real-money account |
-| `LIVE_READINESS_CHECKLIST` Gate 6 | `hydra.service` must be `inactive` at the flip | Stops the paper control and the Gate-4 streak for no reason |
+| `LIVE_READINESS_CHECKLIST` Gate 6 | `hydra.service` must be `inactive` at the flip | Wrong under the alongside model either way, but be precise about how: taken **literally** it stops variant A, a dry-run shadow, and costs nothing; taken by its **intent** (“don't run on paper during the flip”) it stops the paper fleet including B, the control the real-money seat is measured against. Not an outage — a gate that is either inert or counterproductive |
 | `LIVE_READINESS_CHECKLIST` sign-off | `systemctl restart calypso-broker  # picks up the live creds` | The same mistake as a copy-pasteable command, in the block used at the moment of going live |
 | `LIVE_MONEY_ARCHITECTURE` §8 | "Two brokers on paper credentials — zero live-money risk" | §7's own 🔴 correction forbids exactly this: same IBKR username, they evict each other, B goes offline |
 | `RUNBOOKS.md` ×7 sites | "If unsure, stop the bot: `systemctl stop hydra`" | `hydra` is variant **A**, a dry-run shadow. **Halts no trading at all** while the live seat keeps going |
