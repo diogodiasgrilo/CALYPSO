@@ -190,7 +190,7 @@ Added alongside:
   ─────────────────                      ────────────────
   calypso-broker        :8788            calypso-broker-live      :8789
     CALYPSO_IBKR_ENV=paper                 CALYPSO_IBKR_ENV=live
-    /etc/calypso/ibkr/paper/*.cred         /etc/calypso/ibkr/live/*.cred
+    /etc/calypso/ibkr/*.cred               /etc/calypso/ibkr-live/*.cred
         ↑                                      ↑
   hydra, variant_{b,c,d,e,f,g}           hydra_variant_bm   (B, money)
     dry_run per config                     dry_run=false
@@ -294,7 +294,7 @@ account is funded, the only genuinely new thing is a credential file.
 > paper credential paths: a test enforces that the two units share no
 > credential file.
 2. **When the IBKR chain completes:** encrypt the live credentials into
-   `/etc/calypso/ibkr/live/`, set `CALYPSO_IBKR_ENV=live` on the second broker,
+   `/etc/calypso/ibkr-live/`, set `CALYPSO_IBKR_ENV=live` on the second broker,
    restart it, and confirm `/health` reports `environment=live` with a
    non-`D` account code. Only then start bm, at 1 contract.
 3. **Rollback:** `systemctl stop hydra_variant_bm`. Nothing else is touched,

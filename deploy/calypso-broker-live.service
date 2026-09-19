@@ -54,12 +54,12 @@ Environment="CALYPSO_IBKR_CHAIN_CONCURRENCY=4"
 #
 # Setup + the three mandatory pre-start checks: deploy/IBKR_CREDENTIALS_SETUP.md.
 # Do NOT `systemctl enable` this unit until all three pass for the LIVE set.
-LoadCredentialEncrypted=ibkr_consumer_key:/etc/calypso/ibkr/live/consumer_key.cred
-LoadCredentialEncrypted=ibkr_access_token:/etc/calypso/ibkr/live/access_token.cred
-LoadCredentialEncrypted=ibkr_access_token_secret:/etc/calypso/ibkr/live/access_token_secret.cred
-LoadCredentialEncrypted=ibkr_signature_pem:/etc/calypso/ibkr/live/signature.pem.cred
-LoadCredentialEncrypted=ibkr_encryption_pem:/etc/calypso/ibkr/live/encryption.pem.cred
-LoadCredentialEncrypted=ibkr_dhparam_pem:/etc/calypso/ibkr/live/dhparam.pem.cred
+LoadCredentialEncrypted=ibkr_consumer_key:/etc/calypso/ibkr-live/consumer_key.cred
+LoadCredentialEncrypted=ibkr_access_token:/etc/calypso/ibkr-live/access_token.cred
+LoadCredentialEncrypted=ibkr_access_token_secret:/etc/calypso/ibkr-live/access_token_secret.cred
+LoadCredentialEncrypted=ibkr_signature_pem:/etc/calypso/ibkr-live/signature.pem.cred
+LoadCredentialEncrypted=ibkr_encryption_pem:/etc/calypso/ibkr-live/encryption.pem.cred
+LoadCredentialEncrypted=ibkr_dhparam_pem:/etc/calypso/ibkr-live/dhparam.pem.cred
 
 ExecStart=/opt/calypso/.venv/bin/python -m services.broker.main
 

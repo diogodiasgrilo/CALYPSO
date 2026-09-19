@@ -94,8 +94,8 @@ def test_the_two_brokers_share_no_credential_file():
 def test_the_live_unit_uses_the_live_key_directory():
     live = creds_of(LIVE)
     assert len(live) == 6, f"expected 6 credentials, found {len(live)}"
-    wrong = {k: v for k, v in live.items() if "/ibkr/live/" not in v}
-    assert not wrong, f"live credential(s) not under /etc/calypso/ibkr/live/: {wrong}"
+    wrong = {k: v for k, v in live.items() if "/ibkr-live/" not in v}
+    assert not wrong, f"live credential(s) not under /etc/calypso/ibkr-live/: {wrong}"
 
 
 def test_the_paper_unit_was_not_touched():
@@ -105,7 +105,7 @@ def test_the_paper_unit_was_not_touched():
     assert len(paper) == 6
     moved = {k: v for k, v in paper.items() if not v.startswith("/etc/calypso/ibkr/")}
     assert not moved, f"paper credential paths changed: {moved}"
-    assert all("/ibkr/live/" not in v for v in paper.values()), (
+    assert all("/ibkr-live/" not in v for v in paper.values()), (
         "the PAPER broker now points at live credentials"
     )
 
