@@ -1,6 +1,26 @@
 # HYDRA (Trend Following Hybrid) Strategy Specification
 
-**Last Updated:** 2026-05-24
+**Last Updated:** 2026-09-19 (currency sweep — see the scope warning below; the body still dates from 2026-05-24)
+
+> ## ⚠️ SCOPE + CURRENCY WARNING (2026-09-19)
+>
+> The body of this document dates from **2026-05-24** and specifies the strategy as it
+> ran then. Several behaviours that now govern **live** entries and exits are **absent
+> from it entirely** — verified by grep, not by impression:
+>
+> | Behaviour | Since | Status here |
+> |---|---|---|
+> | **A2 %-of-width stop** (`narrow_spread_stop`) — what actually fires on B | 2026-07-24 | 🔴 absent — see the block in **Stop Loss Rules** |
+> | **Require-both-sides** (`one_sided_entries_enabled: false`) — B/C skip any entry that would be one-sided | 2026-07-16 | 🔴 absent |
+> | **MKT-048 fillability veto** — vetoes on `short_bid − long_ask`, not mid; skipped 6 of 7 entries on 2026-09-18 | 2026-09 | 🔴 absent |
+> | **MKT-011B** — a measured credit of exactly $0.00 is an answer, not a failure | 2026-09-18 | 🔴 absent |
+> | **Deliberate rung pricing** (`entry_pricing.deliberate_rung_pricing`) — entry rungs REST instead of crossing | 2026-09-10 | 🔴 absent |
+>
+> Treat this document as the **baseline 0DTE-IC design**, not as a description of what
+> the live seat does today. For current behaviour read `CLAUDE.md` plus
+> `bots/hydra/__init__.py`'s version history, which is the authoritative log of
+> behaviour changes. Variants **F** (Ghauri mean-reversion) and **G** (undefined-risk
+> strangle) have run since 2026-08-27 and are out of scope here, as D and E are.
 **Version:** 2.0.0-rc.1 (IBKR-standalone — Saxo→IBKR migration complete; paper-only)
 **Purpose:** Complete strategy specification for the HYDRA 0DTE trading bot
 **Base Strategy:** Tammy Chambless's MEIC (Multiple Entry Iron Condors)
@@ -149,7 +169,22 @@ HYDRA started as a simple EMA filter (v1.0.0, Feb 4). Over 10 trading days, each
 
 2 effective base entries per day plus 1 conditional entry. **E#1 at 10:15 is permanently DROPPED at ALL VIX levels as of 2026-04-17** (worst slot historically: 24% WR, -$79/entry; 0% WR at VIX 22-25). E4/E5 dropped in v1.19.0 (negative EV in walk-forward backtest).
 
-**Current schedule (v1.23.0, post-E#1-drop):**
+**Current schedule (v1.23.0, post-E#1-drop) — this is variant A's grid, not B's or C's:**
+
+> ⚠️ **Added 2026-09-19.** The table below is **variant A**. The document header says it
+> specifies A/B/C, and the three do NOT share a schedule:
+>
+> | variant | slots | contracts |
+> |---|---|---|
+> | A | 10:45, 11:15 (+ E6 14:00 conditional) | 1 |
+> | **B (live seat)** | **09:45, 10:15, 10:45, 11:15, 11:45, 12:15, 12:45** — a 7-slot grid | **7** |
+> | C | 10:15, 10:45, 11:15 | 7 |
+>
+> B widened from 4 slots to 7 at the 2026-07-24 live-seat swap. **And on B and C the
+> conditional E6 no longer fires at all** — it is inherently one-sided, and
+> `one_sided_entries_enabled: false` suppresses it (see the header warning). So the
+> put-only / call-only outcomes described throughout this section are **A-only
+> behaviour today**, not the live seat's.
 
 | Entry | Time (ET) | Type | Notes |
 |-------|-----------|------|-------|
@@ -486,6 +521,38 @@ Steps 6-7 internally re-run steps 1-5 if they change strikes.
 ---
 
 ## Stop Loss Rules
+
+> ## 🔴 THIS SECTION DOES NOT DESCRIBE THE STOP THAT FIRES ON THE LIVE SEAT
+>
+> **Added 2026-09-19.** Everything below specifies **credit + buffer**. That is what
+> variant **A** runs, and what B ran until 2026-07-24. It is **not** what variant **B**
+> — the live paper seat — uses today.
+>
+> Since `fd53cef`, B's live config carries
+> `strategy.narrow_spread_stop = {enabled: true, pct_of_width: 0.4}` (verified on the
+> VM 2026-09-19, alongside `dry_run: false`, 7 contracts). `strategy.py`'s **A2
+> %-of-width override** runs AFTER every credit+buffer branch below and **replaces**
+> each placed side's stop with:
+>
+> ```
+> side_stop = pct_of_width x spread_width x 100 x contracts
+> # B today: 0.40 x 5 x 100 x 7 = $1,400 per side  — regardless of credit
+> ```
+>
+> Logged as `A2: Entry #N {side} %-of-width stop = ...`. `_get_effective_stop_level`
+> also **bypasses MKT-042 buffer decay** for A2-mode stops, since a %-of-width
+> trigger does not widen early in the day the way credit+buffer does.
+>
+> **Why it matters that this was not written down:** the narrow Brandon variants
+> collect thin credit, so credit+buffer and %-of-width give very different numbers,
+> and the difference IS the risk on the only variant placing real orders. Reading
+> this section to reason about B's loss per side gives the wrong answer.
+>
+> **Check `narrow_spread_stop.enabled` in the variant's live config before assuming
+> which formula applies.** Default is off, so A and an un-migrated C still run
+> exactly what is specified below. B also enables a `settlement_hold` sub-policy
+> (`itm_pct_of_width: 0.7`, `minutes_before_close: 20`) that this document does not
+> cover at all. Validation of the 0.40 setting is in `docs/NEXT_STEPS.md` §B.
 
 ### The Breakeven Design
 
