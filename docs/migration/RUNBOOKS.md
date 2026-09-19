@@ -705,12 +705,18 @@ variant (`variant_readers.live_seat_id()` — **B** today) and a recent date.
 gcloud compute ssh calypso-bot --zone=us-east1-b --command='sudo -u calypso bash -s' <<'EOF'
 set -uo pipefail
 R=/tmp/rb7_rehearsal; rm -rf $R; mkdir -p $R
-B=gs://calypso-backups; D=$(date -u +%Y%m%d); PY=/opt/calypso/.venv/bin/python
+B=gs://calypso-backups; PY=/opt/calypso/.venv/bin/python; V=variant_b
 
-# 1. restore to SCRATCH
-gsutil -q cp $B/variant_b_backtesting_$D.db     $R/backtesting.db
-gsutil -q cp $B/variant_b_hydra_state_$D.json   $R/hydra_state.json
-gsutil -q cp $B/variant_b_hydra_metrics_$D.json $R/hydra_metrics.json
+# 1. restore to SCRATCH.
+#    Pick the most recent backup that EXISTS. This used to be D=$(date -u +%Y%m%d),
+#    but db_backup.timer fires at 23:00 UTC — so "today's" backup does not exist for
+#    23 hours of every day and the rehearsal failed at step 1 unless you happened to
+#    run it late at night (found 2026-09-19, running it at 08:46 UTC).
+D=$(gsutil ls "$B/${V}_backtesting_*.db" 2>/dev/null | sed 's/.*_\([0-9]\{8\}\)\.db/\1/' | sort | tail -1)
+echo "rehearsing against ${V} backup dated: $D"
+gsutil -q cp $B/${V}_backtesting_$D.db     $R/backtesting.db
+gsutil -q cp $B/${V}_hydra_state_$D.json   $R/hydra_state.json
+gsutil -q cp $B/${V}_hydra_metrics_$D.json $R/hydra_metrics.json
 
 # 2. is it sound? integrity + schema + row counts
 $PY - "$R/backtesting.db" <<'PYEOF'
@@ -778,6 +784,7 @@ row counts are non-zero and close to live; `ensure_schema()` returns `True`; bot
 
 | Date | By | Result | Notes |
 |---|---|---|---|
+| 2026-09-19 | Claude | **PASS** | Second rehearsal; 30-day clock reset to **2026-10-19**. Restored `variant_b_backtesting_20260918.db` (34.9 MB) + state + metrics to scratch: `integrity_check ok`, schema **v17** = code's `SCHEMA_VERSION`, 297 trade_entries / 115 trade_stops / 96 daily_summaries / 80,634 market_ticks, latest trade 2026-09-15; `ensure_schema()` **True**; both JSON artefacts parsed; counts **matched live exactly** (297/115/96 both sides, no drift); live DB mtime unchanged. **Found the date bug above** — the procedure asked for *today's* backup, which does not exist until 23:00 UTC, so a morning rehearsal failed at step 1. Now auto-detects the latest. |
 | 2026-09-12 | Claude (operator-approved) | **PASS** | First rehearsal ever run. Restored `variant_b_backtesting_20260912.db` (32 MB) + state + metrics to scratch: `integrity_check ok`, schema **v17** (4/4 v17 columns), 287 trade_entries / 113 trade_stops / 91 daily_summaries / 77,875 market_ticks, latest trade 2026-09-11; `DataRecorder.ensure_schema()` **True**; both JSON artefacts parsed; counts **matched live exactly** (no drift); live data untouched. **The rehearsal found a real gap first — see below.** |
 
 > **What the first rehearsal found (2026-09-12):** there was **nothing to restore for the live

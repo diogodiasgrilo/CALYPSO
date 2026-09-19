@@ -122,6 +122,36 @@ document that describes an action has no way to notice either. Verified as sound
 change: every script the runbooks reference exists, the three unbuilt calendar scripts are
 correctly marked NOT BUILT, and Gate 2's audit claims re-measure clean (0 OPEN, 0 TODO markers).
 
+### B has taken no entry since 2026-09-15 — and a third of its sessions are like that
+
+Surfaced by the RB-7 rehearsal (the restored DB's latest trade was 09-15, not 09-18). Three
+consecutive zero-entry sessions: **09-16** (FOMC, a correct skip), **09-17** and **09-18** (MKT-048
+vetoed the entries as unfillable; 09-18 also carries the −$137.20 from the MKT-011B defect).
+
+**A VIX-threshold explanation was tested and REFUTED.** The obvious hypothesis — that B's narrow
+5pt spreads stop clearing the fillability floor below some VIX level — does not survive contact
+with the data. Across B's 40 live-era sessions (since the 2026-07-24 swap):
+
+| | count | VIX-close range |
+|---|---|---|
+| sessions **with** entries | 27 | 14.27 – 18.73 |
+| sessions with **zero** entries | 13 | 14.45 – 20.25 |
+
+The ranges overlap almost entirely. B traded on the two **lowest**-VIX days of the era (14.27,
+14.28) and took nothing at 20.25. VIX close does not discriminate — though note it is the *close*,
+while entries are decided 10:15–12:45, so intraday VIX at decision time is the better variable and
+has not been tested.
+
+**What IS true, and what matters for go-live: B produces no entries in ~33% of sessions (13 of
+40).** The current three-day run is not an anomaly — 07-29 through 08-03 was a four-session
+drought, and 08-10/11/12 was another three. Two consequences worth holding:
+
+- **Gate 4 can be satisfied by five dead sessions.** The gate counts sessions without manual
+  intervention, not sessions that traded. Five consecutive no-entry days would close it while
+  proving nothing about execution — which is the opposite of what it exists to establish.
+- **A funded `bm` could sit idle for a week** and that would be normal behaviour, not a fault.
+  Worth expecting, so it is not misread as a broken deployment at the worst moment.
+
 ### Still unverified in production
 
 - **POS-003 merged-leg resolver** (deployed 09-15) — still needs a session with both a stop and an

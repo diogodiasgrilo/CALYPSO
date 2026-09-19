@@ -314,7 +314,8 @@ So Gate 5 is now purely operational.
   > "Rehearsal log". Restored the live seat's DB + state + metrics from GCS to scratch:
   > `integrity_check ok`, schema v17, 287 trade_entries / 113 trade_stops / 91 daily_summaries,
   > `DataRecorder.ensure_schema()` True, counts matched live exactly, live data untouched.
-  > **Re-run by 2026-10-12** — the 30-day clock cannot be satisfied retroactively.
+  > **Re-run by 2026-10-19** — rehearsed again 2026-09-19 (PASS), which reset the clock. It
+  > cannot be satisfied retroactively.
   >
   > ⚠️ **It found a real gap before it could pass.** The live seat had NO database or metrics backup
   > at all — `db_backup.sh` protected variant A (a dry-run shadow) and every variant's *state* file,
