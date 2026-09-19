@@ -163,6 +163,45 @@ already documented as structurally broken** (`gex_gate_broken_and_shadow_2026_09
 "walls", whole-chain normalization, a sign convention inverse to SpotGamma, the put branch blind
 0/843).
 
+**✅ And the over-vetoing looks ALREADY LARGELY FIXED — measured, not assumed.** The 36-of-76 table
+above spans the whole live era and is dominated by the period **before** the 2026-09-05 GEX
+corrections. Split at that date:
+
+| window | sessions | GEX vetoes | per session | entries placed | per session |
+|---|---|---|---|---|---|
+| 07-24 → 09-04 (pre-fix) | 31 | 92 | **2.97** | 56 | **1.81** |
+| 09-05 → 09-18 (post-fix) | 9 | 9 | **1.00** | 28 | **3.11** |
+
+**Veto rate fell ~3× and the entry rate rose ~72%**, and the post window *includes two FOMC
+blackout days* — excluding those it is ~4 entries/session. The memory records that the 09-05
+behaviour *flips* were deferred pending shadow data; what this shows is that the **bug corrections
+that did ship** (the single-strike "wall" fix above all) already removed most of the spurious
+vetoing. **Caveats that matter: n=9 sessions, no randomisation, and August/September are different
+regimes.** This is a strong hint, not a result.
+
+**The breach test can be run TODAY — `skipped_entries` was the wrong table.** `theoretical_pnl` and
+`would_have_stopped` are **0 of 176 populated**, for every skip type, ever: the schema promises a
+counterfactual the recorder never writes, so no EV can come from there. The real telemetry is
+**`gex_decisions`** (82 adjuster rows, 09-08 → 09-18) carrying `reference_strike`, `live_action`
+and a 5-variant `shadow_json`. Scoring breach against the intraday SPX path from each decision's
+own timestamp:
+
+| live_action | n | breached | rate |
+|---|---|---|---|
+| KEEP (traded) | 73 | 2 | 2.7% |
+| **SKIP (vetoed)** | **9** | **0** | **0.0%** |
+
+That points the **opposite way** from the 2026-09-06 verdict (vetoed 5/43 breached vs placed 0/38,
+p=0.038, which made the veto look protective). **It does not overturn it** — 0-of-9 is
+uninformative. But two samples pointing opposite ways is a reason to hold the earlier result more
+loosely than "decided", and the honest status is **unresolved in both directions**.
+
+**Revised timeline for the EV question.** §A0 has been saying "~2 weeks". Post-fix the adjuster
+produces ~1 veto/session and only ~1 in 3 carries both credits, so ~20 fully-scoreable vetoes is
+**~10–12 weeks**, not 2. Two ways to shorten it, both cheap: score **breach** (needs only the
+strike, available now for every `gex_decisions` row), or populate `estimated_*_credit` on the veto
+path so each veto becomes scoreable when it happens.
+
 ⚠️ **This measures the COST, not the net.** It does not show the vetoes were wrong — the
 2026-09-06 verdict found vetoed shorts breached 5/43 vs 0/38 for placed ones (p=0.038), i.e. the
 veto looked protective. What is new is that the cost side is now quantified: **36 suppressed
