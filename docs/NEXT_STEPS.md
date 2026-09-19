@@ -241,6 +241,54 @@ drought, and 08-10/11/12 was another three. Two consequences worth holding:
 - **A funded `bm` could sit idle for a week** and that would be normal behaviour, not a fault.
   Worth expecting, so it is not misread as a broken deployment at the worst moment.
 
+### GEX shadow analyzer: fixed its baseline, and it answered the tail-artifact question
+
+Ran `scripts/analyze_gex_shadow.py` — the tool the deferred GEX decisions are meant to rest on —
+and two of its numbers did not survive inspection.
+
+**1. It measured against a replay, not against the gate.** It compared every corrected variant to
+the `live` entry inside `shadow_json`. That entry is **not** a faithful replay: it is pure
+single-profile geometry (`adjuster_predicate = adj_cluster is not None`), while the real adjuster
+also requires **peak persistence** against a `prior_profile`. The replay over-confirms, always in
+the same direction — measured at **2 of 82** adjuster rows on B, both `recorded=False` /
+`replay=True`. Consequences, now corrected:
+
+| | before (vs replay) | after (vs what the gate did) |
+|---|---|---|
+| `all_fixes` / `flipped_sign`, call | 15/41 differ, **−11 stand-downs** | 13/41 differ, **−9 stand-downs** (= the 9 real SKIPs) |
+| `legacy_no_floor`, call | 0/41 — "**inert**" | **2/41 (4.9%), +2 would-confirm** |
+| `windowed`, call | 0/41 — "**inert**" | **2/41 (4.9%), +2 would-confirm** |
+
+⚠️ The standing note that **"windowed normalization is measured inert"** came from this
+comparison. It is an artifact: any variant that also lacks the persistence gate looks identical to
+a replay that lacks it. Measured properly, `windowed` is **not** inert — it differs on 2 of 41 call
+decisions, and in the direction of **more** vetoing (+2 confirms). The *directional* conclusion
+survives and in fact strengthens — it is still no remedy for over-vetoing — but "0 predicates
+changed" should not be repeated as fact.
+
+**2. Section 5 could not answer its own question.** The `cluster_*` columns are NULL on every row
+ever recorded, so the cluster-shape section printed "(none)" four times and the docstring's
+question — *"are we vetoing on 345pt tail artifacts or on real localized walls?"* — stayed open.
+The data was never missing; the same cluster sits in `shadow_json`. Reading it from there:
+
+| | n | min | median | max |
+|---|---|---|---|---|
+| cluster width | 11 | 45pt | **335pt** | 390pt |
+| n_strikes | 11 | 10 | **59** | 71 |
+| strength | 11 | 10.45% | 17.18% | 78.94% |
+| **peak offset from the short** | 11 | 0pt | **10pt** | 25pt |
+| single-strike clusters (audit BUG 1) | | | **0/11** | |
+
+**The answer is "both, and the distinction matters."** The qualifying clusters are enormous — a
+335pt median span is ~4.4% of a 7,600 index, 59 strikes wide — which is the tail-artifact concern,
+confirmed. **But their peak sits a median 10pt from the proposed short** (max 25pt), so the
+peak-locality gate added 2026-08-12 is doing its job: these are not vetoes triggered by a bump 300pt
+away. And **no single-strike clusters remain** — audit BUG 1 is absent from current data.
+
+Fixed in `scripts/analyze_gex_shadow.py` with 10 tests, 4 of which fail against the old version.
+The analyzer now also prints a **replay-fidelity health check**, because a replay that does not
+reproduce the gate silently mis-measures every other variant.
+
 ### Still unverified in production
 
 - **POS-003 merged-leg resolver** (deployed 09-15) — still needs a session with both a stop and an

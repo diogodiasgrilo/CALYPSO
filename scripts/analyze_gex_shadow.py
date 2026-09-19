@@ -90,6 +90,7 @@ def analyze(db_path: str, since: str = "") -> int:
     print("-" * 72)
     # variant -> side -> [n_total, n_differ, n_shadow_true_live_false, n_live_true_shadow_false]
     agg = defaultdict(lambda: defaultdict(lambda: [0, 0, 0, 0]))
+    infidelity = []   # rows where the shadow's own "live" replay != what live DID
     for d in decisions:
         try:
             shadow = json.loads(d["shadow_json"] or "[]")
@@ -99,7 +100,32 @@ def analyze(db_path: str, since: str = "") -> int:
         if live is None:
             continue
         key = "adjuster_predicate" if d["consumer"] == "adjuster" else "overlay_predicate"
-        live_v = bool(live[key])
+
+        # THE BASELINE IS THE RECORDED COLUMN, NOT THE REPLAY (fixed 2026-09-19).
+        #
+        # This used to read `live_v = bool(live[key])` — the "live" entry inside
+        # shadow_json. That entry is NOT a faithful replay of the live gate: it is
+        # pure single-profile geometry (`adjuster_predicate = adj_cluster is not
+        # None` in brandon/gex_shadow.py), while the real adjuster ALSO requires
+        # peak persistence against a prior_profile (defensive_overlay.py ~197).
+        # The replay therefore OVER-CONFIRMS, always in the same direction.
+        #
+        # Measured on variant B, 82 adjuster decisions: the replay said True on 11
+        # call decisions where the gate recorded 9 and kept the strike on the other
+        # two. Every "would-stand-down-where-live-fired" count was inflated by that
+        # difference — against a baseline that included confirmations the live gate
+        # never made. Since these counts are the input to the DEFERRED sign-convention
+        # decision, a one-directional bias in them is not cosmetic.
+        #
+        # live_adjuster_predicate / live_overlay_predicate record what the gate
+        # actually decided, so they are the baseline. The replay is still compared
+        # against them and any divergence reported below as a health check.
+        col_key = ("live_adjuster_predicate" if d["consumer"] == "adjuster"
+                   else "live_overlay_predicate")
+        live_v = bool(d[col_key])
+        if bool(live[key]) != live_v:
+            infidelity.append((d["date"], d["entry_number"], d["side"],
+                               d["live_action"], live_v, bool(live[key])))
         for s in shadow:
             if s["variant"] == "live":
                 continue
@@ -122,6 +148,22 @@ def analyze(db_path: str, since: str = "") -> int:
             print(f"    {side:4s}: {differ:4d}/{n:<5d} differ ({100.0*differ/n if n else 0:.1f}%)"
                   f"   +{gained} would-confirm-where-live-did-not"
                   f"   -{lost} would-stand-down-where-live-fired")
+
+    # Health check on the replay itself. A non-zero count here means the "live"
+    # entry in shadow_json does not reproduce the live gate, so every OTHER
+    # variant's numbers are being measured with a slightly wrong yardstick too.
+    print("\n  replay fidelity (shadow's own 'live' vs what the gate recorded):")
+    if not infidelity:
+        print("    OK — the replay matched the recorded decision on every row.")
+    else:
+        print(f"    \u26a0 {len(infidelity)}/{len(decisions)} rows DIVERGE "
+              f"({100.0*len(infidelity)/len(decisions):.1f}%). The replay omits the "
+              f"peak-persistence gate, so it over-confirms:")
+        for date, entry, side, action, recorded, replayed in infidelity[:10]:
+            print(f"      {date} e#{entry} {side:4s} action={action:5s} "
+                  f"recorded={recorded} replay={replayed}")
+        if len(infidelity) > 10:
+            print(f"      ... and {len(infidelity) - 10} more")
 
     # ---- 3. the put-blindness question ---------------------------------
     print("\n" + "-" * 72)
@@ -162,16 +204,42 @@ def analyze(db_path: str, since: str = "") -> int:
     print("5. QUALIFYING CLUSTER SHAPE (real localized wall, or tail artifact?)")
     print("-" * 72)
     widths, strengths, npts, offsets = [], [], [], []
+    from_json = 0
     for d in decisions:
-        if d["cluster_low"] is None or d["cluster_high"] is None:
-            continue
-        widths.append(d["cluster_high"] - d["cluster_low"])
-        if d["cluster_strength_pct"] is not None:
-            strengths.append(d["cluster_strength_pct"])
-        if d["cluster_n_strikes"] is not None:
-            npts.append(d["cluster_n_strikes"])
-        if d["cluster_peak"] is not None and d["reference_strike"] is not None:
-            offsets.append(abs(d["cluster_peak"] - d["reference_strike"]))
+        low, high = d["cluster_low"], d["cluster_high"]
+        peak, n_str, strength = d["cluster_peak"], d["cluster_n_strikes"], d["cluster_strength_pct"]
+
+        # FALL BACK TO shadow_json (added 2026-09-19). The cluster_* COLUMNS are
+        # NULL on every row recorded so far, so this whole section printed "(none)"
+        # four times and question 4 of this script's own docstring — "are we vetoing
+        # on 345pt tail artifacts or on real localized walls?" — was unanswerable.
+        # The data was never missing: the same cluster is inside shadow_json's "live"
+        # entry, which is written on every row. Read it from there when the columns
+        # are empty, and say how many rows needed the fallback.
+        if low is None or high is None:
+            try:
+                shadow = json.loads(d["shadow_json"] or "[]")
+            except (json.JSONDecodeError, TypeError):
+                continue
+            live = next((s for s in shadow if s["variant"] == "live"), None)
+            cl = (live or {}).get("cluster")
+            if not cl:
+                continue
+            low, high = cl.get("low"), cl.get("high")
+            peak, n_str, strength = cl.get("peak"), cl.get("n_strikes"), cl.get("strength_pct")
+            if low is None or high is None:
+                continue
+            from_json += 1
+
+        widths.append(high - low)
+        if strength is not None:
+            strengths.append(strength)
+        if n_str is not None:
+            npts.append(n_str)
+        if peak is not None and d["reference_strike"] is not None:
+            offsets.append(abs(peak - d["reference_strike"]))
+    if from_json:
+        print(f"  (cluster_* columns are NULL; {from_json} row(s) read from shadow_json)")
 
     def _stat(name, xs, fmt="{:.1f}"):
         if not xs:
