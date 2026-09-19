@@ -1,6 +1,34 @@
-# Live-Readiness Checklist — REAL-MONEY gate (0DTE IC group: A/B/C)
+# Live-Readiness Checklist — REAL-MONEY gate (variant `bm`, the Brandon IC that B runs on paper)
 
-**Purpose:** A go/no-go checklist an operator MUST complete before flipping a 0DTE IC variant from live-PAPER to **REAL MONEY**. Every item is a hard gate. If any item answers "no" or "unknown," do NOT go live.
+**Purpose:** A go/no-go checklist an operator MUST complete before trading **REAL MONEY**. Every item is a hard gate. If any item answers "no" or "unknown," do NOT go live.
+
+> ## 🛑 READ THIS FIRST — real money runs ALONGSIDE paper. Nothing is "flipped".
+>
+> This file was written for a **cutover**: take a paper variant, point it at live
+> credentials, and stop running paper. That is **not** the design any more.
+> [`LIVE_MONEY_ARCHITECTURE.md`](LIVE_MONEY_ARCHITECTURE.md) (2026-09-18) settled on
+> running real money **beside** paper:
+>
+> | | paper (unchanged) | live money (new) |
+> |---|---|---|
+> | broker | `calypso-broker` :8788, `/etc/calypso/ibkr/` | `calypso-broker-live` :8789, `/etc/calypso/ibkr-live/` |
+> | strategy | `hydra` + `hydra_variant_{b,c,d,e,f,g}` | `hydra_variant_bm` — same Brandon code B runs |
+> | after cutover | **keeps running exactly as now** | 1 contract, week 1 |
+>
+> **B is not promoted. B stays on paper**, with its record, its Gate-4 streak, its
+> dashboard and its alerts intact. Real money is variant **`bm`**, a separate unit
+> against a separate broker on a separate IBKR username.
+>
+> Three instructions below were written under the old model and would cause an
+> outage — each is struck and corrected in place: Gate 5's "update
+> `calypso-broker.service` to the live paths", Gate 6's "`hydra.service` must be
+> `inactive`", and the sign-off block's `systemctl restart calypso-broker  # picks up
+> the live creds`. **Pointing the shared paper broker at a live account takes all
+> seven paper strategies with it**, and `_assert_account_matches_env` then refuses to
+> serve the session at all.
+>
+> *(Corrected 2026-09-19 during a pre-cutover re-measurement. The gates themselves —
+> what must be true before real money moves — are unchanged and still authoritative.)*
 
 **This file is NOT** the credentials-deploy runbook (that's `deploy/IBKR_CREDENTIALS_SETUP.md`) or the merge plan (`docs/migration/MERGE_PLAN.md`). It's the **final readiness gate** before live-money trading.
 
@@ -22,8 +50,9 @@
 >   to whichever variant `variant_readers.live_seat_id()` reports, and read `hydra.service` /
 >   `config.json` below as *"the live variant's unit / config"*. Today that is `hydra_variant_b.service` and
 >   `config_variant_b.json`.
-> - **Gate 3's "~1918 passed" baseline is long stale** — the suite is at **4063 passed / 16 skipped** as of
->   2026-09-12. The rule was always *0 failed at the current baseline*, never the literal number.
+> - **Gate 3's baseline keeps going stale** — "~1918 passed" became 4063, and the suite is at
+>   **4284 passed / 16 skipped** as of 2026-09-19. The rule was always *0 failed at the then-current
+>   baseline*, never the literal number; the figure is recorded only so a sudden DROP is visible.
 >
 > **A measured, gate-by-gate status snapshot lives in [`GO_LIVE_MASTER.md` §2-bis](../GO_LIVE_MASTER.md).**
 > Fill this checklist in at cutover; read §2-bis to know what is already red.
@@ -69,11 +98,11 @@
 
 ## Gate 3 — Test state
 
-- [x] Full test suite passes (**4063 passed / 16 skipped**, 0 failed — baseline as of 2026-09-18; the count grows every week, so the gate is **0 failed at the then-current baseline**, never the literal number)
+- [x] Full test suite passes (**4284 passed / 16 skipped**, 0 failed — measured 2026-09-19; the count grows every week, so the gate is **0 failed at the then-current baseline**, never the literal number)
   ```bash
   # RUN LOCALLY, against the deployed commit — NOT on the VM.
   # pytest / pip-audit / coverage are DELIBERATELY excluded from the production venv
-  # (requirements.txt lines ~54-55 are commented out; requirements-lock.txt documents the
+  # (requirements.txt lines 71-73 are commented out; requirements-lock.txt documents the
   # exclude-list rationale) to keep the trading box's dependency + CVE surface small.
   # So: confirm the VM's SHA, check it out locally, and test that.
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso git -C /opt/calypso rev-parse HEAD"
@@ -135,7 +164,9 @@
 - [ ] **No false-positive stops** in those 5 sessions (MKT-046 anti-spike filter caught everything it should have)
 - [ ] **No null/None VIX** during regular market hours in those 5 sessions
   ```bash
-  gcloud compute ssh calypso-bot --zone=us-east1-b --command="sqlite3 /opt/calypso/data/backtesting.db \"SELECT COUNT(*) FROM market_ticks WHERE timestamp >= date('now', '-7 days') AND timestamp NOT LIKE '%T0[09]:%' AND vix_level IS NULL\""
+  # NOTE: data/backtesting.db is variant A's (a dry-run shadow). Query the LIVE SEAT's DB —
+  # data/variant_<seat>/backtesting.db, today variant_b — or this gate grades the wrong bot.
+  gcloud compute ssh calypso-bot --zone=us-east1-b --command="sqlite3 /opt/calypso/data/variant_b/backtesting.db \"SELECT COUNT(*) FROM market_ticks WHERE timestamp >= date('now', '-7 days') AND timestamp NOT LIKE '%T0[09]:%' AND vix_level IS NULL\""
   # MUST output: 0 (or close to 0 — any non-zero needs investigation)
   ```
 - [x] **Chaos test passed**: `kill -9` on the live seat → state file intact JSON, automatic restart, no
@@ -205,25 +236,46 @@ So Gate 5 is now purely operational.
     moved out while nothing was installed and no credentials existed, which is the only
     time the move is free — afterwards it costs a re-encrypt of all six and a repeat of the
     three-check verification.)
-- [ ] **Broker mode (deployed):** `deploy/calypso-broker.service` `LoadCredentialEncrypted=` paths updated to
-  `/etc/calypso/ibkr-live/...`. In broker mode **`calypso-broker` owns the one IBClient/OAuth session** — the
-  live-cred swap happens THERE, not in the `hydra*` strategy units (which proxy data/orders to the broker and
-  carry now-unused cred lines). *(Legacy single-bot fallback only, if `CALYPSO_BROKER_URL` is unset:
-  `deploy/hydra.service` + `bots/hydra/main.py`'s `load_credentials(...)` call site.)*
-- [ ] The broker resolves the **live** keypair — after the swap, the broker's session `is_paper` is **False**.
+- [ ] 🔴 ~~`deploy/calypso-broker.service` `LoadCredentialEncrypted=` paths updated to
+  `/etc/calypso/ibkr-live/...`~~ **— STRUCK 2026-09-19. DO NOT DO THIS.** `calypso-broker` is the
+  **paper** session that A/B/C/D/E/F/G are all trading through right now. Repointing it at live
+  credentials moves every one of them onto a real-money account; `_assert_account_matches_env`
+  then refuses to serve the session (declared paper, actually live) and the whole fleet stops.
+  **Instead:** install the SECOND broker, which carries the live paths already and touches
+  nothing existing.
   ```bash
-  # Confirm the broker is loading the LIVE credential set (per deploy/IBKR_CREDENTIALS_SETUP.md pre-start checks)
-  gcloud compute ssh calypso-bot --zone=us-east1-b --command="grep -n 'load_credentials' /opt/calypso/services/broker/main.py"
+  sudo cp /opt/calypso/deploy/calypso-broker-live.service /etc/systemd/system/
+  sudo systemctl daemon-reload
+  # calypso-broker.service is NOT edited, NOT restarted, NOT stopped.
   ```
+- [ ] The paper broker is byte-identical to before the cutover — prove it, do not assume it.
+  ```bash
+  gcloud compute ssh calypso-bot --zone=us-east1-b --command="diff /etc/systemd/system/calypso-broker.service /opt/calypso/deploy/calypso-broker.service && grep -c 'ibkr-live' /etc/systemd/system/calypso-broker.service"
+  # MUST output: no diff, and 0 occurrences of ibkr-live
+  ```
+- [ ] The **live** broker resolves the live keypair — and the **paper** broker still resolves paper.
+  Ask each one directly rather than reading source; `/health` is the authoritative answer and it
+  is what the strategies' account guard reads.
+  ```bash
+  curl -s http://127.0.0.1:8789/health   # live:  {"environment":"live","account":"<non-D code>",...}
+  curl -s http://127.0.0.1:8788/health   # paper: {"environment":"paper","account":"DUR049068",...}
+  ```
+  A `D`-prefixed account code on :8789 means live credentials were encrypted from the paper
+  keypair. `"environment":"paper"` on :8789 means `CALYPSO_IBKR_ENV=live` did not take. Either is
+  a STOP.
 - [ ] Pre-start verification (per `deploy/IBKR_CREDENTIALS_SETUP.md`, 3 checks) passes against the new `/etc/calypso/ibkr-live/` directory
 - [ ] **The paper credentials remain in `/etc/calypso/ibkr/`** for fallback / rollback. Do not delete.
 
 ## Gate 6 — VM state
 
-- [ ] `hydra.service` is in `inactive` state at the moment of the live flip (not running on paper credentials)
+- [ ] 🔴 ~~`hydra.service` is `inactive` at the moment of the live flip~~ **— STRUCK
+  2026-09-19. The paper fleet KEEPS RUNNING.** Stopping it was right under the cutover model and
+  is wrong under this one: paper B is the control the real-money seat is measured against, and
+  it holds the Gate-4 streak. What must be true instead is that **nothing paper-declared has
+  moved**:
   ```bash
-  gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl is-active hydra"
-  # MUST output: inactive
+  gcloud compute ssh calypso-bot --zone=us-east1-b --command="systemctl is-active calypso-broker hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g | tr '\n' ' '"
+  # MUST output: active x8 — unchanged by the live cutover
   ```
 - [ ] No `failed` in the journal in the last 24h
   ```bash
@@ -238,7 +290,9 @@ So Gate 5 is now purely operational.
 - [ ] Dashboard accessible + WebSocket alive
   ```bash
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="curl -sf http://localhost:8001/api/health"
-  # MUST output: {"status":"healthy",...} (HTTP 200)
+  # MUST output: {"status":"ok","clients":N,"state_loaded":true,"state_date":"YYYY-MM-DD"}
+  # (This said `"status":"healthy"` until 2026-09-19. The endpoint has never returned that,
+  #  so the gate could only ever be failed by an operator reading it literally.)
   ```
 - [ ] Disk usage < 70%
 - [ ] Memory usage < 80%
@@ -277,14 +331,27 @@ So Gate 5 is now purely operational.
 
 - [ ] Config `contracts_per_entry` = **1** for week 1 of live trading, regardless of paper sizing
   ```bash
-  # NOTE: the LIVE VARIANT's config, not A's. Today that is config_variant_b.json.
-  gcloud compute ssh calypso-bot --zone=us-east1-b --command="grep 'contracts_per_entry' /opt/calypso/bots/hydra/config/config_variant_b.json"
+  # The REAL-MONEY variant's config — config_variant_bm.json. NOT B's: B stays on paper
+  # at whatever size it runs, and changing it would corrupt the control this is measured against.
+  gcloud compute ssh calypso-bot --zone=us-east1-b --command="grep 'contracts_per_entry' /opt/calypso/bots/hydra/config/config_variant_bm.json"
   # MUST show: "contracts_per_entry": 1
   ```
-  > ⚠️ **Currently 7 on B.** This is a deliberate cutover-time change, not a standing config — and remember
-  > `config_variant_*.json` carries `skip-worktree` on the VM yet is **still overwritten by a `git pull`**
-  > that advances the tracked file. Re-verify the value *after* the final pre-flip deploy, not before.
-- [ ] `min_buying_power_per_ic` configured for live margin (verify with `what_if_order` once before first entry)
+  > **`bm` already ships `contracts_per_entry: 1`** (and `dry_run: true`), so this gate starts GREEN
+  > and the job is to keep it that way rather than to change anything. **B's 7 contracts are no
+  > longer a Gate-8 failure** — that reading came from the cutover model, where B itself went live.
+  > Still re-verify *after* the final pre-flip deploy: `config_variant_*.json` carries `skip-worktree`
+  > on the VM yet is **still overwritten by a `git pull`** that advances the tracked file.
+- [ ] `min_buying_power_per_ic` configured for live margin — **and read this before trying to measure it.**
+  > Probed 2026-09-19 on paper: a **single-leg** `what_if_order` returns a full, correct block (naked SPX
+  > short call, 1c: amount 225 USD, initial.change 109,213), but a **BAG/combo** whatif returns em-dash
+  > placeholders with all legs snapshot, and a 2-leg BAG **times out and opens the `ib.orders` breaker**.
+  > So the defined-risk IC margin cannot be previewed as a combo here, and summing naked per-leg previews
+  > is useless as a gate — $109k per short would refuse every entry. The shape still to test is **the
+  > short leg previewed while its protective long is already held**, which is how HYDRA legs in. That
+  > needs a position on the books, so it is an RTH measurement.
+  >
+  > ⚠️ Never put a whatif call in the entry path: it is on the **orders** family, so a margin probe
+  > shares a failure budget with real placement.
 - [ ] Daily loss limit / max position count safety bounds tightened for live (recommend: 50% tighter than paper for week 1)
 
 ## Gate 9 — Approval + halt criteria
@@ -308,7 +375,8 @@ So Gate 5 is now purely operational.
   days with a stop · H5 CRITICAL_INTERVENTION · H6 naked short · H7 `orders` breaker >5min in RTH ·
   H8 broker down >15min in RTH · H9 ARGUS FAIL ×3 · H10 any unreconciled position gap.
   **Operator must adopt them** — the doc is a draft until the approval commit exists.
-- [ ] **Halt procedure** rehearsed (operator can `systemctl stop hydra` in < 30 seconds from any location)
+- [ ] **Halt procedure** rehearsed — operator can `systemctl stop hydra_variant_bm` in < 30 seconds from
+  any location. That stops **real money only**; paper keeps running and is meant to.
 - [ ] **Telegram alerts working** — fire a `BOT_STARTED` test alert and confirm receipt within 1 minute
   ```bash
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -c \"from shared.alert_service import AlertService, AlertType, AlertPriority; AlertService({\\\"alerts\\\": {\\\"enabled\\\": True}}, \\\"TEST\\\").send_alert(alert_type=AlertType.BOT_STARTED, title=\\\"LIVE READINESS TEST\\\", message=\\\"This is a test alert from the live-readiness checklist.\\\", priority=AlertPriority.LOW)\"'"
@@ -346,18 +414,19 @@ Gate 8 (Position sizing):  GREEN — 1c week 1
 Gate 9 (Approval/halt):    GREEN — halt criteria committed at $(SHA)
 Gate 10 (Monitoring):      GREEN — operator availability confirmed
 
-Cutting over now via (BROKER MODE — restart the broker FIRST; it owns the live session):
-  systemctl restart calypso-broker   # picks up the live creds; wait for /health connected:true
-  systemctl restart hydra hydra_variant_b   # (per-variant — substitute the unit(s) actually being
-                                             # promoted to real money; hydra_variant_b shown here as B
-                                             # holds the live-PAPER seat as of the 2026-07-24 swap, see
-                                             # RUNBOOKS.md RB-9 — the strategy units proxy to the broker)
-  sudo journalctl -u calypso-broker -u hydra -f &  # monitor in another shell
+Going live now. NOTHING running is restarted — real money is ADDED beside paper:
+  systemctl enable --now calypso-broker-live    # the SECOND broker, :8789, live creds
+  curl -s http://127.0.0.1:8789/health          # REQUIRE environment=live, account NOT starting with D
+  curl -s http://127.0.0.1:8788/health          # REQUIRE paper still environment=paper, competing=false
+  systemctl enable --now hydra_variant_bm       # 1 contract; expect ACCOUNT-ASSERT OK ... 'live_money'
+  sudo journalctl -u calypso-broker-live -u hydra_variant_bm -f &   # monitor in another shell
+
+  # calypso-broker and the seven paper units are NOT touched at any point above.
 
 If any halt criterion fires in week 1, execute:
-  systemctl stop hydra hydra_variant_b   # stop trading (broker stays up as a passive session holder) —
-                                          # again, substitute the unit(s) actually promoted
-  # stop calypso-broker too only to drop the IBKR session entirely
+  systemctl stop hydra_variant_bm   # stops REAL-MONEY trading, and nothing else.
+  # Paper keeps running throughout — it is the control, not collateral.
+  # Stop calypso-broker-live too only to drop the live IBKR session entirely.
   # then: refer to docs/migration/RUNBOOKS.md
 "
 ```
