@@ -8,7 +8,74 @@
 
 **Branch:** `hydra-ibkr-standalone` (or `main` post-merge). Commands assume `/opt/calypso` on the GCP VM.
 
-**Failure-recovery first principle:** if you're unsure, **stop the bot** (`systemctl stop hydra`) and **investigate without time pressure**. The bot stopped is safer than the bot wrong.
+**Failure-recovery first principle:** if you're unsure, **stop what is trading** and **investigate without time pressure**. The bot stopped is safer than the bot wrong.
+
+> ⚠️ **`systemctl stop hydra` does NOT stop trading.** `hydra` is variant **A**, a dry-run
+> shadow (`dry_run: true`) that places no orders — it has been one since the live seat moved to
+> B on 2026-07-24. Stopping it halts nothing while the live seat keeps trading, which is the
+> worst possible outcome for a command you reach for when unsure. This line said
+> `systemctl stop hydra` until 2026-09-19.
+>
+> ```bash
+> # Stop ALL trading, paper and real money, right now:
+> gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b hydra_variant_bm"
+> # hydra_variant_bm may not exist yet — systemctl will say so and stop the rest. That is fine.
+> # The dry-run variants (hydra, c, d, e, f, g) can be left running; they cannot place an order.
+> ```
+>
+> Confirm it worked by the account, not by the unit state — `systemctl` says the process is gone,
+> it does not say the book is flat:
+> ```bash
+> gcloud compute ssh calypso-bot --zone=us-east1-b --command='curl -s -X POST http://127.0.0.1:8788/rpc -H "Content-Type: application/json" -d "{\"method\":\"get_positions\",\"args\":[],\"kwargs\":{}}"'
+> ```
+
+---
+
+## 🚦 STEP 0 — WHICH BROKER ARE YOU FIXING?
+
+> **Today there is one broker and this step is a no-op. After the real-money cutover there
+> are two, and every runbook below becomes ambiguous.** Read this before acting on any of
+> them.
+
+Every unqualified `calypso-broker` in this file means the **PAPER** broker. That was
+unambiguous when it was written — [`LIVE_MONEY_ARCHITECTURE.md`](LIVE_MONEY_ARCHITECTURE.md)
+(2026-09-18) adds a second one, and the sessions are completely independent:
+
+| | paper | real money |
+|---|---|---|
+| unit | `calypso-broker` | `calypso-broker-live` |
+| port | `127.0.0.1:8788` | `127.0.0.1:8789` |
+| credentials | `/etc/calypso/ibkr/` | `/etc/calypso/ibkr-live/` |
+| IBKR username | paper | **different username** |
+| strategies behind it | `hydra`, `hydra_variant_{b,c,d,e,f,g}` | `hydra_variant_bm` |
+| log | `logs/broker/broker.log` | `logs/broker-live/broker.log` |
+
+**Identify the broker from the symptom, not from habit:**
+
+```bash
+# WHICH strategy is unhealthy? Its unit name is the answer.
+#   hydra / hydra_variant_{b..g}  -> paper  -> :8788 -> calypso-broker
+#   hydra_variant_bm              -> MONEY  -> :8789 -> calypso-broker-live
+curl -s http://127.0.0.1:8788/health   # expect environment=paper, account DUR…
+curl -s http://127.0.0.1:8789/health   # expect environment=live,  account NOT starting with D
+```
+
+**Two rules that are easy to get backwards at 3 AM:**
+
+1. **Restarting the paper broker does nothing for a real-money fault, and vice versa.** They
+   hold separate OAuth sessions on separate usernames. A restart aimed at the wrong one costs
+   minutes while real money sits exposed, and it *looks* like you acted.
+2. **They cannot evict each other** — the one-session-per-username limit is per USERNAME, and
+   these are two usernames. That is the whole reason the design is safe. It also means a
+   `competing=true` on one says nothing about the other.
+
+**When a runbook says "stop the bot", stop the AFFECTED one.** `systemctl stop hydra` does not
+stop real-money trading; `systemctl stop hydra_variant_bm` does, and it stops nothing else.
+Paper is the control the real-money seat is measured against — do not take it down as
+collateral.
+
+*(Added 2026-09-19. Before this, the file had 26 references to `calypso-broker` and zero to
+the live one, so the correct action after cutover was nowhere written down.)*
 
 ---
 
@@ -98,7 +165,12 @@ like the legacy one above) holds the one allowed session.
 ### Verification
 ```bash
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="curl -s http://127.0.0.1:8788/health; echo; sudo journalctl -u calypso-broker --since '5 minutes ago' --no-pager | grep -E 'stage 3/3|connected successfully'"
-# Expected: {"status":"ok","connected":true,"authenticated":true,"competing":false}
+# Expected: {"environment":"paper","account":"DUR049068","status":"ok","connected":true,
+#            "authenticated":true,"competing":false}
+# `environment` + `account` were added 2026-09-18 (S1). If they are ABSENT, this broker is
+# running pre-09-18 code — restart it, because a strategy cannot verify which account it
+# reached without them, and hydra_variant_bm REFUSES to start against a broker that
+# cannot say.
 ```
 Then confirm the strategies came back:
 ```bash
@@ -120,7 +192,11 @@ File as P0. (Repeated **410 Gone** during a weekend maintenance window is NOT th
 
 1. Stop the bot to interrupt the restart loop:
    ```bash
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
+   # `hydra` is variant A — a DRY-RUN shadow. Stopping it alone halts no trading.
+   # Stop the unit(s) that actually place orders: today that is hydra_variant_b (the live
+   # paper seat, dry_run=false), plus hydra_variant_bm once real money runs (see STEP 0).
+   # If this runbook concerns one specific variant, substitute that unit instead.
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b"
    ```
 2. Run the auth flow manually to surface the real error:
    ```bash
@@ -197,7 +273,11 @@ Possibilities (in descending likelihood):
 **If the probe fails too** (breaker re-OPENs):
 1. Stop the bot:
    ```bash
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
+   # `hydra` is variant A — a DRY-RUN shadow. Stopping it alone halts no trading.
+   # Stop the unit(s) that actually place orders: today that is hydra_variant_b (the live
+   # paper seat, dry_run=false), plus hydra_variant_bm once real money runs (see STEP 0).
+   # If this runbook concerns one specific variant, substitute that unit instead.
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b"
    ```
 2. **Verify no working orders** before any force_reset (orders left in the book would be reactivated on bot restart):
    ```bash
@@ -274,7 +354,11 @@ IBKR's snapshot endpoint is having issues. SPX/VIX/options all affected.
 1. Confirm via IBKR status page.
 2. If during a regular session: **stop the bot** to prevent placing trades against null data:
    ```bash
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
+   # `hydra` is variant A — a DRY-RUN shadow. Stopping it alone halts no trading.
+   # Stop the unit(s) that actually place orders: today that is hydra_variant_b (the live
+   # paper seat, dry_run=false), plus hydra_variant_bm once real money runs (see STEP 0).
+   # If this runbook concerns one specific variant, substitute that unit instead.
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b"
    ```
 3. Wait for IBKR to recover (status page green) + Step-2 probe shows `6509='R'` again.
 4. Restart:
@@ -340,7 +424,11 @@ Each new IBKR Web API session "wins" — older sessions get evicted (Last-In-Win
 ### Resolution
 1. **Stop the bot** (interrupt the restart loop):
    ```bash
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
+   # `hydra` is variant A — a DRY-RUN shadow. Stopping it alone halts no trading.
+   # Stop the unit(s) that actually place orders: today that is hydra_variant_b (the live
+   # paper seat, dry_run=false), plus hydra_variant_bm once real money runs (see STEP 0).
+   # If this runbook concerns one specific variant, substitute that unit instead.
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b"
    ```
 2. **Sign out the other client.** For the IBKR portal: top-right name → Sign Out.
 3. **Kill any orphan probe / `IBClient` Python processes:**
@@ -444,7 +532,11 @@ If `journalctl` shows `json.decoder.JSONDecodeError` on `hydra_state.json` load:
 
 1. **Stop the bot** (it's auto-restarting; interrupt the loop):
    ```bash
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
+   # `hydra` is variant A — a DRY-RUN shadow. Stopping it alone halts no trading.
+   # Stop the unit(s) that actually place orders: today that is hydra_variant_b (the live
+   # paper seat, dry_run=false), plus hydra_variant_bm once real money runs (see STEP 0).
+   # If this runbook concerns one specific variant, substitute that unit instead.
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b"
    ```
 2. **List available state-file snapshots** (Polish Item 5):
    ```bash
@@ -532,7 +624,10 @@ Expected: the conid mentioned in the alert is NOT in the position list (position
 **Stop the bot to prevent further side effects:**
 
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
+# `hydra` is variant A, a DRY-RUN shadow — stopping it halts no trading.
+# Stop what actually trades: hydra_variant_b today, plus hydra_variant_bm once real
+# money runs (see STEP 0).
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b"
 ```
 
 **Manually close the naked short via the IBKR portal** (NOT via a script — at this point we don't know what's wrong with the bot's close path):
