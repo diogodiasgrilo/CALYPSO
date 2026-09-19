@@ -539,10 +539,16 @@ Full deployment guide: [`docs/ALERTING_SETUP.md`](docs/ALERTING_SETUP.md).
 | Agent | Service | Schedule | Purpose |
 |-------|---------|----------|---------|
 | APOLLO | `apollo.service` | 8:30 AM ET weekdays | Pre-market scout (overnight news, VIX, expected move) |
-| HERMES | `hermes.service` | 7:00 PM ET weekdays | Daily execution quality analyst |
-| HOMER | `homer.service` | 7:30 PM ET weekdays | Automatic HYDRA Trading Journal updates |
+| HERMES | `hermes.service` | **11:00 PM ET** weekdays | Daily execution quality analyst |
+| HOMER | `homer.service` | **11:30 PM ET** weekdays | Automatic HYDRA Trading Journal updates |
 | CLIO | `clio.service` | Sat 9:00 AM ET | Weekly strategy analyst |
 | ARGUS | `argus.service` | Every 15 min | Health monitor (bot process, API, OAuth) |
+
+> **Corrected 2026-09-19: HERMES and HOMER run at 23:00 / 23:30 ET, not 19:00 / 19:30.** They were
+> moved past settlement in `14205f2` because settlement completes ~21:45–22:37 ET — so at 7 PM the
+> daily analysis and the journal HOMER commits to git were both built on unsettled numbers. The
+> timer files are authoritative (`OnCalendar=Mon..Fri *-*-* 23:00:00 America/New_York`); this table
+> had not followed.
 
 **Config:** Template `services/agents_config.json.template`; production `services/agents_config.json` (gitignored, on VM only). Shared: `anthropic` API key, `google_sheets` credentials, `alerts` settings.
 

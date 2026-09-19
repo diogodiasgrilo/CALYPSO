@@ -2,7 +2,7 @@
 
 This directory contains the systemd unit files + setup runbooks for HYDRA on Interactive Brokers.
 
-_Last updated: 2026-05-29 (broker-session pivot — `calypso-broker` is now the single IBKR session owner; A/B/C proxy to it over loopback)._
+_Last updated: 2026-09-19 (added variants F and G, the real-money units, and the orphaned `calypso.service`; corrected the HERMES/HOMER times). Prior revision 2026-05-29 (broker-session pivot — `calypso-broker` is the single IBKR session owner; the strategies proxy to it over loopback)._
 
 ## Active units (install these on the VM)
 
@@ -14,17 +14,22 @@ _Last updated: 2026-05-29 (broker-session pivot — `calypso-broker` is now the 
 | `hydra_variant_c.service` | Variant C (Brandon Trojan Horse, dry-run paper, 3-slot grid, 7c). Was the live paper seat / dashboard PRIMARY until the 2026-07-24 swap; now dry-run shadow. Uses the shared broker via `CALYPSO_BROKER_URL`. | ACTIVE (dry-run) |
 | `hydra_variant_d.service` | Variant D (Strategy D "DC Time Machine" — multi-day double calendar → risk-free iron condor). **Dry-run-LOCKED** (the class refuses non-dry_run construction; places NO real orders). Uses the shared broker via `CALYPSO_BROKER_URL`. Go-live runbook: [`docs/migration/D_GOLIVE_RUNBOOK.md`](../docs/migration/D_GOLIVE_RUNBOOK.md). | ACTIVE (dry-run-locked) |
 | `hydra_variant_e.service` | Variant E (Strategy E "SPY Double Calendar" — multi-day SPY double calendar, managed laddered profit-take + time-exit, no transformer, no hard stop). **Dry-run-LOCKED** (the class refuses non-dry_run construction; places NO real orders). Uses the shared broker via `CALYPSO_BROKER_URL`. | ACTIVE (dry-run-locked) |
+| `hydra_variant_f.service` | Variant F (Ghauri 0DTE mean-reversion credit spreads — event-triggered on an expected-move boundary touch, not clock-scheduled). **Dry-run-LOCKED.** | ACTIVE (dry-run-locked) |
+| `hydra_variant_g.service` | Variant G (0DTE SPX short strangle — two naked shorts, **undefined risk**, no protective wings; the only variant that trades FOMC announcement days). **Dry-run-LOCKED.** | ACTIVE (dry-run-locked) |
+| `calypso-broker-live.service` | **REAL-MONEY session owner** (:8789, `/etc/calypso/ibkr-live/`). Built 2026-09-18, `systemd-analyze verify`-clean, **deliberately NOT installed** — no live credentials exist. Never point it at the paper credential paths: two brokers on one IBKR username evict each other. | BUILT, NOT INSTALLED |
+| `hydra_variant_bm.service` | Variant BM — the same Brandon code B runs, against the **funded** account via :8789. Ships `dry_run=true`, 1 contract, and carries **no** credentials of its own. **NOT installed.** | BUILT, NOT INSTALLED |
 | `entry-window-watch.{service,timer}` | Entry-window watchdog — checks A/B/C + broker just after each entry window (10:20 / 10:50 / 11:20 + 11:35 settle, ET weekdays). | ACTIVE |
 | `broker-paper-smoke.{service,timer}` | **Go-live tooling (one-shot).** Places a real 1-contract paper round-trip through the broker, writes an ET-dated PASS sentinel, **No longer flips anything** — the `ExecStartPost=+flip_a_live.sh` coupling was removed 2026-09-18. It had been a landmine since the 2026-07-24 swap: Gate 3 tells an operator to run this unit for evidence, and on a PASS it would have put **A** live alongside the live seat **B**. Putting a variant live is a deliberate action with its own runbook (RB-8/RB-9 + the flip scripts). The committed `.timer` `OnCalendar` is a specific past date (one-shot, `Persistent=false`) — **re-date it before re-running**, or `systemctl start broker-paper-smoke` manually. | One-shot (go-live) |
 | `scripts/flip_bc_swap.sh` / `scripts/flip_bc_rollback.sh` (no unit) | **Operator-run** live-seat swap between B and C — the current procedure for moving the live paper seat (used 2026-07-24 to move it C→B). `flip_bc_swap.sh` flips the target variant to `dry_run:false`/alerts on and the outgoing variant to `dry_run:true`/alerts off; `flip_bc_rollback.sh` reverses it. Runbook: [`RUNBOOKS.md` RB-9](../docs/migration/RUNBOOKS.md). | Manual |
 | `scripts/flip_ac_live.sh` (no unit) | **Historical** go-live flip of A **and** C to `dry_run:false` (B stays dry-run). Superseded as the live-seat procedure by `flip_bc_swap.sh`/`flip_bc_rollback.sh` since the 2026-07-24 swap; kept for reference and now guards against running while B holds the live seat. Runbook: [`RUNBOOKS.md` RB-8](../docs/migration/RUNBOOKS.md). | Manual (historical) |
 | `apollo.{service,timer}` | Pre-market scout agent (8:30 AM ET weekdays) | ACTIVE |
-| `hermes.{service,timer}` | Daily execution analyst (7:00 PM ET weekdays) | ACTIVE |
-| `homer.{service,timer}` | Trading journal writer (7:30 PM ET weekdays) | ACTIVE |
+| `hermes.{service,timer}` | Daily execution analyst (**11:00 PM** ET weekdays — moved past settlement in `14205f2`; it ran at 7 PM on unsettled numbers) | ACTIVE |
+| `homer.{service,timer}` | Trading journal writer (**11:30 PM** ET weekdays — same move; it committed the journal to git before settlement) | ACTIVE |
 | `clio.{service,timer}` | Weekly strategy analyst (Sat 9 AM ET) | ACTIVE |
 | `argus.{service,timer}` | Health monitor (every 15 min) | ACTIVE |
 | `db_backup.{service,timer}` | Daily backups of SQLite + state + metrics to GCS | ACTIVE |
 | `polygon.env.example` | Template for the optional Polygon API key (variants B/C) | Template |
+| `calypso.service` | ⚠️ **ORPHAN — do NOT install.** Describes the "Calypso Delta Neutral Trading Bot" and runs `src/main.py`, neither of which exists on this branch: the four sibling bots were deleted in P5a/P5b (`git ls-tree HEAD bots/` shows only `__init__.py` + `hydra/`). Kept only because deleting it is a separate decision; noted here 2026-09-19 so nobody installs a unit for a bot that is gone. | ORPHAN |
 
 ### Broker-session topology (read before installing)
 
