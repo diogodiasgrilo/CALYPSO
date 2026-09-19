@@ -70,6 +70,27 @@ Two consequences:
 Probe fixed so this cannot recur: the control now runs **first**
 (`scripts/probe_combo_whatif.py`), with three regression tests that fail against the old ordering.
 
+### ⚠️ The dashboard was a restart behind too — found and fixed 2026-09-19
+
+§A0 recorded "Dashboard deployed + verified (domytrade.com serving the new build)" on 09-18.
+That was true **when it was written** and false by the end of the day, because three more
+dashboard commits landed after the deploy:
+
+| | Deployed / running | Commits it was missing |
+|---|---|---|
+| **Frontend** | build of 09-18 **16:16 UTC** | `639777b` (19:52) — `dashboard/frontend/src/lib/pnlShape.ts`, the accent-fallback contrast fix |
+| **Backend** | `dashboard.service` started **16:33 UTC** | `da3f5be` (17:32) and `a6a1609` (18:40), both touching `dashboard/backend` |
+
+Rebuilt, scp'd, swapped and restarted 2026-09-19 07:55 UTC. The new bundle
+(`index-BxG4G9SY.js`) differs from the one that had been served (`index-CIgQbM0e.js`), which is
+the proof the fix really was absent rather than merely suspected. Site returns 200, API healthy,
+`NRestarts=0`, no errors.
+
+**The reusable part: "deployed + verified" is a claim with an expiry date.** It decays the moment
+the next commit touches the same surface, and nothing in the process notices — the bots have a
+restart ritual, the dashboard does not. Worth checking the built asset hash against the last
+frontend commit whenever §A0 claims the dashboard is current.
+
 ### Still unverified in production
 
 - **POS-003 merged-leg resolver** (deployed 09-15) — still needs a session with both a stop and an
