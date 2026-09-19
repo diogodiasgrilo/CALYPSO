@@ -232,7 +232,7 @@ Procedure: `docs/migration/MERGE_PLAN.md` (8-chunk squash, backup branch, byte-i
 
 **Status:** Out of scope for this branch. The branch is **paper only** — live trading requires:
 1. NEW IBKR live OAuth keypair (separate from paper)
-2. Re-encrypted credentials in `/etc/calypso/ibkr-live/`
+2. Re-encrypted credentials in `/etc/calypso/ibkr/live/`
 3. `load_credentials("live")` in main.py
 4. Full `LIVE_READINESS_CHECKLIST.md` 10-gate sign-off
 5. Explicit user approval committed to the repo

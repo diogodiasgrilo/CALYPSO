@@ -193,10 +193,15 @@ So Gate 5 is now purely operational.
   - 9-char A-Z `consumer_key`
   - Live access token + access-token-secret
   - Live signature + encryption + dhparam PEM files
-- [ ] All 6 live credentials encrypted via `systemd-creds encrypt --name=ibkr_<id>` to `/etc/calypso/ibkr-live/*.cred`
-  - Note: directory name MUST differ from paper (`/etc/calypso/ibkr-live/` vs `/etc/calypso/ibkr/`)
+- [ ] All 6 live credentials encrypted via `systemd-creds encrypt --name=ibkr_<id>` to `/etc/calypso/ibkr/live/*.cred`
+  - Note: live credentials MUST live in their own directory, never mixed in with paper's
+    (`/etc/calypso/ibkr/live/*.cred` vs paper's `.cred` files sitting directly in
+    `/etc/calypso/ibkr/`). **This path is pinned by `deploy/calypso-broker-live.service`
+    and by `tests/test_live_broker_unit_2026_09_18.py` — the unit will not find
+    credentials anywhere else.** Until 2026-09-19 this checklist said
+    `/etc/calypso/ibkr-live/` (a sibling directory), which the unit does not read.
 - [ ] **Broker mode (deployed):** `deploy/calypso-broker.service` `LoadCredentialEncrypted=` paths updated to
-  `/etc/calypso/ibkr-live/...`. In broker mode **`calypso-broker` owns the one IBClient/OAuth session** — the
+  `/etc/calypso/ibkr/live/...`. In broker mode **`calypso-broker` owns the one IBClient/OAuth session** — the
   live-cred swap happens THERE, not in the `hydra*` strategy units (which proxy data/orders to the broker and
   carry now-unused cred lines). *(Legacy single-bot fallback only, if `CALYPSO_BROKER_URL` is unset:
   `deploy/hydra.service` + `bots/hydra/main.py`'s `load_credentials(...)` call site.)*
@@ -205,7 +210,7 @@ So Gate 5 is now purely operational.
   # Confirm the broker is loading the LIVE credential set (per deploy/IBKR_CREDENTIALS_SETUP.md pre-start checks)
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="grep -n 'load_credentials' /opt/calypso/services/broker/main.py"
   ```
-- [ ] Pre-start verification (per `deploy/IBKR_CREDENTIALS_SETUP.md`, 3 checks) passes against the new `/etc/calypso/ibkr-live/` directory
+- [ ] Pre-start verification (per `deploy/IBKR_CREDENTIALS_SETUP.md`, 3 checks) passes against the new `/etc/calypso/ibkr/live/` directory
 - [ ] **The paper credentials remain in `/etc/calypso/ibkr/`** for fallback / rollback. Do not delete.
 
 ## Gate 6 — VM state
@@ -329,7 +334,7 @@ Gate 1 (Branch state):     GREEN [n items checked]
 Gate 2 (Audit state):      GREEN
 Gate 3 (Test state):       GREEN
 Gate 4 (Paper history):    GREEN — $(N) consecutive sessions, P&L: $X, no manual intervention
-Gate 5 (Live credentials): GREEN — /etc/calypso/ibkr-live/ deployed + verified
+Gate 5 (Live credentials): GREEN — /etc/calypso/ibkr/live/ deployed + verified
 Gate 6 (VM state):         GREEN
 Gate 7 (Backup):           GREEN — yesterday's snapshot at $(GCS_PATH)
 Gate 8 (Position sizing):  GREEN — 1c week 1
