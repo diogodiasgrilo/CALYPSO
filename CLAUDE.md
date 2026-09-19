@@ -387,7 +387,50 @@ hydra_variant_c   ┘  (CALYPSO_BROKER_URL=          (owns the 1 IBClient:
 
 ---
 
+## Real money — variant `bm` runs ALONGSIDE paper (built, NOT running)
+
+> **Nothing here can trade today.** No live credentials exist, `bm` ships `dry_run=true`, and
+> neither the live broker unit nor the `bm` unit is installed. Verified 2026-09-19: both absent
+> from `/etc/systemd/system/`, `/etc/calypso/ibkr-live/` does not exist. This section is here so
+> the topology is not a surprise later, since CLAUDE.md carried no mention of it at all until now.
+
+Real money is **not** a cutover. Paper keeps running exactly as it does now — same record, same
+Gate-4 streak, same dashboard, same alerts — and real money is **added beside it**:
+
+| | paper (unchanged) | real money (new) |
+|---|---|---|
+| broker | `calypso-broker` :8788 | `calypso-broker-live` :8789 |
+| credentials | `/etc/calypso/ibkr/` | `/etc/calypso/ibkr-live/` (SIBLING, never nested) |
+| IBKR username | paper | **a different username** |
+| strategies | `hydra`, `hydra_variant_{b,c,d,e,f,g}` | `hydra_variant_bm` — the same Brandon code B runs |
+| sizing | as configured | 1 contract, week 1 (Gate 8) |
+
+**Three things worth knowing before touching any of it:**
+
+1. **Never point `calypso-broker` at live credentials.** It is the single paper session all seven
+   strategies trade through. Repointing it moves every one of them onto a real-money account, and
+   `_assert_account_matches_env` then refuses to serve the session at all.
+2. **The two brokers cannot evict each other** — the one-session limit is per IBKR *username* and
+   these are two usernames. That is exactly why the design is safe, and why two brokers on the
+   *paper* credentials would be the one combination that breaks it.
+3. **A strategy verifies which account it reached.** `/health` publishes `environment` + account
+   code, and `strategy_taxonomy.assert_account_matches` fail-stops on a mismatch — asymmetric on
+   unknown: fatal for real money, tolerated for paper. Look for `ACCOUNT-ASSERT OK` at startup.
+
+**Rollback is `systemctl stop hydra_variant_bm`.** It stops real-money trading and nothing else.
+
+Design + rollout: [`docs/migration/LIVE_MONEY_ARCHITECTURE.md`](docs/migration/LIVE_MONEY_ARCHITECTURE.md).
+Gate board + what is still blocked on the operator: [`docs/GO_LIVE_MASTER.md`](docs/GO_LIVE_MASTER.md).
+
+---
+
 ## Credentials (systemd LoadCredentialEncrypted=)
+
+> **Broker mode (the DEPLOYED topology): the credentials belong to `calypso-broker`, not to
+> `hydra`.** This section was written for the single-bot era and still named `hydra` throughout;
+> corrected 2026-09-19. The `hydra*` units carry now-unused `LoadCredentialEncrypted=` lines as
+> a dead fallback — rotating a credential and restarting `hydra` changes **nothing**, because the
+> broker holds the session. Restart `calypso-broker`.
 
 Six credentials, all per-environment (paper here):
 
@@ -400,13 +443,19 @@ Six credentials, all per-environment (paper here):
 | 5 | Encryption key | PEM file | `ibkr_encryption_pem` |
 | 6 | Diffie-Hellman params | PEM file | `ibkr_dhparam_pem` |
 
-**Full one-time setup runbook:** [`deploy/IBKR_CREDENTIALS_SETUP.md`](deploy/IBKR_CREDENTIALS_SETUP.md) — includes mandatory pre-start verification (3 checks: `systemd-analyze verify`, per-file `systemd-creds decrypt | wc -c` against expected byte ranges, spot-check decrypt of consumer key). Do **not** `systemctl enable hydra` until all 3 pass.
+**Full one-time setup runbook:** [`deploy/IBKR_CREDENTIALS_SETUP.md`](deploy/IBKR_CREDENTIALS_SETUP.md) — includes mandatory pre-start verification (3 checks: `systemd-analyze verify`, per-file `systemd-creds decrypt | wc -c` against expected byte ranges, spot-check decrypt of consumer key). Do **not** `systemctl enable calypso-broker` until all 3 pass. (This said `hydra` until 2026-09-19 — the broker is the credential-bearing unit in broker mode.)
 
-**Loading at runtime:** systemd sets `$CREDENTIALS_DIRECTORY=/run/credentials/hydra.service` (private tmpfs) BEFORE the sandboxing directives take effect, then drops the bot into the sandbox. `shared/ib_oauth.load_credentials("paper")` reads from there. `ProtectSystem=strict` does NOT block credential reading — the bot reads from the tmpfs, never from `/etc/calypso/ibkr/`.
+**Loading at runtime:** systemd sets `$CREDENTIALS_DIRECTORY=/run/credentials/calypso-broker.service` (private tmpfs) BEFORE the sandboxing directives take effect, then drops the process into the sandbox. `shared/ib_oauth.load_credentials(resolve_environment())` reads from there — **not** a hardcoded `"paper"`, which is what this line said until 2026-09-19; `$CALYPSO_IBKR_ENV` selects the environment and raises on an unrecognised value rather than defaulting into the wrong account. `ProtectSystem=strict` does NOT block credential reading — the bot reads from the tmpfs, never from `/etc/calypso/ibkr/`.
 
 **Dev path:** When `$CREDENTIALS_DIRECTORY` is unset, `load_credentials` falls back to env vars (`IBIND_OAUTH1A_CONSUMER_KEY` / `IBIND_OAUTH1A_ACCESS_TOKEN` / `IBIND_OAUTH1A_ACCESS_TOKEN_SECRET`) plus PEM files in `$CALYPSO_IBKR_KEYS_DIR/{env}/` (default `~/ibkr-oauth/{env}/`). An empty/whitespace-only `$CREDENTIALS_DIRECTORY` raises `RuntimeError` (P7-audit M3) — that means systemd's credential load failed and the service should not silently fall through to dev creds.
 
-**Rotation:** Re-encrypt the changed credential, `sudo systemctl restart hydra`. The .cred files are host-key-bound — they don't port to another VM, re-encrypt on each host.
+**Rotation:** Re-encrypt the changed credential, then `sudo systemctl restart calypso-broker` — **not `hydra`**, which holds no session and would be a no-op (this line said `hydra` until 2026-09-19). The strategies keep their loopback connection and reconnect automatically. The .cred files are host-key-bound — they don't port to another VM, re-encrypt on each host.
+
+**Live money uses a SECOND directory and a SECOND broker.** Real-money credentials go to
+`/etc/calypso/ibkr-live/` (a sibling of paper's, never nested inside it) and are read by
+`calypso-broker-live` on :8789. Never encrypt live credentials into `/etc/calypso/ibkr/` — that
+overwrites the paper credentials the live seat is trading on. Procedure:
+[`deploy/IBKR_CREDENTIALS_SETUP.md`](deploy/IBKR_CREDENTIALS_SETUP.md) § Live-money credentials.
 
 ---
 
@@ -424,7 +473,7 @@ Up to **7 parallel HYDRA processes** run concurrently, clustered into **3 compar
 | F | `ic_0dte` | `hydra_variant_f.service` | `GhauriMeanReversionStrategy` ("Ghauri Mean Reversion" — fades a touch of the day's VIX-implied expected-move boundary with a one-sided put/call credit vertical; fully self-contained, does NOT reuse HYDRA's scheduled-entry machinery) | event-triggered, not clock-scheduled (EM-boundary touch, cutoff 13:00 ET) | 1c | fixed 10pt width | dry_run_locked — running since 2026-08-27. **2 recorded entries, lifetime +$45.80** (2026-09-18). ⚠️ Its accounting was wrong until then: it booked every take-profit TWICE, counted no entries at all, and never charged the opening commission — lifetime read $177.90. See `bots/hydra/__init__.py` 2026-09-18. `fomc_announcement_skip=false`. |
 | D | `calendar_multiday` | `hydra_variant_d.service` | `DoubleCalendarStrategy` ("DC Time Machine", multi-day SPX net-debit) | multi-day (not 0DTE) | — | double calendar | dry_run_locked (NO-GO) |
 | E | `calendar_multiday` | `hydra_variant_e.service` | `SpyDoubleCalendarStrategy` ("SPY Double Calendar", multi-day SPY net-debit, from an OptionsKit video) | multi-day (not 0DTE) | — | double calendar | dry_run_locked |
-| G | `undefined_risk_0dte` | `hydra_variant_g.service` | `StrangleStrategy` (0DTE SPX short strangle — two naked shorts, `requires_protective_wings=False`, undefined risk sized by broker margin not a defined-risk floor; reuses HYDRA's scheduled-entry gating unchanged, only strike selection/placement/per-side stops are strangle-specific) | 10:15 / 10:45 / 11:15 (same base schedule as A) | 1c | ±8δ-anchored symmetric OTM, no wings | dry_run_locked — running since 2026-08-27. 14 days of data, lifetime +$836.45. ⚠️ `fomc_announcement_skip=false` — **G is the only undefined-risk strategy and the only one that trades FOMC announcement days**; decided 2026-09-17 to leave ON in dry-run and gate it at promotion (blockers G-1/G-2/G-3 in `GO_LIVE_MASTER.md` §2-ter). |
+| G | `undefined_risk_0dte` | `hydra_variant_g.service` | `StrangleStrategy` (0DTE SPX short strangle — two naked shorts, `requires_protective_wings=False`, undefined risk sized by broker margin not a defined-risk floor; reuses HYDRA's scheduled-entry gating unchanged, only strike selection/placement/per-side stops are strangle-specific) | 10:15 / 10:45 / 11:15 (same base schedule as A) | 1c | ±8δ-anchored symmetric OTM, no wings | dry_run_locked — running since 2026-08-27. **17 days of data, 28 entries, lifetime +$1,239.35** (re-measured 2026-09-19; this read "14 days / +$836.45"). ⚠️ `fomc_announcement_skip=false` — **G is the only undefined-risk strategy and the only one that trades FOMC announcement days**; decided 2026-09-17 to leave ON in dry-run and gate it at promotion (blockers G-1/G-2/G-3 in `GO_LIVE_MASTER.md` §2-ter). |
 
 **Live-seat swap (2026-07-24):** the live paper seat moved from C → B (B: dry_run_shadow→live, 10c→7c, 4-slot→7-slot; C: live→dry_run_shadow, alerts/Sheets off). Dashboard canonical/WS/widget views, Telegram alert identity, and the agent suite (`services/agents_config.json`) all follow whichever variant is live via `dashboard/backend/services/variant_readers.live_seat_id()` / dynamic `is_live`/`is_primary` — no other surface should hardcode "C" as the live bot. Swap runbook: `docs/migration/RUNBOOKS.md` RB-9 (RB-8 is the historical A+C go-live, kept for reference only). To reverse: `scripts/flip_bc_rollback.sh`.
 
@@ -661,14 +710,14 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 ```bash
 # Stop HYDRA + variants (broker keeps the IBKR session — strategies stop trading; session stays up)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g"
 
 # Stop just HYDRA
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
 
 # Start the broker FIRST (it owns the session the strategies depend on), then HYDRA + variants
 # (run pre-start verification first — see deploy/IBKR_CREDENTIALS_SETUP.md)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start calypso-broker hydra hydra_variant_b hydra_variant_c"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start calypso-broker hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g"
 
 # Restart HYDRA (config / strategy change pickup — does NOT re-auth the IBKR session)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart hydra"
@@ -681,7 +730,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 ```bash
 # All active HYDRA-related services (calypso-broker = the shared IBKR session owner)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status calypso-broker hydra hydra_variant_b hydra_variant_c dashboard"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status calypso-broker hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g dashboard"
 
 # Broker session health + re-auth loop logs (where session/auth problems show up in broker mode)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u calypso-broker -n 50 --no-pager"
@@ -708,7 +757,12 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u h
 # Stop all trading immediately. The hydra* units are the ones that place orders;
 # stopping them halts trading. calypso-broker is a passive session holder (it does
 # not trade on its own) — add it to also drop the shared IBKR session.
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c calypso-broker"
+#
+# This listed only hydra + variant_b + variant_c until 2026-09-19, i.e. it left D, E,
+# F and G running while claiming to stop everything. They are dry-run-locked so nothing
+# was at risk, but a command labelled "emergency stop" must not need that caveat to be
+# true. Add hydra_variant_bm once real money runs.
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g calypso-broker"
 ```
 
 Stopping `calypso-broker` drops the one shared IBKR session; the `hydra*` units will fail their `ensure_connected()` health probe and `break` (then systemd retries them, but they stay down without a healthy broker). Bring the broker back FIRST when restarting.
@@ -886,15 +940,29 @@ Three files are backed up daily to Google Cloud Storage. A fourth (state file) g
 
 ### Daily GCS backups via `db_backup.service` + `db_backup.timer`
 
-Runs daily at **23:00 UTC** (= 7 PM EDT / 6 PM EST — after market close + after HOMER's journal write). Backs up:
+Runs daily at **23:00 UTC** (= 7 PM EDT / 6 PM EST — after market close + after HOMER's journal write).
 
-| Source on VM | GCS destination (under `gs://calypso-backups/`) |
-|---|---|
-| `/opt/calypso/data/backtesting.db` | `backtesting_YYYYMMDD.db` |
-| `/opt/calypso/data/hydra_metrics.json` | `hydra_metrics_YYYYMMDD.json` |
-| `/opt/calypso/data/hydra_state.json` | `hydra_state_YYYYMMDD.json` |
+> **Corrected 2026-09-19.** This section described three files copied by `gsutil cp` from an
+> `ExecStartPost` in the unit. All three details were wrong: the logic lives in
+> **`scripts/db_backup.sh`** (moved because `$(date +%Y%m%d)` expanded EMPTY in the systemd exec
+> context, so backups landed on dateless objects with no history), the unit has a single
+> `ExecStart` and no `ExecStartPost`, and the coverage became **seat-agnostic** in `ab63407` —
+> which is the fix the first RB-7 rehearsal forced, after it found the live seat had no DB backup
+> at all while a dry-run shadow did.
 
-`deploy/db_backup.service` shells `gsutil cp` per file. Failure of metrics/state copies is non-fatal (the `|| true` at the end of the `ExecStartPost`) — the DB copy is the primary; the JSON files are best-effort because they're tiny + can be re-synthesized from the DB in the worst case.
+| Source on VM | GCS destination (under `gs://calypso-backups/`) | class |
+|---|---|---|
+| `data/backtesting.db` (variant A) | `backtesting_YYYYMMDD.db` | **gating** |
+| `data/hydra_metrics.json` / `hydra_state.json` | `hydra_metrics_…` / `hydra_state_…` | best-effort |
+| `data/variant_*/backtesting.db` — **every variant** | `variant_<id>_backtesting_YYYYMMDD.db` | **gating** |
+| `data/variant_*/dc_calendar.db` (D/E) | `variant_<id>_dc_calendar_YYYYMMDD.db` | best-effort |
+| `data/variant_*/hydra_metrics.json` / `hydra_state.json` | `variant_<id>_…_YYYYMMDD.json` | best-effort |
+
+**Databases are copied with SQLite's own `.backup()`**, not `cp` — a file copy of a WAL-mode
+database silently drops committed rows (there is a direct-`cp` fallback, and it logs loudly when
+it takes it). **Any failed *gating* copy exits the unit non-zero**, so a missing database backup
+is a failed service rather than a quiet gap; the JSON artefacts are best-effort because they can
+be re-synthesised from the DB. Archived variant dirs (`variant_x.something`) are skipped.
 
 ### Verify the timer is enabled
 
@@ -962,7 +1030,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="ls -la /opt/calypso/
 
 ## Config Files
 
-**IMPORTANT:** `bots/hydra/config/config.json` (variant A's config) is `.gitignore`'d and edited directly on the VM. The variant configs (`config_variant_{b,c,d,e}.json`) ARE tracked in git as samples/templates — they are edited directly on the VM too, and the VM's copy is deploy-authoritative. **Correction (2026-08-19, empirically verified):** these files carry the `skip-worktree` bit on the VM, but that bit only suppresses `git status`/`diff`/`add` from flagging local edits as dirty — it does **NOT** stop a `git pull`'s fast-forward from overwriting the on-disk file when the tracked branch advances a commit that touches that path (confirmed directly: a fast-forward pull silently applied a new tracked value to `config_variant_b.json`/`config_variant_c.json` despite `git ls-files -v` showing `S` on both, immediately before and after). Do not assume skip-worktree makes these files immune to `git pull` — verify VM-local values after every deploy that touches a `config_variant_*.json` sample in the same commit, don't rely on the flag alone. When a variant's live config changes materially (contracts, caps, schedule, live/dry status), refresh the tracked sample to match so the repo doesn't lie to the next reader **and** so a future pull can't silently revert an undocumented VM-only tweak. Real credentials come from Secret Manager (Telegram, Google Sheets) or systemd-creds (IBKR OAuth) — never from config files.
+**IMPORTANT:** `bots/hydra/config/config.json` (variant A's config) is `.gitignore`'d and edited directly on the VM. The variant configs (`config_variant_{b,c,d,e,f,g,bm}.json`) ARE tracked in git as samples/templates — they are edited directly on the VM too, and the VM's copy is deploy-authoritative. **Correction (2026-08-19, empirically verified):** these files carry the `skip-worktree` bit on the VM, but that bit only suppresses `git status`/`diff`/`add` from flagging local edits as dirty — it does **NOT** stop a `git pull`'s fast-forward from overwriting the on-disk file when the tracked branch advances a commit that touches that path (confirmed directly: a fast-forward pull silently applied a new tracked value to `config_variant_b.json`/`config_variant_c.json` despite `git ls-files -v` showing `S` on both, immediately before and after). Do not assume skip-worktree makes these files immune to `git pull` — verify VM-local values after every deploy that touches a `config_variant_*.json` sample in the same commit, don't rely on the flag alone. When a variant's live config changes materially (contracts, caps, schedule, live/dry status), refresh the tracked sample to match so the repo doesn't lie to the next reader **and** so a future pull can't silently revert an undocumented VM-only tweak. Real credentials come from Secret Manager (Telegram, Google Sheets) or systemd-creds (IBKR OAuth) — never from config files.
 
 ```bash
 # View HYDRA config
@@ -1143,9 +1211,9 @@ For the full 86-fix history including all Saxo-era bugs and resolutions, see `bo
 ## Important Notes
 
 1. **Git on VM:** must run as `calypso`: `sudo -u calypso bash -c 'cd /opt/calypso && git pull'`
-2. **Service names use underscores:** `hydra`, `hydra_variant_b`, `hydra_variant_c`, `hydra_variant_d`, `hydra_variant_e`, `dashboard`
-3. **Log locations:** `/opt/calypso/logs/hydra/bot.log`; variants under `/opt/calypso/logs/hydra_variant_{b,c,d,e}/`
-4. **State files:** `data/hydra_state.json`, `data/variant_{b,c,d,e}/hydra_state.json`. Calendar variants D/E also keep a sidecar `data/variant_{d,e}/dc_open_trades.json` (open calendars) + an isolated `data/variant_{d,e}/dc_calendar.db` (calendar tables, separate from the shared `backtesting.db`).
+2. **Service names use underscores:** `hydra`, `hydra_variant_b`, `hydra_variant_c`, `hydra_variant_d`, `hydra_variant_e`, `hydra_variant_f`, `hydra_variant_g`, `dashboard` (plus `hydra_variant_bm` + `calypso-broker-live`, built but not installed)
+3. **Log locations:** `/opt/calypso/logs/hydra/bot.log`; variants under `/opt/calypso/logs/hydra_variant_{b,c,d,e,f,g}/`; the real-money broker would write to `logs/broker-live/broker.log`
+4. **State files:** `data/hydra_state.json`, `data/variant_{b,c,d,e,f,g}/hydra_state.json`. Calendar variants D/E also keep a sidecar `data/variant_{d,e}/dc_open_trades.json` (open calendars) + an isolated `data/variant_{d,e}/dc_calendar.db` (calendar tables, separate from the shared `backtesting.db`).
 5. **Position Registry:** `data/position_registry.json` — vestigial on IBKR (always empty), kept loaded for back-compat
 6. **Token Keeper:** dead on this branch. The `services/token_keeper/` code and the `deploy/token_keeper.service.disabled-on-this-branch` unit (suffixed so no `deploy/*.service` install loop can pick it up) exist only for back-compat with `main` and must never be started. IBKR OAuth 1.0a is unattended.
 7. **All four sibling bots:** **deleted on this branch** (P5a/P5b). `git ls-tree HEAD bots/` shows only `__init__.py` + `hydra/`. The kill-switched versions live on `main`.
