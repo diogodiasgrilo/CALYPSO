@@ -196,11 +196,34 @@ p=0.038, which made the veto look protective). **It does not overturn it** — 0
 uninformative. But two samples pointing opposite ways is a reason to hold the earlier result more
 loosely than "decided", and the honest status is **unresolved in both directions**.
 
-**Revised timeline for the EV question.** §A0 has been saying "~2 weeks". Post-fix the adjuster
-produces ~1 veto/session and only ~1 in 3 carries both credits, so ~20 fully-scoreable vetoes is
-**~10–12 weeks**, not 2. Two ways to shorten it, both cheap: score **breach** (needs only the
-strike, available now for every `gex_decisions` row), or populate `estimated_*_credit` on the veto
-path so each veto becomes scoreable when it happens.
+**Revised timeline for the EV question — ~4 weeks, and the instrumentation is ALREADY DONE.**
+§A0 has been saying "~2 weeks", which is optimistic; an earlier version of this paragraph said
+**10–12 weeks**, which was wrong in the other direction and is corrected here. It derived the
+"1 in 3 carry credits" fraction from a window straddling the fix. Split properly:
+
+| GEX vetoes | total | fully scoreable (strike + both credits) |
+|---|---|---|
+| since 09-05 | 9 | 3 |
+| **since 09-12 (fix deployed)** | **3** | **3 — all of them** |
+
+`_skip_require_both_sides` already passes `est_call`/`est_put` into `_record_skipped_entry`, shipped
+2026-09-12 for exactly this reason — its docstring says so: *"without them every unbreached row
+models as exactly $0.00 … and silently flatters the gate."* **So there is nothing to build.** At the
+measured post-fix rate of ~1 veto per session, 20 scoreable vetoes is **~20 active sessions, ~4
+weeks.** (Found by auditing before implementing: the change this section previously proposed had
+already been made a week earlier.)
+
+**Two things that genuinely would shorten it**, neither requiring new instrumentation:
+- **Score breach instead of P&L.** It needs only the strike, and `gex_decisions` carries one for all
+  82 adjuster rows — runnable today, as the table above shows.
+- **Pool the other variants.** C runs the same Brandon stack and its adjuster vetoes independently;
+  A and G are ungated controls. Only B has been looked at.
+
+ℹ️ Unrelated but found in the same audit: `record_skipped_entry`'s INSERT column list omits
+`theoretical_pnl` and `would_have_stopped` entirely, so those two columns can never be populated by
+any caller. That is why they are 0-of-176. Harmless in practice — `analyze_skipped_entry_outcomes.py`
+derives the counterfactual from strikes + credits rather than reading them — but they are dead
+columns and should not be mistaken for missing data.
 
 ⚠️ **This measures the COST, not the net.** It does not show the vetoes were wrong — the
 2026-09-06 verdict found vetoed shorts breached 5/43 vs 0/38 for placed ones (p=0.038), i.e. the
