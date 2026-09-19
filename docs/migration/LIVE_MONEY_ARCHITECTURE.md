@@ -306,10 +306,18 @@ normal deploy discipline rather than waiting for a big-bang cutover.
 
 ## 8. Test plan
 
-- **Two brokers on paper credentials** — the whole design exercised end to end
-  with zero live-money risk, and the cheapest possible test of fact 2. If the
-  one-session-per-username limit were ever going to bite, it fails here, loudly,
-  on paper.
+- 🔴 ~~**Two brokers on paper credentials**~~ — **STRUCK 2026-09-19. Do NOT run
+  this test.** It survived the §7 correction that killed the same idea in the
+  rollout, so the plan forbade the step and the test plan still opened with it —
+  the reader most likely to act on it is the one working the checklist. Two
+  brokers on the paper credentials are two sessions on the **same IBKR
+  username**: they evict each other and take **B, the live paper seat**, offline.
+  It is not a zero-risk test, it is the one test guaranteed to cause the outage
+  the broker service exists to prevent. What replaces it is in §7's correction:
+  the unit statically (`systemd-analyze verify`), the S1/S2 guards (unit tested,
+  13 mutations killed), and the health-payload contract against a stub
+  `IBClient`. **Two brokers genuinely running concurrently is only testable once
+  LIVE credentials exist** — different username, different session.
 - **S1 contract test** — `/health` reports `environment` + account code, and
   keeps its fail-closed behaviour (any error still degrades to
   `connected: False`; adding fields must not add a raising path).
