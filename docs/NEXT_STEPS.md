@@ -289,6 +289,36 @@ Fixed in `scripts/analyze_gex_shadow.py` with 10 tests, 4 of which fail against 
 The analyzer now also prints a **replay-fidelity health check**, because a replay that does not
 reproduce the gate silently mis-measures every other variant.
 
+### Documentation sweep — 2026-09-19, coverage and what is still unswept
+
+Swept the documents that get **executed** or that a session **reads as state**, verifying each
+checkable claim against the code and the VM rather than re-reading it. **Twelve defects across
+nine files**, on top of the six recorded above.
+
+| File | What was wrong |
+|---|---|
+| `CLAUDE.md` | Credentials section still hydra-centric — told you to rotate then `restart hydra`, **a no-op**, because `calypso-broker` holds the session. "Emergency stop (everything)" left D/E/F/G running. **Zero** mention of the real-money topology. Backups section wrong on all three details (logic is in `scripts/db_backup.sh`; no `ExecStartPost`; coverage is seat-agnostic since `ab63407`). Variant lists stopped at `e`. G's lifetime stale. |
+| `deploy/README.md` | Listed 6 of 19 units — missing F and G (ACTIVE since 08-27) and both real-money units. `calypso.service` is an **orphan** for a bot deleted in P5a/P5b. |
+| `CLAUDE.md` + `deploy/README.md` | **HERMES/HOMER documented at 19:00/19:30 ET; they run at 23:00/23:30.** Moved past settlement in `14205f2` precisely because 7 PM analysis ran on unsettled numbers — so the stale time undoes the reason for the move. |
+| `PROJECT_STATUS.md` | HEAD, commits-ahead and suite count stale; Gate 4 streak misdated; no real-money mention. |
+| `COMBO_ENTRY_LIVE_CUTOVER_PLAN.md` | C1 told the next reader to settle the margin question "FREE" with a BAG whatif — **attempted today, and it does not work on paper.** |
+
+**Verified sound, recorded so it is not re-checked:** every script the runbooks reference exists
+· the three unbuilt calendar scripts are honestly marked NOT BUILT · Gate 2 re-measures clean
+(0 OPEN findings, 0 TODO markers) · `LIVE_HALT_CRITERIA` already halts `hydra_variant_bm`/`_b`
+rather than `hydra`, so it never carried the runbooks' wrong-unit trap · CLAUDE.md's
+sibling-bots-deleted claim holds under its own stated test · all seven `config_variant_*.json`
+exist, including `bm` · metrics agree with the database for all six variants.
+
+⚠️ **NOT swept — be explicit about it rather than implying the repo is clean.** 203 markdown
+files exist; this pass covered the ~12 that are executed or read as current state. Untouched and
+stale-by-age: **`HYDRA_STRATEGY_SPECIFICATION.md`** (1,253 lines, untouched since 2026-07-24 — the
+most likely remaining source of a wrong behavioural claim), `MERGE_PLAN.md` (checked only for
+wrong-unit commands), `D_GOLIVE_*`, `BROKER_SESSION_SERVICE_DESIGN.md`, `NEW_STRATEGY_PLAYBOOK.md`,
+`STRATEGY_GROUPING_REDESIGN.md`, `scripts/README.md`, the dashboard docs, and the historical
+migration plans. The `intel/clio/*` weeklies and `HYDRA_TRADING_JOURNAL.md` are dated records, not
+state, and should not be "corrected" at all.
+
 ### Still unverified in production
 
 - **POS-003 merged-leg resolver** (deployed 09-15) — still needs a session with both a stop and an
