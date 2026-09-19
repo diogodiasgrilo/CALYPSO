@@ -222,3 +222,69 @@ class TestTheVerdictIsHonest:
 
     def test_it_compares_against_the_defined_risk_figure(self):
         assert "defined_risk = a.width * 100 * a.quantity" in SRC
+
+
+class TestTheControlRunsFirst:
+    """A control placed after the combo previews cannot act as a control.
+
+    2026-09-19, out of hours: run LAST, the 1-leg control came back
+    ``Circuit breaker 'ib.orders' is OPEN`` — a breaker the 2-leg BAG timeout
+    had itself just opened by burning the family's retry budget. So the whole
+    probe read "whatif is dead on this account", when a standalone whatif of the
+    SAME conid minutes later returned a full block (initial.change 109,213,
+    amount 225 USD) and both BAG forms returned em-dash placeholders *with all
+    four legs snapshot first*. The real finding — it is the BAG form
+    specifically, not the machinery — is only reachable if the control runs
+    before the calls that can break it.
+    """
+
+    @staticmethod
+    def _stub(monkeypatch, recorder):
+        def fake_rpc(method, *args, **kwargs):
+            if method == "qualify_contract":
+                if kwargs.get("sec_type") == "IND":
+                    return 416904
+                return 900000 + int(kwargs["strike"])
+            if method == "get_quote":
+                return {"last": "7,646.04"}
+            if method == "get_quotes_batch":
+                return {c: {} for c in args[0]}
+            raise AssertionError(f"probe made an unexpected rpc call: {method}")
+
+        def fake_preview(conidex, side, price, qty, label):
+            recorder.append(("bag", label))
+            return {"label": label, "ok": True, "initial_change": 500.0, "blocks": {}}
+
+        def fake_plain(conid, side, qty, label):
+            recorder.append(("plain", label))
+            return {"label": label, "ok": True, "initial_change": 500.0, "blocks": {}}
+
+        monkeypatch.setattr(P, "rpc", fake_rpc)
+        monkeypatch.setattr(P, "preview", fake_preview)
+        monkeypatch.setattr(P, "preview_plain", fake_plain)
+
+    def test_the_single_leg_control_is_previewed_before_any_BAG(self, monkeypatch):
+        calls = []
+        self._stub(monkeypatch, calls)
+        assert P.main(["--expiry", "2026-09-21"]) == 0
+        assert calls, "the probe ran no previews at all"
+        assert calls[0][0] == "plain", (
+            "the 1-leg control must be previewed FIRST — a breaker opened by a "
+            f"BAG timeout would otherwise eat it; order was {[k for k, _ in calls]}"
+        )
+
+    def test_every_preview_still_runs(self, monkeypatch):
+        """Reordering must not drop a form — the routing question needs both."""
+        calls = []
+        self._stub(monkeypatch, calls)
+        P.main(["--expiry", "2026-09-21"])
+        assert [k for k, _ in calls] == ["plain", "bag", "bag", "bag"]
+
+
+class TestTheEvidenceIsReadable:
+    def test_margin_fields_are_rendered_ascii_safe(self):
+        """IBKR's "no value" is a non-ASCII em dash, and ``!r`` over a non-UTF8
+        pipe rendered it as '\\x1b2014' — unreadable at exactly the moment the
+        raw value IS the evidence. ``ascii()`` shows '\\u2014' unambiguously."""
+        assert "{ascii(init.get('change'))}" in SRC
+        assert "!r}  -> {change}" not in SRC

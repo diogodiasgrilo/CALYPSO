@@ -136,9 +136,9 @@ def preview(conidex: str, side: str, price: float, qty: int, label: str) -> dict
     init = (blocks.get("initial") or {})
     amt = (blocks.get("amount") or {})
     change = _money(init.get("change"))
-    print(f"  initial.change : {init.get('change')!r}  -> {change}")
-    print(f"  amount         : {amt.get('amount')!r}")
-    print(f"  maintenance    : {(blocks.get('maintenance') or {}).get('change')!r}")
+    print(f"  initial.change : {ascii(init.get('change'))}  -> {change}")
+    print(f"  amount         : {ascii(amt.get('amount'))}")
+    print(f"  maintenance    : {ascii((blocks.get('maintenance') or {}).get('change'))}")
     return {"label": label, "ok": True, "initial_change": change, "blocks": blocks}
 
 
@@ -173,7 +173,7 @@ def preview_plain(conid: int, side: str, qty: int, label: str) -> dict:
         return {"label": label, "ok": False, "reason": "empty"}
     init = (blocks.get("initial") or {})
     change = _money(init.get("change"))
-    print(f"  initial.change : {init.get('change')!r}  -> {change}")
+    print(f"  initial.change : {ascii(init.get('change'))}  -> {change}")
     return {"label": label, "ok": True, "initial_change": change, "blocks": blocks}
 
 
@@ -255,7 +255,22 @@ def main(argv=None) -> int:
     # a 2-leg number is the one a defined-risk gate would actually need.
     call_vertical = f"{conids['sc']}/-1,{conids['lc']}/1"
 
+    # THE CONTROL RUNS FIRST, and the ordering is load-bearing. Python evaluates
+    # this list left to right, and a BAG preview that TIMES OUT burns the retry
+    # budget of the whole `ib.orders` family — so a control placed last is
+    # refused by a breaker the combo previews themselves opened, which is
+    # indistinguishable from IBKR being unable to price the leg.
+    #
+    # Verified 2026-09-19 (Sat, out of hours), which is why this moved: run last,
+    # the control came back "Circuit breaker 'ib.orders' is OPEN" and the whole
+    # probe read as "whatif is dead on paper". A standalone whatif of the SAME
+    # conid minutes later returned a full block (initial.change 109,213, amount
+    # 225 USD). Meanwhile both combo forms returned em-dash placeholders WITH all
+    # four legs snapshot first — so it is the BAG form specifically, not the
+    # machinery. Only a control that actually runs can draw that distinction.
     results = [
+        preview_plain(conids["sc"], "SELL", a.quantity,
+                      "1-LEG naked short call (CONTROL — the shape G already uses)"),
         preview(f"{SPREAD_TEMPLATE_CONID};;;{legs}", "SELL", est_credit,
                 a.quantity, "BARE template (what the code builds today)"),
         preview(f"{SPREAD_TEMPLATE_CONID}@CBOE;;;{legs}", "SELL", est_credit,
@@ -263,8 +278,6 @@ def main(argv=None) -> int:
         preview(f"{SPREAD_TEMPLATE_CONID};;;{call_vertical}", "SELL",
                 round(est_credit / 2, 2), a.quantity,
                 "2-LEG call vertical (what a defined-risk gate would ask for)"),
-        preview_plain(conids["sc"], "SELL", a.quantity,
-                      "1-LEG naked short call (CONTROL — the shape G already uses)"),
     ]
 
     defined_risk = a.width * 100 * a.quantity
