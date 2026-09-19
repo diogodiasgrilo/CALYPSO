@@ -2,11 +2,11 @@
 
 **This file is the single-source-of-truth for the current state of the `hydra-ibkr-standalone` branch.** Any Claude session arriving at this repo should read this file first, before CLAUDE.md. CLAUDE.md is the operator reference (what the bot does, how to deploy, troubleshoot); this file is the *project state* (what's been done, what's in flight, what's blocked).
 
-**Last updated:** 2026-09-18. ⚠️ **The header facts below are current; the dated narrative further down still stops in June/July and is HISTORY, not state.** For the live one-screen picture read [`docs/NEXT_STEPS.md`](../NEXT_STEPS.md) §A0 — it is refreshed per session and this file is not.
-**Base branch:** `hydra-ibkr-standalone` @ `62d3773` (verify with `git rev-parse HEAD`).
+**Last updated:** 2026-09-19. ⚠️ **The header facts below are current; the dated narrative further down still stops in June/July and is HISTORY, not state.** For the live one-screen picture read [`docs/NEXT_STEPS.md`](../NEXT_STEPS.md) §A0 — it is refreshed per session and this file is not.
+**Base branch:** `hydra-ibkr-standalone` @ `8890686` (2026-09-19 — verify with `git rev-parse HEAD`; this line goes stale by design, so treat a mismatch as normal rather than as a finding).
 **Feature branches:** none outstanding. `feat/strategy-grouping-spy-calendar` (taxonomy/grouping + Strategy D go-live + Strategy E) is **MERGED** — the "NOT merged" line that stood here until 2026-09-18 was two months stale.
-**Commits ahead of `main`:** 93 (`main` @ `59a1fc7`, merged forward 2026-09-15 with 613 commits, `--no-ff`).
-**Test suite:** **4063 passed / 16 skipped** (2026-09-18). CI runs it on every push (`.github/workflows/ci.yml`) along with a typecheck, a lint ratchet, a 42-surface visual audit, a responsive sweep, and five accessibility/degraded-data browser probes.
+**Commits ahead of `main`:** 137 (`main` @ `59a1fc7`, merged forward 2026-09-15 with 613 commits, `--no-ff`).
+**Test suite:** **4294 passed / 16 skipped** (2026-09-19). CI runs it on every push (`.github/workflows/ci.yml`) along with a typecheck, a lint ratchet, a 42-surface visual audit, a responsive sweep, and five accessibility/degraded-data browser probes.
 
 > ### ⚠️ THE MOST IMPORTANT CORRECTION TO THIS FILE (2026-09-18)
 > Everything below about go-live sequencing describes **June 2026** and is
@@ -20,8 +20,16 @@
 > - **The critical path is FUNDING THE LIVE ACCOUNT** — created, not funded.
 >   Then permissions → market data → a new OAuth keypair (~2wk activation).
 >   4–6 weeks, all calendar, no engineering. Everything else queues behind it.
-> - **Gate board:** 2, 7 🟢 · 1, 3, 5, 9, 10 🟡 · 4 🔴 (streak restarted
->   2026-09-18) · 8 🔴 (a cutover-time config change, not work).
+> - **Gate board:** 2, 7 🟢 · 1, 3, 5, 9, 10 🟡 · 4 🔴 (streak at 0; the
+>   2026-09-19 restart landed on a **non-trading Saturday**, so it burned nothing
+>   and **Monday 2026-09-21 can be session 1** if nothing else is deployed) ·
+>   8 🔴 (a cutover-time config change, not work). Gate 7 was **re-rehearsed
+>   2026-09-19 — PASS**; next due 2026-10-19.
+> - **Real money is BUILT but cannot run.** It is not a cutover: `calypso-broker-live`
+>   (:8789) + variant **`bm`** run *alongside* paper, which is untouched. No live
+>   credentials exist, `bm` ships `dry_run=true`, and neither unit is installed —
+>   verified on the VM 2026-09-19. See
+>   [`LIVE_MONEY_ARCHITECTURE.md`](LIVE_MONEY_ARCHITECTURE.md).
 
 **Branch is pushed to `origin`** (github.com/diogodiasgrilo/CALYPSO) as of 2026-05-29 — no longer laptop-only.
 
