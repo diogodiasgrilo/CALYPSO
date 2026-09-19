@@ -310,14 +310,25 @@ rather than `hydra`, so it never carried the runbooks' wrong-unit trap · CLAUDE
 sibling-bots-deleted claim holds under its own stated test · all seven `config_variant_*.json`
 exist, including `bm` · metrics agree with the database for all six variants.
 
-⚠️ **NOT swept — be explicit about it rather than implying the repo is clean.** 203 markdown
-files exist; this pass covered the ~12 that are executed or read as current state. Untouched and
-stale-by-age: **`HYDRA_STRATEGY_SPECIFICATION.md`** (1,253 lines, untouched since 2026-07-24 — the
-most likely remaining source of a wrong behavioural claim), `MERGE_PLAN.md` (checked only for
-wrong-unit commands), `D_GOLIVE_*`, `BROKER_SESSION_SERVICE_DESIGN.md`, `NEW_STRATEGY_PLAYBOOK.md`,
-`STRATEGY_GROUPING_REDESIGN.md`, `scripts/README.md`, the dashboard docs, and the historical
-migration plans. The `intel/clio/*` weeklies and `HYDRA_TRADING_JOURNAL.md` are dated records, not
-state, and should not be "corrected" at all.
+**✅ `HYDRA_STRATEGY_SPECIFICATION.md` swept too — and it held the worst claim of the day.** Its
+Stop Loss Rules specify **credit + buffer** as *the* formula. B has run the **A2 %-of-width stop**
+(`narrow_spread_stop: {enabled: true, pct_of_width: 0.4}`) since `fd53cef`, verified on the VM
+today — `0.40 × 5 × 100 × 7 = $1,400` a side, regardless of credit, and bypassing MKT-042 decay.
+On the narrow Brandon variants the two formulas differ a lot, and that difference **is** the risk
+on the only variant placing orders. Grepped rather than skimmed: `narrow_spread_stop`, `MKT-048`,
+require-both-sides, `MKT-011B` and deliberate rung pricing are **absent from the spec entirely**,
+zero occurrences each. Its schedule table is also variant **A's** while the header claims A/B/C —
+B runs a 7-slot 09:45–12:45 grid, and E6 no longer fires on B/C at all. Scope warning added at the
+top; the body is left as the baseline design it is. Verified correct and untouched: VIX
+breakpoints `[18.0, 22.0, 28.0]`, the E#1 drop, E7 disabled.
+
+⚠️ **STILL NOT swept — named rather than implied clean.** 203 markdown files exist; this pass
+covered ~13. Untouched: `MERGE_PLAN.md` (checked only for wrong-unit commands), `D_GOLIVE_*`,
+`BROKER_SESSION_SERVICE_DESIGN.md`, `NEW_STRATEGY_PLAYBOOK.md`, `STRATEGY_GROUPING_REDESIGN.md`,
+`scripts/README.md`, the dashboard docs, and the historical migration plans. With the spec done,
+**no remaining unswept file is known to describe live trading behaviour** — the rest are design
+rationale, history, or tooling inventories, which fail more quietly. The `intel/clio/*` weeklies
+and `HYDRA_TRADING_JOURNAL.md` are dated records, not state, and should not be "corrected" at all.
 
 ### Still unverified in production
 
