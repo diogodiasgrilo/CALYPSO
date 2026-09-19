@@ -5,7 +5,7 @@
 > [`docs/migration/PROJECT_STATUS.md`](migration/PROJECT_STATUS.md) (project-wide state) and the per-effort
 > design docs.
 >
-> **Last updated: 2026-09-18 (Fri, 14:20 ET).** **Read §A0 first — it is the whole current state on
+> **Last updated: 2026-09-19 (Sat, 03:40 ET).** **Read §A0 first — it is the whole current state on
 > one screen.** §A–§D are current. **§0–§10 are the older backlog (2026-07-14 / 07-24 era)** — much of
 > it is done or superseded; **verify against the code before acting on anything there.** Real live
 > items still live in §5 (entry-schedule lock, E calendar-stop analyzer) and §6 (Brandon fill-quality
@@ -13,86 +13,85 @@
 
 ---
 
-# §A0. WHERE WE ARE — 2026-09-18 (Fri), 14:20 ET
+# §A0. WHERE WE ARE — 2026-09-19 (Sat), 03:40 ET
 
-**Fleet:** all units active · broker connected/authenticated/not competing · **account FLAT
-(0 non-zero positions)** · VM in sync. **B took ZERO entries today and that is CORRECT** —
-see below. Dashboard deployed + verified (domytrade.com serving the new build).
+**The restart is DONE and verified.** Broker + all 7 strategies came up on the current build
+(`ed229e8`) at **07:32–07:34 UTC (03:32–03:34 ET)** — market closed, account **FLAT (0 position
+rows)**, `NRestarts=0` on every unit, VM tree clean and in sync, unit files already matching the
+repo (no `daemon-reload` needed). Everything §A0 listed yesterday as "on disk but not running" is
+now **live**: MKT-011B, the alert token-bucket fix, the account guard + `/health` identity, the
+ORDER-004 margin floor, the bespoke-path changes, and D/E (which were still on Thursday's code).
 
-### 🔴 ON DISK BUT NOT RUNNING — tonight's restart
+**The account guard works in production.** `/health` now answers
+`{"environment":"paper","account":"DUR049068",...}`, and every variant logged
+`ACCOUNT-ASSERT OK: variant X declares 'paper'; broker reports 'paper'` — A, B, C, D, E, F, G,
+seven for seven. The IBKR session stayed up across the restart; no repeat of the 09-12 weekend
+`410 Gone`.
 
-The bots were last restarted **11:16 UTC (07:16 ET)**; most of the day's commits landed
-after that. **Nothing below is live yet:**
+### 🟢 Gate 4 can start counting on Monday
 
-| Fix | Why it matters |
+The restart landed on a **non-trading Saturday**, so it interrupted no session and burned nothing
+— the streak is still at 0. **Monday 2026-09-21 can be session 1 of the five**, but only if
+nothing else is deployed between now and then. That is an operator choice, not a technical one:
+freeze and start the clock, or keep shipping and reset it. Funding is 4–6 weeks out, so the clock
+is still cheap to reset, and the real freeze belongs near cutover.
+
+### The whatif probe: it is the BAG form that is dead, not whatif
+
+Re-run out of hours as planned (`--expiry 2026-09-21` for Monday's contracts, all four legs
+snapshot first). The results **overturn the reading we had**:
+
+| Form | Result |
 |---|---|
-| **MKT-011B** — a $0.00 credit read as "could not measure" | the defect that cost B **−$137.20** today |
-| Alert token-bucket fix | a bucket could be denied its token |
-| Account guard + broker `/health` identity | a strategy cannot currently tell which account it reached |
-| ORDER-004 margin floor (wider side) | latent under-provisioning |
-| Bespoke-path changes + dead-code deletions | — |
-| **D and E** are on *Thursday's* code | furthest behind |
+| 4-leg BAG, bare template | **em-dash placeholders** in every money block — no margin, no amount |
+| 4-leg BAG, `@CBOE`-routed | identical em-dash placeholders |
+| 2-leg call vertical (BAG) | **timed out**, and the retries opened the `ib.orders` breaker |
+| **1-leg naked short call (plain)** | **full, correct block** — amount 225 USD, commission 1.63, initial.change **109,213**, position −1 |
 
-⚠️ **The 09-15 note that B "was restarted to pick up the alert and capital fixes" was
-WRONG and is corrected here.** Capital yes (07:57 UTC, before the 11:16 restart); the
-**alert fix landed 12:14 UTC, after it**, so it has never run. Restart order: broker →
-confirm `/health` → strategies.
+That last row came from a direct RPC call *after* the probe, because the probe's own control was
+refused by the breaker the 2-leg BAG had just opened — the control ran last. **So `what_if_order`
+is healthy; it is the BAG/combo ticket IBKR will not margin on this paper account.** This is the
+margin-preview counterpart to the known-broken paper combo *lifecycle*
+(`combos_not_operable_on_ibkr_paper`), and it now rests on evidence rather than inference: the
+placeholders appeared *with* all four legs snapshot, so they are not the missing-snapshot artifact
+the script's own comment warns about.
 
-**Gate-4 cost of restarting tonight is ZERO** — 09-18 already carries one manual restart,
-so the streak is 0 regardless. Doing it Monday would burn a fresh clean day instead.
+Two consequences:
 
-### Today's session: 0 entries, and the one that should not have happened
+- **`what_if_naked_margin` (the S2 strangle gate) is NOT inert.** Single-leg whatif is exactly the
+  shape it previews, and it prices. That had been in doubt; it no longer is.
+- **S6 cannot be answered the way it was framed.** A defined-risk IC margin is only obtainable from
+  IBKR through a BAG ticket, and the BAG returns nothing here. Summing per-leg naked previews is
+  useless as a gate — one naked SPX short is **$109,213**, so a four-leg sum would block every
+  entry. The one shape not yet tested is the one that would actually work: **whatif the SHORT leg
+  while its protective LONG is already held**, which is how HYDRA legs in (long-first). That needs
+  a real paper long on the books, so it is a market-hours test, not a weekend one.
 
-VIX **15.4** put the 8δ strikes ~65pt OTM, where a 5pt spread is worth ~$0.05 and the
-*fillable* price (short bid − long ask) was $0.03/$0.02/−$0.00. **MKT-048 vetoed six of
-seven entries** and require-both-sides skipped them. That is the system refusing to sell
-premium that is not there — both guards predate today.
-
-**Entry #7 was the exception and it was a real defect.** `_check_credit_gate` treated a
-measured credit of *exactly zero* as "estimation failed" and routed to the laxer MKT-010
-fallback, skipping the thresholds, the MKT-029 ladder **and** MKT-048. It bought both
-protective longs, could not sell either short in 5 attempts, and GUARD-FLOOR unwound it:
-**−$137.20** (−$35.00 call, −$70.00 put, $32.20 commission). The safety net held — B ended
-flat, a HIGH alert fired. **Fixed (`019f188`), not yet deployed.** Not a regression: the
-branch dates to `0e73b42` (v1.5.0).
-
-### Closed today (2026-09-18)
-
-| | What | Evidence |
-|---|---|---|
-| ✅ | **Live-money architecture designed, audited, largely built** | `docs/migration/LIVE_MONEY_ARCHITECTURE.md`. Real money runs **alongside** paper on a 2nd broker — paper is untouched. `8712a8d` guards · `0370997` `calypso-broker-live` (:8789) · `a6a1609` variant **`bm`** · `83598dd` ARGUS. **Nothing built can trade:** no live credentials, `bm` ships `dry_run=true`, neither installed. |
-| ✅ | **A strategy could not tell which account it was trading** | `/health` reported only health, never identity. Now publishes `environment` + account code, and a variant refuses to start on a mismatch — asymmetric on unknown (fatal for real money, tolerated for paper). |
-| ✅ | **ARGUS was blind to the real-money broker** | It scanned one hardcoded log. Now both, every finding labelled, and on the funded account **every** breaker family is a FAIL, not just `orders`. |
-| ✅ | **MKT-011B** | zero-is-an-answer. See above. |
-| ✅ | **ORDER-004 floor used the NARROWER wing** | `_get_vix_adjusted_spread_width` documents `margin = max(call, put)`; the caller asked for `"call"`. **Latent** — every live config is symmetric — fixed before real money. |
-| ✅ | **Dashboard: three stale "primary" definitions collapsed to one** | A VM-only drop-in from 2026-06-02 still named variant C. Now one test-guarded default in `config.py`, pinned to the taxonomy's live seat so the next swap fails a named test. |
-| ✅ | Accessibility, nav revamp, error boundary, chart contrast | deployed + verified |
+Probe fixed so this cannot recur: the control now runs **first**
+(`scripts/probe_combo_whatif.py`), with three regression tests that fail against the old ordering.
 
 ### Still unverified in production
 
-- **POS-003 merged-leg resolver** (deployed 09-15) — needs a session with **both** a stop
-  and an overlapping strike. Today had neither (zero entries).
+- **POS-003 merged-leg resolver** (deployed 09-15) — still needs a session with both a stop and an
+  overlapping strike.
 - **GEX veto EV** — data-blocked until ~20 vetoes carry both strikes AND credit (~2 weeks).
-- **Everything in the restart table above.**
+- **MKT-011B, the alert bucket fix, the ORDER-004 floor** — running now, but none has met a live
+  entry yet. Monday is the first opportunity.
 
 ### Next actions, in order
 
-1. **[tonight, after 16:00 ET]** The restart. Broker first, confirm `/health` shows
-   `environment`, then strategies, then D/E.
-2. **[tonight, same window]** Re-run `scripts/probe_combo_whatif` **out of hours**. It was
-   attempted mid-session today and **opened the `ib.orders` breaker** (~34s, no harm — the
-   account was flat). `what_if_order` is on the *orders* family, so a margin probe shares a
-   failure budget with real placement. That is also why **no whatif gate belongs in the
-   entry path** — it would risk tripping the breaker the entry itself needs.
-3. **[remaining in live-money step 1]** Decide S6 on the probe's number.
-4. **[~2 weeks]** GEX veto EV, once telemetry accumulates.
+1. **[operator decision]** Freeze, or keep shipping — see Gate 4 above. Nothing below is urgent,
+   and all of it resets the streak.
+2. **[a market-hours slot]** The S6 test in its corrected form: whatif the short leg while the
+   protective long is already held.
+3. **[~2 weeks]** GEX veto EV, once telemetry accumulates.
 
 ### Blocked on the operator — the critical path
 
-**FUND THE LIVE ACCOUNT** (created, not funded; confirm it is a **margin** account). Then,
-strictly ordered: permissions → live market-data subscriptions → a new OAuth keypair (~2wk
-activation). **4–6 weeks, all calendar, none of it engineering.** Also yours: the halt
-thresholds and the approval commit (Gate 9).
+**FUND THE LIVE ACCOUNT** (created, not funded; confirm it is a **margin** account). Then, strictly
+ordered: permissions → live market-data subscriptions → a new OAuth keypair (~2wk activation).
+**4–6 weeks, all calendar, none of it engineering.** Also yours: the halt thresholds and the
+approval commit (Gate 9).
 
 ### Gate board
 
@@ -100,12 +99,10 @@ thresholds and the approval commit (Gate 9).
 |---|---|---|---|---|---|---|---|---|---|
 | 🟡 | 🟢 | 🟡 | 🔴 | 🟡 | ⚪ | 🟢 | 🔴 | 🟡 | 🟡 |
 
-Gate 4 is at **0**, and tonight's restart keeps it there at no cost (09-18 already carries a
-manual restart). The gate counts **any** code-reason restart as intervention, and rightly
-so: the point is five sessions on ONE unchanged build, not five that happen to be quiet.
-**Cheap right now** — funding is 4–6 weeks out, so the clock can reset many times without
-being the bottleneck. The real freeze belongs near cutover. Gate 8 is 🔴 only because B runs
-7 contracts against a mandated 1 — a cutover-time config change, not work.
+Gate 4 is at **0** and un-burned — Monday can be session 1. The gate counts **any** code-reason
+restart as intervention, and rightly so: the point is five sessions on ONE unchanged build, not
+five that happen to be quiet. Gate 8 is 🔴 only because B runs 7 contracts against a mandated 1 —
+a cutover-time config change, not work.
 
 ---
 
