@@ -223,6 +223,36 @@ all of the ones that apply to it.
 | S4 | The four `SAFETY-DRY` order gates | **exists** | A `dry_run` strategy cannot place an order on ANY session |
 | S5 | `contracts_per_entry=1` on bm for week 1 | config | Gate 8 |
 | S6 | Live margin via `what_if_order`, replacing the paper-derived `min_buying_power_per_ic=500` | NEW | ORDER-004 gates entries on a number currently calibrated to paper |
+| S7 | **Decide whether `bm` keeps B's `max_entries = [7, 7, 7, 7]`** | **NEW — 2026-09-22** | see below |
+
+> ### S7 — the funded seat has no high-VIX entry cap, as a side effect of the comparison design
+>
+> Variant A and C cap entries by VIX regime (`[2,2,2,1]`) — one entry at VIX ≥ 28. **B does not:
+> `[7,7,7,7]`, the full grid in every regime.** That is *deliberate for B*: its
+> `_comment_max_entries` says it was changed from `[4,4,3,2]` on 2026-07-01 to make B "the per-slot
+> **TESTER** for `slot_edge` — attempt all 7 every zone, gates filter."
+>
+> **`bm` inherits it, and inherits the comment verbatim** — still calling itself the per-slot
+> tester, which it is not. But the setting is not simply a copy-paste error, because `bm`'s own
+> header states the design: *"Identical signals on purpose: the difference between this variant's
+> P&L and paper-B's IS the execution drag."* Signal-identity is the whole measurement. Cap `bm` and
+> not B and you stop measuring drag — you measure drag plus a signal difference.
+>
+> **So the two goals genuinely conflict, and that is the decision:**
+>
+> | | keep `[7,7,7,7]` | cap at high VIX |
+> |---|---|---|
+> | execution-drag measurement | ✅ preserved | ❌ confounded |
+> | crisis-regime exposure (week 1, 1 contract) | up to 7 entries × 2 sides × $200 = **$2,800/contract** | bounded |
+>
+> For scale: 2026-09-21 was a **VIX 14.6–15.1** day and cost −$441/contract with 4 entries. Zone 3
+> is VIX ≥ 28.
+>
+> **This is a risk-appetite call for Gate 9, not a defect** — recorded so it is an explicit decision
+> rather than something the funded account inherits unnoticed. A middle option exists: keep
+> `[7,7,7,7]` and let the **halt criteria** bound the regime instead, which is where a
+> `sides × $200` H1 (see `LIVE_HALT_CRITERIA.md`) would do the work without touching signals.
+
 
 Worth being precise about what S3+S4 already cover, because it is most of the
 risk: a **dry-run** variant cannot place an order anywhere, and a broker whose
