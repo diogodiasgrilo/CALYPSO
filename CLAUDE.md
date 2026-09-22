@@ -160,12 +160,40 @@ Walk-forward backtest Sharpe 3.282; realistic live Sharpe estimate 2.684 (ThetaD
 
 Breakpoints `[18.0, 22.0, 28.0]` define 4 zones. The regime ALWAYS overrides the base `min_viable_credit_per_side` ($2.00) and `min_viable_credit_put_side` ($2.75) — those base values are effectively dead.
 
+> ⚠️ **Corrected 2026-09-22: this table is variant A's, and it was presented as the whole
+> system's.** B and C run credits **10× lower**, and **B and BM do not cap entries at any VIX
+> level.** All six arrays below were read from the live VM configs, not inferred.
+
+**Variant A** (75pt spreads) — the table this section always showed:
+
 | Zone | VIX | Max entries | Entries kept | Min call credit | Min put credit |
 |------|------|-------------|--------------|-----------------|----------------|
 | 0 | < 18 | 2 (drops E#1) | E#2, E#3 | $1.00 | $1.25 |
 | 1 | 18 – 22 | 2 (drops E#1) | E#2, E#3 | $0.50 | $0.75 |
 | 2 | 22 – 28 | 2 (drops E#1) | E#2, E#3 | $0.30 | $0.50 |
 | 3 | ≥ 28 | 1 (E#3 only) | E#3 | $0.30 | $0.40 |
+
+**Variants B, C and BM** (narrow 5–10pt spreads) — credits are **~10× lower on purpose**, since
+credit scales roughly with spread width (the config says so in `_comment_min_credits`):
+
+| Zone | VIX | Min call credit | Min put credit | Max entries — **B / BM** | Max entries — C |
+|------|------|-----------------|----------------|---------------------------|-----------------|
+| 0 | < 18 | **$0.10** | **$0.15** | **7** | 2 |
+| 1 | 18 – 22 | **$0.05** | **$0.10** | **7** | 2 |
+| 2 | 22 – 28 | **$0.05** | **$0.05** | **7** | 2 |
+| 3 | ≥ 28 | **$0.05** | **$0.05** | **7** | 1 |
+
+🔴 **The entry cap does not exist on B or BM.** `max_entries = [7, 7, 7, 7]` — the full grid in
+every regime, including VIX ≥ 28. A reader of the old table would reasonably conclude the system
+self-limits to a single entry in a crisis regime; **the live seat does not, and neither will the
+real-money seat**, which inherits this config shape. At BM's week-1 single contract that is up to
+7 entries × 2 sides × $200 structural = **$2,800/contract of exposure in the regime the
+documentation implied was capped at one entry.** Whether to cap B/BM at high VIX is an open
+question for Gate 9 — this note records the fact, not a recommendation.
+
+ℹ️ B's zone-0 put minimum ($0.15/sh) is also the boundary in the **MKT-029 put-fallback** finding
+— the fallback admits entries below it, and those 43 entries average −$3.20/contract against
++$27.28 for the rest (p = 0.092, pre-registered decision rule in `docs/NEXT_STEPS.md`).
 
 When the regime applies, `call_credit_floor` / `put_credit_floor` are overwritten to `min_credit − $0.10`. `strategy.py:_apply_vix_regime_overrides()` drops EARLIEST entries when capped (keeps best-performing E#3 at 11:15).
 
