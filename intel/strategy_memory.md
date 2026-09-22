@@ -7,6 +7,56 @@ This file is updated automatically by Clio and committed to git.
 
 <!-- New learnings will be appended below this line -->
 
+---
+
+## 🔴 STANDING CORRECTION (2026-09-22) — THE "GHOST `fomc_announcement_skip` FLAG" DOES NOT EXIST
+
+**Every entry below that blames a "ghost", "stale" or "state-persisted"
+`fomc_announcement_skip` flag is FALSE and must not be carried forward, cited as
+corroboration, or acted on.** The claim was first recorded in W13 and has been repeated and
+escalated every week since (4 → 7+ → 12+ → 15+ → 20+ → 29 → 30+ → 44+ "confirmed events"),
+with each report citing the previous ones as evidence. It was never verified against the code.
+
+**What the code actually does** (checked 2026-09-22):
+
+- `fomc_announcement_skip` is read **from config**, at every call site:
+  `self.strategy_config.get("fomc_announcement_skip", ...)` — `base_strategy.py:1387`, `:1513`,
+  `strategy.py:11727`. **It is never read from the state file.**
+- It appears in the state file in exactly one place, `strategy.py:12400`, under the comment
+  *"Dashboard: config flags for banner display"* — written for the UI banner and **read back by
+  nothing**.
+- The day-type test is already a runtime calendar computation:
+  **`is_fomc_announcement_day()` exists at `shared/event_calendar.py:150`** and is what gates the
+  skip. The fix these reports keep recommending — "replace the persisted boolean with a runtime
+  function computed from the hardcoded FOMC calendar" — **is already the implementation.**
+
+**So `fomc_announcement_skip: true` seen in the state file or in HERMES output is the CONFIG
+value, correctly true every day, because B is configured to skip FOMC announcement days.** It is
+a permanent setting being misread as a stale runtime flag.
+
+**Why Entry #3 / the 14:00 conditional does not fire on B** — the real reasons, both deliberate:
+1. **B has no 14:00 slot.** Its `entry_times` are `09:45, 10:15, 10:45, 11:15, 11:45, 12:15,
+   12:45`. A 14:00 conditional cannot fire on a grid that does not contain it.
+2. **`one_sided_entries_enabled: false`** (require-both-sides, 2026-07-16). The Upday-035 /
+   Downday-035 conditional is inherently one-sided, so it is suppressed by design. See CLAUDE.md.
+
+The cumulative "missed EV" figures built on this defect ($2,250–$5,250, then $3,000–$8,000) are
+therefore **not real losses** and must not be used in any prioritisation.
+
+**W38's Recommendation 1 is additionally wrong about 2026-09-18.** It proposes ghost-flag
+suppression as the explanation for that day's 7 skips and its −$105 / $32.20 figures. The logs
+show otherwise, per slot: `MKT-048` vetoed a side on entries #1–#6 with explicit numbers
+(`fillable $0.03/sh < net-credit floor $0.05/sh`), each logged as `skipped - credit gate
+(MKT-011/MKT-032)`; entry #7 hit the MKT-011B zero-credit branch, bought both protective longs,
+could not sell either short, and GUARD-FLOOR unwound it — `ORDER-010` booked $16.10 round-trip
+commission and the price P&L on each long leg, which is exactly the −$105.00 gross and $32.20
+commission. Note also that evaluation attempts cannot generate commission, so "the commission may
+represent the evaluation attempts" is not a possible mechanism.
+
+**Lesson for future reports:** a flag seen in a state file or an agent summary is not evidence of
+runtime behaviour. Confirm against the code path and the per-slot log lines before assigning a
+cause — and treat a claim inherited from your own prior reports as unverified, not as corroborated.
+
 ## 2026-W13 (2026-03-28)
 
 - Ghost FOMC flag caused 4 consecutive idle days (2026-03-24 through 2026-03-27): the `fomc_announcement_skip` flag set during the March 18 blackout persisted in the state file for at least 7 calendar days past its valid scope. Apollo correctly identified the bug on all three days it warned (03-25, 03-26, 03-27) but the fix was not applied before any session. Root cause: flag is state-persisted rather than dynamically computed from the hardcoded FOMC calendar. Highest-priority known defect as of W13 close.
