@@ -349,6 +349,28 @@ resets the Gate-4 streak.**
 > at matching conid, so it must finish before B places anything (POS-003). If 09:40 passes without
 > a PASS, **abort and retry tomorrow** rather than overlapping B.
 
+> #### 🔴 2026-09-22 ATTEMPT FAILED — bug in the smoke, not the system. Retry Wed ≈09:35 ET.
+>
+> Armed runs at **09:29:31** and **09:30:40** both aborted claiming *"market data is NOT real-time
+> … Check the account's SPX-index + OPRA real-time subscriptions."* Both halves were wrong: the
+> same runs logged `SPX 6509='R'`, `VIX='R'`, leg `'RpBd'` — all passing — and the branch that
+> actually fired was a missing ask, OR'd into the same sentence. A manual `get_quote` on the **same
+> conid** moments later returned **bid 12.4 / ask 12.6**.
+>
+> Fixed in `d56318b`: a bounded re-poll (3 × 1.5s, breaking on the first usable ask) before the gate
+> reads the quote, and the abort message split so a missing ask says **"this is NOT an entitlement
+> problem"** instead of sending the reader to check correct subscriptions. 11 tests, 7 failing
+> against the old version. Deployed to the VM (script-only — no restart, Gate-4 streak untouched).
+>
+> **Verified 09:38 ET, CHECK-ONLY, fresh conid** (strike 7780, `917441371`): `bid=10.7 ask=10.8`,
+> exit 0. It did **not** need the retry — the first poll worked. So the real story is narrower than
+> "warmup": **both failures were open-adjacent** (one pre-open, one 40s after the bell), when SPX
+> option quotes have not settled. **Timing is the primary fix; the re-poll is belt-and-braces.**
+>
+> ⚠️ **Still unproven, and it is the actual Gate-3 evidence:** the armed path *past* the gate —
+> place → fill → close. CHECK-ONLY stops before placing, so the round trip has never once succeeded.
+> That is what tomorrow tests.
+
 #### Wed 09-23 — **S6, and it needs NO new order**
 
 The earlier plan was to place a long and then preview the short. Unnecessary: **when B is holding
