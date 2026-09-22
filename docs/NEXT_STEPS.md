@@ -532,10 +532,34 @@ drift consumes the credit until GUARD-FLOOR's $0.05 net floor cannot be met. Tod
 $0.30 → $0.39 against a $0.15 call credit.
 
 **Decision: keep it, don't revert** — reverting gives up ≈$24 × ~3.5 entries ≈ **$85/day** to avoid a ≈$360
-event roughly every 7 sessions. **But the failure is concentrated where the credit is thin**, which points
-at a hybrid worth testing: **rest the longs only when the credit is fat enough to absorb drift; cross
-them when it is thin.** That keeps the saving on most entries and removes the failure mode on exactly
-the ones that fail. It is an order-path change, so B is the only variant that can test it.
+event roughly every 7 sessions.
+
+> ❌ **A "thin-credit hybrid" was proposed here and is WITHDRAWN (2026-09-22, same day).** The idea was to
+> rest the longs only when the credit could absorb drift and cross them when it was thin. It does not
+> survive one measurement. Entry #6's smaller side was $0.15/sh, and across the 24 entries since rung
+> pricing:
+>
+> | threshold on the smaller side | entries the hybrid would cross |
+> |---|---|
+> | ≤ $0.15/sh (catches #6's call) | **18 of 24 (75%)** |
+> | ≤ $0.20/sh (catches #6's put) | **23 of 24 (96%)** |
+>
+> **On B, thin credit is not the exception — it is the norm**, because 5pt spreads collect thin credit
+> almost every time. A threshold that catches today's failure crosses the longs on 75–96% of entries,
+> which is **reverting rung pricing under another name**. It was not a middle ground at all.
+>
+> It also carried every flaw warned against elsewhere in this file: a new free parameter **fitted to
+> one event**, designed after seeing that event, as a new branch in the most safety-critical code path,
+> testable only on the live seat and inherited by `bm`.
+>
+> **What the measurement actually says:** 23 of 24 entries were thin *and succeeded*, so thin credit does
+> not predict failure. What distinguished #6 was drift while resting — closer to a ~4%-per-entry random
+> event than a subset that can be routed around. **The choice is therefore binary** (keep or revert), and
+> the break-even above already answers it: keep.
+>
+> **If the failure rate rises, target the mechanism, not a proxy:** the time goes in the ladder's two 0%
+> resting rungs (0% → 0% → 5% → 10% → MARKET). Shortening how long a long rests bounds drift equally
+> on every entry, with no threshold to fit. Still n=1 — do nothing until the revisit trigger fires.
 
 **Revisit trigger (unchanged): 3 attributable failures in the next 30 entries** — at that point the
 observed rate would sit near break-even.
