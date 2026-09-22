@@ -45,6 +45,70 @@ bound *operational* damage in week 1. They are not evidence the tail has been me
 
 Any one of these. Halting is `systemctl stop` on the strategy unit — never `kill` (§4).
 
+> ## ⚠️ H1 AND H3 WERE BOTH BREACHED ON 2026-09-21 — NINE DAYS AFTER THIS WAS DRAFTED
+>
+> **Do not adopt the table below unchanged.** On 2026-09-21 variant B settled at
+> **−$3,088.20 over 7 contracts = −$441.17/contract** against H1's −$400, with **3 stop-losses**
+> against H3's ≥3. Nothing malfunctioned — SPX ran 7692→7779 and every stop was call-side.
+>
+> **The A2 stop worked and is why it was not far worse.** SPX settled at 7765.00, putting all three
+> stopped call spreads at or through their long strike — each worth the full $3,500 at expiry. B
+> paid $4,300 to exit rather than $10,500: **the stop saved $6,200**, and the session would have
+> been ≈−$9,288 without it. What failed is the *threshold*, not the strategy.
+>
+> ### Why it failed, and why it will fail again
+>
+> H1 is defined as **"1.6× the worst of 25 paper sessions"**. A threshold defined as a multiple of
+> the worst observation is **guaranteed to be breached every time the sample grows a new tail** —
+> here, nine days later. The same applies to H3's *"paper max was 2"* and to H2's and H4's
+> *"worst/max paper"* derivations. This is a property of the definition, not bad luck.
+>
+> ### The measured distribution, now n=28 traded live-era sessions
+>
+> | | per contract |
+> |---|---|
+> | worst — **2026-09-21** | **−$441.17** |
+> | 2nd worst — 2026-07-24 (the −$256 H1 was built on) | −$256.19 |
+> | 3rd worst — 2026-09-14 | −$250.86 |
+> | 5th percentile | −$256.19 |
+> | median | **+$49.57** |
+> | mean | +$19.77 |
+> | losing sessions | 9 of 28 (32%) |
+>
+> ### The better basis: this strategy's loss per side is bounded BY CONSTRUCTION
+>
+> With the A2 %-of-width stop, one side's loss is capped at
+> `pct_of_width × width × 100` = `0.40 × 5 × 100` = **$200 per contract**, plus slippage — it does
+> not depend on how far the market runs. That is a *structural* number, and unlike "worst observed"
+> it does not move when the sample grows. A session threshold can be stated as **sides × $200**:
+>
+> | sides stopped | implied session loss / contract |
+> |---|---|
+> | 2 | −$400 *(what H1 says today — i.e. H1 implicitly assumes ≤2 stops)* |
+> | 3 | −$600 |
+> | 4 | −$800 |
+>
+> **H1 and H3 are therefore the same constraint stated twice**, which is why both broke on the same
+> day: 3 stops × $200 = $600/contract of structural exposure against a $400 cap. Monday came in at
+> −$441 because one side closed early for a small gain.
+>
+> ### Two coherent options for the operator (Gate 9)
+>
+> **Option A — structural.** Set H1 = `max_sides_tolerated × $200`. Choosing 3 stops as the
+> tolerance gives **H1 = −$600/contract** and makes H3 (≥3 stops) the binding trigger, with H1 as
+> its dollar shadow. Self-consistent, and stable as the sample grows.
+>
+> **Option B — distributional.** Keep a percentile rule, but state **n and the date of the worst
+> observation beside the number**, and re-derive on a schedule rather than once. Accepts that the
+> number will move.
+>
+> **Not recommended: re-deriving "1.6× the new worst" (≈ −$700).** It repeats the definition that
+> just failed, and would be breached again by the next fatter tail.
+>
+> ⚠️ Whichever is chosen, **H1 and H3 must be made consistent with each other** — today a
+> 3-stop session is simultaneously "within H3's limit if it is exactly 3" and "past H1". Recorded
+> 2026-09-22; the choice is the operator's and belongs in the Gate-9 approval commit.
+
 | # | Trigger | Threshold (1 contract) | Why this number |
 |---|---|---|---|
 | H1 | Realized loss in one session | **≤ −$400** | 1.6× the worst of 25 paper sessions (−$256) |
