@@ -477,6 +477,42 @@ most of them do win, and cutting them trades a little edge for a lot of variance
 Registering the rule now is the point: after another session like 09-21 the temptation will be to
 act on a number that has not changed.
 
+### 2026-09-22 — B entry #6 execution failure: not a bug, but the rung-pricing WATCH item fired
+
+**12:23 ET.** Credit gate **passed normally** — `Call $0.15 (min $0.10), Put $0.20 (min $0.15)` — so
+this is **not** Friday's MKT-011B zero-credit defect. What happened, leg by leg:
+
+| Leg | What it did |
+|---|---|
+| Long call 7795 | rested at mid $0.30 → unfilled → rested again → 1/7 → escalated → **filled 7/7 @ avg $0.39** ($0.09 over mid) |
+| Long put 7730 | rested → unfilled → 4/7 → escalated → **filled 7/7 @ avg $0.69** |
+| Short call 7790 | **GUARD-FLOOR** required ≥ $0.45 (long $0.39 + $0.05 net floor); bid ≈ $0.40 → **1/7 after 4 rungs** → refused the MARKET rung |
+| Short partial 1/7 | **ORDER-010 flattened it** — left alone it was a **naked short call** |
+| Both longs | unwound |
+
+**Cost −$159.50 booked** (−$95.00 long call 0.39→0.25, −$30.00 long put 0.69→0.65, $34.50 commission),
+plus slippage on the flattened 1-contract short that the log itself says is *not separately tracked*.
+
+**Every safety net fired, in order** — long-first so never naked, GUARD-FLOOR refusing an inverted
+spread, ORDER-010 catching the naked partial, unwind, HIGH alert. B ended holding exactly entry
+#1's four legs. **Not a defect.**
+
+**The pattern, measured:** B's entry-failure rate was **0 of 65 before deliberate rung pricing
+(enabled 2026-09-10) and 2 of 24 since.** But Friday's was MKT-011B and unrelated, so the
+rung-pricing-attributable count is **1 of 24** — not meaningful yet. The mechanism is exactly the
+one the config's own comment predicted when rung pricing was enabled: resting at mid costs time,
+the long's price drifts, and on a thin spread ($0.15 call credit here) the drift consumes the credit
+until GUARD-FLOOR's $0.05 net floor cannot be met. *"WATCH: entry-failure / unwind rate … the
+unwind pays the spread TWICE."* This is that.
+
+**Rough net, stated as an estimate:** rung pricing was enabled to recover a measured $1,575 fill leak
+over 65 entries (≈$24/entry). At that rate its 24 entries since would have saved ≈$580, against
+$159.50 of attributable unwind — **still ≈+$420 net.** That assumes the old leak rate rather than
+measuring post-09-10 realised credit vs mid, which is the proper test and has not been run.
+
+**Do not revert on one observation.** Revisit if the rung-pricing-attributable failure count reaches
+**3 of the next 30 entries**, or if measured realised-credit savings fall below the unwind cost.
+
 ### Still unverified in production
 
 - **POS-003 merged-leg resolver** (deployed 09-15) — still needs a session with both a stop and an
