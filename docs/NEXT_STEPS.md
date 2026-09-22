@@ -409,6 +409,52 @@ new OAuth keypair at ~2 weeks). Then review the Thursday H1/H3 proposal, which G
   identically. Unforceable.
 - **POS-003** needs a session with both a stop and an overlapping strike. Unforceable.
 
+### 2026-09-21 forensic audit: no bugs — but one real candidate for change
+
+**Monday was correct end to end.** Every mechanism did what it is configured to do; the losses
+were the market, not a defect. Checked individually:
+
+| Thread | Verdict |
+|---|---|
+| **A2 stop fired at $1,400** on all four | ✅ exactly `0.40 × 5 × 100 × 7`. Saved **$6,200** vs holding to a 7765.00 settle |
+| **e#1 slippage +$240** (debit $1,640 vs $1,400 mid) | ✅ by design — `EMERGENCY-001` crosses deliberately (bought short at $6.50 vs $6.30 ask). Across all three stops slippage netted **+$240 / −$280 / +$70 ≈ $30**, i.e. not systematic |
+| **MKT-046 "recovered after 7–13s"** with `mkt046_confirm_seconds = 0` | ✅ not a contradiction — 0 means "next monitoring cycle", and 5 false stops were genuinely avoided |
+| **55 × `BRANDON-BREACH E#7 ADVISORY — NOT acting`** | ✅ telemetry-only by design since 2026-09-04. Had it acted it would have closed the **only profitable** entry |
+| **09:32 broker re-auth gate** | ✅ self-healed in 35s, before the 09:45 first slot. Cost nothing |
+| **Entries at $150–$595 credit** | ✅ all passed their gates — see below, this is the real finding |
+
+#### ⚠️ The candidate: MKT-029's put fallback lets B enter at ~zero expectancy
+
+B's zone-0 minimums are **call $0.10 / put $0.15 per share** — 10× lower than A's, deliberately,
+because its spreads are 5pt not 75pt (`_comment_min_credits` in the config says so). MKT-029's
+graduated fallback then admits entries **below** that put minimum, and it fired on five of Monday's
+seven evaluations. Split B's whole live era on it:
+
+| put credit | n | mean/contract | median | win rate |
+|---|---|---|---|---|
+| **< $0.15/sh** (fallback band) | **43** | **−$3.20** | +$30.00 | 77% |
+| ≥ $0.15/sh | 45 | **+$27.28** | +$40.00 | 84% |
+
+Difference **$30.49/contract**, permutation test **p = 0.092** (N=20,000). **Suggestive, not
+significant** — and post-hoc, examined after a bad day, which is exactly when a split like this is
+most likely to mislead. The $0.15 cut is at least principled rather than mined: it is the
+configured minimum, not a tuned boundary. Checked the obvious confound — thin-put entries are
+**not** simply a marker of up-trend days (2026-09-04 was −0.29% with 4/4 thin; 09-21 was +0.95%
+with 3/4).
+
+**Why it is worth taking seriously anyway:** the fallback band's expectancy is ~**zero**, while each
+such entry still carries the full structural $1,400/side tail. Declining a zero-EV activity that
+carries real tail risk is rational independently of the p-value — though the median is +$30, so
+most of them do win, and cutting them trades a little edge for a lot of variance reduction.
+
+**📌 PRE-REGISTERED DECISION RULE — recorded 2026-09-22, BEFORE more data arrives:**
+> Disable the MKT-029 put fallback in VIX zone 0 **if, at n ≥ 80 fallback-band entries, the mean
+> remains ≤ $0/contract.** Currently n=43 at −$3.20. If the mean turns positive as n grows, the
+> effect was noise and the gate stays.
+
+Registering the rule now is the point: after another session like 09-21 the temptation will be to
+act on a number that has not changed.
+
 ### Still unverified in production
 
 - **POS-003 merged-leg resolver** (deployed 09-15) — still needs a session with both a stop and an
