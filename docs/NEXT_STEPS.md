@@ -330,6 +330,85 @@ covered ~13. Untouched: `MERGE_PLAN.md` (checked only for wrong-unit commands), 
 rationale, history, or tooling inventories, which fail more quietly. The `intel/clio/*` weeklies
 and `HYDRA_TRADING_JOURNAL.md` are dated records, not state, and should not be "corrected" at all.
 
+### 🗓️ WEEK PLAN — 2026-09-22 → 09-25 (researched 2026-09-22 pre-market)
+
+**Constraints measured, not assumed:** four clean sessions left this week (Tue–Fri), **no FOMC,
+CPI, OPEX or early-close day among them**. **Nothing in this plan touches bot or `shared/` code**
+— every change is to `scripts/` or documents — so **none of it restarts a strategy and none of it
+resets the Gate-4 streak.**
+
+#### Tue 09-22
+
+| # | Step | Window | Closes |
+|---|---|---|---|
+| 1 | **Armed paper smoke** — `systemctl start broker-paper-smoke` | **09:30–09:40 ET**, account flat, *before* B's 09:45 slot | **Gate 3 🟡→🟢** |
+| 2 | Observe the session. **No deploys during RTH.** | 09:30–16:00 | — |
+| 3 | **Persist the GEX counterfactual**: `analyze_skipped_entry_outcomes --variant b --reason GEX --apply` | after settlement, **≥ 22:40 ET** | fills `theoretical_pnl` / `would_have_stopped`, 0-populated since inception |
+
+> Step 1's timing is the whole risk: the smoke places a real 1-contract round trip, and IBKR merges
+> at matching conid, so it must finish before B places anything (POS-003). If 09:40 passes without
+> a PASS, **abort and retry tomorrow** rather than overlapping B.
+
+#### Wed 09-23 — **S6, and it needs NO new order**
+
+The earlier plan was to place a long and then preview the short. Unnecessary: **when B is holding
+an open IC, the protective long is already on the books.** So while a position is open, run a
+single-leg `what_if_order` on that entry's SHORT conid and read `initial.change`:
+
+- **≈ $500-ish (width × 100)** → IBKR nets the held long → **defined-risk margin confirmed**, S6 answered.
+- **≈ $109,213** (the measured naked figure) → it does NOT net at order-check → S6 answered the other
+  way, and `min_buying_power_per_ic` must stay conservative.
+
+Read-only, RTH, no placement, no breaker exposure beyond one `orders`-family call. **This closes the
+last item in live-money step 1** and settles `COMBO_ENTRY_LIVE_CUTOVER_PLAN` C1 without a live account.
+
+#### Thu 09-24 — two analysis pieces, no deploys
+
+**(a) H1/H3 recalibration proposal for Gate 9.** The current H1 is "1.6× the worst of 25 sessions",
+which is **guaranteed to be breached every time the sample grows a new tail** — as it was on 09-21,
+nine days after drafting. Measured basis to replace it (28 traded live-era sessions):
+
+| | per contract |
+|---|---|
+| worst (2026-09-21) | **−$441.17** |
+| 5th percentile | −$256.19 |
+| median | **+$49.57** |
+| mean | +$19.77 |
+| losing sessions | 9 of 28 (32%) |
+| **structural cap per side** (`0.40 × 5 × 100`) | **$200** |
+
+The structural number is the point: with the A2 stop, loss per side is **bounded by construction**,
+so a threshold can be derived from `sides × $200` rather than from history. Propose both forms,
+let the operator pick, and **state n and the date of the worst observation next to the number** so
+the next breach is recognisable as sample growth rather than a surprise.
+
+**(b) GEX side-attribution.** `analyze_skipped_entry_outcomes` scores the **entry**; the gate vetoes
+a **side**. On 09-21 it credited the veto with saving $1,400 × 2 — but the adjuster had vetoed the
+**put** side, which was never breached, while the save came from require-both-sides killing the
+call. **Two wrong calls scored as a win.** Fix: join `gex_decisions` (`side`, `live_action`) to
+`skipped_entries` and report the vetoed side separately from the entry outcome. Script-only, with
+tests, negative controls included.
+
+#### Fri 09-25 — land + freeze decision
+
+Merge Thursday's script work after the close, re-run the GEX analysis with side attribution, and
+**decide whether Monday 09-28 starts the Gate-4 streak.** Since nothing this week touches bot code,
+a clean freeze from 09-28 is available.
+
+#### Operator, any time this week — still the critical path
+
+**Fund the account.** Nothing above shortens the 4–6 week chain (permissions → market data → a
+new OAuth keypair at ~2 weeks). Then review the Thursday H1/H3 proposal, which Gate 9 needs.
+
+#### What this week will NOT finish, said plainly
+
+- **GEX EV stays open.** Only **8 of 103** vetoes are measurable — strikes were first recorded
+  2026-09-11 and the other 95 can never be scored. At ~1 veto/session it is ~4 weeks to n≈20. The
+  analyzer's own verdict stands: *"n=8. Directional at best. Do not act on this yet."*
+- **MKT-011B stays unverified** — it needs a low-VIX day where adjacent far-OTM strikes quote
+  identically. Unforceable.
+- **POS-003** needs a session with both a stop and an overlapping strike. Unforceable.
+
 ### Still unverified in production
 
 - **POS-003 merged-leg resolver** (deployed 09-15) — still needs a session with both a stop and an
