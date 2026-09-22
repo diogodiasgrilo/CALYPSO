@@ -148,7 +148,23 @@ def main() -> int:
             log("FAIL: option chain empty"); _alert(False, out); return 3
         atm = min(strikes, key=lambda s: abs(s - (spot or sorted(strikes)[len(strikes)//2])))
         conid = bc.qualify_contract("SPX", expiry=exp, strike=atm, right="C", trading_class="SPXW")
+        # RE-POLL A FRESH CONID BEFORE BELIEVING AN EMPTY QUOTE (fixed 2026-09-22).
+        # IBKR's snapshot returns a metadata-only row for the first poll(s) on a
+        # conid it has not served before — documented in CLAUDE.md ("Snapshot
+        # warmup", P7-audit H10). A single get_quote here therefore saw
+        # bid=None/ask=None and the gate below aborted, twice, on 2026-09-22 at
+        # 09:29 and 09:30 ET. It was NOT an entitlement problem: SPX, VIX and the
+        # leg all reported 6509='R', and a manual get_quote on the SAME conid
+        # moments later returned bid 12.4 / ask 12.6. Each run also picks a
+        # different ATM strike as spot moves, so every run tends to hit a fresh
+        # conid and fail the same way.
         q = bc.get_quote(conid)
+        for attempt in range(2, 5):
+            if q.get("ask") not in (None, 0):
+                break
+            log(f"  quote warmup: attempt {attempt - 1} returned no ask — re-polling")
+            time.sleep(1.5)
+            q = bc.get_quote(conid)
         log(f"expiry={exp} ATM call strike={atm} conid={conid} bid={q.get('bid')} ask={q.get('ask')} avail={q.get('availability')}")
     except Exception as e:
         log(f"FAIL: chain/quote resolution: {type(e).__name__}: {e}")
@@ -175,10 +191,22 @@ def main() -> int:
     except Exception as e:
         log(f"FAIL: VIX quote for realtime gate: {type(e).__name__}: {e}"); _alert(False, out); return 5
     rt_spx, rt_vix, rt_leg = _is_rt(spx, "SPX"), _is_rt(vix_q, "VIX"), _is_rt(q, "SPXW-leg")
-    if not (rt_spx and rt_vix and rt_leg) or q.get("ask") in (None, 0):
-        log("ABORT place: market data is NOT real-time (6509 first-char != 'R') on SPX/VIX/leg, "
-            "or no ask — refusing to place a paper order and refusing the auto-flip onto frozen/"
-            "delayed/unentitled data. Check the account's SPX-index + OPRA real-time subscriptions.")
+    # Report WHICH gate failed. Until 2026-09-22 this logged one sentence covering
+    # two independent causes, leading with the entitlement one — so a missing ask
+    # (a warmup artifact) read as "check your SPX-index + OPRA subscriptions",
+    # which were fine. Naming the actual cause saves the next person a cycle.
+    no_ask = q.get("ask") in (None, 0)
+    if not (rt_spx and rt_vix and rt_leg) or no_ask:
+        if not (rt_spx and rt_vix and rt_leg):
+            bad = [n for n, ok in (("SPX", rt_spx), ("VIX", rt_vix), ("SPXW-leg", rt_leg)) if not ok]
+            log(f"ABORT place: market data is NOT real-time on {', '.join(bad)} "
+                f"(6509 first-char != 'R') — refusing to place on frozen/delayed/unentitled data. "
+                f"Check the account's SPX-index + OPRA real-time subscriptions.")
+        else:
+            log("ABORT place: NO ASK on the SPXW leg after re-polling, though SPX, VIX and the leg "
+                "all report real-time ('R'). This is NOT an entitlement problem — do not go looking "
+                "at subscriptions. Either the chain is genuinely unquoted right now (pre-open: "
+                "options do not quote before 09:30 ET) or the snapshot never warmed up.")
         _alert(False, out); return 5
 
     nonce = datetime.now().strftime("%H%M%S")
