@@ -505,13 +505,40 @@ the long's price drifts, and on a thin spread ($0.15 call credit here) the drift
 until GUARD-FLOOR's $0.05 net floor cannot be met. *"WATCH: entry-failure / unwind rate … the
 unwind pays the spread TWICE."* This is that.
 
-**Rough net, stated as an estimate:** rung pricing was enabled to recover a measured $1,575 fill leak
-over 65 entries (≈$24/entry). At that rate its 24 entries since would have saved ≈$580, against
-$159.50 of attributable unwind — **still ≈+$420 net.** That assumes the old leak rate rather than
-measuring post-09-10 realised credit vs mid, which is the proper test and has not been run.
+#### ✅ MEASURED (not estimated) — `analyze_fill_quality --compare 2026-09-10`
 
-**Do not revert on one observation.** Revisit if the rung-pricing-attributable failure count reaches
-**3 of the next 30 entries**, or if measured realised-credit savings fall below the unwind cost.
+The "+$420" first written here was an estimate on an assumed leak rate, **and it omitted the forgone
+P&L of the entry that never happened.** Replaced by measurement:
+
+| | before 09-10 (crossing) | after (resting) |
+|---|---|---|
+| entries | 65 | 24 |
+| **true execution cost / entry** | **$27.96** (drift ≈ 0 — filled instantly) | **$3.65** vs decision-time mid, *including* drift while resting |
+| median leg-in, whole entry | **52.9s** | **99.8s** — nearly double |
+| entries > 90s to leg in | 24.6% | **50.0%** |
+| execution failures attributable | **0** | **1** |
+
+- **Saving: $24.31/entry → $583 across the 24 entries since.**
+- **True cost of today's one failure: ≈$359.50** — $159.50 unwind *plus* ≈$200 of credit entry #6 would
+  likely have kept on a quiet tape. With crossing it would have filled.
+- **Net so far: +$224** — positive, but about half the earlier estimate.
+
+**Break-even failure rate: 6.8%.** Above it, rung pricing loses money. **Observed: 4.2% (1 of 24).**
+Below break-even, but not by much — and n=24, which the tool itself flags as directional.
+
+**Why it happens, mechanically:** crossing filled the long instantly, so the short was priced off fresh
+quotes. Resting leaves the long on the book for ~47s longer; its price drifts; on a thin spread the
+drift consumes the credit until GUARD-FLOOR's $0.05 net floor cannot be met. Today the long call drifted
+$0.30 → $0.39 against a $0.15 call credit.
+
+**Decision: keep it, don't revert** — reverting gives up ≈$24 × ~3.5 entries ≈ **$85/day** to avoid a ≈$360
+event roughly every 7 sessions. **But the failure is concentrated where the credit is thin**, which points
+at a hybrid worth testing: **rest the longs only when the credit is fat enough to absorb drift; cross
+them when it is thin.** That keeps the saving on most entries and removes the failure mode on exactly
+the ones that fail. It is an order-path change, so B is the only variant that can test it.
+
+**Revisit trigger (unchanged): 3 attributable failures in the next 30 entries** — at that point the
+observed rate would sit near break-even.
 
 ### Still unverified in production
 
