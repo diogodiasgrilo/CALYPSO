@@ -566,8 +566,20 @@ observed rate would sit near break-even.
 
 ### Still unverified in production
 
-- **POS-003 merged-leg resolver** (deployed 09-15) — still needs a session with both a stop and an
-  overlapping strike.
+- **POS-003 merged-leg resolver** (deployed 09-15) — **still unverified, and 2026-09-21 explains why
+  it is hard to hit.** That session finally had the setup: e#1 and e#2 both held SC 7735 / LC 7740,
+  so two entries shared two conids, and **both call sides stopped** (11:38:31 and 11:39:09).
+  What the hourly reconciliation shows is that the **conid-accounting layer underneath the resolver
+  works**: it tracked 8 legs as **6 distinct conids** while both were open, then 8, then 10 as
+  entries were added and call sides closed — **0 mismatched, 0 orphans, all day, through three
+  stops on shared strikes.**
+  **But the resolver itself never fired.** It only runs when a leg **vanishes** outside the bot's
+  own closes; a tracked stop needs no attribution. The genuinely ambiguous state — 7735C holding 7
+  of 14 contracts because one of two identical entries had closed — **existed for 38 seconds**
+  (11:38:31 → 11:39:09) and no reconciliation sampled it: the runs either side were 11:32:55 and
+  12:32:58.
+  **So it needs a leg to disappear unexpectedly while a strike is shared** — rare by design, and not
+  something a stop produces. Do not expect a normal session to verify this.
 - **GEX veto EV** — data-blocked until ~20 vetoes carry both strikes AND credit (~2 weeks).
 - **MKT-011B, the alert bucket fix, the ORDER-004 floor** — running now, but none has met a live
   entry yet. Monday is the first opportunity.
