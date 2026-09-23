@@ -74,7 +74,7 @@ from bots.hydra.long_strangle_chain import (
 )
 from bots.hydra.long_strangle_entry import LongStrangleEntry
 from bots.hydra.ls_recorder import LongStrangleDataRecorder
-from bots.hydra.strategy import DATA_DIR, HydraStrategy
+from bots.hydra.strategy import DATA_DIR, HYDRA_VARIANT_ID, HydraStrategy
 from shared.event_calendar import is_fomc_t_plus_one
 from shared.market_hours import get_us_market_time
 
@@ -540,14 +540,21 @@ class LongStrangleStrategy(HydraStrategy):
         the same number over a full year. It widens as the record grows; it does
         not become a different measure.
 
-        Reads the variant's OWN ``backtesting.db`` read-only, one row per day
-        (the last tick of each session), and returns ``[]`` on any failure — the
-        gate then treats that as "unknown" and skips, which is the fail-closed
-        half of the design.
+        Reads read-only, one row per day (the last tick of each session), and
+        returns ``[]`` on any failure — the gate then treats that as "unknown"
+        and skips, which is the fail-closed half of the design.
+
+        ⚠️ IT DOES NOT READ H'S OWN DATABASE, and that was a real bug caught on
+        H's first live tick (2026-09-23 09:49 ET): a brand-new variant's
+        ``backtesting.db`` is EMPTY, so the gate skipped every entry and H would
+        never have traded until it had accumulated its own 93 days — defeating
+        the point of the filter. **VIX is a market-wide value, not a per-variant
+        one**, so the history is read from whichever variant has been recording
+        longest. See ``_vix_history_db``.
         """
         import sqlite3
-        db = os.path.join(DATA_DIR, "backtesting.db")
-        if not os.path.exists(db):
+        db = self._vix_history_db()
+        if not db:
             return []
         lookback = int(self._ls_config().get("iv_percentile_lookback_days", 252))
         today = get_us_market_time().strftime("%Y-%m-%d")
@@ -572,6 +579,44 @@ class LongStrangleStrategy(HydraStrategy):
         except Exception as e:          # noqa: BLE001 — a filter must not break entry
             logger.warning("LS: VIX history unavailable for the IV percentile: %s", e)
             return []
+
+    def _vix_history_db(self) -> Optional[str]:
+        """Which ``backtesting.db`` to read VIX history from.
+
+        **Not H's own.** VIX is market-wide, and a fresh variant's database is
+        empty — which is exactly how the IV filter skipped H's very first entry.
+
+        Resolution order, each step existing for a reason:
+
+        1. ``iv_percentile_source_db`` from config, if an operator pinned one.
+        2. The **live seat's** database, found through the taxonomy rather than
+           hardcoded — CLAUDE.md is explicit that no surface should hardcode
+           which variant is live, and that seat has moved once already (C→B).
+        3. Variant A's root database, the longest-running recorder.
+        4. H's own, which will be right eventually and is a harmless last resort.
+
+        Returns the first path that exists, or None.
+        """
+        cfg_db = str(self._ls_config().get("iv_percentile_source_db", "") or "").strip()
+        candidates = [cfg_db] if cfg_db else []
+
+        root = os.path.dirname(DATA_DIR) if HYDRA_VARIANT_ID else DATA_DIR
+        try:
+            from shared import strategy_taxonomy as _tax
+            for vid in _tax.available_ids():
+                if _tax.STRATEGIES[vid].status == "live":
+                    candidates.append(
+                        os.path.join(root, f"variant_{vid}", "backtesting.db"))
+        except Exception as e:  # pragma: no cover - taxonomy is always importable
+            logger.debug("LS: taxonomy lookup for the VIX source failed: %s", e)
+
+        candidates.append(os.path.join(root, "backtesting.db"))   # variant A
+        candidates.append(os.path.join(DATA_DIR, "backtesting.db"))
+
+        for c in candidates:
+            if c and os.path.exists(c):
+                return c
+        return None
 
     # ==================================================================
     # Step 4 — sizing for zero

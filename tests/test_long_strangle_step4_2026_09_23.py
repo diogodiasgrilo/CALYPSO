@@ -910,3 +910,87 @@ class TestTheSourcesCostCap:
         s._calculate_strikes(e)
         s._skip(e, 1, e.ls_skip_reason)
         assert "cost cap" in s.ls_recorder.record_skip.call_args.args[3]
+
+
+class TestTheVixHistoryComesFromADatabaseThatHasIt:
+    """Caught on H's FIRST live tick, 2026-09-23 09:49 ET.
+
+    `_vix_history_for_percentile` read H's OWN `backtesting.db`. A brand-new
+    variant's database is empty, so the IV gate skipped entry #1 with
+    "VIX-percentile proxy unavailable (empty history)" — and left as-is H would
+    never have traded until it accumulated its own ~93 days, defeating the
+    filter entirely.
+
+    **VIX is a market-wide value, not a per-variant one.** The history is read
+    from whichever variant has been recording longest, found through the
+    taxonomy rather than hardcoded — CLAUDE.md is explicit that no surface
+    should hardcode which variant is live, and that seat has already moved once
+    (C→B).
+    """
+
+    def _tree(self, tmp_path, which):
+        """Build a data tree with a populated DB under `which`."""
+        import sqlite3
+        root = tmp_path / "data"
+        (root / "variant_h").mkdir(parents=True)
+        target = root / which if which != "." else root
+        target.mkdir(parents=True, exist_ok=True)
+        con = sqlite3.connect(str(target / "backtesting.db"))
+        con.execute("CREATE TABLE market_ticks (timestamp TEXT, vix_level REAL)")
+        con.execute("INSERT INTO market_ticks VALUES ('2026-09-20 15:59:00', 15.5)")
+        con.commit()
+        con.close()
+        # H's own DB exists but is EMPTY — the exact production shape.
+        con = sqlite3.connect(str(root / "variant_h" / "backtesting.db"))
+        con.execute("CREATE TABLE market_ticks (timestamp TEXT, vix_level REAL)")
+        con.commit()
+        con.close()
+        return root
+
+    def _patched(self, tmp_path, monkeypatch, which, **cfg):
+        root = self._tree(tmp_path, which)
+        import bots.hydra.long_strangle_strategy as mod
+        monkeypatch.setattr(mod, "DATA_DIR", str(root / "variant_h"))
+        monkeypatch.setattr(mod, "HYDRA_VARIANT_ID", "h")
+        return _strat(ls_cfg=cfg)
+
+    def test_it_does_NOT_read_H_s_own_empty_database(self, tmp_path, monkeypatch):
+        s = self._patched(tmp_path, monkeypatch, "variant_b")
+        assert s._vix_history_for_percentile() == [15.5]
+
+    def test_it_finds_the_live_seat_through_the_taxonomy(self, tmp_path, monkeypatch):
+        """Not hardcoded to 'b'. The seat moved C→B once already."""
+        import shared.strategy_taxonomy as tax
+        live = [v for v, m in tax.STRATEGIES.items() if m.status == "live"]
+        assert live, "no live variant in the taxonomy"
+        s = self._patched(tmp_path, monkeypatch, f"variant_{live[0]}")
+        assert s._vix_history_for_percentile() == [15.5]
+
+    def test_it_falls_back_to_variant_A_s_root_database(self, tmp_path, monkeypatch):
+        s = self._patched(tmp_path, monkeypatch, ".")
+        assert s._vix_history_for_percentile() == [15.5]
+
+    def test_an_operator_can_pin_the_source(self, tmp_path, monkeypatch):
+        root = self._tree(tmp_path, "variant_b")
+        import bots.hydra.long_strangle_strategy as mod
+        monkeypatch.setattr(mod, "DATA_DIR", str(root / "variant_h"))
+        monkeypatch.setattr(mod, "HYDRA_VARIANT_ID", "h")
+        s = _strat(ls_cfg={"iv_percentile_source_db":
+                           str(root / "variant_b" / "backtesting.db")})
+        assert s._vix_history_for_percentile() == [15.5]
+
+    def test_nothing_anywhere_is_empty_not_an_exception(self, tmp_path, monkeypatch):
+        import bots.hydra.long_strangle_strategy as mod
+        monkeypatch.setattr(mod, "DATA_DIR", str(tmp_path / "nowhere"))
+        monkeypatch.setattr(mod, "HYDRA_VARIANT_ID", "h")
+        assert _strat()._vix_history_for_percentile() == []
+
+    def test_the_gate_then_SKIPS_rather_than_passing(self, tmp_path, monkeypatch):
+        """Fail-closed survives the fix: no history still means "unknown", and
+        unknown is never "passes the <35% filter"."""
+        import bots.hydra.long_strangle_strategy as mod
+        monkeypatch.setattr(mod, "DATA_DIR", str(tmp_path / "nowhere"))
+        monkeypatch.setattr(mod, "HYDRA_VARIANT_ID", "h")
+        s = _strat(ls_cfg={"iv_percentile_filter_enabled": True,
+                           "iv_percentile_source": "vix"})
+        assert "unavailable" in s._iv_percentile_gate(_entry())
