@@ -452,3 +452,30 @@ extrinsic being given up, `_check_eod_flatten` is the method to change.
   missing IV field).
 - **A measured latency figure.** The call count is now bounded by construction; the wall-clock number
   comes from the probe.
+
+### The RTH probe ran (2026-09-23, SPX 7724) — all three flagged assumptions resolved
+
+Step 3's outstanding half. Every number below is measured, not assumed.
+
+| Question | Answer | Consequence |
+|---|---|---|
+| **Chain completeness** | 599 strikes, **5pt spacing near the money**, range 2,600–10,000 | The 25pt `snap_to_chain` cap is **safe** — the widest near-money gap is 5pt. |
+| **Q1 — which expected move** | straddle **±22.85pt** vs VIX **±71.62pt**, ratio **3.13×** | Confirms the ~3× claim precisely. They pick genuinely different strikes (C 7745/P 7700 vs C 7795/P 7650). `expected_move_source: straddle` stands as source-faithful. |
+| **Q2 — IV percentile** | **No per-option IV fields on the quote at all.** VIX percentile over 90d (n=656) = **11.9%** | Per-option IV is genuinely unavailable, so the VIX proxy was the right call — but it is a proxy, and every skip reason says so. Today's 11.9% is well under 35%, so the filter passes rather than blocking everything. |
+| **Q3 — skew tolerance** | Real index skew today: **3.8%** (C 7745 mid 3.80 / P 7700 mid 3.95) | 35% is **very loose**, not too tight. It will rarely veto. Keep it — it catches only genuinely lopsided pairs. |
+
+#### The probe also found what would have wasted every session
+
+**A real 1-contract debit of $775** at SPX 7724, against a `sizing_for_zero_max_loss` of **$500**.
+`size_for_zero(500, 775) = 0` — **H would have skipped every day and collected nothing**, defeating
+the only reason the variant exists.
+
+$500 was **our** number, not the source's. He trades **SPY**, where the same strangle costs ~$115,
+so his own sizing rule would buy several contracts for $500. Raised to **$1,200**, which keeps one
+contract affordable in normal conditions while staying just under his own cost cap scaled to SPX
+(~$1,145/contract). **This is a risk-appetite dial and it is reversible** — lower it to stop H
+trading, raise it to let it size up.
+
+This is the clearest argument for installing a strategy rather than reasoning about it: three
+offline steps, a full test suite and a go-live audit did not surface a sizing limit that would have
+silently produced an empty dataset.
