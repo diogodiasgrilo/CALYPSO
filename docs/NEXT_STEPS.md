@@ -579,8 +579,22 @@ observed rate would sit near break-even.
   (11:38:31 → 11:39:09) and no reconciliation sampled it: the runs either side were 11:32:55 and
   12:32:58.
   **So it needs a leg to disappear unexpectedly while a strike is shared** — rare by design, and not
-  something a stop produces. Do not expect a normal session to verify this.
-- **GEX veto EV** — data-blocked until ~20 vetoes carry both strikes AND credit (~2 weeks).
+  something a stop produces.
+  ❌ **TAKE IT OFF THE WAITING LIST (measured 2026-09-23).** Across B's 89 live-era entries over 29
+  traded days: **17 days (59%) had a shared short strike, 33 shared pairs — and 0 of them
+  asymmetric.** `contracts_per_entry` has been **7 for every entry ever placed**. The resolver's
+  *attribution* path only helps when the sharing entries differ in size; a symmetric 7-vs-7 overlap
+  is precisely the case it is documented to **refuse**, because two identical entries explain a
+  single close equally well. **So the 2026-09-15 improvement is inert on B as configured** — not
+  wrong, just unreachable. It becomes verifiable only if sizes ever differ (an unflattened partial
+  fill would do it). Stop waiting for a session to confirm it.
+- **GEX veto EV** — **accumulating far faster than the "~4 weeks" estimated on 09-20.** n went
+  **8 → 13 in two sessions** (2026-09-22 alone added five). At ~5 vetoes on a quiet day, **n≈20 is
+  ~2 more sessions away, not a month.** And the direction is no longer one-sided: 09-21's two saves
+  (−$1,400 each, both breached) are being eroded by 09-22's five misses (+$245/+$262/+$227/+$245/+$158,
+  none breached). Net still −$822.50, i.e. **vetoing has saved money overall** — but **2 of 13
+  breached (15%)** and Tuesday gave back 40% of Monday's saving in one session. The analyzer's own
+  verdict stands: *n=13, directional at best, do not act.* **This is the one to watch this week.**
 - **MKT-011B, the alert bucket fix, the ORDER-004 floor** — running now, but none has met a live
   entry yet. Monday is the first opportunity.
 
