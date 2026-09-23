@@ -214,6 +214,15 @@ class Settings(BaseSettings):
     variant_h_log_file: Path = Path("/opt/calypso/logs/hydra_variant_h/bot.log")
     variant_h_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_h.json")
     variant_h_label: str = "H (0DTE Long Strangle · long gamma · dry-run-locked)"
+    # Empty = full history; H first ran 2026-09-23 and has no record to rebase.
+    # MISSING THIS BROKE CI ON EVERY PUSH FROM 2026-09-23 10:31 UTC ONWARD —
+    # scripts/make_synthetic_fixtures.py assigns variant_<id>_baseline_date for
+    # EVERY taxonomy variant, and pydantic's extra-ban makes a missing field a
+    # hard ValueError at setattr, not a soft default. The identical omission hit
+    # variant bm on 2026-09-18; the guard added then checked bm ALONE, so it
+    # could not catch h. It is now derived across every taxonomy variant
+    # (test_bm_variant_2026_09_18.py).
+    variant_h_baseline_date: str = ""
 
     # ── Cumulative track-record BASELINE (rebase the cumulative to a date) ────
     # 2026-06-04: every cumulative figure (the single P&L card + the Comparison

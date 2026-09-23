@@ -236,6 +236,40 @@ def test_the_dashboard_has_every_settings_field_bm_needs():
     )
 
 
+def test_EVERY_taxonomy_variant_has_the_settings_fields_it_needs():
+    """The same lesson, one level up — and it had to be learned twice.
+
+    The test above is DERIVED over field names but HARD-CODED to `bm`. So when
+    variant **h** was added on 2026-09-23 it was never checked, and
+    `variant_h_baseline_date` was missing: CI's fixture generator broke on
+    EVERY push from 10:31 UTC onward, 14 runs, while the local suite stayed
+    green because nothing local iterates the taxonomy this way.
+
+    A guard that names the variant it guards can only ever protect that one
+    variant, which is exactly the failure it was written to prevent. This one
+    iterates the taxonomy, so the NEXT variant is covered before it is written.
+    """
+    from dashboard.backend.config import Settings
+    import shared.strategy_taxonomy as tax
+
+    def suffixes(vid):
+        pre = f"variant_{vid}_"
+        return {n[len(pre):] for n in Settings.model_fields if n.startswith(pre)}
+
+    reference = suffixes("b")
+    assert reference, "variant_b_* has no fields — the reference is wrong"
+
+    gaps = {vid: sorted(reference - suffixes(vid))
+            for vid in tax.available_ids()
+            if vid != "b" and (reference - suffixes(vid))}
+    assert not gaps, (
+        f"dashboard Settings is missing variant fields: {gaps}. Every taxonomy "
+        f"variant needs what variant_b_* has — scripts/make_synthetic_fixtures.py "
+        f"assigns them for ALL variants and pydantic's extra-ban makes each "
+        f"omission a hard ValueError at setattr, not a default."
+    )
+
+
 def test_the_dashboard_paths_are_bm_specific():
     from dashboard.backend.config import Settings
     for field in ("variant_bm_state_file", "variant_bm_backtesting_db",
