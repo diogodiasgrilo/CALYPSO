@@ -160,7 +160,15 @@ class TestMeta:
         assert body["primary_id"] == "b"
 
         group_ids = {g["id"] for g in body["groups"]}
-        assert group_ids == {"ic_0dte", "calendar_multiday", "undefined_risk_0dte"}
+        # long_gamma_0dte added 2026-09-23 with variant H (0DTE long strangle). It is
+        # the only group that BUYS premium: ic_0dte and undefined_risk_0dte are credit,
+        # calendar_multiday is net debit but theta-POSITIVE. Its pnl_shape="debit" is
+        # what keeps H out of the IC comparison readers, the same mechanism that has
+        # always excluded D/E. (This test's name still says "two groups" — historical,
+        # it has asserted three since undefined_risk_0dte landed.)
+        assert group_ids == {
+            "ic_0dte", "calendar_multiday", "undefined_risk_0dte", "long_gamma_0dte",
+        }
 
         # ic_0dte = credit, calendar_multiday = debit; members derived from taxonomy.
         by_id = {g["id"]: g for g in body["groups"]}

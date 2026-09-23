@@ -49,6 +49,15 @@ _REGISTRY: Dict[str, str] = {
     # since it never holds overnight (unlike D/E), but go-live is still a
     # deliberate later gate, not a config flip.
     "ghauri": "bots.hydra.ghauri_strategy:GhauriMeanReversionStrategy",
+    # Variant H — 0DTE SPX LONG strangle: BUYS an OTM call + an OTM put at the
+    # expected-move boundary. The structural mirror of "strangle" (G) — same two
+    # legs, opposite sign — and the fleet's only NET-DEBIT, long-gamma,
+    # short-theta strategy. Selected via strategy.name = "long_strangle";
+    # dry-run-LOCKED because it is a Step 1 scaffold with NO entry logic yet
+    # (docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md). Risk is bounded by the
+    # debit paid, so unlike G it needs no stop machinery and can never hold a
+    # naked short — but an unfinished strategy stays locked regardless.
+    "long_strangle": "bots.hydra.long_strangle_strategy:LongStrangleStrategy",
 }
 
 # Default when neither brandon.enabled nor strategy.name is set — preserves the

@@ -87,8 +87,13 @@ class TestResolveClass:
             resolve_strategy_class("nope")
 
     def test_available_lists_registered(self):
+        # "long_strangle" (variant H, 2026-09-23) is the 0DTE LONG strangle — the
+        # structural mirror of "strangle" (G). Same two legs, opposite sign: G sells
+        # them, H buys them. Listed adjacently here on purpose; they are easy to
+        # confuse and behave inversely (H is net DEBIT, long gamma, no stops).
         assert available_strategies() == [
-            "brandon", "double_calendar", "ghauri", "hydra", "spy_double_calendar", "strangle"
+            "brandon", "double_calendar", "ghauri", "hydra", "long_strangle",
+            "spy_double_calendar", "strangle",
         ]
 
 

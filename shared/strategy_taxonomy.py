@@ -195,6 +195,21 @@ GROUPS: Dict[str, GroupMeta] = {
         # undefined-risk strategy is ever added — see docs/NEW_STRATEGY_PLAYBOOK.md.
         comparable=False,
     ),
+    "long_gamma_0dte": GroupMeta(
+        id="long_gamma_0dte",
+        label="Long-Gamma 0DTE",
+        # The ONLY group that BUYS premium. Every other group sells it: ic_0dte and
+        # undefined_risk_0dte are credit, and calendar_multiday is net debit but
+        # theta-POSITIVE. This one is net debit AND theta-negative — it pays to be
+        # long gamma. That is the whole point of the group existing: its P&L is
+        # expected to be anti-correlated with the rest of the fleet, profiting on
+        # exactly the large-move days that hurt the sellers.
+        pnl_shape="debit",
+        # comparable=False, same reasoning as undefined_risk_0dte: one member, and
+        # no group-comparison renderer has been built. Flip it to True and build a
+        # renderer together if a second long-gamma strategy is ever added.
+        comparable=False,
+    ),
 }
 
 # Sentinel group for an unregistered letter (never comparable, no axis).
@@ -380,6 +395,31 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         sides="two_sided",  # two naked shorts — two-sided, just wingless  # matches StrangleStrategy.BOT_NAME (not "HYDRA")
         subtitle="0DTE SPX naked strangle · undefined risk",
         ui_name="Strangle",
+    ),
+    "h": StrategyMeta(
+        id="h",
+        display_name="Long Strangle (0DTE)",
+        short_name="LONGSTRANGLE-H",
+        strategy_class="long_strangle",
+        group_id="long_gamma_0dte",
+        # Deliberately NOT structure_family="strangle" (G's value), even though the
+        # leg geometry is identical. structure_family drives dashboard capabilities,
+        # and every IC/strangle-shaped consumer assumes premium was COLLECTED —
+        # "expired worthless" means profit there and maximum loss here. Sharing G's
+        # family would invite exactly that mis-render. New family, own renderer when
+        # one is built.
+        structure_family="long_strangle",
+        pnl_shape="debit",
+        dte_class="0DTE",
+        status="dry_run_locked",
+        bot_name_base="LONGSTRANGLE",  # matches LongStrangleStrategy.BOT_NAME
+        # Risk is the premium paid — known before entry, needs no margin lookup and
+        # no width floor. "defined_risk" is the closest existing value and is true in
+        # the literal sense: the maximum loss is defined at entry.
+        capital_basis="defined_risk",
+        sides="two_sided",  # a long call + a long put — two legs, both bought
+        subtitle="0DTE SPX long strangle · long gamma, pays theta",
+        ui_name="Long Strangle",
     ),
 }
 

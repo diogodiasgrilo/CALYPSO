@@ -1,0 +1,139 @@
+{
+  "_comment_variant": "HYDRA Variant H — 0DTE SPX LONG STRANGLE (Tompkins / Theta Profits). The structural MIRROR of variant G: the same two legs, the opposite sign. G SELLS an OTM call + an OTM put; H BUYS them. That inverts everything: NET DEBIT not credit, LONG gamma, SHORT theta, and max loss = the premium paid (defined by construction, so there is NO stop loss and no stop machinery at all). It is the only long-gamma strategy in the fleet — A/B/C/F/G all sell premium and D/E are net debit but theta-POSITIVE — which is the entire reason to run it: to MEASURE whether long gamma hedges the short-gamma book's bad days. STATUS: Step 1 scaffold per docs/NEW_STRATEGY_PLAYBOOK.md — registered, dry-run-LOCKED, and INERT (no entry logic implemented). The entry/exit knobs below are PLACEHOLDERS for Steps 3–5 and are not read by any code yet. Claims from the source (80% WR, +50–100%) are NOT believed — see docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md §1.",
+  "bot_name": "HYDRA",
+  "dry_run": true,
+  "_comment_credentials": "IBKR OAuth credentials are loaded from systemd $CREDENTIALS_DIRECTORY on the VM, or env vars in dev. Not in this file.",
+  "strategy": {
+    "name": "long_strangle",
+    "_comment_commission": "IBKR all-in SPX cost ~$1.15/leg/contract — see config_variant_c.json's comment for the full breakdown.",
+    "commission_per_leg": 1.15,
+    "underlying_symbol": "SPX",
+    "trading_class": "SPXW",
+    "exchange": "CBOE",
+    "target_dte": 0,
+    "_comment_entry_times": "PLACEHOLDER (Step 3/4). The source enters NEAR THE OPEN — a single entry, not a grid. One slot is the faithful reading; kept as a list for shape-compatibility with the base.",
+    "entry_times": [
+      "09:45"
+    ],
+    "entry_window_minutes": 5,
+    "_comment_delta": "PLACEHOLDER (Step 4) and LIKELY WRONG AS A MECHANISM. The source does NOT pick strikes by delta — it uses spot ± the options-market EXPECTED MOVE, then checks both premiums are 'reasonably similar' for skew. target_delta is retained only so base-class code paths that read it do not see a missing key. Step 4 must decide WHICH expected move (F computes a VIX-implied one at ghauri_strategy.py:324; the source means the ATM straddle) — that choice IS the strategy.",
+    "target_delta": 8,
+    "min_delta": 5,
+    "max_delta": 15,
+    "_comment_safety_caps": "Conservative sizing at 1c while this variant is dry-run-locked and under initial observation — matches variant A/F's ORDER-006 defaults.",
+    "_comment_mkt046": "2026-08-28: same disable as B/C/F (see config_variant_b.json's comment + bots/hydra/__init__.py version history) — MKT-046's 10s wait isn't part of any of these strategies' original research; disabling here matches that reasoning rather than G's own stop history, which is essentially nonexistent (dry-run-locked, first live day 2026-08-28, one real stop so far — see the 2026-08-28 audit). Zero real-money risk either way. Note: this is the confirmation TIMING only, unrelated to the separate close-cost-estimator bug fixed the same day.",
+    "mkt046_confirm_seconds": 0,
+    "contracts_per_entry": 1,
+    "max_contracts_per_order": 10,
+    "max_contracts_per_underlying": 60,
+    "max_vix_entry": 999,
+    "_comment_whipsaw": "Anti-whipsaw filter — Strangle's own _strangle_pre_entry_gates calls the shared _check_whipsaw_filter helper, same as the IC family.",
+    "whipsaw_range_skip_mult": 1.75,
+    "_comment_fomc": "fomc_announcement_skip=FALSE on purpose, and for the OPPOSITE reason to G's. G trades announcement days while carrying undefined risk, which is the outlier flagged in GO_LIVE_MASTER §2-ter. A long strangle's risk is capped at the debit, and an FOMC announcement is precisely the large-move event it exists to capture — skipping those would remove the days most likely to show whether the hedge thesis holds. Revisit at promotion.",
+    "fomc_t1_skip_enabled": true,
+    "fomc_t1_callonly_enabled": false,
+    "fomc_announcement_skip": false,
+    "min_entries_before_roc_gate": 999,
+    "vix_regime": {
+      "_comment": "Inherited unchanged via HydraStrategy._should_attempt_entry (Strangle doesn't override it) — the SAME vix_regime block A/B/C use, kept identical for a fresh variant's first observation window rather than inventing new breakpoints untested for this structure.",
+      "enabled": true,
+      "breakpoints": [
+        18.0,
+        22.0,
+        28.0
+      ],
+      "max_entries": [
+        2,
+        2,
+        2,
+        1
+      ],
+      "put_stop_buffer": [
+        null,
+        2.5,
+        1.5,
+        null
+      ],
+      "call_stop_buffer": [
+        null,
+        1.5,
+        1.0,
+        null
+      ],
+      "min_call_credit": [
+        1.0,
+        0.5,
+        0.3,
+        0.3
+      ],
+      "min_put_credit": [
+        1.25,
+        0.75,
+        0.5,
+        0.4
+      ],
+      "shadow_call_otm": [
+        40.0,
+        50.0,
+        75.0,
+        75.0
+      ],
+      "shadow_put_otm": [
+        50.0,
+        75.0,
+        110.0,
+        90.0
+      ]
+    },
+    "_comment_no_stops": "DELIBERATELY ABSENT: call_stop_buffer / put_stop_buffer / min_buying_power_per_strangle. A long strangle's maximum loss is the debit paid, known before entry, so there is nothing to stop out of and no margin to reserve. No GUARD-FLOOR, no A2 %-of-width, no buffer decay. If a stop knob ever appears in this file, something has been copied in by mistake.",
+    "_comment_long_strangle": "PLACEHOLDERS for Steps 3–5 — no code reads these yet. profit_target_pct_of_debit: the source takes +50% normally and +100% when IV is expanding from a low base. iv_percentile_max: the source's <~35% filter — NOTHING IN THE REPO COMPUTES IV PERCENTILE today (raw IV only), so Step 3 must build it or the filter must be dropped and that recorded. sizing_for_zero_max_loss: 'sizing for zero' — pick an acceptable loss and size assuming the whole debit goes to zero.",
+    "long_strangle": {
+      "profit_target_pct_of_debit": 50,
+      "profit_target_pct_of_debit_iv_expanding": 100,
+      "iv_percentile_max": 35,
+      "sizing_for_zero_max_loss": 500,
+      "expected_move_source": "straddle"
+    }
+  },
+  "trend_filter": {
+    "enabled": false
+  },
+  "smart_entry": {
+    "enabled": false
+  },
+  "vix_time_shift": {
+    "enabled": false
+  },
+  "long_salvage": {
+    "_comment": "Strangle has no long legs to salvage (long_call_strike/long_put_strike are always 0.0) — short_only_stop stays false (close-both-legs default), same as every other variant. Not meaningfully exercised by this strategy either way.",
+    "short_only_stop": false,
+    "enabled": false,
+    "min_profit": 10.0
+  },
+  "filters": {
+    "fomc_blackout": false
+  },
+  "external_price_feed": {
+    "enabled": true
+  },
+  "google_sheets": {
+    "enabled": false,
+    "credentials_file": "config/google_credentials.json",
+    "spreadsheet_name": "Calypso_HYDRA_Variant_G",
+    "worksheet_name": "Trades",
+    "strategy_type": "strangle"
+  },
+  "alerts": {
+    "enabled": false,
+    "phone_number": "+1XXXXXXXXXX",
+    "email": "your@email.com"
+  },
+  "logging": {
+    "log_level": "INFO",
+    "log_dir": "logs/hydra_variant_h",
+    "google_sheets_enabled": false,
+    "spreadsheet_name": "Calypso_HYDRA_Variant_H",
+    "strategy_type": "long_strangle"
+  },
+  "api_pacing_multiplier": 2.5
+}

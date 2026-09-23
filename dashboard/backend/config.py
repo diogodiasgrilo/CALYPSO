@@ -196,6 +196,25 @@ class Settings(BaseSettings):
     variant_g_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_g.json")
     variant_g_label: str = "G (0DTE Strangle · undefined-risk · dry-run-locked)"
 
+    # ── Variant H — 0DTE SPX LONG strangle, net DEBIT (dry-run-locked scaffold) ─
+    # The structural mirror of G: same two legs, opposite sign. G sells the
+    # strangle, H buys it — so H is the fleet's only long-gamma, short-theta,
+    # net-debit-AND-theta-negative strategy (D/E are net debit but theta-POSITIVE).
+    # group_id="long_gamma_0dte" carries pnl_shape="debit", which means
+    # routers/variants.py::_readable_ids() excludes H from the IC comparison
+    # readers automatically — the same mechanism that has always excluded D/E,
+    # and the reason no hand-maintained exclusion is needed here. Its entries are
+    # NOT IC-shaped: "expired worthless" is H's MAXIMUM LOSS, not its profit, so
+    # any IC-shaped renderer would invert the sign of everything it displayed.
+    # Step 1 scaffold — registered and inert, no entry logic yet. See
+    # docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md.
+    variant_h_state_file: Path = Path("/opt/calypso/data/variant_h/hydra_state.json")
+    variant_h_metrics_file: Path = Path("/opt/calypso/data/variant_h/hydra_metrics.json")
+    variant_h_backtesting_db: Path = Path("/opt/calypso/data/variant_h/backtesting.db")
+    variant_h_log_file: Path = Path("/opt/calypso/logs/hydra_variant_h/bot.log")
+    variant_h_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_h.json")
+    variant_h_label: str = "H (0DTE Long Strangle · long gamma · dry-run-locked)"
+
     # ── Cumulative track-record BASELINE (rebase the cumulative to a date) ────
     # 2026-06-04: every cumulative figure (the single P&L card + the Comparison
     # lifetime totals + the running-cumulative curves) is summed from each
