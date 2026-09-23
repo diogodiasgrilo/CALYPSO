@@ -563,3 +563,50 @@ class TestTheExpectedMoveBand:
         assert "proposed_call_strike" in src and "proposed_put_strike" in src
         assert "hypothetical" in src
         assert "Did it move enough?" in src
+
+
+class TestNoFrontendFetchSilentlyDropsTheStrategy:
+    """A sweep, not a spot-check. `useBotConfig` was found fetching the primary's
+    config for every strategy; the question "are there others?" deserves a
+    derived answer rather than a promise.
+
+    Every `/api/...` call that reads STRATEGY-SCOPED data must pass a
+    strategy_id. Market data (SPX ticks, OHLC) is strategy-agnostic and
+    correctly does not, and the primary WS branch legitimately fetches the
+    primary.
+    """
+
+    SRC = Path(__file__).resolve().parents[1] / "dashboard" / "frontend" / "src"
+
+    def test_the_csv_export_is_scoped(self):
+        """It exported the live seat's year regardless of what was on screen —
+        you could be looking at A and download B's numbers, with nothing in the
+        file saying so."""
+        src = (self.SRC / "components" / "shared" / "CommandPalette.tsx").read_text()
+        assert "useSelectedStrategy" in src
+        assert "strategy_id=" in src
+
+    def test_the_bot_config_hook_is_scoped(self):
+        src = (self.SRC / "hooks" / "useBotConfig.ts").read_text()
+        assert "strategy_id=" in src
+
+    def test_performance_metrics_is_fed_per_strategy_off_primary(self):
+        """The unscoped fetch inside PerformanceMetrics is CORRECT — it only
+        runs on the primary branch. The polled (non-primary) branch must pass
+        the variant's own array instead, or every non-primary strategy shows the
+        live seat's metrics."""
+        src = (self.SRC / "components" / "dashboard" / "IronCondorDashboard.tsx").read_text()
+        polled = src.split("function PolledICView", 1)[1]
+        assert polled.count("<PerformanceMetrics dailyPnls=") >= 2, (
+            "PolledICView must feed PerformanceMetrics the variant's own "
+            "daily_pnls; a bare <PerformanceMetrics /> there fetches the PRIMARY"
+        )
+        assert "<PerformanceMetrics />" not in polled
+
+    def test_market_data_fetches_are_deliberately_unscoped(self):
+        """SPX is SPX. Pinned so nobody 'fixes' these into per-strategy calls
+        and quietly breaks the shared cache."""
+        for rel in (("components", "history", "SessionReplay.tsx"),
+                    ("components", "history", "DayDetailModal.tsx")):
+            src = (self.SRC.joinpath(*rel)).read_text()
+            assert "/api/market/" in src

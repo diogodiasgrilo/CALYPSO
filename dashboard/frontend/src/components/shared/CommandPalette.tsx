@@ -3,6 +3,7 @@ import { useNavigate } from "react-router-dom";
 import { Search, LayoutDashboard, CalendarDays, BarChart3, Scale, Layers, Download, Volume2, VolumeX, Eye } from "lucide-react";
 import { useHydraStore } from "../../store/hydraStore";
 import { useStrategyMeta } from "../../hooks/useStrategyMeta";
+import { useSelectedStrategy } from "../../hooks/useSelectedStrategy";
 import { exportDailySummariesCSV } from "../../lib/exportUtils";
 
 interface Command {
@@ -20,6 +21,12 @@ interface CommandPaletteProps {
 }
 
 export function CommandPalette({ open, onClose }: CommandPaletteProps) {
+  // "Export CSV" used to fetch /api/metrics/daily UNSCOPED, so it always
+  // exported the live seat's year regardless of which strategy was on screen —
+  // you could be looking at variant A and download B's numbers, with nothing in
+  // the file saying so. Same class as the bot-config bug: the backend was
+  // always scoped, the caller never asked.
+  const { strategy: exportStrategy } = useSelectedStrategy();
   const [query, setQuery] = useState("");
   const [selectedIndex, setSelectedIndex] = useState(0);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -105,7 +112,10 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       label: "Export CSV",
       icon: <Download size={14} />,
       action: () => {
-        fetch(`/api/metrics/daily?year=${new Date().getFullYear()}`)
+        fetch(
+          `/api/metrics/daily?year=${new Date().getFullYear()}` +
+            (exportStrategy?.id ? `&strategy_id=${encodeURIComponent(exportStrategy.id)}` : ""),
+        )
           .then((r) => r.json())
           .then((data) => {
             if (data.summaries?.length > 0) {
