@@ -130,4 +130,39 @@ variants' schema untouched, which is the deciding factor while B holds the live 
 - [x] Credit/debit + single/multi-day recorded (§1 — **net debit, single day**)
 - [x] Build weight decided and reasoned (§3 — **MEDIUM**, skip 6, include 2 small + 7)
 - [x] Variant id + registry name chosen and confirmed free (§4 — **`h`** / **`long_strangle`**)
-- [ ] Operator go/no-go on proceeding to Step 1
+- [x] Operator go/no-go on proceeding to Step 1 — **given 2026-09-23**
+
+---
+
+## 8. Build progress
+
+| Step | State | Notes |
+|---|---|---|
+| **0** Classify + spec | ✅ | This document. MEDIUM build. |
+| **1** Scaffold + coexistence | ✅ `caf40c9` | Registered, dry-run-LOCKED, **inert**. All 5 coexistence checks pass; dashboard exclusion is automatic via the group's `pnl_shape="debit"`. `main.py` needed no edit (taxonomy-driven banner). |
+| **2** Data model | ✅ | `bots/hydra/long_strangle_entry.py` — `LongStrangleEntry(HydraIronCondorEntry)`, every credit-shaped property overridden, 19 tests. |
+| **3** Data plumbing | ⏳ next | Expected-move source + IV percentile. **Needs a VM probe before building on it** (playbook: D's offline tests were green while the live probe caught SPXW expiry gaps and a missing IV field). |
+| 4–5, 8–10 | — | Entry/simulation, exits, observability, hardening, go-live audit. |
+| 6 | **skipped** | Single-day — no sidecar, no multi-day settlement. |
+| 7 | pending | Isolated DB — **confirmed necessary by Step 2**, see below. |
+
+### Step 2 confirmed Step 0's isolated-DB call, for a concrete reason
+
+`total_credit` returns a truthful **`0.0`** (nothing was sold) and the money paid lives in a new
+`total_debit`. **`trade_entries` has no column that can hold it** — only `call_credit`, `put_credit`,
+`total_credit`. Writing H to the shared table would silently record a strangle that **cost nothing**.
+So Step 7 is required, not merely tidy.
+
+### What Step 2 found that Step 0 did not anticipate
+
+- **No signed trick rescues the inherited formula.** `total_credit = −debit` with the base's
+  `credit − value` gives `−debit − value`; the answer is `value − debit`. They differ by `2 × value`.
+  Pinned by a test: a $2,450 debit worth $3,500 is **+$1,050**, and the inherited formula returns
+  **−$3,500** — opposite sign, and larger than the position's maximum possible loss.
+- **The `[0, width]` clamp had to go.** It exists because a short vertical's cost-to-close is capped
+  by its width. A long option has no cap, and clamping would truncate **exactly the large-move payoff
+  the strategy exists to capture.**
+- **A Step 5 hazard, recorded early.** H populates `long_*` and leaves `short_*` at zero — the mirror
+  of G. G needed **S-CRIT-1** because a base guard demanded both legs be priced while its `long_*` was
+  permanently zero, so its stop never fired. H cannot hit that exact bug (it has no stop), but any base
+  path treating `short_*` as "is there a position here" must be checked in Step 5.
