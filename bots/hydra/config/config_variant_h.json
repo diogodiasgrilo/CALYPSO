@@ -86,7 +86,7 @@
       ]
     },
     "_comment_no_stops": "DELIBERATELY ABSENT: call_stop_buffer / put_stop_buffer / min_buying_power_per_strangle. A long strangle's maximum loss is the debit paid, known before entry, so there is nothing to stop out of and no margin to reserve. No GUARD-FLOOR, no A2 %-of-width, no buffer decay. If a stop knob ever appears in this file, something has been copied in by mistake.",
-    "_comment_long_strangle": "Step 4 READS: expected_move_source, expected_move_multiplier, skew_tolerance_pct, sizing_for_zero_max_loss, min_buying_power_per_long_strangle, iv_percentile_filter_enabled, iv_percentile_source, iv_percentile_max. Step 5 (exits) is NOT written, so profit_target_* are still placeholders. expected_move_source SELECTS WHICH STRATEGY RUNS — 'straddle' (source-faithful, ~22pt on 2026-09-22) and 'vix' (F's formula, ~71pt on the same day) disagree by ~3x and there is deliberately NO FALLBACK between them: if the configured one can't be computed the entry is skipped, because silently substituting the other would blend two strategies into one unseparable series. iv_percentile_filter_enabled is FALSE because nothing in this repo stores option-IV history (market_ticks keeps VIX, a 30-day INDEX vol, not the IV of the 0DTE options being bought) — the gate FAILS CLOSED, so enabling it without wiring a series skips every entry loudly instead of passing everything silently. skew_tolerance_pct 35 is still a guess (the source says only 'reasonably similar').",
+    "_comment_long_strangle": "ALL of these are read by Steps 4-5. profit_target_pct_of_debit is the exit; profit_target_pct_of_debit_iv_expanding (+100%) is UNREACHABLE until iv_percentile_source is wired, which is stated rather than silently defaulted. profit_target_confirm_seconds is 0 ON PURPOSE and is the one place the playbook's own Step-5 instruction is deliberately inverted: a breach-persistence window protects a STOP (which fires on an adverse spike) but systematically gives back a long-gamma PROFIT TARGET (which fires on a favourable spike, and those revert). The guard against a phantom target here is quote quality, not elapsed time. The knob exists at a non-default value so the dry run can falsify that reasoning. expected_move_source SELECTS WHICH STRATEGY RUNS — 'straddle' (source-faithful, ~22pt on 2026-09-22) and 'vix' (F's formula, ~71pt on the same day) disagree by ~3x and there is deliberately NO FALLBACK between them: if the configured one can't be computed the entry is skipped, because silently substituting the other would blend two strategies into one unseparable series. iv_percentile_filter_enabled is FALSE because nothing in this repo stores option-IV history (market_ticks keeps VIX, a 30-day INDEX vol, not the IV of the 0DTE options being bought) — the gate FAILS CLOSED, so enabling it without wiring a series skips every entry loudly instead of passing everything silently. skew_tolerance_pct 35 is still a guess (the source says only 'reasonably similar').",
     "long_strangle": {
       "expected_move_source": "straddle",
       "expected_move_multiplier": 1.0,
@@ -97,7 +97,8 @@
       "iv_percentile_source": "",
       "iv_percentile_max": 35,
       "profit_target_pct_of_debit": 50,
-      "profit_target_pct_of_debit_iv_expanding": 100
+      "profit_target_pct_of_debit_iv_expanding": 100,
+      "profit_target_confirm_seconds": 0
     }
   },
   "trend_filter": {

@@ -1,4 +1,4 @@
-"""LongStrangleStrategy — a 0DTE SPX **LONG** strangle (variant H). Entry built, exits not.
+"""LongStrangleStrategy — a 0DTE SPX **LONG** strangle (variant H). Complete but unrun.
 
 The structural mirror of ``StrangleStrategy`` (variant G): the same two legs, the
 opposite sign. G **sells** an OTM call and an OTM put; this **buys** them. That one
@@ -26,17 +26,24 @@ short-gamma book's bad days?** 2026-09-21 (SPX +1.1%, B's worst live session at
 −$441/contract) and 2026-09-22 (a 20-point range, B positive) are the two sides
 of that question.
 
-BUILD STATUS — **Steps 1–4 + 7 of ``docs/NEW_STRATEGY_PLAYBOOK.md``.** Registered,
-dry-run-LOCKED, and as of Step 4 it can **open a simulated position**: expected-move
-strike selection, the pre-entry gates, sizing-for-zero, and a ``_simulate_entry``
-that books synthetic DRY fills into the isolated ``long_strangle.db``.
+BUILD STATUS — **Steps 1–5 + 7 of ``docs/NEW_STRATEGY_PLAYBOOK.md``.** The strategy is
+functionally complete in dry-run: expected-move strike selection, sizing-for-zero, a
+``_simulate_entry`` booking synthetic DRY fills, a percent-of-debit profit target, and
+settlement at intrinsic — all persisted to the isolated ``long_strangle.db``.
 
-**Step 5 — the exits — is NOT written.** An H entry opened today is opened and then
-held; the +50% / +100%-of-debit targets and the EOD path do not exist yet. The stop
-machinery is explicitly disarmed rather than left inherited (see
-``_calculate_stop_levels_hydra``), and ``_execute_entry`` **refuses** rather than
-falling through to the base's 4-leg iron-condor placement. Do not read "it books an
-entry" as "it is finished".
+**It remains dry-run-LOCKED, and it has never run even in dry-run.** Steps 8–10
+(observability, hardening, the go-live audit) are outstanding. Three independent locks
+keep a real order off the wire: ``__init__`` refuses a non-dry-run construction,
+``_execute_entry`` refuses rather than falling through to the base's 4-leg iron-condor
+placement (which would SELL two short legs this strategy does not have), and
+``_close_long_strangle`` refuses a live close.
+
+Every exit here is the sign-mirror of the credit family and none of them could be
+inherited. The two that would have failed SILENTLY are worth naming at the top of the
+file: the base's settlement booking would have recorded a strangle expiring worthless
+as **break-even** rather than a total loss of the premium (see
+``_settlement_booked_pnl``), and the base's ``credit + buffer`` stop would have produced
+an arbitrary trigger nobody chose (see ``_calculate_stop_levels_hydra``).
 
 Spec + build-weight decision: ``docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md``
 (MEDIUM build — skip Step 6, include a small Step 2 model and a Step 7 isolated DB,
@@ -103,10 +110,11 @@ class LongStrangleStrategy(HydraStrategy):
 
         Locked for a different reason from G's. G is locked because it carries
         UNDEFINED risk and arming it is a deliberate operator decision. This is
-        locked because it is **unfinished**: Step 4 can open a position but Step 5
-        (the exits) is not written, so an armed H would buy premium and then hold
-        it to expiry with no profit target. Its risk is bounded by construction;
-        that is not a reason to arm a half-built strategy.
+        locked because it has **never run** — entry and exits are written and
+        unit-tested, but no tick of this code has touched a live chain, and
+        Steps 8–10 (observability, hardening, the go-live audit) are outstanding.
+        Its risk being bounded by construction is not a reason to arm code that
+        has never executed.
 
         The kwarg is checked BEFORE ``super().__init__`` so an illegal live
         construction never reaches the base init's broker I/O. ``build_strategy``
@@ -114,9 +122,10 @@ class LongStrangleStrategy(HydraStrategy):
         """
         if not kwargs.get("dry_run", False):
             raise ConfigError(
-                "LongStrangleStrategy is dry-run-LOCKED: entry works (Step 4) but "
-                "the EXITS DO NOT EXIST (Step 5 unwritten) — an armed H would buy "
-                "premium and hold it to expiry. See "
+                "LongStrangleStrategy is dry-run-LOCKED: entry and exits are "
+                "written (Steps 1-5 + 7) but THIS CODE HAS NEVER RUN — not one "
+                "tick against a live chain — and Steps 8-10 (observability, "
+                "hardening, go-live audit) are outstanding. See "
                 "docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md. Set dry_run=true, "
                 "or do not select strategy.name='long_strangle'."
             )
@@ -143,8 +152,8 @@ class LongStrangleStrategy(HydraStrategy):
             logger.warning("LongStrangle recorder unavailable (non-critical): %s", e)
 
         logger.info(
-            "LongStrangleStrategy (variant H) constructed — Steps 1-4 + 7: entry "
-            "and dry-run simulation live, EXITS NOT IMPLEMENTED (Step 5)."
+            "LongStrangleStrategy (variant H) constructed — Steps 1-5 + 7: entry, "
+            "profit target and settlement wired; dry-run-LOCKED, never yet run."
         )
 
     # ==================================================================
@@ -717,21 +726,18 @@ class LongStrangleStrategy(HydraStrategy):
         explicitly unreachable is the difference between "no stop" and "a stop
         nobody chose".
 
-        Step 5 owns the exits proper (+50% / +100% of debit, EOD) and will
-        replace the monitoring path; this only guarantees that until then nothing
-        fires by accident.
+        The exits live in ``_check_stop_losses`` (the profit target) and
+        ``_settlement_booked_pnl`` (expiry). Neither reads these levels; they are
+        set unreachable so that no base path can.
 
-        VERIFIED, not assumed: a SECOND, independent mechanism also blocks the
-        base stop path today. ``_validate_pnl_sanity``'s DATA-004 check rejects a
-        side whose two legs are "partially zero", and H's ``short_*_price`` is
-        permanently 0.0 while its ``long_*_price`` is not — so the guard returns
-        False and ``_check_stop_losses`` skips the entry every tick. This is the
-        exact mirror of G's **S-CRIT-1**, where the same guard was the bug (it
-        kept G's stop from EVER firing). Here it is harmless but NOT free: it
-        logs a WARNING every tick calling an intentionally-absent leg
-        "suspicious". **Step 5 must override this guard to validate the LONG legs
-        only** — both to quiet the log and because Step 5's profit-target path
-        will need the monitoring tick it currently discards.
+        RESOLVED IN STEP 5: the base's DATA-004 sanity guard USED to reject H on
+        every tick — it rejects a side whose two legs are "partially zero", and
+        H's ``short_*_price`` is permanently 0.0 against a priced ``long_*``.
+        That was harmless as a second lock but it discarded the very tick the
+        profit target needs, and logged a warning calling an intentionally-absent
+        leg "suspicious". ``_validate_pnl_sanity`` now validates the LONG legs
+        only — the exact mirror of G's **S-CRIT-1**, where the same guard was the
+        bug that kept G's stop from ever firing.
         """
         entry.call_side_stop = float("inf")
         entry.put_side_stop = float("inf")
@@ -764,3 +770,384 @@ class LongStrangleStrategy(HydraStrategy):
             expected_move=getattr(entry, "ls_expected_move", 0.0),
             skew_gap_pct=getattr(entry, "ls_skew_gap_pct", 0.0),
         )
+
+    # ==================================================================
+    # Step 5 — the exits
+    # ==================================================================
+
+    def _validate_pnl_sanity(self, entry) -> Tuple[bool, str]:
+        """Validate the LONG legs only. The exact mirror of G's **S-CRIT-1**,
+        for the opposite reason.
+
+        The base's DATA-004 check rejects a side whose two legs are "partially
+        zero". H's ``short_*_price`` is permanently 0.0 against a priced
+        ``long_*_price``, so the base guard returns False on **every tick** and
+        the per-tick manager skips the entry entirely.
+
+        For G that was the bug: its stop never fired, leaving an undefined-risk
+        naked short unmanaged. Here it is not dangerous — there is no stop to
+        miss — but it is still wrong in two ways. It discards the tick Step 5's
+        profit target needs, and it logs a warning calling an intentionally
+        absent leg "suspicious".
+
+        A side is data-valid iff its LONG is priced. There is deliberately no
+        minimum-loss suppression (mirroring G's L-H3 reasoning in the opposite
+        direction): this guard exists to reject unusable data, never to delay an
+        exit.
+        """
+        if not getattr(entry, "call_side_expired", False) and entry.long_call_strike:
+            if not entry.long_call_price:
+                return False, "Long strangle call leg is unpriced (skip this tick)"
+        if not getattr(entry, "put_side_expired", False) and entry.long_put_strike:
+            if not entry.long_put_price:
+                return False, "Long strangle put leg is unpriced (skip this tick)"
+        return True, "ok (long strangle long-only sanity)"
+
+    def _profit_target_pct(self) -> float:
+        """The exit threshold, as a percentage of the debit paid.
+
+        The source takes **+50%** normally and **+100%** when IV is expanding
+        from a low base. The elevated target therefore depends on the same
+        IV-percentile series Step 4's filter needs and this repo does not have —
+        so it is **unreachable until ``iv_percentile_source`` is wired**, and the
+        target is 50% until then.
+
+        That is stated rather than silently defaulted, because "we take +100% in
+        expanding IV" reads as an implemented rule in the config file, and today
+        it is not one.
+        """
+        cfg = self._ls_config()
+        base = float(cfg.get("profit_target_pct_of_debit", 50.0))
+        if not (cfg.get("iv_percentile_filter_enabled", False)
+                and str(cfg.get("iv_percentile_source", "") or "").strip()):
+            return base
+        pct = iv_percentile(float(getattr(self, "current_vix", 0.0) or 0.0),
+                            self._vix_history_for_percentile())
+        if pct is not None and pct <= float(cfg.get("iv_percentile_max", 35.0)):
+            return float(cfg.get("profit_target_pct_of_debit_iv_expanding", base))
+        return base
+
+    def _check_stop_losses(self) -> Optional[str]:
+        """H's per-tick manager. **There is no stop loss — this is the target.**
+
+        WHY THERE IS NO BREACH-PERSISTENCE WINDOW, AND WHY THAT IS NOT AN OMISSION
+        -------------------------------------------------------------------------
+        The playbook's Step 5 asks for a persistence window on any stop reading a
+        noisy multi-leg mark, the MKT-046 analogue: a single stale tick must not
+        fire a false stop. **Applied here it would be actively harmful.**
+
+        A stop triggers on an ADVERSE spike, so waiting to confirm protects you —
+        if it reverts, you keep the position. A long strangle's profit target
+        triggers on a FAVOURABLE spike, and reverting is exactly what those
+        spikes do. Waiting 10 seconds to confirm +50% systematically gives back
+        the move the strategy exists to capture. The sign of the position inverts
+        the sign of the guard.
+
+        So the target fires on the first VALID tick, and the protection against a
+        phantom target is **quote quality rather than elapsed time**:
+        ``_quote_mid``'s crossed-book guard (L-M7) plus the long-legs-only sanity
+        check above. ``profit_target_confirm_seconds`` exists at a default of 0
+        so the dry run can measure the other setting rather than assume this one.
+
+        Every valid tick is written to ``ls_snapshots`` BEFORE the target is
+        evaluated, so the mark that triggered an exit is recoverable and the
+        peak-versus-exit gap is measurable — the question the source's win-rate
+        claim actually rests on.
+        """
+        self._batch_update_entry_prices()
+        target = self._profit_target_pct()
+        now = get_us_market_time()
+
+        for entry in list(self.daily_state.active_entries):
+            if not isinstance(entry, LongStrangleEntry):
+                continue
+            valid, message = self._validate_pnl_sanity(entry)
+            if not valid:
+                logger.debug("LS #%d: %s", entry.entry_number, message)
+                continue
+
+            if self.ls_recorder:
+                self.ls_recorder.record_snapshot(
+                    entry, now.strftime("%Y-%m-%d"), now.strftime("%H:%M:%S"),
+                    spx=self.current_price,
+                )
+
+            pct = entry.pnl_pct_of_debit
+            if pct < target:
+                entry._ls_target_first_seen = None
+                continue
+
+            confirm = float(self._ls_config().get(
+                "profit_target_confirm_seconds", 0.0))
+            if confirm > 0:
+                first = getattr(entry, "_ls_target_first_seen", None)
+                if first is None:
+                    entry._ls_target_first_seen = now
+                    logger.info(
+                        "LS #%d: target %+.0f%% touched at %+.1f%% — holding "
+                        "%.0fs for confirmation (a NON-default setting; see "
+                        "_check_stop_losses on why 0 is the default)",
+                        entry.entry_number, target, pct, confirm,
+                    )
+                    continue
+                if (now - first).total_seconds() < confirm:
+                    continue
+
+            logger.info(
+                "LS #%d: profit target hit — %+.1f%% of a $%.2f debit "
+                "(target %+.0f%%)", entry.entry_number, pct,
+                entry.total_debit, target,
+            )
+            return self._close_long_strangle(
+                entry, f"profit_target_{target:.0f}", now,
+            )
+        return None
+
+    def _close_long_strangle(self, entry, reason: str, now=None) -> str:
+        """SELL both longs at the current mark and book the result.
+
+        Dry-run only — the third lock. ``__init__`` and ``_execute_entry`` should
+        both make a live call here impossible; this refuses anyway, on the same
+        principle.
+
+        P&L is booked GROSS of commission and the commission is added to the
+        day's separate total, which is the convention every other close path in
+        this codebase uses. Inventing a net-of-commission realized P&L here would
+        make H's numbers quietly incomparable with A-G's.
+        """
+        if not self.dry_run:  # pragma: no cover - unreachable while locked
+            raise ConfigError(
+                "LongStrangleStrategy has no live close path (Step 5 is dry-run only)."
+            )
+        now = now or get_us_market_time()
+        proceeds = entry.current_value
+        realized = proceeds - entry.total_debit
+        close_commission = 2 * self.commission_per_leg * entry.contracts
+
+        # *_side_expired is the flag `active_entries` and the settlement sweep
+        # both read: the sweep explicitly skips an already-expired side, so
+        # marking both here is what prevents settlement re-booking this exit.
+        entry.call_side_expired = True
+        entry.put_side_expired = True
+        entry.close_reason = reason
+        entry.close_time = now.isoformat()
+
+        self._book_realized_pnl(realized, entry)
+        self.daily_state.total_commission += close_commission
+
+        minutes_held = 0.0
+        if getattr(entry, "entry_time", None):
+            minutes_held = max(0.0, (now - entry.entry_time).total_seconds() / 60.0)
+        if self.ls_recorder:
+            self.ls_recorder.record_exit(
+                entry, now.strftime("%Y-%m-%d"), exit_reason=reason,
+                realized_pnl=realized, commissions=entry.open_commission + close_commission,
+                spx_at_exit=self.current_price, minutes_held=minutes_held,
+                exit_time=now.strftime("%H:%M:%S"),
+            )
+
+        logger.info(
+            "LS #%d CLOSED (%s): sold for $%.2f against a $%.2f debit = "
+            "$%+.2f (%+.1f%%), held %.0f min",
+            entry.entry_number, reason, proceeds, entry.total_debit,
+            realized, entry.pnl_pct_of_debit, minutes_held,
+        )
+        return (
+            f"Entry #{entry.entry_number} closed ({reason}): "
+            f"{realized:+.2f} on a ${entry.total_debit:.2f} debit"
+        )
+
+    # ==================================================================
+    # Step 5 — expiry
+    # ==================================================================
+
+    def _settlement_booked_pnl(self, entry, side: str,
+                               settlement_level) -> Tuple[float, bool]:
+        """Settlement P&L for one LONG leg: ``intrinsic − debit``.
+
+        The base books "the full credit kept" for a side that finished OTM. For H
+        that is ``call_spread_credit``, an inherited field nothing ever sets — so
+        the base would book **$0.00** and record a long strangle that expired
+        worthless as **break-even**. The true answer is a loss of the whole
+        premium paid for that leg. This is the same class of mis-record S-HIGH-2
+        fixed for G, with the sign reversed.
+
+        The ``worthless`` flag is returned False unconditionally: in the base's
+        vocabulary it means "kept the credit", which never applies here, and it
+        only gates a log line that would otherwise read backwards.
+        """
+        # getattr, not attribute access: the base's restart-recovery path
+        # reconstructs entries as HydraIronCondorEntry, which has no debit at
+        # all. _restore_long_strangle_entries repairs that from ls_entries, but
+        # an entry whose row is missing reaches here with no cost basis — and an
+        # AttributeError inside the settlement sweep would take down settlement
+        # for the whole day, for every entry.
+        debit = getattr(entry, "call_debit" if side == "call" else "put_debit", None)
+        if debit is None:
+            logger.critical(
+                "LS #%s %s side: NO COST BASIS (entry was restored without an "
+                "ls_entries row) — booking $0.00 because the P&L is genuinely "
+                "unknown, NOT because it is zero. Reconcile against the IBKR "
+                "settlement report.", getattr(entry, "entry_number", "?"), side,
+            )
+            return 0.0, False
+
+        if side == "call":
+            strike = entry.long_call_strike
+            intrinsic_pts = ((settlement_level - strike)
+                             if settlement_level is not None else None)
+        else:
+            strike = entry.long_put_strike
+            intrinsic_pts = ((strike - settlement_level)
+                             if settlement_level is not None else None)
+
+        if intrinsic_pts is None:
+            # Unreachable on the normal path: requires_protective_wings=False
+            # makes the base read the settlement level even in dry-run, and it
+            # DEFERS booking when that read fails (S-HIGH-3). If it happens
+            # anyway (no broker), book the WORST case rather than nothing —
+            # booking 0.0 here would silently lose the entire debit, which is
+            # exactly the failure this override exists to prevent.
+            logger.critical(
+                "LS #%d %s side: settlement SPX unreadable — booking the "
+                "worst case (−$%.2f, total loss of the premium paid). RECONCILE "
+                "against the IBKR settlement report.",
+                entry.entry_number, side, debit,
+            )
+            return -debit, False
+
+        if strike <= 0:
+            return 0.0, False
+
+        value = max(0.0, intrinsic_pts) * 100 * max(int(getattr(entry, "contracts", 1)), 1)
+        booked = value - debit
+        logger.info(
+            "LS #%d %s leg settled: SPX %.2f vs strike %.0f → intrinsic $%.2f "
+            "against a $%.2f debit = %+.2f",
+            entry.entry_number, side, settlement_level, strike, value, debit, booked,
+        )
+        return booked, False
+
+    def _simulate_hydra_entry_prices(self, entry) -> None:
+        """The dry-run price fallback, made deliberate rather than accidental.
+
+        The base runs this when the real-quote batch returns nothing. Its full-IC
+        branch derives every leg from ``total_credit / (140 × contracts)`` — which
+        for H is a truthful 0.0, so it silently marks both longs at **zero**.
+
+        That outcome is, as it happens, the RIGHT one: a zeroed long is rejected
+        by ``_validate_pnl_sanity``, so the tick is skipped, no target can fire on
+        a fabricated mark, and settlement books from the SPX level rather than
+        from these prices. The alternative — holding the last good mark — is
+        worse, because a stale +50% would exit at a price that no longer exists.
+
+        It is overridden anyway for two reasons. Arriving at a safe failure by
+        accident is not the same as choosing it, and the base path is silent
+        where an operator should see that quotes are down.
+        """
+        entry.long_call_price = 0.0
+        entry.long_put_price = 0.0
+        logger.warning(
+            "LS #%d: quote batch unavailable — marking both legs UNPRICED so "
+            "this tick is skipped. No exit can fire on a fabricated mark; "
+            "settlement is unaffected (it reads the SPX level).",
+            entry.entry_number,
+        )
+
+    # ==================================================================
+    # Step 5 — restart recovery, because the shared state file cannot
+    #          carry a debit
+    # ==================================================================
+
+    def _load_state_file_history(self) -> bool:
+        """Restore as the base does, then **put the debit back**.
+
+        THE PROBLEM. The shared state file serialises only credit-shaped fields
+        (``total_credit``, ``call_spread_credit``, ``put_spread_credit``) and its
+        restore path hardcodes ``HydraIronCondorEntry``. A mid-day restart
+        therefore hands variant H back entries that are the wrong class AND have
+        no cost basis, with two consequences:
+
+        * the per-tick manager skips them (they are not ``LongStrangleEntry``),
+          so the profit target can never fire again for that position; and
+        * ``_settlement_booked_pnl`` reads ``entry.call_debit``, which a base
+          entry does not have — an ``AttributeError`` inside the settlement
+          sweep.
+
+        THE FIX, AND WHY IT IS NOT A SIDECAR. The playbook's Step 6 answer to
+        "the base state schema can't hold your fields" is a sidecar JSON, and it
+        also says single-day strategies skip Step 6. Both are satisfiable here
+        because **H already has its own database**: ``ls_entries`` holds the
+        strikes, conids and both debits, keyed by ``(date, entry_number)``, and
+        the row is written before the position is ever monitored. So recovery is
+        a read from H's own store — no new file, and **zero edits to the shared
+        save/load that variant B trades on live**.
+
+        A row that cannot be found is reported CRITICAL rather than patched over
+        with a guess: an entry with an unknown cost basis has no computable P&L,
+        and inventing one would be worse than saying so.
+        """
+        ok = super()._load_state_file_history()
+        try:
+            self._restore_long_strangle_entries()
+        except Exception as e:  # pragma: no cover - recovery must not block start
+            logger.error("LS: restart recovery failed (non-fatal): %s", e)
+        return ok
+
+    def _restore_long_strangle_entries(self) -> None:
+        """Upgrade restored base entries back to ``LongStrangleEntry`` + debits."""
+        entries = getattr(self.daily_state, "entries", None)
+        if not entries:
+            return
+        stale = [e for e in entries if not isinstance(e, LongStrangleEntry)]
+        if not stale:
+            return
+        if not self.ls_recorder:
+            logger.critical(
+                "LS: %d entries restored WITHOUT a cost basis and no recorder to "
+                "recover it from. Their P&L is not computable — reconcile manually.",
+                len(stale),
+            )
+            return
+
+        rows = {r.get("entry_number"): r
+                for r in self.ls_recorder.fetch_entries(
+                    get_us_market_time().strftime("%Y-%m-%d"))}
+
+        for i, old in enumerate(entries):
+            if isinstance(old, LongStrangleEntry):
+                continue
+            row = rows.get(old.entry_number)
+            if not row:
+                logger.critical(
+                    "LS: entry #%s restored with NO ls_entries row — its debit is "
+                    "unknown, so its P&L is not computable. Reconcile against the "
+                    "IBKR statement.", old.entry_number,
+                )
+                continue
+
+            new = LongStrangleEntry(entry_number=old.entry_number)
+            # Carry every field the base restore did populate, so flags, ids and
+            # timestamps survive the class change unchanged.
+            for name, value in vars(old).items():
+                try:
+                    setattr(new, name, value)
+                except AttributeError:  # pragma: no cover - read-only property
+                    pass
+            new.call_debit = float(row.get("call_debit") or 0.0)
+            new.put_debit = float(row.get("put_debit") or 0.0)
+            new.contracts = int(row.get("contracts") or new.contracts or 1)
+            new.long_call_strike = float(row.get("call_strike") or new.long_call_strike)
+            new.long_put_strike = float(row.get("put_strike") or new.long_put_strike)
+            new.long_call_uic = row.get("long_call_uic") or new.long_call_uic
+            new.long_put_uic = row.get("long_put_uic") or new.long_put_uic
+            new.ls_em_source = row.get("em_source") or ""
+            new.ls_expected_move = float(row.get("expected_move") or 0.0)
+            new.ls_skew_gap_pct = float(row.get("skew_gap_pct") or 0.0)
+            entries[i] = new
+            logger.info(
+                "LS: recovered entry #%d from ls_entries — C %.0f / P %.0f, "
+                "$%.2f debit, %dc",
+                new.entry_number, new.long_call_strike, new.long_put_strike,
+                new.total_debit, new.contracts,
+            )

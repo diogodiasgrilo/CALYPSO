@@ -221,3 +221,55 @@ class TestTheFileItselfIsSqlite:
         assert con.execute("PRAGMA integrity_check").fetchone()[0] == "ok"
         assert con.execute("SELECT COUNT(*) FROM ls_entries").fetchone()[0] == 1
         con.close()
+
+
+class TestItCanBeReadBackForRestartRecovery:
+    """A recorder is normally write-only. This one is read for one specific
+    reason: the shared state file serialises only credit-shaped fields and its
+    restore path hardcodes the IC entry class, so a mid-day restart hands variant
+    H back an entry with NO COST BASIS. Rather than change the shared save/load
+    that variant B trades on live, H reads its debit back out of here.
+
+    These tests pin the CONTRACT that recovery depends on — the exact column
+    names, not just "some row came back" — because a rename here would break
+    recovery silently and only on a restart.
+    """
+
+    def test_the_row_carries_every_field_recovery_needs(self, rec):
+        rec.record_entry(_entry(), "2026-09-23", 7765.0, em_source="straddle",
+                         expected_move=22.0, skew_gap_pct=16.7)
+        row = rec.fetch_entries("2026-09-23")[0]
+        assert row["entry_number"] == 1
+        assert row["call_debit"] == 1400.0 and row["put_debit"] == 1050.0
+        assert row["contracts"] == 7
+        assert row["call_strike"] == 7825.0 and row["put_strike"] == 7725.0
+        assert row["long_call_uic"] == 111 and row["long_put_uic"] == 222
+        assert row["em_source"] == "straddle" and row["expected_move"] == 22.0
+
+    def test_another_day_is_not_returned(self):
+        """Recovery asks for today. Yesterday's entries are settled and must not
+        come back as open positions."""
+        import tempfile
+        r = LongStrangleDataRecorder(str(Path(tempfile.mkdtemp()) / "ls.db"))
+        r.record_entry(_entry(), "2026-09-22", 7700.0)
+        assert r.fetch_entries("2026-09-23") == []
+        assert len(r.fetch_entries("2026-09-22")) == 1
+        r.close()
+
+    def test_rows_come_back_in_entry_order(self, rec):
+        for n in (3, 1, 2):
+            e = _entry()
+            e.entry_number = n
+            rec.record_entry(e, "2026-09-23", 7765.0)
+        assert [r["entry_number"] for r in rec.fetch_entries("2026-09-23")] == [1, 2, 3]
+
+    def test_a_dead_connection_returns_empty_rather_than_raising(self, rec):
+        """Recovery degrades to "nothing recovered", which the caller reports
+        loudly — it must never raise into startup."""
+        rec._conn.close()
+        assert rec.fetch_entries("2026-09-23") == []
+
+    def test_no_connection_at_all_returns_empty(self, tmp_path):
+        r = LongStrangleDataRecorder(str(tmp_path / "nope" / "deep" / "ls.db"))
+        assert r._conn is None
+        assert r.fetch_entries("2026-09-23") == []

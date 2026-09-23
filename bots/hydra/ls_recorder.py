@@ -240,6 +240,38 @@ class LongStrangleDataRecorder:
             ),
         )
 
+    def fetch_entries(self, date: str) -> list:
+        """Every entry recorded for ``date``, as plain dicts. Read-only.
+
+        Exists for RESTART RECOVERY, and that is worth stating because a
+        recorder is otherwise write-only by design. The shared state file
+        persists only credit-shaped fields and its restore path hardcodes
+        ``HydraIronCondorEntry`` — so a mid-day restart would hand variant H back
+        an entry with **no debit at all**, which is both unmanageable (no
+        percentage of a zero debit) and unsettleable.
+
+        Rather than touch the fix-scarred shared save/load to carry a field only
+        one dry-run-locked strategy needs, H reads its cost basis back out of its
+        own database. The row is written before the position is ever monitored,
+        so it is always there first.
+
+        Returns ``[]`` on any failure — recovery degrades to "no entries
+        recovered", which the caller reports loudly, rather than raising into
+        startup.
+        """
+        if not self._conn:
+            return []
+        try:
+            cur = self._conn.execute(
+                "SELECT * FROM ls_entries WHERE date = ? ORDER BY entry_number",
+                (date,),
+            )
+            cols = [d[0] for d in cur.description]
+            return [dict(zip(cols, row)) for row in cur.fetchall()]
+        except Exception as e:
+            logger.warning("LongStrangleDataRecorder read failed: %s", e)
+            return []
+
     def close(self) -> None:
         if self._conn:
             try:

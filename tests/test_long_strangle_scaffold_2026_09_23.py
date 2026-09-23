@@ -56,12 +56,13 @@ class TestItCannotArm:
         reader deciding whether to unlock must be able to tell which applies.
 
         The reason MOVES as the build progresses — at Step 1 it was "no entry
-        logic", and since Step 4 it is the missing exits. What must not change is
-        that the message states a specific unfinished thing, so nobody unlocks on
-        the strength of a generic "not ready yet"."""
+        logic", at Step 4 the missing exits, and since Step 5 it is that the code
+        has never executed. What must not change is that the message states a
+        specific unfinished thing, so nobody unlocks on the strength of a generic
+        "not ready yet"."""
         src = (ROOT / "bots" / "hydra" / "long_strangle_strategy.py").read_text()
-        assert "EXITS DO NOT EXIST" in src
-        assert "hold it to expiry" in src
+        assert "THIS CODE HAS NEVER RUN" in src
+        assert "Steps 8-10" in src
 
     def test_config_ships_dry_run_true(self):
         cfg = json.loads(CONFIG.read_text())

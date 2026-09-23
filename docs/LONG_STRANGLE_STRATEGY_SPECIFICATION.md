@@ -1,8 +1,9 @@
 # Strategy H — 0DTE Long Strangle ("Tompkins")
 
-**Status:** Steps 0–4 + 7 built, dry-run-LOCKED. It can select strikes and book a **simulated**
-entry; **the exits (Step 5) do not exist**, so an entry is opened and then held. See §8.
-**Written:** 2026-09-23 · **Last updated:** 2026-09-23 (Step 4)
+**Status:** Steps 0–5 + 7 built, dry-run-LOCKED. Functionally complete in dry-run — strikes,
+sizing, entry, profit target, settlement — but **this code has never run**, and Steps 8–10
+(observability, hardening, go-live audit) are outstanding. See §8.
+**Written:** 2026-09-23 · **Last updated:** 2026-09-23 (Step 5)
 **Playbook:** [`docs/NEW_STRATEGY_PLAYBOOK.md`](NEW_STRATEGY_PLAYBOOK.md) Step 0
 **Source:** Jeff Tompkins, via Theta Profits —
 [article](https://www.thetaprofits.com/a-0dte-long-strangle-targeting-50-100-in-24-hours/) ·
@@ -144,8 +145,8 @@ variants' schema untouched, which is the deciding factor while B holds the live 
 | **2** Data model | ✅ | `bots/hydra/long_strangle_entry.py` — `LongStrangleEntry(HydraIronCondorEntry)`, every credit-shaped property overridden, 19 tests. |
 | **3** Data plumbing | 🟡 **half done** | `bots/hydra/long_strangle_chain.py` — pure selection helpers, 31 tests, no broker/clock. **The market-hours VM probe is still outstanding** and three assumptions below depend on it. |
 | **4** Entry + dry-run simulation | ✅ | `long_strangle_strategy.py` — expected-move strike selection, skew veto, sizing-for-zero, the shared pre-entry gates, and a `_simulate_entry` booking synthetic DRY fills into `long_strangle.db`. 53 tests. **No real order can reach the broker**: `_execute_entry` raises rather than inheriting the base's 4-leg IC placement (which would SELL two shorts H doesn't have), and `_calculate_stop_levels_hydra` is an explicit no-op setting both stops unreachable. |
-| **5** Exits | 🔴 **next** | +50% / +100%-of-debit targets and the EOD path. **Until this lands, an H entry is opened and then held** — which is why the dry-run lock message now names the missing exits rather than missing entry logic. |
-| 8–10 | — | Observability, hardening, go-live audit. |
+| **5** Exits | ✅ | Percent-of-debit profit target + settlement at intrinsic. 33 tests. **Two inherited exits would have failed SILENTLY** and are overridden: the base books a worthless expiry as "the credit kept" (→ H's total loss recorded as **break-even**), and its DATA-004 sanity guard rejected every H tick as "partial zero prices" (G's S-CRIT-1, mirrored). **No breach-persistence window, on purpose** — see below. |
+| 8–10 | 🔴 **next** | Observability, hardening, go-live audit. These are what still keep H locked. |
 | 6 | **skipped** | Single-day — no sidecar, no multi-day settlement. |
 | **7** Isolated DB | ✅ | `bots/hydra/ls_recorder.py` → `data/variant_h/long_strangle.db`. Four `ls_*` tables, **no credit column anywhere** (asserted). `em_source` stored per entry so the two expected-move regimes stay separable; snapshots accumulate so a +50% peak survives a give-back; `ls_skipped` carries the full counterfactual the GEX work could never recover for B's first 95 vetoes. 18 tests. |
 
@@ -259,3 +260,100 @@ missing exits. `_execute_entry` raises instead of inheriting the base's four-leg
 that path would sell two short legs H does not have and has never sized for; the `__init__` lock
 should make it unreachable, and it is the second lock anyway, on the principle that "the other guard
 will catch it" is how a strategy ends up selling naked options.
+
+### Step 5 — the exits, and the one place the playbook's own instruction is inverted
+
+**Two inherited exits would have failed silently.** Neither would have raised, logged an error, or
+looked wrong in a dashboard — they would simply have produced the wrong number:
+
+| | base behaviour | why it is wrong for H | fix |
+|---|---|---|---|
+| **Settlement** | books "the full credit kept" for a side finishing OTM | H's `call_spread_credit` is an inherited field nothing ever sets, so the base books **$0.00** — recording a strangle that expired worthless as **break-even** instead of a total loss of the premium | `_settlement_booked_pnl` overridden to `intrinsic − debit` per leg |
+| **DATA-004 sanity guard** | rejects a side whose two legs are "partially zero" | H's shorts are permanently 0.0 against a priced long, so it rejected **every tick** and the per-tick manager skipped the entry entirely | `_validate_pnl_sanity` overridden to validate the LONG legs only |
+
+The settlement one is the same class of defect as G's **S-HIGH-2** (an ITM naked short booked as
+full-credit profit), with the sign reversed. The sanity guard is G's **S-CRIT-1** mirrored: there the
+guard was the bug that kept G's stop from ever firing; here it was discarding the tick the profit
+target needs. Both were predicted in Step 2's "a Step 5 hazard, recorded early" note — H populates
+`long_*` and leaves `short_*` at zero, so *any* base path reading `short_*` as "is there a position
+here" misreads it.
+
+#### No breach-persistence window, and that is the design
+
+The playbook's Step 5 asks for a breach-persistence window on any stop reading a noisy multi-leg
+mark — the MKT-046 analogue, so a single stale tick cannot fire a false stop. **Applied here it
+would be actively harmful, because the sign of the position inverts the sign of the guard:**
+
+- A **stop** triggers on an *adverse* spike. Waiting to confirm protects you — if it reverts, you
+  still hold the position.
+- A long strangle's **profit target** triggers on a *favourable* spike, and reverting is exactly what
+  those spikes do. Waiting 10 seconds to confirm +50% systematically gives back the move the strategy
+  exists to capture.
+
+So the target fires on the **first valid tick**, and the protection against a phantom target is
+**quote quality rather than elapsed time**: `_quote_mid`'s crossed-book guard (L-M7) plus the
+long-legs-only sanity check. `profit_target_confirm_seconds` exists at a default of **0** so the dry
+run can *falsify* that reasoning rather than have it stand as permanent. Every valid tick is written
+to `ls_snapshots` **before** the target is evaluated, so the mark that triggered an exit is
+recoverable and the peak-versus-exit gap stays measurable — which is the question the source's
+80%-win-rate claim actually turns on.
+
+#### One more accident, made deliberate
+
+The base's dry-run **quote-outage fallback** derives every leg from
+`total_credit / (140 × contracts)`. H's credit is a truthful `0.0`, so it marks both longs at
+**zero**. That is, as it happens, the *right* failure: a zeroed long is rejected by the sanity
+guard, so the tick is skipped, no target fires on a fabricated mark, and settlement is unaffected
+because it reads the SPX level rather than these prices. Holding the last good mark would be
+**worse** — a stale +50% would exit at a price that no longer exists.
+
+`_simulate_hydra_entry_prices` is overridden to do it on purpose and to log a WARNING anyway, for
+two reasons: arriving at a safe failure by accident is not the same as choosing it, and the base
+path is silent where an operator should see that quotes are down.
+
+#### Conventions kept rather than reinvented
+
+Realized P&L is booked **gross of commission**, with the commission added to the day's separate
+total. That is what every other close path in this codebase does; a net-of-commission realized P&L
+here would have made H's numbers quietly incomparable with A–G's.
+
+#### The +100% target is unreachable, and says so
+
+The source takes +100% when IV is expanding from a low base. That depends on the same IV-percentile
+series Step 4's filter needs and this repo does not have, so `_profit_target_pct` returns 50% until
+`iv_percentile_source` is wired. It is stated rather than silently defaulted, because
+`profit_target_pct_of_debit_iv_expanding: 100` sitting in the config file reads as an implemented
+rule, and today it is not one.
+
+#### A restart would have lost the cost basis — found by audit, not by a test failure
+
+**Step 6 is skipped because H is single-day. That is still correct, and it nearly hid a real bug.**
+
+The shared state file serialises only credit-shaped fields (`total_credit`, `call_spread_credit`,
+`put_spread_credit`) and its restore path **hardcodes `HydraIronCondorEntry`**. A mid-day restart —
+an ordinary event for a 0DTE strategy — therefore hands H back entries that are the wrong class and
+have **no debit at all**. Two consequences, one silent and one loud:
+
+- the per-tick manager skips them (they are not `LongStrangleEntry`), so **the profit target can
+  never fire again** for that position; and
+- `_settlement_booked_pnl` reads `entry.call_debit`, which a base entry does not have — an
+  **`AttributeError` inside the settlement sweep**, which would take down settlement for *every*
+  entry that day, not just the recovered one.
+
+**The fix is not a sidecar.** The playbook's Step 6 answer to "the base state schema can't hold your
+fields" is a sidecar JSON, and it also says single-day strategies skip Step 6. Both hold here,
+because **H already has its own database**: `ls_entries` carries the strikes, conids and both
+debits, keyed by `(date, entry_number)`, and the row is written before the position is ever
+monitored. Recovery is a read from H's own store — no new file, and **zero edits to the shared
+save/load that variant B trades on live.**
+
+An entry whose row cannot be found is reported **CRITICAL and left unconverted** rather than patched
+over with a guess, and `_settlement_booked_pnl` now books `$0.00` with a loud "the P&L is genuinely
+unknown, NOT zero" instead of raising. An entry with an unknown cost basis has no computable P&L;
+inventing one would be worse than saying so.
+
+#### What remains
+
+**Steps 8–10** — observability (a status reader, a dashboard view for the new `long_gamma_0dte`
+group), hardening, and the go-live audit. Those are now the only things keeping H locked, along with
+the plain fact that **this code has never executed a single tick against a live chain.**

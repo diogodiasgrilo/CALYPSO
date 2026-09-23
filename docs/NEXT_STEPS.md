@@ -381,12 +381,26 @@ resets the Gate-4 streak.**
 >    assumptions strategy H's Step 3 left open. Its answers land as **config values, not code**.
 > 3. **≥22:40 ET — the GEX `--apply` backfill** (13 measurable vetoes).
 >
-> **Strategy H, Playbook Step 4 ✅ (this morning, offline).** Entry + dry-run simulation: expected-move
-> strike selection, skew veto, sizing-for-zero, the shared pre-entry gates, and a `_simulate_entry`
-> booking synthetic DRY fills into the isolated `long_strangle.db`. 53 tests. **Steps 1–4 + 7 done;
-> Step 5 (the exits) is next and is what still keeps H locked** — an H entry today would be opened
-> and then held to expiry. H is **not installed on the VM**, so none of this touches A–G or the
-> Gate-4 streak. Detail: `docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md` §8.
+> **Strategy H, Playbook Steps 4 + 5 ✅ (this morning, offline).** Entry, dry-run simulation, the
+> percent-of-debit profit target and settlement at intrinsic — **functionally complete in dry-run**,
+> 86 new tests. **Steps 1–5 + 7 done.**
+>
+> Two inherited exits would have failed **silently** and are now overridden: the base books a
+> worthless expiry as *"the credit kept"*, which for H is an unset field — so a **total loss would
+> have been recorded as break-even**; and the base's DATA-004 guard rejected **every** H tick as
+> "partial zero prices" (H's shorts are absent by construction). Those are G's S-HIGH-2 and
+> S-CRIT-1, mirrored.
+>
+> A third defect was found by **auditing rather than by a failing test**: a mid-day restart would
+> have handed H back entries with **no cost basis at all** (the shared state file carries only
+> credit-shaped fields and its restore hardcodes the IC entry class) — silently disabling the
+> profit target, and crashing the settlement sweep **for every entry that day**. Fixed by reading
+> the debit back out of H's own `ls_entries`, with **zero edits to the shared save/load B trades
+> on live**.
+>
+> **What still keeps H locked: Steps 8–10, and the plain fact that this code has never run** — not
+> one tick against a live chain. H is **not installed on the VM**, so none of this touches A–G or
+> the Gate-4 streak. Detail: `docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md` §8.
 
 ##### S6 — and it needs NO new order
 
