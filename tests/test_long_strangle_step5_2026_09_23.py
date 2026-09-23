@@ -587,3 +587,54 @@ class TestTheEODFlattenIsDeclinedDeliberately:
         e = _open(s)
         booked, _ = s._settlement_booked_pnl(e, "call", 7800.0)
         assert booked == pytest.approx(15 * 100 * 2 - e.call_debit)
+
+
+class TestTheRecorderExistsBeforeTheBaseInitRuns:
+    """Caught on H's first real restart, 2026-09-23 09:55 ET:
+
+        ERROR | LS: restart recovery failed (non-fatal):
+                'LongStrangleStrategy' object has no attribute 'ls_recorder'
+
+    The base `__init__` calls `_load_state_file_history` →
+    `_restore_long_strangle_entries`, which reads `self.ls_recorder` to recover
+    a restarted position's cost basis. The recorder was created AFTER
+    `super().__init__()`, so the attribute did not exist yet and recovery never
+    ran. **The Step 5 mechanism was dead on arrival** — and it took an actual
+    restart to reveal it, because the unit tests constructed the object with
+    `__new__` and set the attribute by hand.
+    """
+
+    def test_the_recorder_is_assigned_before_super_init(self):
+        """Source-order check. A behavioural test cannot catch this: every other
+        test bypasses `__init__` entirely via `__new__`, which is exactly why
+        the bug survived to production."""
+        src = (ROOT / "bots" / "hydra" / "long_strangle_strategy.py").read_text()
+        body = src.split("def __init__", 1)[1].split("\n    def ", 1)[0]
+        # The exact CALL, not the docstring's prose mention of it — the first
+        # version of this test matched the docstring and passed vacuously.
+        call = "super().__init__(*args, **kwargs)"
+        assign = "self.ls_recorder: Optional[LongStrangleDataRecorder] = None"
+        assert assign in body and call in body
+        assert body.index(assign) < body.index(call), \
+            "the recorder must be created BEFORE super().__init__ — recovery " \
+            "runs inside it"
+
+    def test_recovery_survives_a_missing_attribute_loudly(self, caplog):
+        """Belt-and-braces: an ordering regression must produce a CRITICAL, not
+        an AttributeError swallowed by the caller's except."""
+        import logging
+        s = _strat()
+        del s.ls_recorder
+        from bots.hydra.strategy import HydraIronCondorEntry
+        e = HydraIronCondorEntry(entry_number=1)
+        e.long_call_strike = 7785.0
+        s.daily_state.entries.append(e)
+        with caplog.at_level(logging.CRITICAL):
+            s._restore_long_strangle_entries()          # must not raise
+        assert any("no recorder to recover it from" in r.message
+                   for r in caplog.records)
+
+    def test_the_ordering_reason_is_recorded_in_the_code(self):
+        src = (ROOT / "bots" / "hydra" / "long_strangle_strategy.py").read_text()
+        assert "dead on arrival" in src
+        assert "CREATED **BEFORE** ``super().__init__()``" in src

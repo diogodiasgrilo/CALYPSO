@@ -134,6 +134,30 @@ class LongStrangleStrategy(HydraStrategy):
                 "docs/migration/H_GOLIVE_SCOPE_AND_AUDIT.md. Set dry_run=true, "
                 "or do not select strategy.name='long_strangle'."
             )
+        # Step 7's isolated DB. It is NOT the base's DataRecorder: `trade_entries`
+        # has no column that can hold a debit, so writing H there would record a
+        # strangle that cost nothing (see ls_recorder.py's module docstring).
+        #
+        # ⚠️ CREATED **BEFORE** ``super().__init__()``, and that ordering is a
+        # bug fix, not a style choice. The base init calls
+        # ``_load_state_file_history`` → ``_restore_long_strangle_entries``,
+        # which reads ``self.ls_recorder`` to recover a restarted position's
+        # cost basis. Creating the recorder after super() meant the attribute
+        # did not exist yet, so EVERY restart logged
+        # "'LongStrangleStrategy' object has no attribute 'ls_recorder'" and
+        # recovery never ran — the Step 5 mechanism was dead on arrival, and it
+        # took H's first real restart (2026-09-23 09:55 ET) to show it. The
+        # recorder needs only DATA_DIR, which is module-level, so nothing here
+        # depends on the base being constructed.
+        self.ls_recorder: Optional[LongStrangleDataRecorder] = None
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            self.ls_recorder = LongStrangleDataRecorder(
+                os.path.join(DATA_DIR, "long_strangle.db")
+            )
+        except Exception as e:  # pragma: no cover - defensive; recorder is optional
+            logger.warning("LongStrangle recorder unavailable (non-critical): %s", e)
+
         super().__init__(*args, **kwargs)
         # Defense-in-depth: re-check after super in case dry_run is derived
         # differently downstream (it should equal the kwarg).
@@ -143,19 +167,6 @@ class LongStrangleStrategy(HydraStrategy):
                 "refusing to arm a strategy with zero observations. See "
                 "docs/migration/H_GOLIVE_SCOPE_AND_AUDIT.md."
             )
-
-        # Step 7's isolated DB, wired here in Step 4 because this is where rows
-        # start existing. It is NOT the base's DataRecorder: `trade_entries` has
-        # no column that can hold a debit, so writing H there would record a
-        # strangle that cost nothing (see ls_recorder.py's module docstring).
-        self.ls_recorder: Optional[LongStrangleDataRecorder] = None
-        try:
-            os.makedirs(DATA_DIR, exist_ok=True)
-            self.ls_recorder = LongStrangleDataRecorder(
-                os.path.join(DATA_DIR, "long_strangle.db")
-            )
-        except Exception as e:  # pragma: no cover - defensive; recorder is optional
-            logger.warning("LongStrangle recorder unavailable (non-critical): %s", e)
 
         logger.info(
             "LongStrangleStrategy (variant H) constructed — Steps 1-5 + 7: entry, "
@@ -1306,7 +1317,11 @@ class LongStrangleStrategy(HydraStrategy):
         stale = [e for e in entries if not isinstance(e, LongStrangleEntry)]
         if not stale:
             return
-        if not self.ls_recorder:
+        # getattr, not attribute access: this runs from inside the base
+        # __init__, and an ordering regression must degrade to a loud CRITICAL
+        # rather than an AttributeError swallowed by the caller's except.
+        recorder = getattr(self, "ls_recorder", None)
+        if not recorder:
             logger.critical(
                 "LS: %d entries restored WITHOUT a cost basis and no recorder to "
                 "recover it from. Their P&L is not computable — reconcile manually.",
@@ -1315,7 +1330,7 @@ class LongStrangleStrategy(HydraStrategy):
             return
 
         rows = {r.get("entry_number"): r
-                for r in self.ls_recorder.fetch_entries(
+                for r in recorder.fetch_entries(
                     get_us_market_time().strftime("%Y-%m-%d"))}
 
         for i, old in enumerate(entries):
