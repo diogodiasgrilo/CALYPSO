@@ -92,6 +92,36 @@ def test_synthetic_fixture_generator_is_importable():
     assert hasattr(m, "main")
 
 
+def test_the_synthetic_fixture_generator_actually_RUNS(tmp_path, monkeypatch):
+    """Importable is the weakest useful property, and checking only that is how
+    CI stayed red for 14 consecutive pushes on 2026-09-23.
+
+    Adding variant H to the taxonomy without a matching
+    `variant_h_baseline_date` in the dashboard Settings broke this script at
+    RUNTIME — `ValueError: "Settings" object has no field ...`, because
+    pydantic's extra-ban makes a missing field a hard error at setattr. The
+    module still imported perfectly, so the test above passed, the local suite
+    was green, and the failure lived only in CI where nobody was looking.
+
+    Running it costs about a second and covers the whole class: any future
+    breakage in fixture generation fails HERE, next to the change that caused
+    it, instead of in a job whose emails are easy to ignore.
+    """
+    import importlib
+    import sys
+
+    m = importlib.import_module("scripts.make_synthetic_fixtures")
+    out = tmp_path / "fixtures"
+    # main() parses sys.argv — invoked exactly as CI invokes it, so the test
+    # exercises the real entry point rather than a refactored-for-testing one.
+    monkeypatch.setattr(sys, "argv", ["make_synthetic_fixtures.py", "--out", str(out)])
+    rc = m.main()
+
+    assert rc in (0, None), f"fixture generator exited {rc}"
+    written = [p for p in out.rglob("*") if p.is_file()]
+    assert written, "generator reported success but wrote nothing"
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Test isolation — what CI's first real failure exposed
 # ─────────────────────────────────────────────────────────────────────────────
