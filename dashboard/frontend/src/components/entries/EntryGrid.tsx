@@ -2,6 +2,7 @@ import { useHydraStore, type HydraEntry, type HydraState } from "../../store/hyd
 import { EntryCard } from "./EntryCard";
 import { colors } from "../../lib/tradingColors";
 import { useBotConfig, useShowConditionalEntries } from "../../hooks/useBotConfig";
+import { useSelectedStrategy } from "../../hooks/useSelectedStrategy";
 
 /** Find the entry emitted by the bot for a given effective entry number. The
  *  bot stamps `entry_number` based on the POST-VIX-regime active schedule
@@ -49,12 +50,93 @@ interface EntryGridProps {
   entries?: HydraEntry[];
 }
 
+/**
+ * What an EVENT-TRIGGERED strategy shows instead of a timeline.
+ *
+ * There is no schedule, so there is no grid. What a reader actually needs is
+ * (a) that no fixed times exist — stated, not implied by emptiness — and
+ * (b) what DOES cause an entry, which is the strategy's own subtitle.
+ *
+ * Entries that did fire are still listed, in the order they fired, because
+ * "when did it trigger today" is the real question for this shape.
+ */
+function EventTriggeredEntries({
+  name,
+  subtitle,
+  entries,
+}: {
+  name: string;
+  subtitle?: string;
+  entries: HydraEntry[];
+}) {
+  return (
+    <div className="bg-card rounded-lg border border-border-dim p-4">
+      <div className="flex flex-wrap items-baseline gap-x-2 gap-y-1 mb-1">
+        <h3 className="text-sm font-semibold text-text-primary">Entries</h3>
+        <span className="text-3xs uppercase tracking-wider text-text-dim">
+          event-triggered · no fixed schedule
+        </span>
+      </div>
+      <p className="text-xs text-text-secondary leading-relaxed">
+        {name} does not enter at set times. It waits for a market condition
+        {subtitle ? ` — ${subtitle.toLowerCase()}` : ""} — so a slot grid would
+        describe a schedule it does not have.
+      </p>
+
+      {entries.length > 0 ? (
+        <div className="mt-3 space-y-1.5">
+          {entries.map((e) => (
+            <div
+              key={e.entry_number ?? e.entry_time}
+              className="flex items-baseline gap-2 text-xs"
+            >
+              <span className="text-text-dim tabular-nums">
+                {String(e.entry_time ?? "").slice(11, 16) || "—"}
+              </span>
+              <span className="text-text-primary">Entry #{e.entry_number}</span>
+            </div>
+          ))}
+        </div>
+      ) : (
+        <div className="mt-3 text-xs text-text-dim">
+          No trigger today — the condition has not been met.
+        </div>
+      )}
+    </div>
+  );
+}
+
 export function EntryGrid({ entries: entriesProp }: EntryGridProps = {}) {
   const { hydraState } = useHydraStore();
   const config = useBotConfig();
+  const { strategy: selectedForSchedule } = useSelectedStrategy();
   const entries: HydraEntry[] = entriesProp ?? hydraState?.entries ?? [];
   const schedule = hydraState?.entry_schedule;
   const showConditional = useShowConditionalEntries();
+
+  // ── Event-triggered strategies have NO schedule to render ────────────────
+  // A timeline of clock slots is not a neutral default here — it is a claim
+  // about the strategy that is false. Variant F fades a touch of the day's
+  // expected-move boundary; it never consults `entry_times` (its own config
+  // says so), so the grid used to invent slots from whatever fallback was
+  // nearest: the persisted state schedule, or failing that a hardcoded
+  // 10:15/10:45/11:15.
+  //
+  // Driven off the taxonomy's `schedule_kind`, not off `entry_times` being
+  // empty — an empty list cannot distinguish "no schedule" from "no schedule
+  // YET", and the next event-driven strategy must not have to rediscover this.
+  if (selectedForSchedule?.schedule_kind === "event") {
+    const placed = [...entries]
+      .filter((e) => e.entry_time)
+      .sort((a, b) => (a.entry_number ?? 0) - (b.entry_number ?? 0));
+    return (
+      <EventTriggeredEntries
+        name={selectedForSchedule.ui_name || selectedForSchedule.display_name}
+        subtitle={selectedForSchedule.subtitle}
+        entries={placed}
+      />
+    );
+  }
 
   // ── Non-primary (polled) strategies ──────────────────────────────────────
   // When the parent passes a polled snapshot's entries, render EXACTLY those.

@@ -271,6 +271,10 @@ def _strategy_meta_dict(m: tax.StrategyMeta) -> dict:
         # know the holding horizon. Present in the taxonomy all along; simply
         # never exposed, so the frontend could not consult it.
         "dte_class": m.dte_class,
+        # "clock" | "event". The entry grid MUST NOT render a timeline for an
+        # event-triggered strategy — it has no schedule to show, and inferring
+        # one from an empty `entry_times` gave variant F a fabricated grid.
+        "schedule_kind": m.schedule_kind,
         "data_kind": _data_kind(m),
         "is_live": _is_live(m.id),
         # Live-money architecture 2026-09-18: whether this strategy's orders land on

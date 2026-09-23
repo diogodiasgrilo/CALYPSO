@@ -73,6 +73,22 @@ class StrategyMeta:
     status: str  # operational metadata: "live" | "dry_run_shadow" | "dry_run_locked" (display only)
     bot_name_base: str  # the BOT_NAME class const it runs under ("HYDRA"/"DCTM"/...)
 
+    # ── Added 2026-09-23 ──
+    #
+    # schedule_kind answers "WHAT causes an entry attempt" — a clock, or a
+    # market event. It exists because the dashboard was inferring the answer
+    # from `entry_times` being empty, which is not the same question and gave
+    # variant F a fabricated schedule: F is event-triggered (it fades a touch of
+    # the day's expected-move boundary, before a 13:00 cutoff) and its own
+    # config says the list is "Not read for scheduling by this strategy". An
+    # empty list can also mean "not configured yet", so the UI had no way to
+    # tell "no schedule" from "no schedule YET".
+    #
+    #   "clock" — fires at fixed times; `entry_times` is the schedule.
+    #   "event" — fires on a market condition; `entry_times` is meaningless and
+    #             must NOT be rendered as a timeline.
+    schedule_kind: str = "clock"
+
     # ── Added 2026-09-17 (dashboard rebuild Phase 2 — docs/DASHBOARD_REBUILD_PLAN.md) ──
     #
     # capital_basis answers "what does CAPITAL mean for this strategy", which is
@@ -364,6 +380,13 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         bot_name_base="HYDRA",
         capital_basis="defined_risk",
         sides="one_sided",  # a true one-sided subset of a 4-leg IC
+        # EVENT-TRIGGERED, not clock-scheduled — and this is the one variant
+        # where that distinction is load-bearing. `entry_times` is [] and F's
+        # own config says the list is "Not read for scheduling by this strategy"
+        # (it overrides _parse_entry_times / _should_attempt_entry /
+        # _is_entry_time outright). The dashboard used to infer a schedule from
+        # that empty list and show F a clock grid it does not have.
+        schedule_kind="event",
         subtitle="0DTE SPX credit vertical · fades the expected-move boundary",
         ui_name="Ghauri",
     ),

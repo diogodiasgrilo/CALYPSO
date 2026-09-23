@@ -610,3 +610,85 @@ class TestNoFrontendFetchSilentlyDropsTheStrategy:
                     ("components", "history", "DayDetailModal.tsx")):
             src = (self.SRC.joinpath(*rel)).read_text()
             assert "/api/market/" in src
+
+
+class TestEventTriggeredStrategiesHaveNoTimeline:
+    """Variant F fades a touch of the day's expected-move boundary before a
+    13:00 cutoff. It has no clock schedule, and its own config says so outright:
+    `entry_times` is `[]` and the comment reads "Not read for scheduling by this
+    strategy" — it overrides `_parse_entry_times` / `_should_attempt_entry` /
+    `_is_entry_time` outright.
+
+    The entry grid nonetheless rendered a timeline, because it inferred the
+    schedule from `entry_times` being empty and fell through to the persisted
+    state schedule or, failing that, a hardcoded `["10:15","10:45","11:15"]`.
+    A grid of clock slots is not a neutral default there — it is a claim about
+    the strategy that is false.
+
+    Now driven by the taxonomy's `schedule_kind`, because an empty list cannot
+    distinguish "no schedule" from "no schedule YET".
+    """
+
+    SRC = Path(__file__).resolve().parents[1] / "dashboard" / "frontend" / "src"
+
+    def test_F_is_declared_event_triggered(self):
+        import shared.strategy_taxonomy as tax
+        assert tax.STRATEGIES["f"].schedule_kind == "event"
+
+    def test_every_other_strategy_is_clock_scheduled(self):
+        """DERIVED — so a new event-driven strategy that forgets the field is
+        caught by the mismatch below rather than by someone noticing a wrong
+        grid on screen."""
+        import shared.strategy_taxonomy as tax
+        for vid in tax.available_ids():
+            if vid == "f":
+                continue
+            assert tax.STRATEGIES[vid].schedule_kind == "clock", vid
+
+    def test_the_declaration_matches_whether_entry_times_exist(self, tmp_path):
+        """The real invariant: a CLOCK strategy must have times to show, and an
+        EVENT strategy must not be relying on them. Checked against each
+        variant's committed config."""
+        import json
+        import shared.strategy_taxonomy as tax
+        root = Path(__file__).resolve().parents[1] / "bots" / "hydra" / "config"
+        for vid in tax.available_ids():
+            f = root / f"config_variant_{vid}.json"
+            if not f.exists():            # variant A's config is gitignored
+                continue
+            times = json.load(f.open())["strategy"].get("entry_times", [])
+            kind = tax.STRATEGIES[vid].schedule_kind
+            if kind == "clock":
+                assert times, f"{vid} is clock-scheduled but has no entry_times"
+            else:
+                assert not times, (
+                    f"{vid} is event-triggered but ships entry_times {times} — "
+                    f"one of the two is wrong")
+
+    def test_the_api_exposes_it(self):
+        import shared.strategy_taxonomy as tax
+        from dashboard.backend.routers import strategies as mod
+        src = Path(mod.__file__).read_text()
+        assert '"schedule_kind": m.schedule_kind' in src
+        assert tax.STRATEGIES["f"].schedule_kind == "event"
+
+    def test_the_grid_branches_on_the_taxonomy_not_on_an_empty_list(self):
+        src = (self.SRC / "components" / "entries" / "EntryGrid.tsx").read_text()
+        assert 'schedule_kind === "event"' in src
+        assert "EventTriggeredEntries" in src
+        # The branch must come BEFORE the fallback that invents slots.
+        assert src.index('schedule_kind === "event"') < src.index('["10:15", "10:45", "11:15"]')
+
+    def test_it_says_what_DOES_trigger_an_entry(self):
+        """"No schedule" alone is not useful. The card states the trigger, from
+        the strategy's own subtitle."""
+        src = (self.SRC / "components" / "entries" / "EntryGrid.tsx").read_text()
+        assert "event-triggered · no fixed schedule" in src
+        assert "does not enter at set times" in src
+        assert "subtitle" in src
+
+    def test_entries_that_DID_fire_are_still_listed(self):
+        """"When did it trigger today" is the real question for this shape."""
+        src = (self.SRC / "components" / "entries" / "EntryGrid.tsx").read_text()
+        assert "No trigger today" in src
+        assert "entries.map" in src

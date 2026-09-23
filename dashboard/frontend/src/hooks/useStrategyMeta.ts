@@ -65,6 +65,11 @@ export interface StrategyInfo {
   /** Holding horizon — "0DTE" | "multi_day" | "unknown". A chart bucketed by
    *  day-of-week or entry-slot is meaningless for a multi-day position. */
   dte_class: string;
+  /** WHAT causes an entry attempt — "clock" (fixed times) or "event" (a market
+   *  condition). An event-triggered strategy has NO schedule to render, and
+   *  inferring one from an empty `entry_times` is what gave variant F a
+   *  fabricated 10:15/10:45/11:15 grid. */
+  schedule_kind?: string;
   data_kind: DataKind;
   is_live: boolean;
   is_primary: boolean;
