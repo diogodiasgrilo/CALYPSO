@@ -144,7 +144,7 @@ variants' schema untouched, which is the deciding factor while B holds the live 
 | **3** Data plumbing | 🟡 **half done** | `bots/hydra/long_strangle_chain.py` — pure selection helpers, 31 tests, no broker/clock. **The market-hours VM probe is still outstanding** and three assumptions below depend on it. |
 | 4–5, 8–10 | — | Entry/simulation, exits, observability, hardening, go-live audit. |
 | 6 | **skipped** | Single-day — no sidecar, no multi-day settlement. |
-| 7 | pending | Isolated DB — **confirmed necessary by Step 2**, see below. |
+| **7** Isolated DB | ✅ | `bots/hydra/ls_recorder.py` → `data/variant_h/long_strangle.db`. Four `ls_*` tables, **no credit column anywhere** (asserted). `em_source` stored per entry so the two expected-move regimes stay separable; snapshots accumulate so a +50% peak survives a give-back; `ls_skipped` carries the full counterfactual the GEX work could never recover for B's first 95 vetoes. 18 tests. |
 
 ### Step 2 confirmed Step 0's isolated-DB call, for a concrete reason
 
