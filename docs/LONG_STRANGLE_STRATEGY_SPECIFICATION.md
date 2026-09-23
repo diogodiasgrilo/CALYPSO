@@ -104,7 +104,7 @@ variants' schema untouched, which is the deciding factor while B holds the live 
 ## 5. Reuse map
 
 **Already built — reuse directly:**
-- Expected-move calculation — **F computes it today** (`ghauri_strategy.py:324`, VIX-implied, `±EM` boundaries)
+- Expected-move calculation — **F computes it today** (`ghauri_strategy.py`, `±EM` boundaries). **Resolved 2026-09-23: the dependency now runs the other way.** H's `expected_move_from_straddle` is the shared helper, and F was moved onto it — so "the expected move" is one piece of arithmetic in this repo, and any difference between the two variants can only be a config difference.
 - Two-leg wingless placement — **G's `requires_protective_wings = False`**
 - 0DTE SPX chain resolution, conid qualification, snapshot/warmup, IV parsing (percent-parse fixed 2026-09-10)
 - Entry scheduling, monitoring loop, alerts, ARGUS, backups (`db_backup.sh` picks up any `data/variant_*/`)
@@ -124,7 +124,7 @@ variants' schema untouched, which is the deciding factor while B holds the live 
 
 ## 6. Open questions for Step 1
 
-- **Which expected-move definition?** F uses VIX-implied. The source says "the options market's expected move" (i.e. the ATM straddle). These differ, and the strike choice is the strategy.
+- ~~**Which expected-move definition?**~~ **RESOLVED — the ATM straddle.** Both sources say "the options market's expected move"; on a 0DTE chain that is the ATM straddle, not a de-annualised VIX30. H was built on it, and **F was corrected onto it on 2026-09-23** (`expected_move_source`), retiring the `em_multiplier: 0.50` fudge factor that had been standing in for it. Neither variant falls back to the other definition — they are different distances, and blending them would make the record unsplittable.
 - **IV percentile lookback** — what window, from what source? `market_ticks` has VIX history; true option-IV percentile needs a series the repo does not keep.
 - **Exit polling rate.** A +50% move on a cheap 0DTE option can appear and vanish inside a minute; B's monitoring cadence may be too slow to capture it, which would make a dry-run result unrealistically poor *or* good depending on direction.
 - **Is 1DTE in or out?** Recommend out — it reintroduces overnight hold and Step 6.

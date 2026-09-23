@@ -2,8 +2,8 @@
 
 Source: Jamaal Ghauri (Theta Profits interview, John Einar Sandvand,
 2026-08-16; docs/STRATEGY_CANDIDATES.md, "0DTE Mean Reversion Credit
-Spreads"). Fades price touching the day's VIX-implied expected-move (EM)
-boundary with a ONE-SIDED (never both) 0DTE SPX put or call credit vertical:
+Spreads"). Fades price touching the day's expected-move (EM) boundary with a
+ONE-SIDED (never both) 0DTE SPX put or call credit vertical:
 mark the upper/lower EM boundary from the opening print; on a fresh touch of
 either boundary (no confirmation wait), enter the corresponding fade — a call
 credit spread betting on reversal down at the upper boundary, a put credit
@@ -13,6 +13,17 @@ width 5-20pt (config). Profit target 50% of credit; stop at 100% of credit
 stop locks in at (or near) breakeven-or-better. Average hold 20-30 minutes,
 always closed same-session — never held overnight, so STATE-004 never
 applies to this variant.
+
+THE EXPECTED MOVE IS THE ATM STRADDLE (since 2026-09-23). The source means
+the options market's own expected move, which on a 0DTE chain is the ATM
+straddle price. This variant derived it from VIX instead — `spx_open x
+(vix/100)/sqrt(252)`, a de-annualised THIRTY-DAY implied vol — and then
+corrected the resulting ~48% overstatement with `em_multiplier: 0.50`. That
+multiplier was a fudge factor standing in for a number the repo can now read
+directly, via the `expected_move_from_straddle` helper built for variant H.
+`expected_move_source: "vix"` restores the old behaviour, multiplier
+included, for an A/B. See `_ghauri_expected_move` for why there is
+deliberately no fallback between the two.
 
 STATUS: dry-run-LOCKED (mirrors DoubleCalendarStrategy / StrangleStrategy — a
 non-dry_run construction raises ConfigError before any broker I/O). Going
@@ -96,6 +107,10 @@ from typing import Any, Dict, Optional
 
 from bots.hydra.base_strategy import ConfigError, MEICState
 from bots.hydra.brandon import take_profit
+# Shared with variant H on purpose: two strategies reading "the expected move"
+# must never disagree about the arithmetic — any difference between them has to
+# be a config difference, not a second implementation that drifted.
+from bots.hydra.long_strangle_chain import expected_move_from_straddle, snap_to_chain
 from bots.hydra.strategy import HydraStrategy, HydraIronCondorEntry
 from shared.alert_service import AlertType, AlertPriority
 from shared.delta_strike_selector import select_strike_by_delta
@@ -175,6 +190,15 @@ class GhauriMeanReversionStrategy(HydraStrategy):
 
         strategy_cfg = config.get("strategy", {})
         ghauri_cfg = strategy_cfg.get("ghauri", {})
+
+        # WHICH expected move defines the boundary — and it selects which
+        # strategy runs, so it is read once at construction like every other
+        # knob rather than looked up per tick. "straddle" is source-faithful
+        # (Ghauri marks the boundary from the options market's own expected
+        # move); "vix" restores the pre-2026-09-23 VIX30/sqrt(252) x multiplier
+        # behaviour exactly, for an A/B comparison.
+        self.ghauri_em_source = str(
+            ghauri_cfg.get("expected_move_source", "straddle")).lower()
 
         # Strike selection
         self.ghauri_target_delta_pct = float(ghauri_cfg.get("target_delta_pct", 0.15))
@@ -317,17 +341,23 @@ class GhauriMeanReversionStrategy(HydraStrategy):
 
         if self._ghauri_upper_boundary is None or self._ghauri_lower_boundary is None:
             spx_open = self.market_data.spx_open
-            vix_open = self.market_data.vix_open
-            if not spx_open or spx_open <= 0 or not vix_open or vix_open <= 0:
+            if not spx_open or spx_open <= 0:
                 return False  # session open data not available yet this tick
-            raw_em = spx_open * (vix_open / 100) / sqrt(252)
-            expected_move = raw_em * self.ghauri_em_multiplier
+
+            expected_move, em_source = self._ghauri_expected_move(spx_open)
+            if expected_move <= 0:
+                # Boundaries stay unset and THIS TICK returns. The caller re-runs
+                # every heartbeat, so a transient unquotable chain costs seconds,
+                # not the day — which is why this needs no fallback (see
+                # _ghauri_expected_move for why a fallback would be wrong).
+                return False
+
             self._ghauri_upper_boundary = spx_open + expected_move
             self._ghauri_lower_boundary = spx_open - expected_move
+            self._ghauri_em_source_today = em_source
             logger.info(
                 f"GHAURI: EM boundaries set for today — SPX open {spx_open:.2f}, "
-                f"VIX open {vix_open:.2f}, raw VIX30 EM ±{raw_em:.2f} × "
-                f"mult {self.ghauri_em_multiplier:.2f} = EM ±{expected_move:.2f} -> "
+                f"EM ±{expected_move:.2f} ({em_source}) -> "
                 f"upper {self._ghauri_upper_boundary:.2f} / "
                 f"lower {self._ghauri_lower_boundary:.2f}"
             )
@@ -842,7 +872,88 @@ class GhauriMeanReversionStrategy(HydraStrategy):
         super()._reset_for_new_day()
         self._ghauri_upper_boundary = None
         self._ghauri_lower_boundary = None
+        self._ghauri_em_source_today = ""
         self._ghauri_upper_fired_today = False
         self._ghauri_lower_fired_today = False
         self._ghauri_pending_fire_side = None
         self._ghauri_next_entry_number = 1
+
+    # =========================================================================
+    # The day's expected move — the distance this strategy fades a touch of
+    # =========================================================================
+
+    def _ghauri_expected_move(self, spx_open: float):
+        """``(expected_move, source)`` — the day's EM boundary distance.
+
+        THE SOURCE MEANS THE ATM STRADDLE. Ghauri marks the boundary from the
+        options market's own expected move, which on a 0DTE chain is the ATM
+        straddle price. This strategy originally computed
+        ``spx_open x (vix/100) / sqrt(252)`` instead, which de-annualises a
+        THIRTY-DAY implied vol — a different quantity that a 139-session replay
+        measured as overstating the real daily move by ~48%, and which was then
+        corrected with an ``em_multiplier`` of 0.50.
+
+        **That multiplier was a fudge factor standing in for a number we can now
+        read directly.** ``expected_move_from_straddle`` (built for variant H,
+        which has the same source concept) prices the real thing off the live
+        chain, so F no longer has to approximate it.
+
+        NO FALLBACK BETWEEN THE TWO, for the same reason variant H has none: a
+        VIX-derived boundary and a straddle-derived one are different distances,
+        and silently substituting one for the other produces a record that
+        cannot be split back into two strategies afterwards. If the configured
+        source cannot be computed this returns 0.0 and the caller simply retries
+        on the next heartbeat — F sets its boundaries once per day and re-checks
+        every tick, so an unquotable chain costs seconds rather than the session.
+
+        ``expected_move_source: "vix"`` restores the old behaviour exactly,
+        multiplier included, for an A/B comparison.
+        """
+        source = self.ghauri_em_source
+
+        if source == "vix":
+            vix_open = self.market_data.vix_open
+            if not vix_open or vix_open <= 0:
+                return 0.0, "vix"
+            raw = spx_open * (vix_open / 100) / sqrt(252)
+            return raw * self.ghauri_em_multiplier, "vix"
+
+        if source != "straddle":
+            logger.error(
+                "GHAURI: unknown expected_move_source %r — refusing to guess. "
+                "Valid values: 'straddle', 'vix'.", source
+            )
+            return 0.0, source
+
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            return 0.0, "straddle"
+        try:
+            strikes = self.broker.get_option_chain(
+                self.underlying_symbol,
+                datetime.strptime(expiry, "%Y-%m-%d").date(),
+                trading_class=self.trading_class, exchange=self.exchange,
+            ) or []
+        except Exception as e:  # noqa: BLE001 — retried next heartbeat
+            logger.warning("GHAURI: chain fetch failed for the straddle EM: %s", e)
+            return 0.0, "straddle"
+
+        atm = snap_to_chain(spx_open, [float(k) for k in strikes if k], 25.0)
+        if atm is None:
+            logger.warning(
+                "GHAURI: no ATM strike within 25pt of the open %.2f — "
+                "cannot price the straddle this tick", spx_open)
+            return 0.0, "straddle"
+
+        call_map, put_map = self._read_option_chain(expiry, [atm])
+        cu, pu = call_map.get(float(atm)), put_map.get(float(atm))
+        quotes = self._read_option_quotes_batch([u for u in (cu, pu) if u]) or {}
+        call_px = float(self._quote_mid(quotes.get(cu)) or 0.0)
+        put_px = float(self._quote_mid(quotes.get(pu)) or 0.0)
+        em = expected_move_from_straddle(call_px, put_px)
+        if em <= 0:
+            logger.warning(
+                "GHAURI: ATM straddle at %.0f not priceable (call %.2f / put %.2f) "
+                "— NOT substituting the VIX formula; retrying next heartbeat",
+                atm, call_px, put_px)
+        return em, "straddle"

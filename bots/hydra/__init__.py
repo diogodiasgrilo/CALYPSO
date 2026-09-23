@@ -36,6 +36,46 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-23 STRATEGY F — THE EXPECTED MOVE IS THE ATM STRADDLE, AND THE FUDGE FACTOR IS
+  RETIRED. Fallout from the inherited-gate audit ("did you do this same mistake with any
+  other strategies?"). F did not inherit a GATE it shouldn't run — its problem was one
+  level deeper: it ran the right rule on the WRONG QUANTITY.
+
+  Ghauri marks the boundary from the options market's own expected move. On a 0DTE chain
+  that is the ATM straddle. F computed `spx_open x (vix/100)/sqrt(252)` — a de-annualised
+  THIRTY-DAY implied vol. F's own config already recorded a 139-session replay measuring
+  that proxy as overstating the real daily move by ~48%, which is why the trigger rate was
+  4.3% against ~70% for an independent backtest of the same published rules. The 2026-09-06
+  response was `em_multiplier: 0.50` — a correction factor fitted to the measurement.
+  Building H made that unnecessary: `expected_move_from_straddle` reads the real number off
+  the live chain, so F now calls the same helper.
+
+  * `_ghauri_expected_move(spx_open) -> (em, source)`, config-selected via
+    `ghauri.expected_move_source` ("straddle" shipped, "vix" restores the old behaviour
+    exactly — multiplier included — for an A/B). `em_multiplier` is INERT under "straddle";
+    applying it there would correct the overstatement twice and halve the real boundary.
+  * NO FALLBACK between the two, same rule as H: they are different distances, and silently
+    substituting one produces a record that cannot be split back into two strategies. An
+    unquotable chain returns 0.0 and the boundary stays unset for that TICK — F re-checks
+    every heartbeat, so the cost is seconds, not the session.
+  * `_ghauri_em_source_today` records which definition drew today's boundary.
+  * The shared helper is imported, not reimplemented. Two strategies reading "the expected
+    move" must only ever differ by config.
+
+  ⚠️ FOUND WHILE TESTING, AND THE MORE SERIOUS HALF: the new method had been spliced INSIDE
+  `_reset_for_new_day`, leaving that method as a bare docstring and its body as dead code
+  after a `return`. F would have carried yesterday's boundaries and `fired_today` flags
+  forward forever — one entry on day one, silence after. **Twenty-one source-grep tests
+  passed against that build.** The lesson is the one from the CI break earlier the same day,
+  one level down: a test that reads source proves a token is present, never that code runs.
+  `TestDailyResetActuallyResets` calls the method and inspects the state; all four of its
+  tests fail against the broken build (verified by reintroducing it).
+
+  Tests: `tests/test_ghauri_strategy.py` (62, was 47) — the touch-trigger day-scenarios were
+  rewired onto the straddle path so they prove the code that actually runs, and
+  `TestExpectedMoveMultiplier` now names `ghauri_em_source="vix"` explicitly, so the two
+  definitions are pinned separately with a negative control proving they differ.
+
 - 2026-09-23 STRATEGY H — MADE FAITHFUL TO ITS SOURCE. Operator question: "why can't we
   build it properly and run it JUST like the man in the video said?" Checking, the honest
   answer was that we had NOT. H inherited HYDRA's gating stack, and TWO of those gates

@@ -42,7 +42,12 @@ def _inst(**overrides):
     inst.ghauri_delta_max_reads = 6
     inst.ghauri_width_pt = 10.0
     inst.ghauri_strike_search_pts = 150.0
-    inst.ghauri_em_multiplier = 0.50  # live default since 2026-09-06 — see TestExpectedMoveMultiplier
+    # The SHIPPED source since 2026-09-23: the ATM straddle, as Ghauri means it.
+    # Tests that exercise the legacy VIX formula must say so explicitly — the
+    # default here tracks production so the touch-trigger scenarios below prove
+    # the path that actually runs.
+    inst.ghauri_em_source = "straddle"
+    inst.ghauri_em_multiplier = 0.50  # VIX-path only; ignored under "straddle"
     inst.ghauri_profit_target_pct = 0.50
     inst.ghauri_pct_of_credit = 1.00
     inst.ghauri_trail_arm_pct = 0.25
@@ -61,6 +66,30 @@ def _inst(**overrides):
     inst.state = MEICState.WAITING_FIRST_ENTRY
     for k, v in overrides.items():
         setattr(inst, k, v)
+    return inst
+
+
+def _price_the_straddle(inst, em=30.71, spx_open=6500.0):
+    """Make the ATM straddle price to exactly ``em`` points.
+
+    Stubs the four BROKER reads ``_ghauri_expected_move`` makes — never
+    ``_ghauri_expected_move`` itself. The distinction is the whole point: the
+    touch-trigger scenarios below have to drive the real expected-move code,
+    because the straddle is the path production takes as of 2026-09-23. Stubbing
+    the method would leave them proving a boundary calculation no longer used.
+
+    The 30.71pt default is what the OLD VIX formula produced for SPX 6500 / VIX
+    15 at ``em_multiplier`` 0.50, so every scenario's price drifts keep the same
+    relationship to the boundary they were written against.
+    """
+    atm = round(spx_open / 5.0) * 5.0
+    inst.underlying_symbol, inst.trading_class, inst.exchange = "SPX", "SPXW", "CBOE"
+    inst._get_todays_expiry = lambda: "2026-08-25"
+    inst.broker = SimpleNamespace(
+        get_option_chain=lambda *a, **k: [atm - 5.0, atm, atm + 5.0])
+    inst._read_option_chain = lambda expiry, strikes: ({atm: "C"}, {atm: "P"})
+    inst._read_option_quotes_batch = lambda uics: {"C": em / 2.0, "P": em / 2.0}
+    inst._quote_mid = lambda q: q
     return inst
 
 
@@ -278,9 +307,12 @@ class TestShouldAttemptEntry:
     """
 
     def _armed_inst(self, spx_open=6500.0, vix_open=15.0):
-        return _inst(
-            current_price=spx_open,
-            market_data=SimpleNamespace(spx_open=spx_open, vix_open=vix_open),
+        return _price_the_straddle(
+            _inst(
+                current_price=spx_open,
+                market_data=SimpleNamespace(spx_open=spx_open, vix_open=vix_open),
+            ),
+            spx_open=spx_open,
         )
 
     def test_boundaries_not_computed_without_session_open_data(self):
@@ -397,9 +429,14 @@ class TestExpectedMoveMultiplier:
     """
 
     def _armed(self, mult, spx_open=6500.0, vix_open=15.0):
+        # ``ghauri_em_source="vix"`` explicitly: as of 2026-09-23 the shipped
+        # source is the straddle, and the multiplier this class is about exists
+        # ONLY on the legacy VIX path. Naming it here is what keeps these tests
+        # honest about which boundary definition they are measuring.
         return _inst(
             current_price=spx_open,
             market_data=SimpleNamespace(spx_open=spx_open, vix_open=vix_open),
+            ghauri_em_source="vix",
             ghauri_em_multiplier=mult,
         )
 
@@ -878,3 +915,177 @@ class TestRestartRecoveryDoesNotDisableStopLossMonitoring:
         assert getattr(entry, "trail_armed", None) is True  # armed fresh, via setattr on the plain entry
         effective_stop = confirm_mock.call_args[0][3]
         assert effective_stop == pytest.approx(90.0)  # trail-tightened, not the unarmed 200.0
+
+
+class TestExpectedMoveIsTheStraddle:
+    """2026-09-23. F marked its boundary from ``spx_open x (vix/100)/sqrt(252)``
+    — a de-annualised THIRTY-DAY implied vol — and then corrected the resulting
+    ~48% overstatement with ``em_multiplier: 0.50``.
+
+    The source means the ATM STRADDLE, and the repo can now read it directly via
+    ``expected_move_from_straddle`` (built for variant H, same source concept).
+    The multiplier was a fudge factor standing in for a number we can measure.
+
+    These drive the REAL method against a stubbed broker. The class above
+    (`TestExpectedMoveMultiplier`) still pins the VIX path, which stays
+    reachable for an A/B — these two classes together are what prove the two
+    definitions are distinct and neither silently becomes the other.
+    """
+
+    def test_the_boundary_is_the_straddle_price(self):
+        """C 18.40 + P 16.10 = 34.50pt, and the boundary sits exactly there."""
+        inst = _price_the_straddle(
+            _inst(current_price=6500.0,
+                  market_data=SimpleNamespace(spx_open=6500.0, vix_open=15.0)))
+        inst._read_option_quotes_batch = lambda uics: {"C": 18.40, "P": 16.10}
+        em, source = inst._ghauri_expected_move(6500.0)
+        assert em == pytest.approx(34.50, abs=1e-9)
+        assert source == "straddle"
+
+    def test_the_multiplier_does_NOT_scale_the_straddle(self):
+        """The fudge factor must be inert on the path that no longer needs it —
+        otherwise the correction gets applied twice and the boundary lands at
+        half the market's own expected move."""
+        wide = _price_the_straddle(
+            _inst(current_price=6500.0, ghauri_em_multiplier=1.00,
+                  market_data=SimpleNamespace(spx_open=6500.0, vix_open=15.0)))
+        half = _price_the_straddle(
+            _inst(current_price=6500.0, ghauri_em_multiplier=0.50,
+                  market_data=SimpleNamespace(spx_open=6500.0, vix_open=15.0)))
+        assert wide._ghauri_expected_move(6500.0)[0] == pytest.approx(
+            half._ghauri_expected_move(6500.0)[0])
+
+    def test_the_two_sources_produce_DIFFERENT_boundaries(self):
+        """The negative control for this whole change. If these ever matched,
+        every test above would pass while measuring nothing."""
+        straddle = _price_the_straddle(
+            _inst(current_price=6500.0,
+                  market_data=SimpleNamespace(spx_open=6500.0, vix_open=15.0)))
+        straddle._read_option_quotes_batch = lambda uics: {"C": 18.40, "P": 16.10}
+        vix = _inst(current_price=6500.0, ghauri_em_source="vix",
+                    market_data=SimpleNamespace(spx_open=6500.0, vix_open=15.0))
+        assert straddle._ghauri_expected_move(6500.0)[0] != pytest.approx(
+            vix._ghauri_expected_move(6500.0)[0], abs=0.01)
+
+    @pytest.mark.parametrize("call_px,put_px", [(0.0, 16.10), (18.40, 0.0), (0.0, 0.0)])
+    def test_an_unpriceable_leg_does_NOT_fall_back_to_the_vix_formula(self, call_px, put_px):
+        """The invariant that makes the record splittable. A VIX-derived
+        boundary and a straddle-derived one are different distances; silently
+        substituting one produces a history that cannot be separated into two
+        strategies afterwards. VIX is deliberately LIVE (15.0) here, so a
+        fallback would succeed if one existed."""
+        inst = _price_the_straddle(
+            _inst(current_price=6500.0,
+                  market_data=SimpleNamespace(spx_open=6500.0, vix_open=15.0)))
+        inst._read_option_quotes_batch = lambda uics: {"C": call_px, "P": put_px}
+        em, source = inst._ghauri_expected_move(6500.0)
+        assert em == 0.0
+        assert source == "straddle"
+
+    def test_an_unpriceable_chain_leaves_the_boundary_UNSET_for_the_tick(self):
+        """Not a skipped day: F re-checks every heartbeat, so the cost of an
+        unquotable chain is seconds. This is the reason no fallback is needed."""
+        inst = _price_the_straddle(
+            _inst(current_price=6500.0,
+                  market_data=SimpleNamespace(spx_open=6500.0, vix_open=15.0)))
+        inst._read_option_quotes_batch = lambda uics: {"C": 0.0, "P": 0.0}
+        assert inst._should_attempt_entry(_et(9, 35)) is False
+        assert inst._ghauri_upper_boundary is None
+
+        # …and the very next heartbeat, with quotes back, sets them normally.
+        inst._read_option_quotes_batch = lambda uics: {"C": 18.40, "P": 16.10}
+        inst._should_attempt_entry(_et(9, 36))
+        assert inst._ghauri_upper_boundary == pytest.approx(6534.50)
+
+    def test_a_chain_with_no_strike_near_the_open_refuses(self):
+        """snap_to_chain's 25pt cap. A partially-loaded chain must not quietly
+        price a 'straddle' 200pt away and call it the expected move."""
+        inst = _price_the_straddle(
+            _inst(current_price=6500.0,
+                  market_data=SimpleNamespace(spx_open=6500.0, vix_open=15.0)))
+        inst.broker = SimpleNamespace(get_option_chain=lambda *a, **k: [6200.0, 6800.0])
+        assert inst._ghauri_expected_move(6500.0)[0] == 0.0
+
+    def test_an_unknown_source_refuses_rather_than_guessing(self):
+        inst = _inst(current_price=6500.0, ghauri_em_source="atr",
+                     market_data=SimpleNamespace(spx_open=6500.0, vix_open=15.0))
+        em, source = inst._ghauri_expected_move(6500.0)
+        assert em == 0.0
+        assert source == "atr"
+
+    def test_the_day_records_WHICH_definition_drew_its_boundary(self):
+        """Without this the two regimes cannot be separated in the record."""
+        inst = _price_the_straddle(
+            _inst(current_price=6500.0,
+                  market_data=SimpleNamespace(spx_open=6500.0, vix_open=15.0)))
+        inst._should_attempt_entry(_et(9, 35))
+        assert inst._ghauri_em_source_today == "straddle"
+
+    def test_the_shipped_config_selects_the_straddle(self):
+        import json
+        cfg = json.loads(
+            (Path(__file__).resolve().parents[1] / "bots" / "hydra" / "config"
+             / "config_variant_f.json").read_text())
+        assert cfg["strategy"]["ghauri"]["expected_move_source"] == "straddle"
+
+
+class TestDailyResetActuallyResets:
+    """2026-09-23 regression. While adding the straddy EM, the new method was
+    spliced INSIDE ``_reset_for_new_day`` — leaving that method as a bare
+    docstring and its body as dead code after a ``return``. F would then have
+    carried yesterday's boundaries and ``fired_today`` flags into every
+    subsequent session forever: one entry on day one, silence after.
+
+    **Twenty-one source-grep tests passed against that build.** Nothing here
+    greps; each of these calls the method and looks at the state.
+    """
+
+    def _exhausted(self):
+        """Yesterday, with both boundaries already fired."""
+        return _inst(
+            current_price=6500.0,
+            market_data=SimpleNamespace(spx_open=6500.0, vix_open=15.0),
+            _ghauri_upper_boundary=6530.0, _ghauri_lower_boundary=6470.0,
+            _ghauri_upper_fired_today=True, _ghauri_lower_fired_today=True,
+        )
+
+    def test_yesterdays_boundaries_do_not_survive_into_today(self, monkeypatch):
+        monkeypatch.setattr(HydraStrategy, "_reset_for_new_day", lambda self: None)
+        inst = _inst(_ghauri_upper_boundary=6530.0, _ghauri_lower_boundary=6470.0,
+                     _ghauri_em_source_today="straddle")
+        inst._reset_for_new_day()
+        assert inst._ghauri_upper_boundary is None
+        assert inst._ghauri_lower_boundary is None
+        assert inst._ghauri_em_source_today == ""
+
+    def test_yesterdays_fired_flags_do_not_survive_into_today(self, monkeypatch):
+        """The one that would silence the strategy permanently: a boundary
+        already 'fired' can never fire again."""
+        monkeypatch.setattr(HydraStrategy, "_reset_for_new_day", lambda self: None)
+        inst = _inst(_ghauri_upper_fired_today=True, _ghauri_lower_fired_today=True,
+                     _ghauri_pending_fire_side="call", _ghauri_next_entry_number=4)
+        inst._reset_for_new_day()
+        assert inst._ghauri_upper_fired_today is False
+        assert inst._ghauri_lower_fired_today is False
+        assert inst._ghauri_pending_fire_side is None
+        assert inst._ghauri_next_entry_number == 1
+
+    def test_the_inherited_reset_is_still_called(self, monkeypatch):
+        """STATE-004 + the MEICDailyState reconstruction are a universal safety
+        net. Overriding the method must extend it, never replace it."""
+        called = []
+        monkeypatch.setattr(HydraStrategy, "_reset_for_new_day",
+                            lambda self: called.append(True))
+        _inst()._reset_for_new_day()
+        assert called == [True]
+
+    def test_a_reset_day_can_fire_again_end_to_end(self, monkeypatch):
+        """The behavioural statement of the bug: yesterday fired both sides,
+        today touches the upper boundary, today must still enter."""
+        monkeypatch.setattr(HydraStrategy, "_reset_for_new_day", lambda self: None)
+        inst = _price_the_straddle(self._exhausted())
+        inst._reset_for_new_day()
+        inst.current_price = 6500.0
+        inst._should_attempt_entry(_et(9, 35))
+        inst.current_price = inst._ghauri_upper_boundary + 1
+        assert inst._should_attempt_entry(_et(9, 45)) is True

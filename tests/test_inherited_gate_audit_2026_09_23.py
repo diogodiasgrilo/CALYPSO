@@ -214,3 +214,60 @@ class TestSourceFaithfulness:
         assert not offenders, (
             f"{offenders} are net-debit strategies with a live whipsaw filter — "
             f"it skips exactly the wide-range sessions they exist to capture.")
+
+
+# ======================================================================
+# F now reads the expected move its source actually means
+# ======================================================================
+
+class TestFUsesTheStraddleNotAFudgeFactor:
+    """Ghauri marks the boundary from the OPTIONS MARKET'S OWN expected move,
+    which on a 0DTE chain is the ATM straddle.
+
+    F computed `spx_open x (vix/100)/sqrt(252)` instead — a de-annualised
+    THIRTY-DAY implied vol, a different quantity that F's own config records a
+    139-session replay measuring as overstating the real daily move by ~48% —
+    and then corrected it with `em_multiplier: 0.50`. **That multiplier was a
+    fudge factor standing in for a number the repo can now read directly**, via
+    the `expected_move_from_straddle` helper built for variant H, which has the
+    same source concept.
+    """
+
+    def test_the_config_selects_the_straddle(self):
+        assert _cfg("f")["ghauri"]["expected_move_source"] == "straddle"
+
+    def test_the_helper_is_shared_with_H_not_reimplemented(self):
+        """Two strategies reading 'the expected move' must never disagree about
+        the arithmetic — that can only ever be a config difference."""
+        src = (ROOT / "bots" / "hydra" / "ghauri_strategy.py").read_text()
+        assert "from bots.hydra.long_strangle_chain import" in src
+        assert "expected_move_from_straddle" in src
+
+    def test_there_is_no_silent_fallback_to_the_vix_formula(self):
+        """Same rule as H. A VIX-derived boundary and a straddle-derived one are
+        different distances; substituting one for the other yields a record that
+        cannot be split back into two strategies."""
+        src = (ROOT / "bots" / "hydra" / "ghauri_strategy.py").read_text()
+        assert "NOT substituting the VIX formula" in src
+        assert "NO FALLBACK BETWEEN THE TWO" in src
+
+    def test_an_unpriceable_chain_costs_a_tick_not_the_day(self):
+        """F sets boundaries ONCE per day but re-checks every heartbeat, so
+        returning 0.0 simply retries — which is why no fallback is needed."""
+        src = (ROOT / "bots" / "hydra" / "ghauri_strategy.py").read_text()
+        assert "retrying next heartbeat" in src
+
+    def test_the_old_behaviour_is_still_reachable_for_an_A_B(self):
+        src = (ROOT / "bots" / "hydra" / "ghauri_strategy.py").read_text()
+        assert 'if source == "vix":' in src
+        assert "ghauri_em_multiplier" in src
+
+    def test_an_unknown_source_refuses_rather_than_guessing(self):
+        src = (ROOT / "bots" / "hydra" / "ghauri_strategy.py").read_text()
+        assert "refusing to guess" in src
+
+    def test_the_em_source_is_recorded_per_day(self):
+        """Which definition drew today's boundary must be stored, or a later
+        analysis cannot separate the two regimes."""
+        src = (ROOT / "bots" / "hydra" / "ghauri_strategy.py").read_text()
+        assert "_ghauri_em_source_today" in src
