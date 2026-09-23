@@ -197,6 +197,51 @@ def read_ls_status(db_path: Optional[str], date: str = "") -> Dict[str, Any]:
         con.close()
 
 
+def read_spx_path(market_db: Optional[str], date: str,
+                  max_points: int = 400) -> List[Dict[str, Any]]:
+    """The session's SPX path, for drawing the expected-move band.
+
+    THE ONE PICTURE A LONG STRANGLE NEEDS. Every H session reduces to a single
+    question — **did SPX travel beyond the expected move?** — and it is
+    answerable even on a day H DECLINED to enter, because the skip row carries
+    the strikes it would have used. Without it the "Declined" list says a veto
+    happened and nothing about whether the veto was right.
+
+    Read from a market DB rather than H's own: SPX is market-wide, and a
+    variant's own database only starts at the moment it was installed (H's
+    begins 09:49 on 2026-09-23, mid-session). Same reasoning as the VIX history
+    in ``_vix_history_db``.
+
+    Downsampled to ``max_points`` by taking every Nth row — the shape of the
+    path is what matters, and 1,500 ticks is a needlessly heavy payload for a
+    line that is ~900px wide.
+    """
+    con = _connect(market_db)
+    if not con:
+        return []
+    try:
+        rows = _rows(
+            con,
+            "SELECT timestamp, spx_price FROM market_ticks "
+            "WHERE date(timestamp) = ? AND spx_price > 0 ORDER BY timestamp",
+            (date,),
+        )
+        if not rows:
+            return []
+        step = max(1, len(rows) // max_points)
+        out = [{"t": r["timestamp"][11:16], "spx": round(float(r["spx_price"]), 2)}
+               for r in rows[::step]]
+        # Always keep the true last tick — a downsample that drops the close
+        # would misreport where the session actually ended.
+        last = rows[-1]
+        if out and out[-1]["t"] != last["timestamp"][11:16]:
+            out.append({"t": last["timestamp"][11:16],
+                        "spx": round(float(last["spx_price"]), 2)})
+        return out
+    finally:
+        con.close()
+
+
 def read_ls_recent(db_path: Optional[str], limit: int = 30) -> List[Dict[str, Any]]:
     """Recent closed positions across days, newest first — the history strip.
 

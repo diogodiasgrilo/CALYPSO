@@ -486,3 +486,80 @@ class TestHDoesNotRenderAsAnIronCondor:
         # A single shared cache was the other half — it would pin the first
         # strategy fetched for every later one.
         assert "new Map<string, BotConfig>()" in src
+
+
+class TestTheExpectedMoveBand:
+    """"Did it move enough?" is the only question a long strangle asks, and the
+    dashboard could not answer it.
+
+    The operator's screenshot of H's first session showed four zero cards and a
+    "Declined" row reading "VIX-percentile proxy unavailable" — a veto with no
+    indication of whether vetoing was right. It was not: SPX ranged 7707.01 to
+    7760.02 that day against a proposed band of C 7760 / P 7720, so the declined
+    trade would have gone 13 points in the money on the put side.
+
+    The SPX path makes that visible, and it works on a DECLINED day because the
+    skip row carries the strikes it would have used.
+    """
+
+    def _ticks(self, tmp_path, rows):
+        import sqlite3
+        p = tmp_path / "market.db"
+        con = sqlite3.connect(str(p))
+        con.execute("CREATE TABLE market_ticks (timestamp TEXT, spx_price REAL)")
+        con.executemany("INSERT INTO market_ticks VALUES (?,?)", rows)
+        con.commit()
+        con.close()
+        return str(p)
+
+    def test_it_returns_the_session_path(self, tmp_path):
+        from dashboard.backend.services.ls_reader import read_spx_path
+        db = self._ticks(tmp_path, [
+            ("2026-09-23 09:31:36", 7741.0),
+            ("2026-09-23 12:00:00", 7707.01),
+            ("2026-09-23 15:59:00", 7730.0),
+        ])
+        path = read_spx_path(db, "2026-09-23")
+        assert [p["t"] for p in path] == ["09:31", "12:00", "15:59"]
+        assert path[1]["spx"] == 7707.01
+
+    def test_another_day_is_not_included(self, tmp_path):
+        from dashboard.backend.services.ls_reader import read_spx_path
+        db = self._ticks(tmp_path, [("2026-09-22 10:00:00", 7800.0),
+                                    ("2026-09-23 10:00:00", 7741.0)])
+        assert read_spx_path(db, "2026-09-23") == [{"t": "10:00", "spx": 7741.0}]
+
+    def test_it_downsamples_but_KEEPS_THE_CLOSE(self, tmp_path):
+        """A downsample that drops the last tick would misreport where the
+        session ended — and for this strategy the extreme IS the result."""
+        from dashboard.backend.services.ls_reader import read_spx_path
+        rows = [(f"2026-09-23 10:{m:02d}:00", 7700.0 + m) for m in range(60)]
+        rows.append(("2026-09-23 15:59:59", 7999.0))
+        db = self._ticks(tmp_path, rows)
+        path = read_spx_path(db, "2026-09-23", max_points=10)
+        assert len(path) <= 12
+        assert path[-1]["spx"] == 7999.0, "the closing tick was dropped"
+
+    def test_a_missing_market_db_is_empty_not_an_error(self, tmp_path):
+        from dashboard.backend.services.ls_reader import read_spx_path
+        assert read_spx_path(str(tmp_path / "nope.db"), "2026-09-23") == []
+        assert read_spx_path(None, "2026-09-23") == []
+
+    def test_zero_prices_are_excluded(self, tmp_path):
+        from dashboard.backend.services.ls_reader import read_spx_path
+        db = self._ticks(tmp_path, [("2026-09-23 10:00:00", 0.0),
+                                    ("2026-09-23 10:01:00", 7741.0)])
+        assert read_spx_path(db, "2026-09-23") == [{"t": "10:01", "spx": 7741.0}]
+
+    def test_the_status_endpoint_carries_the_path(self, client):
+        r = client.get("/api/long-strangle/status")
+        assert r.status_code == 200
+        assert "spx_path" in r.json()
+
+    def test_the_frontend_draws_the_band_from_a_SKIP_when_there_is_no_entry(self):
+        """The counterfactual case, which is the common one early on."""
+        src = (Path(__file__).resolve().parents[1] / "dashboard" / "frontend" /
+               "src" / "pages" / "LongStrangle.tsx").read_text()
+        assert "proposed_call_strike" in src and "proposed_put_strike" in src
+        assert "hypothetical" in src
+        assert "Did it move enough?" in src

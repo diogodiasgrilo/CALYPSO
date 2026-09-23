@@ -30,6 +30,17 @@
 
 import { useEffect, useState } from "react";
 import { AlertTriangle, TrendingUp } from "lucide-react";
+import {
+  CartesianGrid,
+  Line,
+  LineChart,
+  ReferenceArea,
+  ReferenceLine,
+  ResponsiveContainer,
+  Tooltip,
+  XAxis,
+  YAxis,
+} from "recharts";
 import { formatCurrency, formatPnL } from "../lib/formatters";
 
 interface Mark {
@@ -67,6 +78,7 @@ interface Skip {
   entry_number: number;
   skip_time: string | null;
   skip_reason: string | null;
+  spx: number | null;
   proposed_call_strike: number | null;
   proposed_put_strike: number | null;
   proposed_debit: number | null;
@@ -86,6 +98,11 @@ interface RecentRow {
   em_source: string | null;
 }
 
+interface SpxPoint {
+  t: string;
+  spx: number;
+}
+
 interface Status {
   strategy: string;
   label: string;
@@ -95,6 +112,7 @@ interface Status {
   open: Position[];
   closed: Position[];
   skipped: Skip[];
+  spx_path?: SpxPoint[];
   summary: {
     open_count: number;
     closed_count: number;
@@ -110,6 +128,154 @@ const pct = (v: number | null | undefined) =>
 
 const money = (v: number | null | undefined) =>
   v === null || v === undefined ? "—" : formatCurrency(v, 0);
+
+/**
+ * THE picture a long strangle needs, and the one thing no other view here
+ * provides: SPX's path against the expected-move band it was priced at.
+ *
+ * Every H session reduces to one question — **did it move enough?** — and the
+ * answer is a glance, not a calculation. It works even on a day H DECLINED to
+ * enter, because the skip row carries the strikes it would have used. Without
+ * it the "Declined" list reports that a veto happened and says nothing about
+ * whether the veto was right, which is exactly the counterfactual the variant
+ * exists to collect.
+ */
+function ExpectedMoveBand({
+  path,
+  callStrike,
+  putStrike,
+  entrySpx,
+  em,
+  hypothetical,
+}: {
+  path: SpxPoint[];
+  callStrike: number | null;
+  putStrike: number | null;
+  entrySpx: number | null;
+  em: number | null;
+  hypothetical: boolean;
+}) {
+  if (path.length < 2 || !callStrike || !putStrike) return null;
+
+  const highs = path.map((p) => p.spx);
+  const hi = Math.max(...highs);
+  const lo = Math.min(...highs);
+  // Pad so the band is never flush against the frame, and so a breach reads as
+  // a breach rather than as the line touching the edge of the chart.
+  const pad = Math.max(8, (callStrike - putStrike) * 0.25);
+  const yMin = Math.min(lo, putStrike) - pad;
+  const yMax = Math.max(hi, callStrike) + pad;
+
+  const brokeCall = hi >= callStrike;
+  const brokePut = lo <= putStrike;
+  const broke = brokeCall || brokePut;
+  const throughBy = brokeCall
+    ? hi - callStrike
+    : brokePut
+      ? putStrike - lo
+      : 0;
+
+  return (
+    <section>
+      <div className="flex flex-wrap items-baseline justify-between gap-2 mb-1.5">
+        <h2 className="text-xs font-semibold text-text-primary">
+          Did it move enough?
+        </h2>
+        <div className="text-3xs text-text-dim">
+          band = spot {entrySpx?.toFixed(0) ?? "?"} ± {em?.toFixed(1) ?? "?"}pt
+          {hypothetical && " · position was DECLINED — this is the counterfactual"}
+        </div>
+      </div>
+
+      <div className="bg-bg-elevated border border-border-dim rounded p-3">
+        <div style={{ width: "100%", height: 220 }}>
+          <ResponsiveContainer>
+            <LineChart data={path} margin={{ top: 6, right: 8, bottom: 0, left: 0 }}>
+              <CartesianGrid strokeDasharray="2 4" stroke="var(--color-border-dim)" />
+              {/* Inside the band is where a long strangle LOSES — shaded as the
+                  losing region, which is the opposite of every other chart on
+                  this dashboard and the point worth making visually. */}
+              <ReferenceArea
+                y1={putStrike}
+                y2={callStrike}
+                fill="var(--color-loss)"
+                fillOpacity={0.07}
+              />
+              <ReferenceLine
+                y={callStrike}
+                stroke="var(--color-profit)"
+                strokeDasharray="4 3"
+                label={{
+                  value: `C ${callStrike.toFixed(0)}`,
+                  position: "insideTopRight",
+                  fontSize: 10,
+                  fill: "var(--color-text-dim)",
+                }}
+              />
+              <ReferenceLine
+                y={putStrike}
+                stroke="var(--color-profit)"
+                strokeDasharray="4 3"
+                label={{
+                  value: `P ${putStrike.toFixed(0)}`,
+                  position: "insideBottomRight",
+                  fontSize: 10,
+                  fill: "var(--color-text-dim)",
+                }}
+              />
+              <XAxis
+                dataKey="t"
+                tick={{ fontSize: 10, fill: "var(--color-text-dim)" }}
+                interval="preserveStartEnd"
+                minTickGap={48}
+              />
+              <YAxis
+                domain={[yMin, yMax]}
+                tick={{ fontSize: 10, fill: "var(--color-text-dim)" }}
+                width={52}
+                tickFormatter={(v: number) => v.toFixed(0)}
+              />
+              <Tooltip
+                contentStyle={{
+                  background: "var(--color-bg-elevated)",
+                  border: "1px solid var(--color-border-dim)",
+                  borderRadius: 4,
+                  fontSize: 11,
+                }}
+                formatter={(v: number | undefined) => [v?.toFixed(2) ?? "—", "SPX"]}
+              />
+              <Line
+                type="monotone"
+                dataKey="spx"
+                stroke="var(--color-text-primary)"
+                strokeWidth={1.5}
+                dot={false}
+                isAnimationActive={false}
+              />
+            </LineChart>
+          </ResponsiveContainer>
+        </div>
+
+        <div className="mt-2 text-xs">
+          {broke ? (
+            <span className="text-profit font-medium">
+              Broke the {brokeCall ? "call" : "put"} side by {throughBy.toFixed(1)}pt
+              {hypothetical && " — the declined trade would have gone in the money"}
+            </span>
+          ) : (
+            <span className="text-text-secondary">
+              Stayed inside the band all session — the debit would have been lost
+            </span>
+          )}
+          <span className="text-text-dim">
+            {"  ·  "}session range {Math.min(...highs).toFixed(2)} –{" "}
+            {Math.max(...highs).toFixed(2)}
+          </span>
+        </div>
+      </div>
+    </section>
+  );
+}
 
 function Card({ label, value, hint }: { label: string; value: string; hint?: string }) {
   return (
@@ -294,6 +460,25 @@ export function LongStrangle() {
             />
             <Card label="Realized" value={formatPnL(s.realized_pnl, 0)} />
           </div>
+
+          {(() => {
+            const p = status.open[0] ?? status.closed[0];
+            const k = status.skipped[0];
+            const call = p?.call_strike ?? k?.proposed_call_strike ?? null;
+            const put = p?.put_strike ?? k?.proposed_put_strike ?? null;
+            const spot = p?.spx_at_entry ?? k?.spx ?? null;
+            const em = p?.expected_move ?? k?.expected_move ?? null;
+            return (
+              <ExpectedMoveBand
+                path={status.spx_path ?? []}
+                callStrike={call}
+                putStrike={put}
+                entrySpx={spot}
+                em={em}
+                hypothetical={!p && !!k}
+              />
+            );
+          })()}
 
           {status.open.length > 0 && (
             <section>

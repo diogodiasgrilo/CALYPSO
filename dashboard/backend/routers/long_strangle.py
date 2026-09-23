@@ -18,7 +18,11 @@ from typing import Optional
 from fastapi import APIRouter, Query
 
 from dashboard.backend.config import settings
-from dashboard.backend.services.ls_reader import read_ls_recent, read_ls_status
+from dashboard.backend.services.ls_reader import (
+    read_ls_recent,
+    read_ls_status,
+    read_spx_path,
+)
 
 router = APIRouter(prefix="/api/long-strangle", tags=["long-strangle"])
 
@@ -41,6 +45,34 @@ def _db_path() -> Optional[str]:
     return os.path.join(os.path.dirname(str(sf)), "long_strangle.db")
 
 
+def _market_db() -> Optional[str]:
+    """A database with the session's SPX ticks.
+
+    NOT H's own: SPX is market-wide, and a variant's database only starts when
+    it was installed (H's begins mid-session on 2026-09-23). Resolves through
+    the taxonomy to the live seat — never hardcoded, because that seat has
+    already moved once (C→B) — then falls back to variant A's root DB.
+    """
+    sf = getattr(settings, f"variant_{_VARIANT}_state_file", None)
+    if not sf:
+        return None
+    root = os.path.dirname(os.path.dirname(str(sf)))
+    candidates = []
+    try:
+        import shared.strategy_taxonomy as tax
+        for vid in tax.available_ids():
+            if tax.STRATEGIES[vid].status == "live":
+                candidates.append(os.path.join(root, f"variant_{vid}", "backtesting.db"))
+    except Exception:  # noqa: BLE001 — a display route must not 500
+        pass
+    candidates.append(os.path.join(root, "backtesting.db"))
+    candidates.append(os.path.join(os.path.dirname(str(sf)), "backtesting.db"))
+    for c in candidates:
+        if os.path.exists(c):
+            return c
+    return None
+
+
 @router.get("/status")
 def long_strangle_status(date: str = Query(default="")):
     """One day of variant H: open, closed, declined, and the peak-versus-exit gap.
@@ -49,7 +81,12 @@ def long_strangle_status(date: str = Query(default="")):
     something to show even when H did not trade today — which, for a
     dry-run-locked variant that is not installed, is the normal case.
     """
-    return read_ls_status(_db_path(), date=date)
+    out = read_ls_status(_db_path(), date=date)
+    # The session's SPX path, so the page can draw the expected-move band and
+    # answer "did it move enough?" — including on days H declined to enter.
+    if isinstance(out, dict) and out.get("date"):
+        out["spx_path"] = read_spx_path(_market_db(), out["date"])
+    return out
 
 
 @router.get("/recent")

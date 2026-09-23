@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
-import { LayoutDashboard, CalendarDays, BarChart3, Scale, Waves } from "lucide-react";
+import { LayoutDashboard, CalendarDays, BarChart3, Scale } from "lucide-react";
 import { DashboardLayout } from "./components/layout/DashboardLayout";
 import { ErrorBoundary } from "./components/shared/ErrorBoundary";
 import { Dashboard } from "./pages/Dashboard";
@@ -31,11 +31,6 @@ function NavTabs() {
     }`;
 
   const comparableGroups = meta.groups.filter((g) => g.comparable);
-  // Strategy H's own tab. It is NOT under "Compare": its group is
-  // comparable=false (one member, and nothing here shares its P&L shape), and
-  // the page is a view OF one strategy rather than a head-to-head. Driven off
-  // the taxonomy so it simply does not render until the group is registered.
-  const longGamma = meta.groups.find((g) => g.id === "long_gamma_0dte");
 
   return (
     // Horizontally scrollable tab strip — the standard mobile pattern, and the
@@ -59,12 +54,13 @@ function NavTabs() {
         <BarChart3 size={14} />
         Analytics
       </NavLink>
-      {longGamma && (
-        <NavLink to="/long-strangle" className={linkClass}>
-          <Waves size={14} />
-          Long Gamma
-        </NavLink>
-      )}
+      {/* NO standalone "Long Gamma" tab. It was added before the main dashboard
+          could render H, and once `data_kind: "long_gamma"` dispatched there it
+          became a duplicate of the Dashboard tab whenever H was selected — and
+          it sat in the "views OF the selected strategy" row while actually
+          being one specific strategy, the exact confusion the rule below
+          describes. Pick H in the header; /long-strangle still resolves for a
+          bookmarked link. */}
       {/* Two DIFFERENT axes lived in one undifferentiated row until 2026-09-18.
           Dashboard/History/Analytics are views OF the selected strategy; the
           comparison links LEAVE that strategy and show a whole group. Rendered
