@@ -182,3 +182,54 @@ class TestItCannotPolluteTheCanonicalRecord:
         floor in this config would mean G's config was copied without thinking."""
         s = json.loads(CONFIG.read_text())["strategy"]
         assert not [k for k in s if "stop_buffer" in k or "buying_power" in k]
+
+
+class TestItIsFaithfulToTheSource:
+    """The inherited gating stack is an insurance-SELLER's, and two of its gates
+    contradict a long-gamma strategy outright. Running H with them on would
+    measure "the source's strategy minus its winners" — so they are off, and
+    pinned here because turning one back on silently would invalidate the whole
+    observation window without any test failing.
+    """
+
+    def _cfg(self):
+        return json.loads(CONFIG.read_text())["strategy"]
+
+    def test_the_whipsaw_filter_is_OFF(self):
+        """It skips entries when the intraday range is wide. A wide range is the
+        day H exists for. This is the single most consequential line in H's
+        config."""
+        assert self._cfg()["whipsaw_range_skip_mult"] is None
+
+    def test_the_FOMC_next_day_blackout_is_OFF(self):
+        """The day after a Fed announcement is frequently a big-move day, and
+        the source specifies no FOMC handling at all."""
+        assert self._cfg()["fomc_t1_skip_enabled"] is False
+
+    def test_it_trades_the_announcement_day_too(self):
+        assert self._cfg()["fomc_announcement_skip"] is False
+
+    def test_the_expected_move_source_is_the_SOURCE_FAITHFUL_one(self):
+        """The video reads the expected move off the option chain (the ATM
+        straddle). The VIX formula is F's, and it disagrees by ~3x."""
+        assert self._cfg()["long_strangle"]["expected_move_source"] == "straddle"
+
+    def test_a_single_entry_near_the_open(self):
+        """The source enters once, near the open — not on HYDRA's slot grid."""
+        assert self._cfg()["entry_times"] == ["09:45"]
+
+    def test_the_profit_target_is_the_sources_fifty_percent(self):
+        assert self._cfg()["long_strangle"]["profit_target_pct_of_debit"] == 50
+
+    def test_no_stop_knob_has_crept_in(self):
+        """Max loss is the debit. A stop buffer appearing here would mean
+        something was copied in from a credit variant."""
+        cfg = self._cfg()
+        for banned in ("call_stop_buffer", "put_stop_buffer", "narrow_spread_stop"):
+            assert banned not in cfg, banned
+
+    def test_the_reasoning_lives_in_the_config_not_only_in_a_test(self):
+        """A future reader edits the config, not this file."""
+        raw = CONFIG.read_text()
+        assert "DISABLED (null) ON PURPOSE" in raw
+        assert "a wide range is the day it EXISTS FOR" in raw

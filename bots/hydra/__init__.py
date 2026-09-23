@@ -36,6 +36,31 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-23 STRATEGY H — MADE FAITHFUL TO ITS SOURCE. Operator question: "why can't we
+  build it properly and run it JUST like the man in the video said?" Checking, the honest
+  answer was that we had NOT. H inherited HYDRA's gating stack, and TWO of those gates
+  contradict a long-gamma strategy outright:
+  * WHIPSAW (`whipsaw_range_skip_mult`) skips an entry when the intraday range exceeds
+    1.75x the expected move. For a premium SELLER that is protective — a wild day is when
+    a short position gets hurt. H IS THE OPPOSITE: a wide range is the day it EXISTS FOR.
+    Left on, the gate would have systematically skipped H's best sessions and we would
+    have measured "the source's strategy minus its winners". Now null.
+  * FOMC T+1 BLACKOUT skips the day after an announcement — frequently a large-move day.
+    A/B/C black it out because unresolved post-Fed drift hurts a short position; that
+    reasoning does not transfer to a long one. The source specifies no FOMC handling at
+    all. Now false. (fomc_announcement_skip was already false, deliberately.)
+  The prior justification — "kept for the first observation window so H's gating matches
+  the rest of the fleet and the dry-run data is comparable" — WAS WRONG, and is recorded
+  as wrong rather than quietly replaced: comparability is worth nothing if the thing being
+  compared has had its thesis filtered out.
+  The gate CALLS stay in place so the logic remains single-sourced with the fleet; both
+  are one config value away from returning. 8 tests pin the faithfulness, including that
+  the reasoning lives in the CONFIG (where a future reader will actually be editing) and
+  not only in a test file.
+  Still NOT faithful, and blocked on data rather than choice: the source's IV-percentile
+  <35% filter (nothing here stores option-IV history), its +100% target in expanding IV
+  (same missing series), and the 35% skew tolerance (the source says only "reasonably
+  similar" — the number is ours). All three are recorded in the spec as open.
 - 2026-09-23 STRATEGY H (long strangle), PLAYBOOK STEP 10 — go-live audit. VERDICT:
   **NO-GO**, and the gap is larger than "it needs a live path".
   THE DOMINANT FACT, VERIFIED NOT ASSUMED: H has never executed a single tick. Checked

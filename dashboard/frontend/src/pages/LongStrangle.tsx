@@ -74,6 +74,18 @@ interface Skip {
   expected_move: number | null;
 }
 
+interface RecentRow {
+  date: string;
+  entry_number: number;
+  exit_reason: string | null;
+  realized_pnl: number | null;
+  pnl_pct_of_debit: number | null;
+  minutes_held: number | null;
+  total_debit: number | null;
+  contracts: number | null;
+  em_source: string | null;
+}
+
 interface Status {
   strategy: string;
   label: string;
@@ -109,8 +121,91 @@ function Card({ label, value, hint }: { label: string; value: string; hint?: str
   );
 }
 
+/**
+ * The running record across days — and the one summary that decides whether
+ * this strategy is what its source claims.
+ *
+ * The source claims ~80% winners at +50-100% against losers at -100%. Two
+ * numbers test that and neither is visible in a daily view: the WIN RATE over
+ * the whole sample, and the AVERAGE RETURN ON THE DEBIT. They are rendered with
+ * the sample size attached, because a win rate without an `n` is not a
+ * measurement.
+ */
+function RunningRecord({ rows }: { rows: RecentRow[] }) {
+  const scored = rows.filter((r) => r.realized_pnl !== null);
+  if (scored.length === 0) return null;
+  const wins = scored.filter((r) => (r.realized_pnl ?? 0) > 0).length;
+  const net = scored.reduce((a, r) => a + (r.realized_pnl ?? 0), 0);
+  const risked = scored.reduce((a, r) => a + (r.total_debit ?? 0), 0);
+  const avgPct =
+    scored.reduce((a, r) => a + (r.pnl_pct_of_debit ?? 0), 0) / scored.length;
+
+  return (
+    <section>
+      <h2 className="text-xs font-semibold text-text-primary mb-1.5">
+        Running record
+      </h2>
+      <div className="grid grid-cols-2 md:grid-cols-4 gap-2 mb-2">
+        <Card
+          label="Win rate"
+          value={`${((wins / scored.length) * 100).toFixed(0)}%`}
+          /* An `n` is not decoration. The source claims 80% and the only honest
+             way to read ours is against how many trades produced it. */
+          hint={`${wins} of ${scored.length} — source claims ~80%`}
+        />
+        <Card
+          label="Avg return on debit"
+          value={`${avgPct >= 0 ? "+" : ""}${avgPct.toFixed(0)}%`}
+          hint="source claims +50–100% per winner"
+        />
+        <Card label="Net" value={formatPnL(net, 0)} />
+        <Card
+          label="Total risked"
+          value={money(risked)}
+          hint="sum of debits — every dollar was capped"
+        />
+      </div>
+      <div className="overflow-x-auto">
+        <table className="w-full text-3xs">
+          <thead className="text-text-dim">
+            <tr className="text-left">
+              <th className="py-1 pr-3 font-medium">date</th>
+              <th className="py-1 pr-3 font-medium">exit</th>
+              <th className="py-1 pr-3 font-medium text-right">debit</th>
+              <th className="py-1 pr-3 font-medium text-right">P&amp;L</th>
+              <th className="py-1 pr-3 font-medium text-right">% of debit</th>
+              <th className="py-1 pr-3 font-medium text-right">held</th>
+              <th className="py-1 font-medium">EM</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => (
+              <tr key={`${r.date}-${r.entry_number}`} className="border-t border-border-dim">
+                <td className="py-1 pr-3 text-text-secondary">{r.date}</td>
+                <td className="py-1 pr-3 text-text-dim">{r.exit_reason}</td>
+                <td className="py-1 pr-3 text-right text-text-dim">{money(r.total_debit)}</td>
+                <td className="py-1 pr-3 text-right font-medium">
+                  {formatPnL(r.realized_pnl ?? 0, 0)}
+                </td>
+                <td className="py-1 pr-3 text-right text-text-secondary">
+                  {pct(r.pnl_pct_of_debit)}
+                </td>
+                <td className="py-1 pr-3 text-right text-text-dim">
+                  {r.minutes_held?.toFixed(0) ?? "—"}m
+                </td>
+                <td className="py-1 text-text-dim">{r.em_source ?? "—"}</td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  );
+}
+
 export function LongStrangle() {
   const [status, setStatus] = useState<Status | null>(null);
+  const [recent, setRecent] = useState<RecentRow[]>([]);
   const [failed, setFailed] = useState(false);
 
   useEffect(() => {
@@ -127,10 +222,21 @@ export function LongStrangle() {
         .catch(() => {
           if (!cancelled) setFailed(true);
         });
+    const loadRecent = () =>
+      fetch("/api/long-strangle/recent?limit=30")
+        .then((r) => (r.ok ? r.json() : { rows: [] }))
+        .then((d: { rows: RecentRow[] }) => {
+          if (!cancelled) setRecent(d.rows ?? []);
+        })
+        .catch(() => undefined);
     load();
+    loadRecent();
     // 30s matches the other DB-backed pollers. H writes a snapshot roughly every
     // monitoring tick, so this is never the bottleneck on freshness.
-    const t = setInterval(load, 30_000);
+    const t = setInterval(() => {
+      load();
+      loadRecent();
+    }, 30_000);
     return () => {
       cancelled = true;
       clearInterval(t);
@@ -307,6 +413,8 @@ export function LongStrangle() {
             )}
         </>
       )}
+
+      {recent.length > 0 && <RunningRecord rows={recent} />}
     </div>
   );
 }

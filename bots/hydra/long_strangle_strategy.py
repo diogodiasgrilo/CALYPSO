@@ -433,10 +433,41 @@ class LongStrangleStrategy(HydraStrategy):
             )
             return False
 
+        # THE SOURCE'S COST CAP — his rule, added 2026-09-23 after re-reading the
+        # article. He will not pay more than ~$1.15/share for a SPY strangle
+        # (~$1.30-1.40 on QQQ). It is a QUALITY filter, distinct from
+        # sizing-for-zero: that one decides HOW MANY to buy, this one refuses to
+        # OVERPAY for the premium in the first place.
+        #
+        # ⚠️ THE PORT IS OURS, NOT HIS. He trades SPY and QQQ; we chose SPX to
+        # match the fleet. $1.15 on a ~$775 SPY is 0.1483% of spot, so the same
+        # fraction on SPX is ~$11.50/share ≈ $1,150/contract. Expressed as a
+        # percentage so it tracks the index instead of going stale.
+        #
+        # At 1 contract with a $500 loss limit, sizing-for-zero binds first and
+        # this cap never fires. It is implemented anyway because the two rules
+        # are independent, and raising the loss limit later must not silently
+        # remove his.
+        cap_pct = float(self._ls_config().get("max_debit_pct_of_spot", 0.0))
+        debit_ps = call_px + put_px
+        if cap_pct > 0:
+            cap_ps = spot * cap_pct / 100.0
+            if debit_ps > cap_ps:
+                logger.info(
+                    "LS: debit $%.2f/share exceeds the source's cost cap $%.2f "
+                    "(%.4f%% of spot %.0f) — too expensive, skipping",
+                    debit_ps, cap_ps, cap_pct, spot,
+                )
+                entry.ls_skip_reason = (
+                    f"debit ${debit_ps:.2f}/sh over the ${cap_ps:.2f} cost cap "
+                    f"({cap_pct:.4f}% of spot)"
+                )
+                return False
+
         logger.info(
             "LS strikes: C %.0f (%.2f) / P %.0f (%.2f) — spot %.2f ± %.1fpt "
-            "(%s), skew %.1f%%",
-            call_k, call_px, put_k, put_px, spot, em, em_source, gap,
+            "(%s), skew %.1f%%, debit $%.2f/sh",
+            call_k, call_px, put_k, put_px, spot, em, em_source, gap, debit_ps,
         )
         return True
 
@@ -487,13 +518,60 @@ class LongStrangleStrategy(HydraStrategy):
         return None
 
     def _vix_history_for_percentile(self) -> List[float]:
-        """Closing VIX history for the percentile proxy. Empty until wired.
+        """One VIX close per prior trading day, oldest first, for the percentile.
 
-        Returning ``[]`` makes ``iv_percentile`` return None — "unknown" — which
-        ``_iv_percentile_gate`` treats as a skip, not a pass. That is the
-        fail-closed half of the design above.
+        WIRED 2026-09-23. This returned ``[]`` — "unknown" — on the reasoning
+        that the repo stores no option-IV history. **That was too absolutist.**
+        The source is a retail trader reading "IV percentile" off a broker
+        platform, and for SPX that number is derived from index-option implied
+        vol — which is what VIX *is*. ``market_ticks`` has carried a VIX level
+        on every heartbeat since 2026-05-05, so the filter the source specifies
+        is computable, and running without it was the larger infidelity.
+
+        WHAT IT IS NOT, said plainly so no later reader over-reads it: VIX is
+        the **30-day** implied vol of SPX options, not the IV of the specific
+        0DTE contracts being bought. The two move together but are not the same
+        point on the term structure. Every skip this produces says so in its
+        reason string.
+
+        ⚠️ **The sample has never seen a high-vol regime.** As of wiring it spans
+        ~93 trading days at VIX 13.95-22.59, so a "35th percentile" here is
+        ranked against a calm-only history and means something different from
+        the same number over a full year. It widens as the record grows; it does
+        not become a different measure.
+
+        Reads the variant's OWN ``backtesting.db`` read-only, one row per day
+        (the last tick of each session), and returns ``[]`` on any failure — the
+        gate then treats that as "unknown" and skips, which is the fail-closed
+        half of the design.
         """
-        return []
+        import sqlite3
+        db = os.path.join(DATA_DIR, "backtesting.db")
+        if not os.path.exists(db):
+            return []
+        lookback = int(self._ls_config().get("iv_percentile_lookback_days", 252))
+        today = get_us_market_time().strftime("%Y-%m-%d")
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+            try:
+                # One value per PRIOR day: today's own ticks would rank the
+                # current reading against itself and drag the percentile toward
+                # the middle on every tick.
+                rows = con.execute(
+                    "SELECT vix_level FROM ("
+                    "  SELECT date(timestamp) AS d, vix_level,"
+                    "         ROW_NUMBER() OVER (PARTITION BY date(timestamp)"
+                    "                            ORDER BY timestamp DESC) AS rn"
+                    "  FROM market_ticks WHERE vix_level > 0 AND date(timestamp) < ?"
+                    ") WHERE rn = 1 ORDER BY d DESC LIMIT ?",
+                    (today, lookback),
+                ).fetchall()
+                return [float(r[0]) for r in reversed(rows) if r and r[0]]
+            finally:
+                con.close()
+        except Exception as e:          # noqa: BLE001 — a filter must not break entry
+            logger.warning("LS: VIX history unavailable for the IV percentile: %s", e)
+            return []
 
     # ==================================================================
     # Step 4 — sizing for zero
@@ -551,12 +629,28 @@ class LongStrangleStrategy(HydraStrategy):
         * **Orphaned orders** still blocks. H cannot create a naked short, but it
           shares an account with variants that can, and opening new positions
           while the account state is unreconciled is wrong regardless of sign.
-        * **Whipsaw** still blocks, which is arguably backwards for a long-gamma
-          strategy — a wide intraday range is what H *wants*. It is kept for the
-          first observation window so H's gating matches the rest of the fleet
-          and the dry-run data is comparable; ``whipsaw_range_skip_mult`` is
-          config-exposed, and this is a prime candidate to relax once there is
-          data. Flagged here rather than silently inverted.
+        * **Whipsaw is DISABLED for H** (``whipsaw_range_skip_mult: null``), and
+          this is the most consequential config choice in the variant. The
+          filter skips an entry when the intraday range exceeds 1.75x the
+          expected move. For a premium SELLER that is protective — a wild day is
+          when a short position gets hurt. **H is the opposite: a wide range is
+          the day it exists for**, so the inherited gate would systematically
+          skip its best sessions and we would be measuring "the source's
+          strategy minus its winners". The source specifies no such filter.
+
+          It was briefly kept "so the gating matches the fleet and the data is
+          comparable" — that was wrong. Comparability is worth nothing if the
+          thing being compared has had its thesis filtered out.
+
+        * **FOMC T+1 is also disabled** for the same reason: the day after an
+          announcement is frequently a large-move day, and the source specifies
+          no FOMC handling at all. A/B/C black it out because unresolved
+          post-Fed drift hurts a short position; that reasoning does not
+          transfer to a long one.
+
+        The gate CALLS stay in place rather than being deleted, so the logic
+        remains single-sourced with the rest of the fleet and both are one
+        config value away from returning.
         """
         if self._has_orphaned_orders():
             logger.error("LS entry #%d blocked by orphaned orders", entry_num)
@@ -866,13 +960,29 @@ class LongStrangleStrategy(HydraStrategy):
         """
         cfg = self._ls_config()
         base = float(cfg.get("profit_target_pct_of_debit", 50.0))
-        if not (cfg.get("iv_percentile_filter_enabled", False)
-                and str(cfg.get("iv_percentile_source", "") or "").strip()):
+        elevated = float(cfg.get("profit_target_pct_of_debit_iv_expanding", base))
+        if elevated <= base:
             return base
-        pct = iv_percentile(float(getattr(self, "current_vix", 0.0) or 0.0),
-                            self._vix_history_for_percentile())
-        if pct is not None and pct <= float(cfg.get("iv_percentile_max", 35.0)):
-            return float(cfg.get("profit_target_pct_of_debit_iv_expanding", base))
+
+        hist = self._vix_history_for_percentile()
+        pct = iv_percentile(float(getattr(self, "current_vix", 0.0) or 0.0), hist)
+        if pct is None:
+            return base
+
+        # "EXPANDING from a LOW base" is TWO conditions, and reading it as one
+        # was the easy mistake: a low percentile alone is a cheap-premium day,
+        # which is the ENTRY filter, not the exit rule. The source wants the
+        # extra target when vol is cheap AND rising — the case where a long
+        # position gets paid twice, by the move and by the vol expansion.
+        low = pct <= float(cfg.get("iv_percentile_max", 35.0))
+        rising = bool(hist) and float(getattr(self, "current_vix", 0.0) or 0.0) > hist[-1]
+        if low and rising:
+            logger.info(
+                "LS: IV cheap (%.0fth pct) AND expanding (VIX %.2f > prior close "
+                "%.2f) — target raised to %+.0f%%",
+                pct, float(getattr(self, "current_vix", 0.0) or 0.0), hist[-1], elevated,
+            )
+            return elevated
         return base
 
     def _check_stop_losses(self) -> Optional[str]:

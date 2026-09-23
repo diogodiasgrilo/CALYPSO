@@ -198,28 +198,53 @@ class TestTheProfitTarget:
 
 
 class TestTheElevatedTarget:
-    def test_it_is_fifty_percent_while_the_IV_series_is_unwired(self):
-        """The source takes +100% when IV expands from a low base. That needs the
-        same IV-percentile series Step 4's filter needs and this repo lacks, so
-        the elevated target is unreachable — stated, not silently defaulted."""
-        s = _strat(ls_cfg={"profit_target_pct_of_debit_iv_expanding": 100.0})
-        assert s._profit_target_pct() == pytest.approx(50.0)
+    """The source raises the target to +100% when IV is "expanding from a low
+    base". That is TWO conditions, and reading it as one was the easy mistake:
+    a low percentile alone is a cheap-premium day, which is the ENTRY filter,
+    not the exit rule. He wants the bigger target when vol is cheap AND rising —
+    the case where a long position gets paid twice, by the move and by the vol
+    expansion."""
 
-    def test_a_wired_low_IV_percentile_raises_it_to_one_hundred(self):
-        s = _strat(ls_cfg={"profit_target_pct_of_debit_iv_expanding": 100.0,
-                           "iv_percentile_filter_enabled": True,
-                           "iv_percentile_source": "vix",
-                           "iv_percentile_max": 35.0})
+    def _s(self, **over):
+        cfg = {"profit_target_pct_of_debit_iv_expanding": 100.0,
+               "iv_percentile_max": 35.0}
+        cfg.update(over)
+        return _strat(ls_cfg=cfg)
+
+    def test_cheap_AND_rising_raises_it_to_one_hundred(self):
+        s = self._s()
+        s.current_vix = 14.0                      # above the prior close...
+        s._vix_history_for_percentile = lambda: [20.0, 22.0, 25.0, 30.0, 13.0]
+        assert s._profit_target_pct() == pytest.approx(100.0)   # ...and 20th pct
+
+    def test_cheap_but_FALLING_keeps_the_ordinary_target(self):
+        """Vol collapsing toward a low is not vol expanding from one. Buying
+        premium into a decline is the opposite of the setup he describes."""
+        s = self._s()
         s.current_vix = 10.0
         s._vix_history_for_percentile = lambda: [12.0, 13.0, 14.0, 20.0, 25.0]
-        assert s._profit_target_pct() == pytest.approx(100.0)
+        assert s._profit_target_pct() == pytest.approx(50.0)
 
-    def test_a_high_percentile_keeps_the_ordinary_target(self):
-        s = _strat(ls_cfg={"profit_target_pct_of_debit_iv_expanding": 100.0,
-                           "iv_percentile_filter_enabled": True,
-                           "iv_percentile_source": "vix",
-                           "iv_percentile_max": 35.0})
+    def test_rising_but_EXPENSIVE_keeps_the_ordinary_target(self):
+        """"From a low base" is doing real work — a rise off an already-high
+        level is not the setup."""
+        s = self._s()
+        s.current_vix = 30.0
         s._vix_history_for_percentile = lambda: [10.0, 11.0, 12.0, 13.0, 20.0]
+        assert s._profit_target_pct() == pytest.approx(50.0)
+
+    def test_no_history_falls_back_to_the_ordinary_target(self):
+        """Unknown is not "expanding". The ENTRY filter fails closed on unknown;
+        the EXIT must fail to the ordinary target, because refusing to exit is
+        not a safe default for a position already open."""
+        s = self._s()
+        s._vix_history_for_percentile = lambda: []
+        assert s._profit_target_pct() == pytest.approx(50.0)
+
+    def test_an_elevated_target_below_the_base_is_ignored(self):
+        s = self._s(profit_target_pct_of_debit_iv_expanding=25.0)
+        s.current_vix = 14.0
+        s._vix_history_for_percentile = lambda: [20.0, 22.0, 25.0, 30.0, 13.0]
         assert s._profit_target_pct() == pytest.approx(50.0)
 
 

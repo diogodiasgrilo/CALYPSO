@@ -751,3 +751,162 @@ class TestTheStrikesCannotCollapseIntoAStraddle:
         assert call.kwargs["expected_move"] == pytest.approx(2.0)
         # skip_reason is positional (date, entry_number, skip_time, reason).
         assert "straddle" in call.args[3]
+
+
+# ======================================================================
+# The IV-percentile filter — the source's rule, now actually running
+# ======================================================================
+
+class TestTheVixHistoryIsRealNow:
+    """`_vix_history_for_percentile` returned `[]` until 2026-09-23 on the
+    reasoning that this repo stores no option-IV history. **That was too
+    absolutist.** The source is a retail trader reading "IV percentile" off a
+    broker platform, and for SPX that number comes from index-option implied vol
+    — which is what VIX is. `market_ticks` has carried a VIX level on every
+    heartbeat since 2026-05-05, so the filter the source SPECIFIES is
+    computable, and running without it was the larger infidelity.
+
+    What it is NOT: VIX is 30-day implied vol, not the IV of the specific 0DTE
+    contracts. Every skip it produces says so.
+    """
+
+    def _db(self, tmp_path, rows):
+        import sqlite3
+        d = tmp_path / "variant_h"
+        d.mkdir(exist_ok=True)
+        con = sqlite3.connect(str(d / "backtesting.db"))
+        con.execute("CREATE TABLE market_ticks (timestamp TEXT, vix_level REAL)")
+        con.executemany("INSERT INTO market_ticks VALUES (?,?)", rows)
+        con.commit()
+        con.close()
+        return d
+
+    def _strat_with(self, tmp_path, monkeypatch, rows, **cfg):
+        d = self._db(tmp_path, rows)
+        import bots.hydra.long_strangle_strategy as mod
+        monkeypatch.setattr(mod, "DATA_DIR", str(d))
+        return _strat(ls_cfg=cfg)
+
+    def test_it_reads_one_close_per_day_oldest_first(self, tmp_path, monkeypatch):
+        s = self._strat_with(tmp_path, monkeypatch, [
+            ("2026-09-20 15:59:00", 15.0), ("2026-09-20 10:00:00", 99.0),
+            ("2026-09-21 15:59:00", 16.0), ("2026-09-21 10:00:00", 98.0),
+        ])
+        # The LAST tick of each day is that day's close; earlier ones are noise.
+        assert s._vix_history_for_percentile() == [15.0, 16.0]
+
+    def test_today_is_excluded(self, tmp_path, monkeypatch):
+        """Ranking the current reading against itself drags the percentile
+        toward the middle on every tick."""
+        from shared.market_hours import get_us_market_time
+        today = get_us_market_time().strftime("%Y-%m-%d")
+        s = self._strat_with(tmp_path, monkeypatch, [
+            ("2026-09-20 15:59:00", 15.0), (f"{today} 10:00:00", 44.0),
+        ])
+        assert s._vix_history_for_percentile() == [15.0]
+
+    def test_zero_and_missing_readings_are_dropped(self, tmp_path, monkeypatch):
+        s = self._strat_with(tmp_path, monkeypatch, [
+            ("2026-09-20 15:59:00", 15.0), ("2026-09-19 15:59:00", 0.0),
+        ])
+        assert s._vix_history_for_percentile() == [15.0]
+
+    def test_the_lookback_is_bounded_and_configurable(self, tmp_path, monkeypatch):
+        rows = [(f"2026-0{m}-{d:02d} 15:59:00", 10.0 + d)
+                for m in (6, 7) for d in range(1, 21)]
+        s = self._strat_with(tmp_path, monkeypatch, rows,
+                             iv_percentile_lookback_days=5)
+        assert len(s._vix_history_for_percentile()) == 5
+
+    def test_a_missing_database_is_empty_not_an_exception(self, tmp_path, monkeypatch):
+        import bots.hydra.long_strangle_strategy as mod
+        monkeypatch.setattr(mod, "DATA_DIR", str(tmp_path / "nope"))
+        assert _strat()._vix_history_for_percentile() == []
+
+    def test_a_corrupt_database_degrades_to_empty(self, tmp_path, monkeypatch):
+        d = tmp_path / "variant_h"
+        d.mkdir()
+        (d / "backtesting.db").write_bytes(b"not a database")
+        import bots.hydra.long_strangle_strategy as mod
+        monkeypatch.setattr(mod, "DATA_DIR", str(d))
+        assert _strat()._vix_history_for_percentile() == []
+
+    def test_the_gate_now_PASSES_on_genuinely_cheap_vol(self, tmp_path, monkeypatch):
+        """The whole point: the source's rule runs instead of being skipped."""
+        s = self._strat_with(tmp_path, monkeypatch,
+                             [(f"2026-06-{d:02d} 15:59:00", 20.0 + d) for d in range(1, 21)],
+                             iv_percentile_filter_enabled=True,
+                             iv_percentile_source="vix", iv_percentile_max=35.0)
+        s.current_vix = 14.0            # far below every stored close
+        assert s._iv_percentile_gate(_entry()) is None
+
+    def test_the_gate_VETOES_expensive_vol_and_names_the_proxy(self, tmp_path, monkeypatch):
+        s = self._strat_with(tmp_path, monkeypatch,
+                             [(f"2026-06-{d:02d} 15:59:00", 10.0 + d * 0.1) for d in range(1, 21)],
+                             iv_percentile_filter_enabled=True,
+                             iv_percentile_source="vix", iv_percentile_max=35.0)
+        s.current_vix = 30.0            # above every stored close
+        reason = s._iv_percentile_gate(_entry())
+        assert reason is not None
+        # It must never be mistaken for a per-option IV percentile.
+        assert "NOT an option-IV percentile" in reason
+
+
+class TestTheSourcesCostCap:
+    """He will not pay more than ~$1.15/share for a SPY strangle. A QUALITY
+    filter, distinct from sizing-for-zero: that decides HOW MANY to buy, this
+    refuses to OVERPAY in the first place.
+
+    The PORT is ours, not his — he trades SPY/QQQ and we chose SPX. $1.15 on a
+    ~$775 SPY is 0.1483% of spot, so the same fraction on SPX is ~$11.50/share.
+    Expressed as a percentage so it tracks the index rather than going stale.
+    """
+
+    def _s(self, otm_px, cap=0.1483):
+        s = _strat(quotes=_atm_quotes(otm=otm_px),
+                   ls_cfg={"max_debit_pct_of_spot": cap})
+        s._get_todays_expiry = MagicMock(return_value="2026-09-23")
+        return s
+
+    def test_an_ordinary_debit_passes(self):
+        # 2 x $1.20 = $2.40/share on spot 7765 -> 0.031%, far under the cap.
+        assert self._s(1.20)._calculate_strikes(_entry()) is True
+
+    def test_an_over_priced_strangle_is_refused(self):
+        # 2 x $8.00 = $16.00/share -> 0.206% of spot, over the 0.1483% cap.
+        e = _entry()
+        assert self._s(8.00)._calculate_strikes(e) is False
+        assert "cost cap" in e.ls_skip_reason
+
+    def test_the_cap_tracks_the_index_rather_than_a_fixed_dollar(self):
+        """0.1483% of 7765 is ~$11.52/share. A fixed dollar cap would drift as
+        the index moves; a percentage does not."""
+        s = self._s(5.70)          # 2 x 5.70 = 11.40/share, just UNDER
+        assert s._calculate_strikes(_entry()) is True
+        s2 = self._s(5.80)         # 2 x 5.80 = 11.60/share, just OVER
+        assert s2._calculate_strikes(_entry()) is False
+
+    def test_zero_disables_it(self):
+        """An operator must be able to turn HIS rule off without deleting it."""
+        assert self._s(8.00, cap=0.0)._calculate_strikes(_entry()) is True
+
+    def test_it_is_independent_of_sizing_for_zero(self):
+        """The two rules answer different questions. At 1 contract with a $500
+        loss limit sizing binds first, so this must be its OWN gate or raising
+        that limit later would silently drop the source's rule."""
+        s = self._s(8.00)
+        e = _entry()
+        s._calculate_strikes(e)
+        # Refused on COST, before sizing was ever consulted.
+        assert "cost cap" in e.ls_skip_reason
+        assert "sizing" not in e.ls_skip_reason
+
+    def test_the_skip_records_the_counterfactual(self):
+        s = self._s(8.00)
+        s.daily_state = SimpleNamespace(entries_skipped=0)
+        s._next_entry_index = 0
+        s._record_skipped_entry = MagicMock()
+        e = _entry()
+        s._calculate_strikes(e)
+        s._skip(e, 1, e.ls_skip_reason)
+        assert "cost cap" in s.ls_recorder.record_skip.call_args.args[3]
