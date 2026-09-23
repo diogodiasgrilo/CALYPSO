@@ -17,6 +17,7 @@
 import { useSelectedStrategy } from "../../hooks/useSelectedStrategy";
 import { useStrategySnapshot } from "../../hooks/useStrategySnapshot";
 import { IronCondorDashboard } from "./IronCondorDashboard";
+import { LongStrangle } from "../../pages/LongStrangle";
 import { CalendarDashboard } from "./CalendarDashboard";
 import { accentForStrategy } from "../../lib/pnlShape";
 import { useSelectedSnapshotStore } from "./selectedSnapshotStore";
@@ -60,6 +61,14 @@ export function StrategyDashboard() {
   }
 
   const accent = accentForStrategy(strategy.id);
+
+  // 2b. Long-gamma strategy → its own view. It must NOT fall through to the IC
+  // renderer below: that renderer's entire model is that premium was COLLECTED,
+  // so it would show credit, cushion bars and a spread width H does not have.
+  // This is the case the old two-way `data_kind` switch silently mis-rendered.
+  if (strategy.data_kind === "long_gamma") {
+    return <LongStrangle />;
+  }
 
   // 3. Calendar strategy → polled calendar view.
   if (strategy.data_kind === "dc_calendar") {

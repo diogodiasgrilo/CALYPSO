@@ -134,8 +134,25 @@ def _decide_calendar_winner(scores: dict, outcome_counts: dict) -> str:
 
 
 def _data_kind(m: tax.StrategyMeta) -> str:
-    """``dc_calendar`` for net-debit double calendars, else ``ic_state``."""
-    return "dc_calendar" if m.structure_family == "double_calendar" else "ic_state"
+    """Which renderer a strategy's main-dashboard view needs.
+
+    ⚠️ THIS USED TO BE A TWO-WAY SWITCH — "double calendar, else iron condor" —
+    and that silently made every future shape an iron condor. Variant H landed
+    in the `else` and rendered with credit fields, cushion bars and a spread
+    width it does not have: the ONLY `ic_state` strategy whose `pnl_shape` is
+    `debit`, which is self-contradictory because the IC renderer's whole model
+    is that premium was COLLECTED.
+
+    `pnl_shape` is now what decides, because it is the property the renderers
+    actually disagree about. A debit strategy that is not a calendar gets
+    `long_gamma`, and anything genuinely new fails visibly on an unknown kind
+    rather than being quietly drawn as an iron condor.
+    """
+    if m.structure_family == "double_calendar":
+        return "dc_calendar"
+    if m.pnl_shape == "debit":
+        return "long_gamma"
+    return "ic_state"
 
 
 def _variant_dir(vid: str) -> Optional[Path]:

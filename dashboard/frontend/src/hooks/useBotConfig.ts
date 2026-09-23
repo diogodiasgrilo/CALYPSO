@@ -1,6 +1,23 @@
-/** Fetches bot config flags from the backend (read once on mount). */
+/**
+ * Bot config flags for the SELECTED strategy.
+ *
+ * ⚠️ IT USED TO FETCH THE PRIMARY'S CONFIG FOR EVERY STRATEGY, and the symptom
+ * was visible on screen: with variant H picked — a strategy with exactly ONE
+ * entry at 09:45 — the Timeline rendered "09:45 … 12:45", which is variant B's
+ * seven-slot grid. The same was true of A, C, F and G; H only made it obvious.
+ *
+ * Two independent causes, both fixed here:
+ *   1. `fetch("/api/hydra/bot-config")` passed NO `strategy_id`, and the
+ *      backend falls back to `live_config_file()` when none is given.
+ *   2. The cache was a single module-level `BotConfig`, so even with an id the
+ *      first strategy fetched would have stuck for every later one.
+ *
+ * The cache is now keyed by strategy id, which is what makes switching in the
+ * picker actually refetch.
+ */
 
 import { useEffect, useState } from "react";
+import { useSelectedStrategy } from "./useSelectedStrategy";
 
 interface BotConfig {
   conditional_e6_enabled: boolean;
@@ -41,24 +58,39 @@ const DEFAULT_CONFIG: BotConfig = {
   primary_label: "",
 };
 
-let _cachedConfig: BotConfig | null = null;
+/** Per-strategy cache. A single shared slot was half the bug this hook had. */
+const _cache = new Map<string, BotConfig>();
 
-/** Returns the full bot config (cached after first fetch). */
+/** Returns the selected strategy's bot config (cached per strategy id). */
 export function useBotConfig(): BotConfig {
-  const [cfg, setCfg] = useState<BotConfig>(_cachedConfig ?? DEFAULT_CONFIG);
+  const { strategy } = useSelectedStrategy();
+  // "" means "whatever the backend considers canonical", which is the correct
+  // request while meta is still loading — it is the historical behaviour and
+  // the only sensible default before a selection exists.
+  const id = strategy?.id ?? "";
+  const [cfg, setCfg] = useState<BotConfig>(_cache.get(id) ?? DEFAULT_CONFIG);
 
   useEffect(() => {
-    if (_cachedConfig) return;
-    fetch("/api/hydra/bot-config")
+    const hit = _cache.get(id);
+    if (hit) {
+      setCfg(hit);
+      return;
+    }
+    let cancelled = false;
+    const qs = id ? `?strategy_id=${encodeURIComponent(id)}` : "";
+    fetch(`/api/hydra/bot-config${qs}`)
       .then((r) => r.json())
       .then((data: BotConfig) => {
-        _cachedConfig = data;
-        setCfg(data);
+        _cache.set(id, data);
+        if (!cancelled) setCfg(data);
       })
       .catch(() => {
         // On error, keep defaults (show nothing hidden unintentionally)
       });
-  }, []);
+    return () => {
+      cancelled = true;
+    };
+  }, [id]);
 
   return cfg;
 }

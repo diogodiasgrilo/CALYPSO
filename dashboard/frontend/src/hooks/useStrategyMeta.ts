@@ -11,8 +11,13 @@
 
 import { useEffect, useState } from "react";
 
-/** A strategy's data renderer kind — drives StrategyDashboard's dispatch. */
-export type DataKind = "ic_state" | "dc_calendar";
+/** A strategy's data renderer kind — drives StrategyDashboard's dispatch.
+ *
+ * `long_gamma` added 2026-09-23. `data_kind` used to be a two-way switch
+ * ("double calendar, else iron condor"), which silently drew variant H — net
+ * DEBIT, no credit, no spread width — as an iron condor. The kinds now follow
+ * `pnl_shape`, which is the property the renderers actually disagree about. */
+export type DataKind = "ic_state" | "dc_calendar" | "long_gamma";
 
 /** Credit (net-credit IC) vs debit (net-debit calendar). Forbids cross-shape charts. */
 export type PnlShape = "credit" | "debit" | "unknown";

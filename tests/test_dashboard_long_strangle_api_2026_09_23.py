@@ -392,3 +392,97 @@ class TestASkipOnlyDayIsStillData:
         out = read_ls_status(str(p))
         assert out["available"] is False
         assert "declined entries" in out["reason"]
+
+
+class TestHDoesNotRenderAsAnIronCondor:
+    """The operator spotted this on screen: with variant H picked — ONE entry at
+    09:45 — the dashboard showed a Timeline of "09:45 … 12:45", which is variant
+    B's seven-slot grid, plus credit fields and cushion bars H does not have.
+
+    Two independent causes, both fixed 2026-09-23:
+
+    1. `_data_kind` was a TWO-WAY switch — "double calendar, else iron condor" —
+       so every future shape defaulted to the IC renderer whose entire model is
+       that premium was COLLECTED. H was the only `ic_state` strategy with
+       `pnl_shape == "debit"`, which is self-contradictory.
+    2. `useBotConfig` fetched `/api/hydra/bot-config` with NO strategy_id, and
+       the backend falls back to the live seat's config. That one affected A, C,
+       F and G too — H only made it obvious.
+    """
+
+    def test_h_is_not_ic_shaped(self):
+        import shared.strategy_taxonomy as tax
+        from dashboard.backend.routers.strategies import _data_kind
+        assert _data_kind(tax.STRATEGIES["h"]) == "long_gamma"
+
+    def test_no_debit_strategy_is_ever_ic_state(self):
+        """DERIVED over the taxonomy, not asserted about H alone — a guard that
+        names the thing it guards protects only that thing, which is how the
+        `variant_h_baseline_date` omission survived a test written for exactly
+        that class of bug."""
+        import shared.strategy_taxonomy as tax
+        from dashboard.backend.routers.strategies import _data_kind
+        wrong = {v: _data_kind(tax.STRATEGIES[v])
+                 for v in tax.available_ids()
+                 if tax.STRATEGIES[v].pnl_shape == "debit"
+                 and _data_kind(tax.STRATEGIES[v]) == "ic_state"}
+        assert not wrong, (
+            f"{wrong} would render with the iron-condor renderer, whose model is "
+            f"that premium was COLLECTED — 'expired worthless' is profit there "
+            f"and MAXIMUM LOSS for a debit strategy."
+        )
+
+    def test_the_credit_strategies_are_unchanged(self):
+        """The fix must not move anything that already worked."""
+        import shared.strategy_taxonomy as tax
+        from dashboard.backend.routers.strategies import _data_kind
+        for v in ("a", "b", "bm", "c", "f", "g"):
+            assert _data_kind(tax.STRATEGIES[v]) == "ic_state", v
+        for v in ("d", "e"):
+            assert _data_kind(tax.STRATEGIES[v]) == "dc_calendar", v
+
+    def test_h_does_not_claim_the_IC_analytics_page(self):
+        """A real consequence of the old mis-classification: H had
+        `analytics: True`, so the page would have rendered sixteen zeroed
+        iron-condor charts. H writes NO trade_entries/trade_stops — its rows
+        live in ls_entries, in its own database."""
+        import shared.strategy_taxonomy as tax
+        from dashboard.backend.routers.strategies import _capabilities
+        caps = _capabilities(tax.STRATEGIES["h"])
+        assert caps["analytics"] is False
+        assert caps["calendar_cards"] is False
+        assert caps["main_dashboard"] is True      # it still has a view
+
+    def test_the_bot_config_endpoint_is_strategy_scoped(self, client, monkeypatch):
+        """The Timeline bug's other half. Asking for H must return H's single
+        09:45 slot, not the live seat's seven.
+
+        Points the setting at the REPO's committed config — the default is the
+        VM path, which does not exist off-box."""
+        repo_cfg = (Path(__file__).resolve().parents[1] / "bots" / "hydra" /
+                    "config" / "config_variant_h.json")
+        assert repo_cfg.exists(), "H's committed config is missing"
+        monkeypatch.setattr(settings, "variant_h_config_file", repo_cfg,
+                            raising=False)
+
+        r = client.get("/api/hydra/bot-config", params={"strategy_id": "h"})
+        assert r.status_code == 200
+        times = r.json().get("entry_times") or []
+        assert times == ["09:45"], f"expected H's single slot, got {times}"
+
+    def test_and_the_live_seat_still_gets_its_own(self, client):
+        """The scoping must not break the default path that already worked."""
+        r = client.get("/api/hydra/bot-config")
+        assert r.status_code == 200
+
+    def test_the_frontend_actually_passes_the_strategy_id(self):
+        """The backend was always scoped; the frontend never asked. Checked as
+        source because the failure was a MISSING argument — there is no wrong
+        value to assert on."""
+        src = (Path(__file__).resolve().parents[1] / "dashboard" / "frontend" /
+               "src" / "hooks" / "useBotConfig.ts").read_text()
+        assert "strategy_id=" in src
+        assert "useSelectedStrategy" in src
+        # A single shared cache was the other half — it would pin the first
+        # strategy fetched for every later one.
+        assert "new Map<string, BotConfig>()" in src
