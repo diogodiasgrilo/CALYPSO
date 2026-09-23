@@ -33,6 +33,23 @@ something that was never time-sensitive. `DataRecorder.update_skipped_entry_back
 exists for writing the result back and remains available, but nothing here
 requires the bot to be involved.
 
+TWO SCORING DEFECTS, FIXED 2026-09-23 — read this before comparing to an old run
+--------------------------------------------------------------------------------
+Both changed the numbers this script reports, and the second changed what
+``--apply`` WRITES, so a run from before that date is not comparable.
+
+1. **Attribution.** The GEX adjuster vetoes **one side**; this scored the **whole
+   entry** and filtered on nothing but ``skip_reason LIKE '%GEX%'``. A veto got
+   credit for whatever the entry avoided, regardless of which side it objected
+   to. On 2026-09-21 the adjuster vetoed the **put**, the put was **never
+   breached**, and the entry was saved by the **call** breach — which
+   require-both-sides caught, not GEX. Two wrong calls scored as one win. Now
+   joined to ``gex_decisions`` (``gex_vetoed_sides``) and scored per side
+   (``score_gex_veto``).
+2. **Arithmetic.** A one-sided breach was modelled as a full-entry loss,
+   discarding the surviving side's kept credit and pricing the loss at the
+   CALL's width even when the PUT breached. See ``_side_pnl``.
+
 WHAT IS MEASURED vs WHAT IS MODELLED — read this before quoting a number
 -----------------------------------------------------------------------
 MEASURED (hard facts from market_ticks):
@@ -58,6 +75,11 @@ as if it were the whole history.
 USAGE (on the VM, as calypso)
   .venv/bin/python -m scripts.analyze_skipped_entry_outcomes --variant b
   .venv/bin/python -m scripts.analyze_skipped_entry_outcomes --variant b --reason GEX
+
+The GEX run also prints an ATTRIBUTION block: of the vetoes traceable to a
+``gex_decisions`` row, how many objected to a side that actually breached. A
+veto marked ``wrong`` whose entry still avoided a loss was saved by something
+else — that distinction is the whole reason the join exists.
 """
 from __future__ import annotations
 
@@ -112,8 +134,85 @@ def _spx_extremes_after(db, date_str, after_time):
         con.close()
 
 
+def gex_vetoed_sides(db, variant):
+    """``{(date, entry_number): {"call"|"put", ...}}`` — the sides the GEX
+    strike-adjuster actually vetoed, from ``gex_decisions``.
+
+    WHY THIS JOIN EXISTS (found 2026-09-23). The adjuster vetoes **one side**;
+    this analyzer scored **the whole entry** and filtered on nothing but
+    ``skip_reason LIKE '%GEX%'``. So a veto got credit for whatever the entry
+    avoided, regardless of which side it objected to.
+
+    On 2026-09-21 that produced a verdict that was wrong twice over: the
+    adjuster vetoed the **put**, the put was **never breached**, and the entry
+    was saved by the **call** breach — which require-both-sides caught, not GEX.
+    Two incorrect calls were scored as one win.
+
+    Returns ``{}`` when the table is absent or empty (pre-schema-v16 databases),
+    which the caller must treat as "attribution unavailable" and say so, rather
+    than as "no side was vetoed".
+    """
+    con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
+    try:
+        out = {}
+        for r in con.execute(
+            "SELECT date, entry_number, side FROM gex_decisions "
+            "WHERE consumer = 'adjuster' AND UPPER(COALESCE(live_action,'')) = 'SKIP' "
+            "AND (variant IS NULL OR LOWER(variant) = ?)",
+            (str(variant).lower(),),
+        ):
+            side = (r[2] or "").strip().lower()
+            if side in ("call", "put") and r[1] is not None:
+                out.setdefault((r[0], r[1]), set()).add(side)
+        return out
+    except sqlite3.Error:
+        return {}               # no gex_decisions table — attribution unavailable
+    finally:
+        con.close()
+
+
+def score_gex_veto(outcome, vetoed_sides):
+    """Was the veto right ON ITS OWN TERMS — did the side IT objected to breach?
+
+    Deliberately separate from the entry's P&L. An entry can be saved while the
+    veto that is credited with saving it was wrong about which side was
+    dangerous, and collapsing the two hides exactly that.
+
+    Returns one of ``"correct"`` (a vetoed side breached), ``"wrong"`` (no
+    vetoed side breached), or ``"unattributed"`` (no gex_decisions row).
+    """
+    if not vetoed_sides:
+        return "unattributed"
+    breached = {s for s in ("call", "put")
+                if outcome.get(f"{s}_breach")}
+    return "correct" if (vetoed_sides & breached) else "wrong"
+
+
+def _side_pnl(breached, credit_ps, width, *, pct_of_width, contracts):
+    """One side's modelled dollars, or None when it breached with no width.
+
+    THE SIDES ARE INDEPENDENT, and modelling them together was a real defect
+    (found 2026-09-23). An iron condor whose CALL stops out does not forfeit the
+    PUT: the put rides to expiry and keeps its credit. The previous version
+    charged a full stop for ANY breach and discarded BOTH sides' credit, which
+    overstates the loss on every one-sided breach — the common case, since SPX
+    rarely breaches both sides of the same condor in one session.
+
+    Returns None rather than 0.0 for "breached but no width recorded": a stop
+    whose size is unknown is not a stop worth zero, and the caller must drop the
+    row instead of persisting a number it invented.
+    """
+    if breached:
+        return -(pct_of_width * width * 100 * contracts) if width else None
+    return (credit_ps or 0.0) * 100 * contracts
+
+
 def evaluate(row, lo, hi, *, pct_of_width, contracts):
-    """Outcome for one skipped entry. Returns None when unmeasurable."""
+    """Outcome for one skipped entry. Returns None when unmeasurable.
+
+    Each side is modelled on ITS OWN strikes, width and credit — see
+    ``_side_pnl`` for why modelling them jointly was wrong.
+    """
     sc, sp = row.get("theoretical_short_call"), row.get("theoretical_short_put")
     if not sc and not sp:
         return None            # strikes never recorded — structurally unmeasurable
@@ -122,27 +221,39 @@ def evaluate(row, lo, hi, *, pct_of_width, contracts):
 
     call_breach = bool(sc) and hi is not None and hi >= sc
     put_breach = bool(sp) and lo is not None and lo <= sp
+
+    # Per-side width. The old code took the CALL width and fell back to the put
+    # only when no call existed — so a put-side breach on an asymmetric condor
+    # was priced at the call's width (MKT-028 exists precisely to allow 60/75pt
+    # asymmetry, so this is not hypothetical).
+    call_width = (abs(row["theoretical_long_call"] - sc)
+                  if sc and row.get("theoretical_long_call") else 0.0)
+    put_width = (abs(sp - row["theoretical_long_put"])
+                 if sp and row.get("theoretical_long_put") else 0.0)
+
+    call_pnl = (_side_pnl(call_breach, row.get("estimated_call_credit"), call_width,
+                          pct_of_width=pct_of_width, contracts=contracts)
+                if sc else 0.0)
+    put_pnl = (_side_pnl(put_breach, row.get("estimated_put_credit"), put_width,
+                         pct_of_width=pct_of_width, contracts=contracts)
+               if sp else 0.0)
+
+    # A side that breached with no recorded width makes the ENTRY unmodellable —
+    # better to report it as such than to persist a partial figure as a total.
+    modelled = None if (call_pnl is None or put_pnl is None) else call_pnl + put_pnl
+
     credit = ((row.get("estimated_call_credit") or 0.0)
               + (row.get("estimated_put_credit") or 0.0)) * 100 * contracts
 
-    width = 0.0
-    if sc and row.get("theoretical_long_call"):
-        width = abs(row["theoretical_long_call"] - sc)
-    elif sp and row.get("theoretical_long_put"):
-        width = abs(sp - row["theoretical_long_put"])
-
-    if call_breach or put_breach:
-        # MODELLED — B's acting A2 stop caps the loss at pct x width x 100 x qty.
-        modelled = -(pct_of_width * width * 100 * contracts) if width else None
-    else:
-        modelled = credit      # close to measured: the credit is kept
-
     return {
         "date": row["date"], "entry": row["entry_number"],
-        "short_call": sc, "short_put": sp, "width": width,
+        "short_call": sc, "short_put": sp,
+        "width": max(call_width, put_width),     # display only
+        "call_width": call_width, "put_width": put_width,
         "spx_lo": lo, "spx_hi": hi,
         "call_breach": call_breach, "put_breach": put_breach,
         "breached": call_breach or put_breach,
+        "call_pnl": call_pnl, "put_pnl": put_pnl,
         "credit": credit, "modelled_pnl": modelled,
     }
 
@@ -174,6 +285,8 @@ def main(argv=None) -> int:
     print(f"\nskipped entries matched: {len(rows)}"
           + (f"  (reason ~ {a.reason!r})" if a.reason else ""))
 
+    veto_map = gex_vetoed_sides(db, a.variant)
+
     measurable, unmeasurable = [], 0
     for r in rows:
         lo, hi = _spx_extremes_after(db, r["date"], r.get("skip_time"))
@@ -181,6 +294,9 @@ def main(argv=None) -> int:
         if res is None:
             unmeasurable += 1
         else:
+            sides = veto_map.get((r["date"], r["entry_number"]), set())
+            res["vetoed_sides"] = sides
+            res["veto_verdict"] = score_gex_veto(res, sides)
             measurable.append(res)
 
     print(f"  measurable (strikes recorded + tick coverage): {len(measurable)}")
@@ -195,14 +311,15 @@ def main(argv=None) -> int:
         return 0
 
     print(f"\n  {'date':12} {'e#':>3} {'SC':>7} {'SP':>7} {'SPX lo/hi':>17} "
-          f"{'breach':>8} {'modelled $':>11}")
+          f"{'breach':>8} {'vetoed':>7} {'verdict':>12} {'modelled $':>11}")
     for m in measurable:
         br = ("CALL" if m["call_breach"] else "") + ("PUT" if m["put_breach"] else "")
         pnl_s = "—" if m["modelled_pnl"] is None else f"{m['modelled_pnl']:,.0f}"
         rng = f"{m['spx_lo']:.1f}/{m['spx_hi']:.1f}"
+        vs = ",".join(sorted(m.get("vetoed_sides") or [])) or "-"
         print(f"  {m['date']:12} {m['entry']:>3} {str(m['short_call'] or '-'):>7} "
               f"{str(m['short_put'] or '-'):>7} {rng:>17} "
-              f"{br or '-':>8} {pnl_s:>11}")
+              f"{br or '-':>8} {vs:>7} {m.get('veto_verdict','-'):>12} {pnl_s:>11}")
 
     n = len(measurable)
     br = sum(1 for m in measurable if m["breached"])
@@ -214,6 +331,26 @@ def main(argv=None) -> int:
         print(f"  MODELLED : net ${sum(pnl):,.2f} over {len(pnl)} entries "
               f"(${sum(pnl)/len(pnl):,.2f}/entry)")
         print(f"             positive => vetoing COST us; negative => vetoing SAVED us")
+    # ATTRIBUTION — separate from the entry's P&L on purpose. An entry can be
+    # saved while the veto credited with saving it was wrong about WHICH side
+    # was dangerous; collapsing the two hides exactly that (2026-09-21).
+    verdicts = [m.get("veto_verdict") for m in measurable]
+    n_attr = sum(1 for v in verdicts if v in ("correct", "wrong"))
+    if n_attr:
+        right = sum(1 for v in verdicts if v == "correct")
+        print(f"\n  ATTRIBUTION: of {n_attr} veto(es) traceable to a gex_decisions "
+              f"row, {right} objected to a side that")
+        print(f"               ACTUALLY breached and {n_attr - right} did not. A "
+              f"'wrong' veto whose entry still")
+        print(f"               avoided a loss was saved by something ELSE — "
+              f"require-both-sides, not GEX.")
+    unattr = sum(1 for v in verdicts if v == "unattributed")
+    if unattr:
+        print(f"\n  ⚠️  {unattr} of {n} row(s) have NO gex_decisions match — their "
+              f"veto cannot be attributed")
+        print(f"      to a side, so they are counted in the dollars but NOT in the "
+              f"verdict above.")
+
     print(f"\n  The breach rate is MEASURED. The dollars are MODELLED on a "
           f"{a.pct_of_width:.0%}-of-width")
     print(f"  stop at {a.contracts}c — the real loss depends on when the stop fired and "

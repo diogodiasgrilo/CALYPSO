@@ -462,7 +462,27 @@ so a threshold can be derived from `sides × $200` rather than from history. Pro
 let the operator pick, and **state n and the date of the worst observation next to the number** so
 the next breach is recognisable as sample growth rather than a surprise.
 
-**(b) GEX side-attribution.** `analyze_skipped_entry_outcomes` scores the **entry**; the gate vetoes
+**(b) GEX side-attribution — ✅ DONE 2026-09-23, and it was worse than described.**
+
+> **Fixed before tonight's `--apply`, which is the point: that run WRITES these numbers into the
+> database.** Two defects, not one:
+>
+> 1. **Attribution.** `analyze_skipped_entry_outcomes` filtered on `skip_reason LIKE '%GEX%'` and
+>    never joined `gex_decisions`, which carries the `side` the adjuster actually vetoed. Now joined
+>    (`gex_vetoed_sides`), and the veto is scored against **the side it objected to**
+>    (`score_gex_veto` → `correct` / `wrong` / `unattributed`). Only `live_action='SKIP'` counts —
+>    a `SHIFT` still placed and a `KEEP` did nothing, so neither can be credited with a save.
+> 2. **Arithmetic — this one changed the persisted dollars.** A one-sided breach was modelled as a
+>    **full-entry loss**, discarding the surviving side's kept credit and pricing the loss at the
+>    CALL's width even when the PUT breached (MKT-028 permits 60/75pt asymmetry, so that is not
+>    hypothetical). On the legacy test's own fixture the old model reported **−$1,400 where −$700
+>    was true — a 100% overstatement**, in the direction that flatters any veto credited with
+>    avoiding it. SPX rarely breaches both sides of one condor in a session, so the one-sided case
+>    is the **common** one.
+>
+> Verified end-to-end on the 09-21 shape: `breach CALL · vetoed put · verdict **wrong** · −1,225`,
+> where the old report would have read "1/1 breached, GEX saved $1,400". 31 new tests; the legacy
+> test that pinned the old arithmetic is corrected with the reason recorded in its docstring. `analyze_skipped_entry_outcomes` scores the **entry**; the gate vetoes
 a **side**. On 09-21 it credited the veto with saving $1,400 × 2 — but the adjuster had vetoed the
 **put** side, which was never breached, while the save came from require-both-sides killing the
 call. **Two wrong calls scored as a win.** Fix: join `gex_decisions` (`side`, `live_action`) to

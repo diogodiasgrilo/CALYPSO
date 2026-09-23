@@ -100,10 +100,28 @@ class TestTheModelledDollarsAreLabelledAndSane:
         r = evaluate(_row(cc=1.0, pc=1.0), lo=7580, hi=7620, **K)
         assert r["modelled_pnl"] == pytest.approx((1.0 + 1.0) * 100 * 7)
 
-    def test_breached_models_the_loss_as_the_A2_stop(self):
-        """5pt wings, 40%, 7c -> -(0.40 x 5 x 100 x 7) = -1400."""
+    def test_a_breached_side_costs_its_A2_stop(self):
+        """5pt wings, 40%, 7c -> -(0.40 x 5 x 100 x 7) = -1400 ON THAT SIDE."""
         r = evaluate(_row(sc=7650, lc=7655), lo=7600, hi=7660, **K)
-        assert r["modelled_pnl"] == pytest.approx(-(0.40 * 5 * 100 * 7))
+        assert r["call_pnl"] == pytest.approx(-(0.40 * 5 * 100 * 7))
+
+    def test_the_UNBREACHED_side_still_keeps_its_credit(self):
+        """CORRECTED 2026-09-23. This assertion used to read
+        `modelled_pnl == -1400`, i.e. the whole entry priced as one stop.
+
+        That was wrong, and by a lot: here SPX reached 7660 against a 7650 short
+        call but never came near the 7550 short put, so the put rides to expiry
+        and keeps $700. The true modelled figure is **-700**, and the old one
+        **overstated the loss by 100%** — in the direction that flatters any
+        veto credited with avoiding it, which is what made it worth fixing
+        before `--apply` wrote these numbers into the database.
+
+        SPX rarely breaches both sides of one condor in a session, so the
+        one-sided case is the COMMON one, not an edge case."""
+        r = evaluate(_row(sc=7650, lc=7655), lo=7600, hi=7660, **K)
+        assert r["put_breach"] is False
+        assert r["put_pnl"] == pytest.approx(1.0 * 100 * 7)          # +700
+        assert r["modelled_pnl"] == pytest.approx(-700.0)            # not -1400
 
     def test_the_loss_scales_with_the_stop_fraction(self):
         a = evaluate(_row(), lo=7600, hi=7660, pct_of_width=0.40, contracts=7)
