@@ -36,6 +36,39 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-23 STRATEGY H (long strangle), PLAYBOOK STEP 9 (partial) — hardening.
+  Three findings from an adversarial pass over the whole build. The first is the one
+  Step 9 exists for; the other two are silent-failure bugs.
+  1. THE ENTRY PATH COST 13 BROKER ROUND-TRIPS, against the ONE calypso-broker session
+     that LIVE B trades through. On this fleet that is a CORRECTNESS concern, not a
+     tidy-up: a read-heavy entry burst on a DRY-RUN variant adds latency to the live
+     seat, and the playbook records that D's first entry took ~4 minutes and had to be
+     bounded before it could safely run beside a live variant ("bound it BEFORE soak").
+     The count was 1 strike-grid fetch + 4x `_get_option_uic` (each internally a chain
+     fetch PLUS a qualify) + 4 single-leg quotes. `_read_option_chain` already returns
+     BOTH rights' maps from one read, and quotes batch — so resolving PAIRS instead of
+     legs gives 7, and the VIX expected-move source 4 (it needs no chain at all).
+  2. A SMALL EXPECTED MOVE COULD SILENTLY BUILD A STRADDLE. `select_strangle_strikes`
+     refuses a non-positive expected move precisely because "spot +/- 0" is an ATM
+     straddle — materially different and far more expensive. It did NOT catch the same
+     thing happening through the SNAP: with 5pt strikes near the money, any expected
+     move under ~2.5pt rounds BOTH legs onto the same strike. Reachable — the ATM
+     straddle collapses late in a quiet session, exactly when this is least watched.
+     Now refused, with the collapsed strike and the move named in the skip reason.
+     REFUSED RATHER THAN WIDENED: widening to the next strike out would invent a
+     position the expected move did not ask for.
+  3. THE EOD FLATTEN (MKT-047) WAS BEING SKIPPED BY ACCIDENT. It force-closes open 0DTE
+     SHORTS near the cutoff so a late breach cannot ride to max loss in the un-closable
+     final minutes; H has no shorts and no such tail. But it was skipped only because
+     the base gates on `requires_protective_wings` — which H sets for one reason, the
+     CALENDARS set for another, and the naked-short guard reads for a third. Three
+     unrelated rationales resolving to one flag is what breaks silently when somebody
+     changes one of them. Now an explicit override, with the trade-off STATED: closing
+     at 15:50 would capture remaining extrinsic and holding forfeits it, but at 0DTE
+     that is small, SPXW is cash-settled (no assignment risk), and hold-to-expiry is
+     what the source describes. The cost of holding is VARIANCE, not a systematic loss.
+  Step 9's remaining items are the market-hours VM probe (the one that cannot be done
+  offline — it is where shape bugs hide) and a measured latency figure. 18 new tests.
 - 2026-09-23 STRATEGY H (long strangle), PLAYBOOK STEP 8 — observability. H is now
   visible from Telegram and the dashboard, on surfaces of its OWN rather than as a row
   in existing ones, and the reason is not cosmetic: EVERY other renderer here assumes

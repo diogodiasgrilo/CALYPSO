@@ -149,7 +149,8 @@ variants' schema untouched, which is the deciding factor while B holds the live 
 | 6 | **skipped** | Single-day — no sidecar, no multi-day settlement. |
 | **7** Isolated DB | ✅ | `bots/hydra/ls_recorder.py` → `data/variant_h/long_strangle.db`. Four `ls_*` tables, **no credit column anywhere** (asserted). `em_source` stored per entry so the two expected-move regimes stay separable; snapshots accumulate so a +50% peak survives a give-back; `ls_skipped` carries the full counterfactual the GEX work could never recover for B's first 95 vetoes. 18 tests. |
 | **8** Observability | ✅ | `bots/hydra/ls_status.py` (pure, read-only) + `/longstrangle` Telegram command; `dashboard/backend/services/ls_reader.py` + `GET /api/long-strangle/{status,recent}` + a `/long-strangle` page. 50 tests. `tsc -b` and `vite build` clean. |
-| 9–10 | 🔴 **next** | Hardening and the go-live audit. These, plus the plain fact that this code has never run, are what still keep H locked. |
+| **9** Hardening | 🟡 **offline half done** | Adversarial pass found 3 defects — a **13-round-trip entry path** against the session live B trades through (now 7), a **small expected move silently building a straddle**, and an **EOD flatten skipped by accident**. 18 tests. **Outstanding: the market-hours VM probe** (item 2 — the one that cannot be done offline) and a measured latency figure. |
+| **10** Go-live audit | 🔴 **next** | Scope+audit with a GO/NO-GO verdict, an MVL plan, and a runbook. Plus the plain fact that this code has never run. |
 
 ### Step 2 confirmed Step 0's isolated-DB call, for a concrete reason
 
@@ -396,3 +397,55 @@ does for D and E.
 **`available: false` is the expected production response today.** H is dry-run-locked and not
 installed on the VM, so the page renders "no data yet" rather than an error — a 500 for "not
 installed" would be worse than an empty view.
+
+### Step 9 — hardening. Three findings, and the first is the one Step 9 exists for
+
+**1. The entry path cost 13 broker round-trips, against the session live B trades through.**
+Step 9's third item is blunt about why this is a *correctness* concern and not a tidy-up: every
+strategy proxies through the ONE `calypso-broker` session, so a read-heavy entry burst on a
+**dry-run** variant adds latency to the **live seat**. The playbook records that D's first entry took
+~4 minutes and had to be bounded before it could safely run beside a live variant — *"bound it
+before soak, not after."*
+
+The count broke down as one strike-grid fetch, four `_get_option_uic` calls (each internally a chain
+fetch **plus** a qualify) and four single-leg quotes. `_read_option_chain` already returns **both**
+rights' maps from one read, and quotes batch — so resolving pairs instead of legs brings it to
+**seven**, and the VIX expected-move source to **four** (it needs no chain to compute the move).
+
+| | before | after |
+|---|---|---|
+| straddle source | 13 | **7** |
+| vix source | 11 | **4** |
+
+**2. A small expected move could silently build a straddle instead of a strangle.**
+`select_strangle_strikes` refuses a non-positive expected move, precisely because "spot ± 0" is an
+ATM straddle — a materially different and far more expensive position. It did **not** catch the same
+thing happening through the **snap**: with 5pt strikes near the money, any expected move under
+~2.5pt rounds **both** legs onto the same strike. That is reachable — the ATM straddle collapses
+late in a quiet session, which is exactly when this strategy is least likely to be watched. Now
+refused, with the collapsed strike and the move named in the skip reason. **Refused rather than
+widened**: widening to the next strike out would invent a position the expected move did not ask
+for.
+
+**3. The EOD flatten was being skipped by accident.** MKT-047 force-closes open 0DTE **shorts** near
+the cutoff so a late breach cannot ride to max loss in the un-closable final minutes. H has no shorts
+and no such tail, so the rule does not apply — but it was already being skipped only because the base
+gates on `requires_protective_wings`, which **H sets for one reason, the calendars set for another,
+and the naked-short guard reads for a third.** Three unrelated rationales resolving to one flag is
+what breaks silently when someone changes one of them. Now an explicit override.
+
+The trade-off is stated rather than left implicit: closing at 15:50 would capture whatever extrinsic
+is left, and holding to settlement forfeits it. At 0DTE with minutes to run that is small, SPXW is
+cash-settled so there is no assignment risk, and hold-to-expiry is what the source describes. **The
+cost of holding is variance, not a systematic loss** — the P&L is set by the 4pm print rather than
+by where the position could have been sold ten minutes earlier. If the dry run shows meaningful
+extrinsic being given up, `_check_eod_flatten` is the method to change.
+
+#### Still outstanding in Step 9
+
+- **The live VM probe during market hours** (`scripts/probe_long_strangle_data.py`) — item 2, and the
+  one that cannot be done offline. It settles the three flagged assumptions from Step 3 and is where
+  shape bugs hide (D's offline tests were green while the live probe caught SPXW expiry gaps and a
+  missing IV field).
+- **A measured latency figure.** The call count is now bounded by construction; the wall-clock number
+  comes from the probe.

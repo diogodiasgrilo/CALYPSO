@@ -69,18 +69,43 @@ def _strat(*, em_source="straddle", contracts=1, ls_cfg=None, quotes=None,
     s.strategy_config = {"long_strangle": cfg}
     s.ls_recorder = MagicMock()
 
+    grid = list(CHAIN if chain is None else chain)
     s.broker = MagicMock()
-    s.broker.get_option_chain.return_value = list(CHAIN if chain is None else chain)
-    s._get_option_uic = MagicMock(side_effect=uic)
+    s.broker.get_option_chain.return_value = grid
+
+    # Step 9 batched the entry path from 13 broker calls to 7, so the fakes sit
+    # on the seams it actually uses now: ONE `_read_option_chain` resolves both
+    # rights, and ONE `_read_option_quotes_batch` prices both legs. Stubbing the
+    # per-leg helpers would test a path the strategy no longer takes.
+    def _chain(expiry, candidates):
+        call_map, put_map = {}, {}
+        for cand in candidates:
+            if not grid:
+                continue
+            nearest = min(grid, key=lambda k: abs(k - cand))
+            if abs(nearest - cand) > 25:
+                continue
+            c, pu = uic(nearest, "Call", expiry), uic(nearest, "Put", expiry)
+            if c:
+                call_map[float(nearest)] = c
+            if pu:
+                put_map[float(nearest)] = pu
+        return call_map, put_map
+    s._read_option_chain = MagicMock(side_effect=_chain)
 
     # Default book: ~$11 ATM legs (a 22pt straddle) and ~$1.20 OTM wings.
     prices = {} if quotes is None else dict(quotes)
 
-    def _quote(conid):
-        px = prices.get(conid, prices.get("*", 1.20))
-        return None if px is None else {"bid": px - 0.05, "ask": px + 0.05,
-                                        "mid": px, "last": px, "mark": px}
-    s._read_option_quote = MagicMock(side_effect=_quote)
+    def _quotes_batch(ids):
+        out = {}
+        for i in ids:
+            px = prices.get(i, prices.get("*", 1.20))
+            if px is None:
+                continue          # absent from the batch = not quoted
+            out[i] = {"bid": px - 0.05, "ask": px + 0.05,
+                      "mid": px, "last": px, "mark": px}
+        return out
+    s._read_option_quotes_batch = MagicMock(side_effect=_quotes_batch)
     return s
 
 
@@ -595,3 +620,134 @@ class TestInitiateEntry:
         s._check_whipsaw_filter = MagicMock(return_value="whipsaw")
         s._initiate_entry()
         assert s._entry_in_progress is False
+
+
+# ======================================================================
+# Step 9 — hardening
+# ======================================================================
+
+class TestItIsBoundedAgainstTheSharedBroker:
+    """Step 9 item 3: "performance pass = correctness, because the broker
+    session is shared."
+
+    Every strategy proxies through the ONE `calypso-broker` session, so a
+    read-heavy entry burst on a DRY-RUN variant adds latency to **live B**. The
+    playbook records that variant D's first entry took ~4 minutes and had to be
+    bounded before it could safely run beside a live variant — "bound it BEFORE
+    soak, not after".
+
+    The entry path originally cost **13 broker round-trips**: one chain fetch,
+    four `_get_option_uic` calls (each internally a chain fetch PLUS a qualify),
+    and four single-leg quotes. Resolving both rights from the one chain read
+    and batching the quotes brings it to seven.
+    """
+
+    def _counted(self, **kw):
+        s = _strat(quotes=_atm_quotes(), **kw)
+        s._get_todays_expiry = MagicMock(return_value="2026-09-23")
+        s.broker.get_option_chain.reset_mock()
+        return s
+
+    def test_a_full_entry_costs_seven_round_trips_not_thirteen(self):
+        s = self._counted()
+        assert s._calculate_strikes(_entry()) is True
+        # 1 strike-grid fetch + 2 chain reads (ATM pair, OTM pair) + 2 batch
+        # quotes. Each _read_option_chain is itself a chain fetch + a qualify.
+        assert s.broker.get_option_chain.call_count == 1
+        assert s._read_option_chain.call_count == 2
+        assert s._read_option_quotes_batch.call_count == 2
+        total = 1 + s._read_option_chain.call_count * 2 + \
+            s._read_option_quotes_batch.call_count
+        assert total == 7
+
+    def test_one_chain_read_resolves_BOTH_rights(self):
+        """`_get_option_uic` resolves a single right and costs a full chain read
+        each time. `_read_option_chain` already returns both maps."""
+        s = self._counted()
+        call_uic, put_uic = s._resolve_pair("2026-09-23", 7785.0, 7745.0)
+        assert call_uic and put_uic
+        assert s._read_option_chain.call_count == 1
+
+    def test_one_batch_quote_prices_BOTH_legs(self):
+        s = self._counted()
+        c, p = s._price_pair(77851, 77452)
+        assert c > 0 and p > 0
+        assert s._read_option_quotes_batch.call_count == 1
+
+    def test_the_vix_source_is_cheaper_still(self):
+        """It needs no chain to compute the expected move, so it skips the ATM
+        round-trip entirely."""
+        s = self._counted(em_source="vix")
+        assert s._calculate_strikes(_entry()) is True
+        assert s._read_option_chain.call_count == 1      # the OTM pair only
+        assert s._read_option_quotes_batch.call_count == 1
+
+    def test_an_unquoted_leg_is_absent_from_the_batch_not_zero(self):
+        """A batch omits instruments it has nothing for. Reading a missing key
+        as 0.0 is correct here ONLY because the caller then refuses; the test
+        pins that it does."""
+        atm = _atm_quotes()
+        atm["*"] = None
+        s = _strat(quotes=atm)
+        s._get_todays_expiry = MagicMock(return_value="2026-09-23")
+        e = _entry()
+        assert s._calculate_strikes(e) is False
+        assert "priceable" in e.ls_skip_reason
+
+
+class TestTheStrikesCannotCollapseIntoAStraddle:
+    """Step 9 finding: `select_strangle_strikes` refuses a non-positive expected
+    move because "spot ± 0" is an ATM straddle — materially different and far
+    more expensive. It does NOT catch the same thing happening through the SNAP.
+
+    With 5pt strikes near the money, any expected move under ~2.5pt rounds BOTH
+    legs onto the same strike and a long strangle silently becomes a long
+    straddle. That is reachable: the ATM straddle collapses late in a quiet
+    session, which is exactly when this strategy is least likely to be watched.
+    """
+
+    def _tiny_em(self, straddle_px):
+        atm = round(SPOT / 5) * 5
+        s = _strat(quotes={int(atm * 10 + 1): straddle_px,
+                           int(atm * 10 + 2): straddle_px, "*": 1.20})
+        s._get_todays_expiry = MagicMock(return_value="2026-09-23")
+        return s
+
+    def test_a_sub_grid_expected_move_is_refused(self):
+        s = self._tiny_em(1.00)          # EM 2.0pt → both snap to 7765
+        e = _entry()
+        assert s._calculate_strikes(e) is False
+        assert "straddle, not a strangle" in e.ls_skip_reason
+
+    def test_the_reason_names_the_collapsed_strike_and_the_move(self):
+        s = self._tiny_em(1.00)
+        e = _entry()
+        s._calculate_strikes(e)
+        assert "7765" in e.ls_skip_reason and "2.0pt" in e.ls_skip_reason
+
+    def test_it_refuses_rather_than_widening_to_the_next_strike(self):
+        """Widening would invent a position the expected move did not ask for.
+        Skipping records the reason and leaves the decision visible."""
+        s = self._tiny_em(1.00)
+        e = _entry()
+        s._calculate_strikes(e)
+        assert e.long_call_strike == 0.0 and e.long_put_strike == 0.0
+
+    def test_an_expected_move_just_over_the_grid_still_passes(self):
+        s = self._tiny_em(1.60)          # EM 3.2pt → 7770 / 7760, distinct
+        e = _entry()
+        assert s._calculate_strikes(e) is True
+        assert e.long_call_strike > e.long_put_strike
+
+    def test_the_skip_is_recorded_with_its_counterfactual(self):
+        s = self._tiny_em(1.00)
+        s.daily_state = SimpleNamespace(entries_skipped=0)
+        s._next_entry_index = 0
+        s._record_skipped_entry = MagicMock()
+        e = _entry()
+        s._calculate_strikes(e)
+        s._skip(e, 1, e.ls_skip_reason)
+        call = s.ls_recorder.record_skip.call_args
+        assert call.kwargs["expected_move"] == pytest.approx(2.0)
+        # skip_reason is positional (date, entry_number, skip_time, reason).
+        assert "straddle" in call.args[3]

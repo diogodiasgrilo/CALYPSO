@@ -404,8 +404,14 @@ resets the Gate-4 streak.**
 > max loss as a **fact** (the debit, known before entry), the **peak next to the exit** (that gap is
 > the measurement), and declined entries with their counterfactual. `tsc -b` + `vite build` clean.
 >
-> **What still keeps H locked: Steps 9–10, and the plain fact that this code has never run** — not
-> one tick against a live chain. H is **not installed on the VM**, so none of this touches A–G or
+> **Step 9's offline half ✅** — an adversarial pass found three real defects, all now fixed:
+> the entry path made **13 broker round-trips against the session live B trades through** (now 7 —
+> on a shared broker that is a correctness item, not a tidy-up); a **small expected move silently
+> built a straddle** instead of a strangle, reachable late in a quiet session; and the **EOD flatten
+> was being skipped by accident**, via a flag three unrelated rationales happen to share.
+>
+> **What still keeps H locked: the market-hours VM probe (Step 9 item 2 — today's RTH task),
+> Step 10, and the plain fact that this code has never run** — not one tick against a live chain. H is **not installed on the VM**, so none of this touches A–G or
 > the Gate-4 streak. Detail: `docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md` §8.
 
 ##### S6 — and it needs NO new order

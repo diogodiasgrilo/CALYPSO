@@ -518,3 +518,47 @@ class TestRestartRecovery:
         # ...but the caller swallows it, which is the property that matters.
         src = (ROOT / "bots" / "hydra" / "long_strangle_strategy.py").read_text()
         assert "LS: restart recovery failed (non-fatal)" in src
+
+
+# ======================================================================
+# Step 9 — the EOD flatten is declined on purpose, not by accident
+# ======================================================================
+
+class TestTheEODFlattenIsDeclinedDeliberately:
+    """MKT-047 force-closes open 0DTE SHORTS near the cutoff so a late breach
+    cannot ride to max loss in the un-closable final minutes. H has no shorts
+    and no such tail — its worst case is the debit, already paid.
+
+    It was already being skipped, but only by ACCIDENT: the base gates on
+    `requires_protective_wings`, which H sets for a different reason and the
+    calendars set for a third. Three unrelated rationales resolving to one flag
+    is precisely what breaks silently when someone changes one of them.
+    """
+
+    def test_it_never_flattens(self):
+        s = _strat()
+        _mark(_open(s), 2.00, 2.00)
+        assert s._check_eod_flatten() is None
+
+    def test_it_does_not_depend_on_the_calendars_flag_to_do_so(self):
+        """Flip the flag the base actually gates on: H must still decline."""
+        s = _strat()
+        s.requires_protective_wings = True
+        _mark(_open(s), 2.00, 2.00)
+        assert s._check_eod_flatten() is None
+
+    def test_the_trade_off_is_recorded_rather_than_left_implicit(self):
+        """Holding forfeits remaining extrinsic. That is a choice with a cost,
+        and the cost is named so a dry-run result can overturn it."""
+        src = (ROOT / "bots" / "hydra" / "long_strangle_strategy.py").read_text()
+        assert "THE TRADE-OFF, STATED" in src
+        # Matched without spanning a line wrap.
+        assert "capture whatever extrinsic" in src
+        assert "meaningful extrinsic being given up" in src
+
+    def test_settlement_still_books_the_position(self):
+        """Declining to flatten is only safe because expiry books at intrinsic."""
+        s = _strat()
+        e = _open(s)
+        booked, _ = s._settlement_booked_pnl(e, "call", 7800.0)
+        assert booked == pytest.approx(15 * 100 * 2 - e.call_debit)

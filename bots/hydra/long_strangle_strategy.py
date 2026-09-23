@@ -266,10 +266,8 @@ class LongStrangleStrategy(HydraStrategy):
             logger.warning("LS: no ATM strike within %.0fpt of spot %.2f",
                            MAX_SNAP_DISTANCE, spot)
             return 0.0, "straddle"
-        call_uic = self._get_option_uic(atm, "Call", expiry)
-        put_uic = self._get_option_uic(atm, "Put", expiry)
-        call_px = self._estimate_long_premium(call_uic)
-        put_px = self._estimate_long_premium(put_uic)
+        call_uic, put_uic = self._resolve_pair(expiry, atm, atm)
+        call_px, put_px = self._price_pair(call_uic, put_uic)
         em = expected_move_from_straddle(call_px, put_px)
         if em <= 0:
             logger.warning(
@@ -282,18 +280,41 @@ class LongStrangleStrategy(HydraStrategy):
                         "(call %.2f + put %.2f)", em, atm, call_px, put_px)
         return em, "straddle"
 
-    def _estimate_long_premium(self, uic) -> float:
-        """Per-contract price (option points) of a leg we intend to BUY.
+    def _resolve_pair(self, expiry: str, call_strike: float,
+                      put_strike: float) -> Tuple[Optional[int], Optional[int]]:
+        """``(call_conid, put_conid)`` in ONE chain round-trip.
 
-        Routes through ``_quote_mid``, which carries the L-M7 crossed-quote guard
-        (never averages a bid>ask book) and the mid → last → mark fallback. The
-        mirror of G's ``_estimate_short_premium``; the arithmetic is identical
-        because a mid is a mid — only what we do with it differs in sign.
+        ``_get_option_uic`` resolves a SINGLE right and internally does a full
+        ``_read_option_chain`` — a chain fetch plus a qualify — so calling it
+        per leg costs two broker round-trips each. ``_read_option_chain``
+        already returns both maps, so one call resolves both rights.
+
+        This is a Step 9 (hardening) change, and on this fleet it is a
+        **correctness** concern rather than a tidy-up: every strategy proxies
+        through the ONE shared ``calypso-broker`` session, so a read-heavy entry
+        burst on a dry-run variant adds latency to **live B**. The playbook is
+        explicit that D had to be bounded before it could safely run beside a
+        live variant.
         """
-        if not uic:
-            return 0.0
-        quote = self._read_option_quote(uic) or {}
-        return float(self._quote_mid(quote) or 0.0)
+        call_map, put_map = self._read_option_chain(
+            expiry, [float(call_strike), float(put_strike)])
+        return call_map.get(float(call_strike)), put_map.get(float(put_strike))
+
+    def _price_pair(self, call_uic, put_uic) -> Tuple[float, float]:
+        """``(call_mid, put_mid)`` in ONE batch quote, in option points.
+
+        Routes through ``_quote_mid``, which carries the L-M7 crossed-quote
+        guard (never averages a bid>ask book) and the mid → last → mark
+        fallback. The mirror of G's ``_estimate_short_premium``; the arithmetic
+        is identical because a mid is a mid — only what we do with it differs in
+        sign. Batched for the same shared-broker reason as ``_resolve_pair``.
+        """
+        ids = [u for u in (call_uic, put_uic) if u]
+        if not ids:
+            return 0.0, 0.0
+        quotes = self._read_option_quotes_batch(ids) or {}
+        return (float(self._quote_mid(quotes.get(call_uic)) or 0.0),
+                float(self._quote_mid(quotes.get(put_uic)) or 0.0))
 
     # ==================================================================
     # Step 4 — strike selection
@@ -345,12 +366,34 @@ class LongStrangleStrategy(HydraStrategy):
             entry.ls_skip_reason = "chain could not supply both strikes"
             return False
 
+        # STEP 9 FINDING. `select_strangle_strikes` refuses a non-positive
+        # expected move because "spot +/- 0" is an ATM straddle — a materially
+        # different and far more expensive position. It does NOT catch the same
+        # thing happening through the SNAP: with 5pt strikes near the money, any
+        # expected move under ~2.5pt rounds BOTH legs onto the same strike, and
+        # a long strangle silently becomes a long straddle. That is reachable —
+        # the ATM straddle collapses late in a quiet session, which is exactly
+        # when this strategy is least likely to be watched.
+        #
+        # Refuse rather than adjust. Widening to the next strike out would
+        # invent a position the expected move did not ask for; skipping records
+        # the reason and leaves the decision visible.
+        if call_k <= put_k:
+            logger.warning(
+                "LS: expected move %.1fpt collapsed both legs onto %.0f — that is "
+                "an ATM straddle, not a strangle. Skipping.", em, call_k,
+            )
+            entry.ls_skip_reason = (
+                f"expected move {em:.1f}pt too small — both legs snap to {call_k:.0f} "
+                f"(a straddle, not a strangle)"
+            )
+            return False
+
         # H holds two LONGS. short_* stays 0.0 — the mirror of G (Step 2).
         entry.long_call_strike, entry.long_put_strike = call_k, put_k
         entry.short_call_strike = entry.short_put_strike = 0.0
 
-        call_uic = self._get_option_uic(call_k, "Call", expiry)
-        put_uic = self._get_option_uic(put_k, "Put", expiry)
+        call_uic, put_uic = self._resolve_pair(expiry, call_k, put_k)
         if not call_uic or not put_uic:
             logger.warning("LS: conid resolution failed (call=%s put=%s)",
                            call_uic, put_uic)
@@ -358,8 +401,7 @@ class LongStrangleStrategy(HydraStrategy):
             return False
         entry.long_call_uic, entry.long_put_uic = call_uic, put_uic
 
-        call_px = self._estimate_long_premium(call_uic)
-        put_px = self._estimate_long_premium(put_uic)
+        call_px, put_px = self._price_pair(call_uic, put_uic)
         if call_px <= 0 or put_px <= 0:
             # A zero premium here would become a zero debit, an infinite
             # sizing-for-zero count, and a position that appears free.
@@ -1151,3 +1193,34 @@ class LongStrangleStrategy(HydraStrategy):
                 new.entry_number, new.long_call_strike, new.long_put_strike,
                 new.total_debit, new.contracts,
             )
+
+    # ==================================================================
+    # Step 9 — hardening: the EOD flatten, declined on purpose
+    # ==================================================================
+
+    def _check_eod_flatten(self) -> Optional[str]:
+        """**Never.** H rides to cash settlement, and that is a decision.
+
+        MKT-047 force-closes every open 0DTE SHORT near the cutoff so a late
+        breach cannot ride to maximum loss in the un-closable final minutes.
+        **H has no shorts and no such tail** — its worst case is the debit, which
+        was already paid — so the rule it exists to enforce does not apply.
+
+        It was already being skipped before this override, but only by
+        ACCIDENT: the base gates on ``requires_protective_wings``, which H sets
+        to False for a completely different reason (it has no shorts for the
+        naked-short guard to act on) and which the CALENDARS set to skip this
+        for a third reason again (they hold for days). Three unrelated
+        rationales resolving to one flag is exactly the kind of coincidence that
+        breaks silently when someone changes one of them.
+
+        THE TRADE-OFF, STATED. Closing at 15:50 would capture whatever extrinsic
+        value is left; holding to settlement forfeits it and books intrinsic.
+        At 0DTE with minutes to run that difference is small, SPXW is
+        cash-settled so there is no assignment risk, and hold-to-expiry is what
+        the source describes. The cost of holding is variance — the P&L is set
+        by the 4pm print rather than by where the position could have been sold
+        ten minutes earlier — not a systematic loss. If the dry run shows
+        meaningful extrinsic being given up, this is the method to change.
+        """
+        return None
