@@ -266,3 +266,42 @@ class TestTheLogicIsExtractedSoItCanBeRun:
         # of a result calculation is how the first defect survived review.
         assert "const brokeCall = " not in src
         assert "const settleValue =" not in src
+
+
+class TestThePageDescribesTheVariantItActuallyIs:
+    """Copy that states a variant's OPERATING MODE has to track the taxonomy.
+
+    The page said "dry-run shadow". H's status is ``dry_run_locked``, and in
+    this fleet those are different things: a shadow variant (A, C) merely has
+    ``dry_run: true`` in config and can be flipped by editing it, while a locked
+    one REFUSES to construct outside dry-run. The page named the weaker of the
+    two — undersells the guarantee, and would go silently stale the day H is
+    promoted.
+
+    Derived from ``strategy_taxonomy``, not asserted as a literal, for the
+    reason the CI break of the same morning made expensive: a guard naming the
+    thing it guards protects only that thing.
+    """
+
+    def test_the_disclaimer_matches_H_s_taxonomy_status(self):
+        import shared.strategy_taxonomy as tax
+        status = tax.STRATEGIES["h"].status
+        src = PAGE.read_text()
+        expected = {
+            "dry_run_locked": "dry-run LOCKED",
+            "dry_run_shadow": "dry-run shadow",
+            "live": "LIVE",
+        }[status]
+        assert expected in src, (
+            f"H's taxonomy status is {status!r}, so the page's disclaimer must "
+            f"say {expected!r}. Promoting a variant means updating what its page "
+            f"claims about it.")
+
+    def test_the_page_does_not_still_claim_H_is_uninstalled(self):
+        """It was true when the page was written and stopped being true the same
+        day: H was installed on the VM on 2026-09-23 and recorded a row that
+        morning. A docstring that describes ``available: false`` as the expected
+        response sends the next reader looking for a bug that is not there."""
+        src = PAGE.read_text()
+        assert "is not installed on the" not in src
+        assert "`available: false` is the expected response today" not in src

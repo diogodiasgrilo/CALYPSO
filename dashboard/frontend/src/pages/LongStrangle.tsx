@@ -23,9 +23,12 @@
  *    variant B had to be retro-fitted for this and could never recover its first
  *    95 vetoes.
  *
- * Everything here is dry-run. H places no real orders and is not installed on the
- * VM, so `available: false` is the expected response today and the page says so
- * plainly rather than rendering an empty grid.
+ * Everything here is dry-run — H is dry-run LOCKED (it refuses to construct
+ * outside dry-run) and places no real orders. It was installed on the VM on
+ * 2026-09-23 and began recording the same morning, so `available: true` is the
+ * normal response now; the `available: false` branch remains for the window
+ * before a variant's first row and says so plainly rather than rendering an
+ * empty grid.
  */
 
 import { useEffect, useState } from "react";
@@ -486,8 +489,12 @@ export function LongStrangle() {
       <div className="flex items-start gap-2 bg-bg-elevated border border-border-dim rounded p-3">
         <AlertTriangle size={16} className="text-warning shrink-0 mt-0.5" />
         <div className="text-xs text-text-secondary">
+          {/* "LOCKED", not "shadow". Those are different states in this fleet:
+              a shadow variant (A, C) merely has dry_run=true in config, while H
+              — like D/E/F/G — REFUSES to construct outside dry-run. The stricter
+              word is the true one, and the page should not undersell it. */}
           <span className="font-semibold text-text-primary">
-            Strategy H — 0DTE Long Strangle · dry-run shadow.
+            Strategy H — 0DTE Long Strangle · dry-run LOCKED.
           </span>{" "}
           Places <span className="font-semibold">no real orders</span>. The only
           long-gamma strategy in the fleet: it BUYS an OTM call and an OTM put at
