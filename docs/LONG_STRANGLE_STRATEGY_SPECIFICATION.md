@@ -141,7 +141,7 @@ variants' schema untouched, which is the deciding factor while B holds the live 
 | **0** Classify + spec | ✅ | This document. MEDIUM build. |
 | **1** Scaffold + coexistence | ✅ `caf40c9` | Registered, dry-run-LOCKED, **inert**. All 5 coexistence checks pass; dashboard exclusion is automatic via the group's `pnl_shape="debit"`. `main.py` needed no edit (taxonomy-driven banner). |
 | **2** Data model | ✅ | `bots/hydra/long_strangle_entry.py` — `LongStrangleEntry(HydraIronCondorEntry)`, every credit-shaped property overridden, 19 tests. |
-| **3** Data plumbing | ⏳ next | Expected-move source + IV percentile. **Needs a VM probe before building on it** (playbook: D's offline tests were green while the live probe caught SPXW expiry gaps and a missing IV field). |
+| **3** Data plumbing | 🟡 **half done** | `bots/hydra/long_strangle_chain.py` — pure selection helpers, 31 tests, no broker/clock. **The market-hours VM probe is still outstanding** and three assumptions below depend on it. |
 | 4–5, 8–10 | — | Entry/simulation, exits, observability, hardening, go-live audit. |
 | 6 | **skipped** | Single-day — no sidecar, no multi-day settlement. |
 | 7 | pending | Isolated DB — **confirmed necessary by Step 2**, see below. |
@@ -152,6 +152,43 @@ variants' schema untouched, which is the deciding factor while B holds the live 
 `total_debit`. **`trade_entries` has no column that can hold it** — only `call_credit`, `put_credit`,
 `total_credit`. Writing H to the shared table would silently record a strangle that **cost nothing**.
 So Step 7 is required, not merely tidy.
+
+### Step 3 (offline half) — the expected move is implemented, not decided
+
+Both definitions are built and the choice is config-driven
+(`long_strangle.expected_move_source`), because **they genuinely disagree and the
+expected move IS the strike choice**:
+
+| | formula | on 2026-09-22's numbers |
+|---|---|---|
+| `expected_move_from_straddle` | ATM call + ATM put | **≈ 22pt** — source-faithful |
+| `expected_move_from_vix` | `spot × (vix/100) / √252` | **≈ 71pt** — matches variant F's arithmetic exactly |
+
+A test pins that they differ, so nobody later assumes they are interchangeable.
+F's formula is reproduced character-for-character so H and F can never disagree
+about the maths — only about config.
+
+**⚠️ THREE ASSUMPTIONS AWAIT THE PROBE.** The playbook is explicit that D's
+offline tests were green while the live probe caught SPXW expiry gaps and a
+missing IV field:
+
+1. **Straddle-as-expected-move.** It systematically *overstates* the 1-SD move
+   (~0.85× is the usual correction). **No correction is applied** — the source
+   applies none, and inventing a fudge factor before the probe would be fitting
+   to nothing.
+2. **IV percentile has no honest input in this repo.** Nothing stores option-IV
+   history; `market_ticks` keeps VIX, a 30-day *index* proxy, **not** the IV of
+   the 0DTE options actually being bought. A caller passing VIX history gets a
+   VIX percentile and must say so. The probe must establish what series exists.
+3. **The 35% skew tolerance is a guess.** The source says only "reasonably
+   similar" and never quantifies it.
+
+Most of the 31 tests pin **refusals**, because every dangerous failure here is
+silent-but-plausible: a missing quote becoming a tiny expected move (and
+therefore near-the-money strikes); a sparse chain snapping 7825 onto 7700;
+`size_for_zero` rounding up to one contract past the loss limit it exists to
+enforce; `iv_percentile` returning 0.0 for "unknown" and reading as "passes the
+<35% filter".
 
 ### What Step 2 found that Step 0 did not anticipate
 
