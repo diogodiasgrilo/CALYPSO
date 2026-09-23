@@ -76,6 +76,33 @@ Version History:
   `TestExpectedMoveMultiplier` now names `ghauri_em_source="vix"` explicitly, so the two
   definitions are pinned separately with a negative control proving they differ.
 
+- 2026-09-23 DASHBOARD — THE LONG-STRANGLE PAGE STATED ITS RESULT WRONG, TWICE. Operator
+  asked for a line-by-line read of H's page "as of now and during the day". Both sentences
+  the page exists to print were defective:
+
+  * **The wrong side reported.** 2026-09-23 ran 7695.13-7760.02 against a 7760 call / 7720
+    put. BOTH broke — the call by 0.02pt, the put by 24.87pt — and the code checked
+    `brokeCall` first, so the page read "Broke the call side by 0.0pt": a near-miss, on a
+    day the put finished twenty-five points in the money. The verdict now leads with the
+    WIDEST breach and names the other in a parenthetical.
+  * **A mid-session mark called a settlement.** "It would have settled at ..." was printed
+    off whatever the last tick happened to be. SPXW is cash-settled at the close, so that
+    sentence is true after 16:00 ET and false before it — intraday the legs hold intrinsic
+    value PLUS the time value still in them, making the figure a floor, not a result. The
+    page now renders a different sentence per case, and the open-session one says
+    "intrinsic only". Past sessions settle regardless of their last tick; early closes take
+    their own close label.
+  * Also fixed: a dangling sentence fragment ("— declining cost that"), and the
+    stayed-inside-the-band case now reports the closest approach in points rather than
+    nothing measurable.
+
+  The arithmetic moved to `dashboard/frontend/src/lib/strangleVerdict.ts` — pure, importing
+  nothing — specifically so a test can EXECUTE it (node type-stripping) rather than grep it.
+  Both defects lived in code containing every correct-looking token.
+  Tests: `tests/test_strangle_verdict_2026_09_23.py` (27), including the invariant that the
+  headline number and the headline side must describe the SAME side, which is what checking
+  them separately can never catch.
+
 - 2026-09-23 STRATEGY H — MADE FAITHFUL TO ITS SOURCE. Operator question: "why can't we
   build it properly and run it JUST like the man in the video said?" Checking, the honest
   answer was that we had NOT. H inherited HYDRA's gating stack, and TWO of those gates

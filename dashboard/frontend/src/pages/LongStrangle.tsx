@@ -42,6 +42,12 @@ import {
   YAxis,
 } from "recharts";
 import { formatCurrency, formatPnL } from "../lib/formatters";
+import {
+  bandVerdict,
+  sessionIsSettled,
+  todayInNewYork,
+  valueStrangleAt,
+} from "../lib/strangleVerdict";
 
 interface Mark {
   timestamp: string;
@@ -147,6 +153,8 @@ function ExpectedMoveBand({
   entrySpx,
   em,
   hypothetical,
+  debit,
+  sessionDate,
 }: {
   path: SpxPoint[];
   callStrike: number | null;
@@ -154,26 +162,33 @@ function ExpectedMoveBand({
   entrySpx: number | null;
   em: number | null;
   hypothetical: boolean;
+  debit: number | null;
+  sessionDate: string;
 }) {
   if (path.length < 2 || !callStrike || !putStrike) return null;
 
-  const highs = path.map((p) => p.spx);
-  const hi = Math.max(...highs);
-  const lo = Math.min(...highs);
+  const prices = path.map((p) => p.spx);
+  const hi = Math.max(...prices);
+  const lo = Math.min(...prices);
   // Pad so the band is never flush against the frame, and so a breach reads as
   // a breach rather than as the line touching the edge of the chart.
   const pad = Math.max(8, (callStrike - putStrike) * 0.25);
   const yMin = Math.min(lo, putStrike) - pad;
   const yMax = Math.max(hi, callStrike) + pad;
 
-  const brokeCall = hi >= callStrike;
-  const brokePut = lo <= putStrike;
-  const broke = brokeCall || brokePut;
-  const throughBy = brokeCall
-    ? hi - callStrike
-    : brokePut
-      ? putStrike - lo
-      : 0;
+  // Both sides can break on the SAME session, so the verdict leads with the one
+  // that moved furthest. See lib/strangleVerdict.ts for why that matters.
+  const v = bandVerdict(hi, lo, callStrike, putStrike);
+
+  // What it would actually have been worth. For a DECLINED entry this is the
+  // whole point: "a veto happened" is not a result, "the veto cost $831" is.
+  // SPXW is cash-settled at the close, so intrinsic at the last print is the
+  // FINAL number only once the close has passed — before it, the position is
+  // still worth intrinsic plus whatever time value remains, and the sentence
+  // below says so rather than calling a mid-session mark a settlement.
+  const last = path[path.length - 1];
+  const settled = sessionIsSettled(sessionDate, todayInNewYork(), last.t);
+  const val = valueStrangleAt(last.spx, callStrike, putStrike, debit, settled);
 
   return (
     <section>
@@ -256,21 +271,65 @@ function ExpectedMoveBand({
           </ResponsiveContainer>
         </div>
 
-        <div className="mt-2 text-xs">
-          {broke ? (
-            <span className="text-profit font-medium">
-              Broke the {brokeCall ? "call" : "put"} side by {throughBy.toFixed(1)}pt
-              {hypothetical && " — the declined trade would have gone in the money"}
+        <div className="mt-2 text-xs space-y-1">
+          <div>
+            {v.broke ? (
+              <span className="text-profit font-medium">
+                Broke the {v.widestSide} side by {v.widest.toFixed(2)}pt
+                {v.brokeCall && v.brokePut && (
+                  <span className="font-normal text-text-secondary">
+                    {" "}
+                    (both sides broke — {v.otherSide} by{" "}
+                    {v.otherThrough.toFixed(2)}pt)
+                  </span>
+                )}
+              </span>
+            ) : (
+              <span className="text-text-secondary">
+                {settled
+                  ? "Stayed inside the band all session — the debit was lost in full"
+                  : "Inside the band so far"}{" "}
+                — closest approach {v.closestApproach.toFixed(2)}pt from the{" "}
+                {v.widestSide} strike
+              </span>
+            )}
+            <span className="text-text-dim">
+              {"  ·  "}session range {lo.toFixed(2)} – {hi.toFixed(2)}
             </span>
-          ) : (
-            <span className="text-text-secondary">
-              Stayed inside the band all session — the debit would have been lost
-            </span>
+          </div>
+
+          {/* THE result, not just the path. Shown only for a declined entry:
+              a real position has an actual exit and does not need a
+              counterfactual. */}
+          {hypothetical && debit != null && debit > 0 && (
+            <div className={val.pnl >= 0 ? "text-profit" : "text-loss"}>
+              {val.settled ? (
+                <>
+                  Settled at {last.spx.toFixed(2)} ({last.t}) worth{" "}
+                  {formatCurrency(val.intrinsic, 0)} against a{" "}
+                  {formatCurrency(debit, 0)} debit —{" "}
+                  <span className="font-semibold">
+                    {formatPnL(val.pnl, 0)} ({val.pctOfDebit?.toFixed(0)}%)
+                  </span>
+                  {val.pnl > 0 && " that declining the entry gave up"}
+                </>
+              ) : (
+                <>
+                  At the last print ({last.t}, {last.spx.toFixed(2)}) the legs hold{" "}
+                  {formatCurrency(val.intrinsic, 0)} of intrinsic value against a{" "}
+                  {formatCurrency(debit, 0)} debit —{" "}
+                  <span className="font-semibold">
+                    {formatPnL(val.pnl, 0)} ({val.pctOfDebit?.toFixed(0)}%)
+                  </span>
+                  <span className="text-text-dim">
+                    {" "}
+                    · intrinsic only — the session is still open, so the position
+                    is worth this plus its remaining time value
+                  </span>
+                </>
+              )}
+            </div>
           )}
-          <span className="text-text-dim">
-            {"  ·  "}session range {Math.min(...highs).toFixed(2)} –{" "}
-            {Math.max(...highs).toFixed(2)}
-          </span>
         </div>
       </div>
     </section>
@@ -476,6 +535,8 @@ export function LongStrangle() {
                 entrySpx={spot}
                 em={em}
                 hypothetical={!p && !!k}
+                debit={p?.total_debit ?? k?.proposed_debit ?? null}
+                sessionDate={status.date}
               />
             );
           })()}
