@@ -371,7 +371,24 @@ resets the Gate-4 streak.**
 > place → fill → close. CHECK-ONLY stops before placing, so the round trip has never once succeeded.
 > That is what tomorrow tests.
 
-#### Wed 09-23 — **S6, and it needs NO new order**
+#### Wed 09-23 — **the smoke retry, S6, and strategy H**
+
+> **Operational priority, in order:**
+> 1. **≈09:35 ET — the armed paper-smoke retry** (Gate 3's last item). Must finish before B's 09:45
+>    slot. Aborts rather than overlapping B. See the 09-22 block above for why it failed and what
+>    changed.
+> 2. **During RTH — `scripts/probe_long_strangle_data.py`** (read-only). It answers the three
+>    assumptions strategy H's Step 3 left open. Its answers land as **config values, not code**.
+> 3. **≥22:40 ET — the GEX `--apply` backfill** (13 measurable vetoes).
+>
+> **Strategy H, Playbook Step 4 ✅ (this morning, offline).** Entry + dry-run simulation: expected-move
+> strike selection, skew veto, sizing-for-zero, the shared pre-entry gates, and a `_simulate_entry`
+> booking synthetic DRY fills into the isolated `long_strangle.db`. 53 tests. **Steps 1–4 + 7 done;
+> Step 5 (the exits) is next and is what still keeps H locked** — an H entry today would be opened
+> and then held to expiry. H is **not installed on the VM**, so none of this touches A–G or the
+> Gate-4 streak. Detail: `docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md` §8.
+
+##### S6 — and it needs NO new order
 
 The earlier plan was to place a long and then preview the short. Unnecessary: **when B is holding
 an open IC, the protective long is already on the books.** So while a position is open, run a

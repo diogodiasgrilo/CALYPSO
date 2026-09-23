@@ -53,9 +53,15 @@ class TestItCannotArm:
 
     def test_the_lock_names_the_reason_it_is_locked(self):
         """G is locked for undefined risk; H because it is unfinished. A future
-        reader deciding whether to unlock must be able to tell which applies."""
+        reader deciding whether to unlock must be able to tell which applies.
+
+        The reason MOVES as the build progresses — at Step 1 it was "no entry
+        logic", and since Step 4 it is the missing exits. What must not change is
+        that the message states a specific unfinished thing, so nobody unlocks on
+        the strength of a generic "not ready yet"."""
         src = (ROOT / "bots" / "hydra" / "long_strangle_strategy.py").read_text()
-        assert "NO entry logic" in src
+        assert "EXITS DO NOT EXIST" in src
+        assert "hold it to expiry" in src
 
     def test_config_ships_dry_run_true(self):
         cfg = json.loads(CONFIG.read_text())

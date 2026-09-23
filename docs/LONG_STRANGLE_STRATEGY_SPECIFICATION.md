@@ -1,7 +1,8 @@
 # Strategy H — 0DTE Long Strangle ("Tompkins")
 
-**Status:** Step 0 only — specification and build-weight decision. **No code written.**
-**Written:** 2026-09-23
+**Status:** Steps 0–4 + 7 built, dry-run-LOCKED. It can select strikes and book a **simulated**
+entry; **the exits (Step 5) do not exist**, so an entry is opened and then held. See §8.
+**Written:** 2026-09-23 · **Last updated:** 2026-09-23 (Step 4)
 **Playbook:** [`docs/NEW_STRATEGY_PLAYBOOK.md`](NEW_STRATEGY_PLAYBOOK.md) Step 0
 **Source:** Jeff Tompkins, via Theta Profits —
 [article](https://www.thetaprofits.com/a-0dte-long-strangle-targeting-50-100-in-24-hours/) ·
@@ -142,7 +143,9 @@ variants' schema untouched, which is the deciding factor while B holds the live 
 | **1** Scaffold + coexistence | ✅ `caf40c9` | Registered, dry-run-LOCKED, **inert**. All 5 coexistence checks pass; dashboard exclusion is automatic via the group's `pnl_shape="debit"`. `main.py` needed no edit (taxonomy-driven banner). |
 | **2** Data model | ✅ | `bots/hydra/long_strangle_entry.py` — `LongStrangleEntry(HydraIronCondorEntry)`, every credit-shaped property overridden, 19 tests. |
 | **3** Data plumbing | 🟡 **half done** | `bots/hydra/long_strangle_chain.py` — pure selection helpers, 31 tests, no broker/clock. **The market-hours VM probe is still outstanding** and three assumptions below depend on it. |
-| 4–5, 8–10 | — | Entry/simulation, exits, observability, hardening, go-live audit. |
+| **4** Entry + dry-run simulation | ✅ | `long_strangle_strategy.py` — expected-move strike selection, skew veto, sizing-for-zero, the shared pre-entry gates, and a `_simulate_entry` booking synthetic DRY fills into `long_strangle.db`. 53 tests. **No real order can reach the broker**: `_execute_entry` raises rather than inheriting the base's 4-leg IC placement (which would SELL two shorts H doesn't have), and `_calculate_stop_levels_hydra` is an explicit no-op setting both stops unreachable. |
+| **5** Exits | 🔴 **next** | +50% / +100%-of-debit targets and the EOD path. **Until this lands, an H entry is opened and then held** — which is why the dry-run lock message now names the missing exits rather than missing entry logic. |
+| 8–10 | — | Observability, hardening, go-live audit. |
 | 6 | **skipped** | Single-day — no sidecar, no multi-day settlement. |
 | **7** Isolated DB | ✅ | `bots/hydra/ls_recorder.py` → `data/variant_h/long_strangle.db`. Four `ls_*` tables, **no credit column anywhere** (asserted). `em_source` stored per entry so the two expected-move regimes stay separable; snapshots accumulate so a +50% peak survives a give-back; `ls_skipped` carries the full counterfactual the GEX work could never recover for B's first 95 vetoes. 18 tests. |
 
@@ -203,3 +206,56 @@ enforce; `iv_percentile` returning 0.0 for "unknown" and reading as "passes the
   of G. G needed **S-CRIT-1** because a base guard demanded both legs be priced while its `long_*` was
   permanently zero, so its stop never fired. H cannot hit that exact bug (it has no stop), but any base
   path treating `short_*` as "is there a position here" must be checked in Step 5.
+
+### Step 4 — the decisions the entry path had to make
+
+Four choices in Step 4 were not obvious, and each one is the kind that would have produced a
+believable number rather than a visible failure.
+
+**1. No fallback between the two expected moves.** If the configured source cannot be computed — a
+missing ATM quote, a VIX of zero — the entry is **skipped**. It does not quietly use the other
+definition. The two disagree by roughly 3× (22pt vs 71pt on 2026-09-22), so a fallback would place a
+71pt strangle while the config, the logs and the recorded `em_source` all said `straddle`, and the
+resulting series could never be separated back into two strategies afterwards. Pinned by a test
+asserting the source string does **not** change on failure.
+
+**2. The IV-percentile filter fails closed.** Assumption 2 above is unresolved — nothing in this repo
+stores option-IV history — so `iv_percentile_filter_enabled` ships `false`. Enabling it without
+naming a series **skips every entry** with an explicit reason rather than passing everything. A
+filter that passes everything is indistinguishable from a working one from the outside; a filter that
+blocks everything announces itself in the first log line. If the probe's answer to Q2 is "only VIX
+exists", the `vix` source is accepted but every skip reason it writes says
+`NOT an option-IV percentile`, so no later analysis can mistake a 30-day index vol for the IV of the
+0DTE options actually being bought.
+
+**3. The buying-power floor had to be overridden, and not for the reason G's was.** G overrides it
+*upward* (a naked short needs far more than the defined-risk IC floor). H overrides it *downward*:
+long options are fully paid, so the capital required is the debit. The base derives its floor from
+`max(call_width, put_width) × $100` — 60–75pt of IC width, so $6,000–7,500 per contract for a
+position costing a few hundred dollars. That would not have failed loudly. It would have skipped
+every entry on a modest account and looked exactly like "no signal". The floor is now the
+sizing-for-zero loss limit.
+
+**4. The stops are disarmed explicitly, not left inherited.** With `total_credit` truthfully `0.0`,
+the base's `credit + buffer` collapses to the `MIN_STOP_LEVEL` floor plus a buffer — a small
+arbitrary dollar figure with no relationship to anything, which the monitoring loop would then treat
+as a real trigger. `_calculate_stop_levels_hydra` is overridden to set both sides unreachable.
+**"No stop" and "a stop nobody chose" are different things**, and only one of them is what this
+strategy's max-loss-is-the-debit design actually means.
+
+#### One gate kept deliberately, and it is arguably backwards
+
+The **whipsaw filter still blocks H entries.** It skips when the intraday range exceeds 1.75× the
+expected move — which for a long-gamma strategy is a description of the day it *wants*. It is kept
+for the first observation window so H's gating matches the rest of the fleet and the dry-run data is
+comparable, and it is flagged here rather than silently inverted. `whipsaw_range_skip_mult` is
+config-exposed; this is the first knob to revisit once there is data.
+
+#### What Step 4 does NOT do
+
+No exits (Step 5), no live placement path, and no observability surface (Step 8). An H entry opened
+today is opened and then **held** — which is why the dry-run lock's message was rewritten to name the
+missing exits. `_execute_entry` raises instead of inheriting the base's four-leg placement, because
+that path would sell two short legs H does not have and has never sized for; the `__init__` lock
+should make it unreachable, and it is the second lock anyway, on the principle that "the other guard
+will catch it" is how a strategy ends up selling naked options.

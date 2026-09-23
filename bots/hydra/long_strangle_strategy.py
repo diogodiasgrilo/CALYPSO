@@ -1,4 +1,4 @@
-"""LongStrangleStrategy — a 0DTE SPX **LONG** strangle (variant H). Step 1 scaffold.
+"""LongStrangleStrategy — a 0DTE SPX **LONG** strangle (variant H). Entry built, exits not.
 
 The structural mirror of ``StrangleStrategy`` (variant G): the same two legs, the
 opposite sign. G **sells** an OTM call and an OTM put; this **buys** them. That one
@@ -26,11 +26,17 @@ short-gamma book's bad days?** 2026-09-21 (SPX +1.1%, B's worst live session at
 −$441/contract) and 2026-09-22 (a 20-point range, B positive) are the two sides
 of that question.
 
-BUILD STATUS — **Step 1 of ``docs/NEW_STRATEGY_PLAYBOOK.md`` ONLY.** This class is
-a registered, dry-run-LOCKED, **INERT** scaffold: it starts, it is schedulable, and
-it deliberately implements **no entry logic yet**. Steps 2–5 (debit entry model,
-expected-move strike selection, percent-of-debit exits, sizing-for-zero) are not
-written. Do not read the presence of this file as a working strategy.
+BUILD STATUS — **Steps 1–4 + 7 of ``docs/NEW_STRATEGY_PLAYBOOK.md``.** Registered,
+dry-run-LOCKED, and as of Step 4 it can **open a simulated position**: expected-move
+strike selection, the pre-entry gates, sizing-for-zero, and a ``_simulate_entry``
+that books synthetic DRY fills into the isolated ``long_strangle.db``.
+
+**Step 5 — the exits — is NOT written.** An H entry opened today is opened and then
+held; the +50% / +100%-of-debit targets and the EOD path do not exist yet. The stop
+machinery is explicitly disarmed rather than left inherited (see
+``_calculate_stop_levels_hydra``), and ``_execute_entry`` **refuses** rather than
+falling through to the base's 4-leg iron-condor placement. Do not read "it books an
+entry" as "it is finished".
 
 Spec + build-weight decision: ``docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md``
 (MEDIUM build — skip Step 6, include a small Step 2 model and a Step 7 isolated DB,
@@ -41,11 +47,32 @@ because ``IronCondorEntry``'s P&L is credit-shaped in every branch and
 from __future__ import annotations
 
 import logging
+import os
+from datetime import datetime
+from typing import List, Optional, Tuple
 
-from bots.hydra.base_strategy import ConfigError
-from bots.hydra.strategy import HydraStrategy
+from bots.hydra.base_strategy import ConfigError, MEICState
+from bots.hydra.long_strangle_chain import (
+    expected_move_from_straddle,
+    expected_move_from_vix,
+    iv_percentile,
+    premiums_are_balanced,
+    select_strangle_strikes,
+    size_for_zero,
+    snap_to_chain,
+)
+from bots.hydra.long_strangle_entry import LongStrangleEntry
+from bots.hydra.ls_recorder import LongStrangleDataRecorder
+from bots.hydra.strategy import DATA_DIR, HydraStrategy
+from shared.event_calendar import is_fomc_t_plus_one
+from shared.market_hours import get_us_market_time
 
 logger = logging.getLogger(__name__)
+
+#: Every strike is snapped to a listed one within this many points, or the entry
+#: is skipped. Same tolerance ``_read_option_chain`` uses — half the widest
+#: far-OTM SPXW spacing. A looser cap would let 7825 quietly resolve to 7700.
+MAX_SNAP_DISTANCE = 25.0
 
 
 class LongStrangleStrategy(HydraStrategy):
@@ -76,9 +103,10 @@ class LongStrangleStrategy(HydraStrategy):
 
         Locked for a different reason from G's. G is locked because it carries
         UNDEFINED risk and arming it is a deliberate operator decision. This is
-        locked because it is an **unfinished Step 1 scaffold** with no entry
-        logic — its risk is bounded by construction, but a half-built strategy
-        must not be armed regardless.
+        locked because it is **unfinished**: Step 4 can open a position but Step 5
+        (the exits) is not written, so an armed H would buy premium and then hold
+        it to expiry with no profit target. Its risk is bounded by construction;
+        that is not a reason to arm a half-built strategy.
 
         The kwarg is checked BEFORE ``super().__init__`` so an illegal live
         construction never reaches the base init's broker I/O. ``build_strategy``
@@ -86,9 +114,10 @@ class LongStrangleStrategy(HydraStrategy):
         """
         if not kwargs.get("dry_run", False):
             raise ConfigError(
-                "LongStrangleStrategy is dry-run-LOCKED: it is a Step 1 scaffold "
-                "with NO entry logic implemented (see "
-                "docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md). Set dry_run=true, "
+                "LongStrangleStrategy is dry-run-LOCKED: entry works (Step 4) but "
+                "the EXITS DO NOT EXIST (Step 5 unwritten) — an armed H would buy "
+                "premium and hold it to expiry. See "
+                "docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md. Set dry_run=true, "
                 "or do not select strategy.name='long_strangle'."
             )
         super().__init__(*args, **kwargs)
@@ -99,7 +128,639 @@ class LongStrangleStrategy(HydraStrategy):
                 "LongStrangleStrategy resolved to dry_run=false after init — "
                 "refusing to arm an unfinished strategy scaffold."
             )
+
+        # Step 7's isolated DB, wired here in Step 4 because this is where rows
+        # start existing. It is NOT the base's DataRecorder: `trade_entries` has
+        # no column that can hold a debit, so writing H there would record a
+        # strangle that cost nothing (see ls_recorder.py's module docstring).
+        self.ls_recorder: Optional[LongStrangleDataRecorder] = None
+        try:
+            os.makedirs(DATA_DIR, exist_ok=True)
+            self.ls_recorder = LongStrangleDataRecorder(
+                os.path.join(DATA_DIR, "long_strangle.db")
+            )
+        except Exception as e:  # pragma: no cover - defensive; recorder is optional
+            logger.warning("LongStrangle recorder unavailable (non-critical): %s", e)
+
         logger.info(
-            "LongStrangleStrategy (variant H) constructed — Step 1 scaffold, "
-            "INERT: no entry logic implemented yet."
+            "LongStrangleStrategy (variant H) constructed — Steps 1-4 + 7: entry "
+            "and dry-run simulation live, EXITS NOT IMPLEMENTED (Step 5)."
+        )
+
+    # ==================================================================
+    # Step 4 — config access
+    # ==================================================================
+
+    def _ls_config(self) -> dict:
+        """The ``strategy.long_strangle`` block, or an empty dict.
+
+        Every Step 4 knob lives under this one key so a reader can see the whole
+        strategy-specific surface in one place, and so nothing here can collide
+        with an iron-condor knob of the same name.
+        """
+        cfg = getattr(self, "strategy_config", {}) or {}
+        return cfg.get("long_strangle", {}) or {}
+
+    # ==================================================================
+    # Step 4 — capital
+    # ==================================================================
+
+    def _min_buying_power_per_unit(self) -> float:
+        """Capital per contract is the DEBIT PAID, not a margin requirement.
+
+        Long options are **fully paid** — there is nothing to margin. The base's
+        floor is width-derived (``max(call_width, put_width) x $100``), which for
+        the IC family is correct and for H is meaningless: ``spread_width`` is
+        0.0 by construction (Step 2), and the base would instead derive a 60-75pt
+        IC width and demand $6,000-7,500 per contract for a position that costs a
+        few hundred dollars. That would not fail loudly; it would just skip every
+        entry on a small account and look like "no signal".
+
+        The floor used instead is ``sizing_for_zero_max_loss`` — the most the
+        strategy will ever commit to one entry, because sizing-for-zero caps
+        total debit at exactly that number (see ``_size_for_zero``). Overridable
+        via ``min_buying_power_per_long_strangle`` if an operator wants a wider
+        margin of safety than the loss limit itself.
+
+        Note the gate multiplies this by ``contracts_per_entry``, so at >1
+        contract it demands MORE than the strategy can actually spend. That is
+        deliberate: the floor is checked before strikes exist, so the true debit
+        is unknowable at that point, and a capital gate should err high.
+        """
+        cfg = self._ls_config()
+        default = float(cfg.get("sizing_for_zero_max_loss", 500.0) or 500.0)
+        return float(cfg.get("min_buying_power_per_long_strangle", default))
+
+    # ==================================================================
+    # Step 4 — the expected move (which IS the strike choice)
+    # ==================================================================
+
+    def _chain_strikes(self, expiry: str) -> List[float]:
+        """The listed strike grid for ``expiry``, or ``[]``.
+
+        Goes to the broker's chain directly rather than through
+        ``_read_option_chain``, which resolves conids for a *candidate* set — but
+        the candidates are what we are trying to compute. One cheap call.
+        """
+        try:
+            expiry_date = datetime.strptime(expiry, "%Y-%m-%d").date()
+        except (ValueError, TypeError) as e:
+            logger.warning("LS: bad expiry %r: %s", expiry, e)
+            return []
+        try:
+            strikes = self.broker.get_option_chain(
+                self.underlying_symbol, expiry_date,
+                trading_class=self.trading_class, exchange=self.exchange,
+            )
+        except Exception as e:
+            logger.warning("LS: chain fetch failed: %s", e)
+            return []
+        return [float(s) for s in (strikes or []) if s]
+
+    def _expected_move(self, spot: float, expiry: str,
+                       strikes: List[float]) -> Tuple[float, str]:
+        """``(expected_move, source)`` — the number the strikes are built from.
+
+        Config-driven via ``long_strangle.expected_move_source``. The two
+        definitions **disagree by roughly 3x** on a quiet day (2026-09-22:
+        straddle ~22pt, VIX-implied ~71pt), and the expected move IS the strike
+        choice, so this is not a tuning knob — it selects which strategy runs.
+
+        **There is deliberately NO FALLBACK between them.** If the configured
+        source cannot be computed — a missing ATM quote, a VIX of zero — this
+        returns ``(0.0, source)`` and the caller skips the entry. Quietly
+        substituting the other definition would place a 71pt-wide strangle while
+        the config, the logs and the recorded ``em_source`` all said "straddle",
+        and the resulting data would be two strategies blended into one series
+        with no way to separate them afterwards.
+        """
+        source = str(self._ls_config().get("expected_move_source", "straddle")).lower()
+
+        if source == "vix":
+            vix = float(getattr(self, "current_vix", 0.0) or 0.0)
+            mult = float(self._ls_config().get("expected_move_multiplier", 1.0))
+            em = expected_move_from_vix(spot, vix, mult)
+            if em <= 0:
+                logger.warning("LS: VIX-implied expected move unavailable (VIX=%.2f)", vix)
+            return em, "vix"
+
+        if source != "straddle":
+            logger.error(
+                "LS: unknown expected_move_source %r — refusing to guess. "
+                "Valid values: 'straddle', 'vix'.", source
+            )
+            return 0.0, source
+
+        # Straddle: price the ATM call and put on the live chain.
+        atm = snap_to_chain(spot, strikes, MAX_SNAP_DISTANCE)
+        if atm is None:
+            logger.warning("LS: no ATM strike within %.0fpt of spot %.2f",
+                           MAX_SNAP_DISTANCE, spot)
+            return 0.0, "straddle"
+        call_uic = self._get_option_uic(atm, "Call", expiry)
+        put_uic = self._get_option_uic(atm, "Put", expiry)
+        call_px = self._estimate_long_premium(call_uic)
+        put_px = self._estimate_long_premium(put_uic)
+        em = expected_move_from_straddle(call_px, put_px)
+        if em <= 0:
+            logger.warning(
+                "LS: ATM straddle at %.0f not priceable (call %.2f / put %.2f) — "
+                "NOT substituting the VIX formula; skipping instead",
+                atm, call_px, put_px,
+            )
+        else:
+            logger.info("LS: expected move %.1fpt from the %.0f straddle "
+                        "(call %.2f + put %.2f)", em, atm, call_px, put_px)
+        return em, "straddle"
+
+    def _estimate_long_premium(self, uic) -> float:
+        """Per-contract price (option points) of a leg we intend to BUY.
+
+        Routes through ``_quote_mid``, which carries the L-M7 crossed-quote guard
+        (never averages a bid>ask book) and the mid → last → mark fallback. The
+        mirror of G's ``_estimate_short_premium``; the arithmetic is identical
+        because a mid is a mid — only what we do with it differs in sign.
+        """
+        if not uic:
+            return 0.0
+        quote = self._read_option_quote(uic) or {}
+        return float(self._quote_mid(quote) or 0.0)
+
+    # ==================================================================
+    # Step 4 — strike selection
+    # ==================================================================
+
+    def _calculate_strikes(self, entry) -> bool:
+        """Pick both long strikes at ``spot ± expected_move``, and price them.
+
+        Also resolves conids and leg prices here rather than in
+        ``_simulate_entry``, because the skew check and sizing-for-zero both need
+        the premiums — quoting once and reusing is both cheaper and consistent
+        (two quote rounds could disagree and produce a debit that never existed).
+
+        Returns False on any refusal; the caller records the reason.
+        """
+        spot = self.current_price
+        if spot <= 0:
+            logger.error("LS: cannot calculate strikes — no SPX price")
+            entry.ls_skip_reason = "no SPX price"
+            return False
+
+        expiry = self._get_todays_expiry()
+        if not expiry:
+            logger.error("LS: no expiry available")
+            entry.ls_skip_reason = "no expiry"
+            return False
+        entry.expiry = expiry
+
+        strikes = self._chain_strikes(expiry)
+        if not strikes:
+            entry.ls_skip_reason = "empty option chain"
+            return False
+
+        em, em_source = self._expected_move(spot, expiry, strikes)
+        entry.ls_em_source = em_source
+        entry.ls_expected_move = em
+        if em <= 0:
+            entry.ls_skip_reason = f"expected move unavailable ({em_source})"
+            return False
+
+        call_k, put_k = select_strangle_strikes(spot, em, strikes, MAX_SNAP_DISTANCE)
+        if call_k is None or put_k is None:
+            # One leg is a directional bet, which is not this strategy.
+            logger.warning(
+                "LS: chain could not supply both strikes within %.0fpt of "
+                "%.2f ± %.1f (call=%s put=%s)",
+                MAX_SNAP_DISTANCE, spot, em, call_k, put_k,
+            )
+            entry.ls_skip_reason = "chain could not supply both strikes"
+            return False
+
+        # H holds two LONGS. short_* stays 0.0 — the mirror of G (Step 2).
+        entry.long_call_strike, entry.long_put_strike = call_k, put_k
+        entry.short_call_strike = entry.short_put_strike = 0.0
+
+        call_uic = self._get_option_uic(call_k, "Call", expiry)
+        put_uic = self._get_option_uic(put_k, "Put", expiry)
+        if not call_uic or not put_uic:
+            logger.warning("LS: conid resolution failed (call=%s put=%s)",
+                           call_uic, put_uic)
+            entry.ls_skip_reason = "conid resolution failed"
+            return False
+        entry.long_call_uic, entry.long_put_uic = call_uic, put_uic
+
+        call_px = self._estimate_long_premium(call_uic)
+        put_px = self._estimate_long_premium(put_uic)
+        if call_px <= 0 or put_px <= 0:
+            # A zero premium here would become a zero debit, an infinite
+            # sizing-for-zero count, and a position that appears free.
+            logger.warning("LS: leg not priceable (call %.2f / put %.2f)",
+                           call_px, put_px)
+            entry.ls_skip_reason = "leg not priceable"
+            return False
+        entry.long_call_price, entry.long_put_price = call_px, put_px
+
+        # The source's skew check. Equidistant strikes are NOT equally priced
+        # (put skew); a large imbalance means the "strangle" is a directional
+        # position wearing two legs.
+        tol = float(self._ls_config().get("skew_tolerance_pct", 35.0))
+        gap = abs(call_px - put_px) / max(call_px, put_px) * 100.0
+        entry.ls_skew_gap_pct = gap
+        if not premiums_are_balanced(call_px, put_px, tol):
+            logger.info(
+                "LS: skew veto — call %.2f vs put %.2f is %.1f%% apart "
+                "(tolerance %.1f%%)", call_px, put_px, gap, tol,
+            )
+            entry.ls_skip_reason = (
+                f"skew {gap:.1f}% > {tol:.1f}% tolerance"
+            )
+            return False
+
+        logger.info(
+            "LS strikes: C %.0f (%.2f) / P %.0f (%.2f) — spot %.2f ± %.1fpt "
+            "(%s), skew %.1f%%",
+            call_k, call_px, put_k, put_px, spot, em, em_source, gap,
+        )
+        return True
+
+    # ==================================================================
+    # Step 4 — the IV-percentile filter, deliberately OFF
+    # ==================================================================
+
+    def _iv_percentile_gate(self, entry) -> Optional[str]:
+        """The source's "IV percentile below ~35%" filter. **Default: disabled.**
+
+        Not disabled out of laziness — disabled because **this repo has no honest
+        input for it** (spec assumption 2). Nothing stores option-IV history;
+        ``market_ticks`` keeps VIX, which is a 30-day *index* vol and NOT the IV
+        of the specific 0DTE options being bought. The Step 3 probe's job is to
+        establish what series actually exists.
+
+        So the gate is built and wired, and it **fails closed**: enabling it
+        without naming a series skips every entry with an explicit reason, rather
+        than passing everything and looking like the filter is working. A
+        premature flip is therefore immediately visible in the logs instead of
+        silently doing nothing.
+
+        Returns a skip reason, or None to proceed.
+        """
+        cfg = self._ls_config()
+        if not cfg.get("iv_percentile_filter_enabled", False):
+            return None
+
+        source = str(cfg.get("iv_percentile_source", "") or "").strip().lower()
+        if not source:
+            return ("iv_percentile filter enabled but no iv_percentile_source is "
+                    "wired — see spec assumption 2 (probe Q2)")
+        if source != "vix":
+            return f"iv_percentile_source {source!r} is not implemented"
+
+        # VIX percentile, named as such. It is a proxy and the recorded reason
+        # says so, so no later analysis can mistake it for an option-IV
+        # percentile.
+        history = self._vix_history_for_percentile()
+        pct = iv_percentile(float(getattr(self, "current_vix", 0.0) or 0.0), history)
+        entry.ls_iv_percentile = pct
+        if pct is None:
+            return "VIX-percentile proxy unavailable (empty history)"
+        max_pct = float(cfg.get("iv_percentile_max", 35.0))
+        if pct > max_pct:
+            return (f"VIX-percentile proxy {pct:.0f}% > {max_pct:.0f}% max "
+                    f"(NOT an option-IV percentile)")
+        return None
+
+    def _vix_history_for_percentile(self) -> List[float]:
+        """Closing VIX history for the percentile proxy. Empty until wired.
+
+        Returning ``[]`` makes ``iv_percentile`` return None — "unknown" — which
+        ``_iv_percentile_gate`` treats as a skip, not a pass. That is the
+        fail-closed half of the design above.
+        """
+        return []
+
+    # ==================================================================
+    # Step 4 — sizing for zero
+    # ==================================================================
+
+    def _size_for_zero(self, entry) -> int:
+        """Contracts, assuming the entire debit goes to zero.
+
+        The source's rule, and the only one that makes sense for a position whose
+        maximum loss is its cost: choose what you can afford to lose outright,
+        then buy that many. ``size_for_zero`` floors at 0 rather than 1 — a
+        caller that cannot afford one contract must place nothing, because
+        rounding up would breach the very limit the rule exists to enforce.
+
+        The fleet-wide safety caps (``contracts_per_entry``,
+        ``max_contracts_per_order``) are applied as a MIN, so they can only ever
+        reduce the count, never raise it above what the loss limit allows.
+        """
+        debit_per_contract = (entry.long_call_price + entry.long_put_price) * 100.0
+        if debit_per_contract <= 0:
+            return 0
+        max_loss = float(self._ls_config().get("sizing_for_zero_max_loss", 500.0))
+        affordable = size_for_zero(max_loss, debit_per_contract)
+
+        # A cap that is PRESENT is honoured even at 0 — `or affordable` here
+        # would turn a deliberate 0 into "no cap", which is the wrong direction
+        # for a safety limit.
+        caps = [int(self.contracts_per_entry or 0)]
+        order_cap = getattr(self, "max_contracts_per_order", None)
+        if order_cap is not None:
+            caps.append(int(order_cap))
+
+        capped = max(min(affordable, *caps) if caps else affordable, 0)
+        logger.info(
+            "LS sizing-for-zero: $%.0f limit / $%.2f per contract = %d, "
+            "capped to %d by the fleet contract caps",
+            max_loss, debit_per_contract, affordable, capped,
+        )
+        return capped
+
+    # ==================================================================
+    # Step 4 — pre-entry gates
+    # ==================================================================
+
+    def _long_strangle_pre_entry_gates(self, entry_num: int) -> Optional[str]:
+        """Shared pre-entry gates; a skip/delay string if any blocks, else None.
+
+        Mirrors G's ``_strangle_pre_entry_gates`` — the same helpers in the same
+        order, so the gate LOGIC stays single-sourced — minus the IC-specific
+        credit/conditional branches, which have no meaning for a debit structure.
+
+        Two of these gates are worth noting because they read oddly for a long
+        strategy and are kept on purpose:
+
+        * **Orphaned orders** still blocks. H cannot create a naked short, but it
+          shares an account with variants that can, and opening new positions
+          while the account state is unreconciled is wrong regardless of sign.
+        * **Whipsaw** still blocks, which is arguably backwards for a long-gamma
+          strategy — a wide intraday range is what H *wants*. It is kept for the
+          first observation window so H's gating matches the rest of the fleet
+          and the dry-run data is comparable; ``whipsaw_range_skip_mult`` is
+          config-exposed, and this is a prime candidate to relax once there is
+          data. Flagged here rather than silently inverted.
+        """
+        if self._has_orphaned_orders():
+            logger.error("LS entry #%d blocked by orphaned orders", entry_num)
+            self._next_entry_index += 1
+            return f"Entry #{entry_num} skipped - orphaned orders blocking"
+
+        is_halted, halt_reason = self._check_market_halt()
+        if is_halted:
+            # A halt is a DELAY (retry later), not a skip — do NOT advance.
+            return f"Entry #{entry_num} delayed - {halt_reason}"
+
+        has_bp, bp_message = self._check_buying_power()
+        if not has_bp:
+            self.daily_state.entries_skipped += 1
+            self._next_entry_index += 1
+            self._record_skipped_entry(entry_num, f"Insufficient capital: {bp_message}",
+                                       send_alert=False)
+            return f"Entry #{entry_num} skipped - {bp_message}"
+
+        whipsaw_reason = self._check_whipsaw_filter()
+        if whipsaw_reason:
+            self.daily_state.entries_skipped += 1
+            self._next_entry_index += 1
+            self._record_skipped_entry(entry_num, whipsaw_reason, send_alert=True)
+            return f"Entry #{entry_num} skipped - {whipsaw_reason}"
+
+        if (self.fomc_t1_skip_enabled and is_fomc_t_plus_one()
+                and not self._force_normal_day()):
+            self.daily_state.entries_skipped += 1
+            self._next_entry_index += 1
+            self._record_skipped_entry(entry_num, "FOMC T+1 blackout", send_alert=True)
+            return f"Entry #{entry_num} skipped - FOMC T+1 blackout"
+
+        return None
+
+    # ==================================================================
+    # Step 4 — orchestration
+    # ==================================================================
+
+    def _initiate_entry(self) -> str:
+        """Long-strangle entry: gates → strikes → IV gate → size → simulate → book.
+
+        Simpler than the IC path by construction: there is no credit gate (nothing
+        is sold), no one-sided conversion (one leg is a directional bet, not this
+        strategy), no conditional E6, and no stop levels to compute.
+        """
+        entry_num = self._next_entry_index + 1
+        logger.info("LONGSTRANGLE: initiating entry #%d", entry_num)
+
+        gate = self._long_strangle_pre_entry_gates(entry_num)
+        if gate is not None:
+            return gate
+
+        self._entry_in_progress = True
+        self.state = MEICState.ENTRY_IN_PROGRESS
+        try:
+            entry = LongStrangleEntry(entry_number=entry_num)
+            # Structure discriminator so logging/analytics never label this an
+            # Iron Condor with phantom 0.0 wings (item 6, as G does).
+            entry.structure = "long_strangle"
+            entry.contracts = self.contracts_per_entry
+            entry.strategy_id = (
+                f"long_strangle_{get_us_market_time().strftime('%Y%m%d')}_{entry_num:03d}"
+            )
+
+            if not self._calculate_strikes(entry):
+                return self._skip(entry, entry_num,
+                                  getattr(entry, "ls_skip_reason", "strike selection failed"))
+
+            iv_skip = self._iv_percentile_gate(entry)
+            if iv_skip:
+                return self._skip(entry, entry_num, iv_skip)
+
+            contracts = self._size_for_zero(entry)
+            if contracts <= 0:
+                return self._skip(
+                    entry, entry_num,
+                    "sizing-for-zero allows 0 contracts (debit exceeds the loss limit)",
+                )
+            entry.contracts = contracts
+
+            if not self.dry_run:  # pragma: no cover - unreachable while locked
+                raise ConfigError("LongStrangleStrategy cannot place live orders")
+            if not self._simulate_entry(entry):
+                self.daily_state.entries_failed += 1
+                self._record_failed_entry(entry_num, "long strangle: simulation failed",
+                                          used_retry_loop=False)
+                self._next_entry_index += 1
+                return f"Entry #{entry_num} failed - simulation unsuccessful"
+
+            entry.entry_time = get_us_market_time()
+            entry.is_complete = True
+            self.daily_state.entries.append(entry)
+            self.daily_state.entries_completed += 1
+            # NOT total_credit_received — nothing was collected. The daily
+            # credit accumulator stays at zero for H on purpose; the money paid
+            # is in ls_entries.total_debit.
+            entry.open_commission = 2 * self.commission_per_leg * entry.contracts
+            self.daily_state.total_commission += entry.open_commission
+
+            self._calculate_stop_levels_hydra(entry)   # documented no-op
+            self._save_state_to_disk()                 # persist before logging
+            self._log_entry(entry)
+            entry._spx_at_entry = self.current_price
+            self._record_entry_to_db(entry)
+            self._next_entry_index += 1
+
+            return (
+                f"Entry #{entry_num} placed: LONG STRANGLE "
+                f"C {entry.long_call_strike:.0f} / P {entry.long_put_strike:.0f}, "
+                f"debit ${entry.total_debit:.2f} ({entry.contracts}c)"
+            )
+        finally:
+            self._entry_in_progress = False
+            self.state = MEICState.MONITORING
+
+    def _skip(self, entry, entry_num: int, reason: str) -> str:
+        """Book a skip once, to both the shared counters and ``ls_skipped``.
+
+        The second half is the part that matters: ``ls_skipped`` carries the
+        proposed strikes, the debit, the expected move and its source — enough to
+        score the decision later. The GEX work on variant B had to be retro-fitted
+        for exactly this and could never recover its first 95 vetoes.
+        """
+        self.daily_state.entries_skipped += 1
+        self._next_entry_index += 1
+        self._record_skipped_entry(entry_num, reason, send_alert=False)
+        if self.ls_recorder:
+            now = get_us_market_time()
+            debit = ((getattr(entry, "long_call_price", 0.0)
+                      + getattr(entry, "long_put_price", 0.0))
+                     * 100.0 * (entry.contracts or 1))
+            self.ls_recorder.record_skip(
+                now.strftime("%Y-%m-%d"), entry_num, now.strftime("%H:%M:%S"), reason,
+                spx=self.current_price, vix=getattr(self, "current_vix", 0.0),
+                proposed_call_strike=getattr(entry, "long_call_strike", 0.0),
+                proposed_put_strike=getattr(entry, "long_put_strike", 0.0),
+                proposed_debit=debit,
+                em_source=getattr(entry, "ls_em_source", ""),
+                expected_move=getattr(entry, "ls_expected_move", 0.0),
+                iv_percentile=getattr(entry, "ls_iv_percentile", None),
+                skew_gap_pct=getattr(entry, "ls_skew_gap_pct", 0.0),
+            )
+        logger.info("LONGSTRANGLE entry #%d skipped - %s", entry_num, reason)
+        return f"Entry #{entry_num} skipped - {reason}"
+
+    # ==================================================================
+    # Step 4 — dry-run simulation
+    # ==================================================================
+
+    def _simulate_entry(self, entry) -> bool:
+        """Book synthetic DRY fills for the two LONG legs. No order is placed.
+
+        Conids and mid prices were already resolved in ``_calculate_strikes``, so
+        this only converts them into the debit and assigns synthetic ids. The
+        base IC simulation cannot be reused: it books a *credit* from a four-leg
+        structure and would record this position as having collected money.
+        """
+        if not entry.long_call_uic or not entry.long_put_uic:
+            logger.error("[DRY RUN] LS: missing conid for entry #%d", entry.entry_number)
+            return False
+        if entry.long_call_price <= 0 or entry.long_put_price <= 0:
+            logger.error("[DRY RUN] LS: unpriced leg for entry #%d", entry.entry_number)
+            return False
+
+        n = entry.contracts
+        entry.call_debit = entry.long_call_price * 100 * n
+        entry.put_debit = entry.long_put_price * 100 * n
+        entry.long_call_fill_price = entry.long_call_price
+        entry.long_put_fill_price = entry.long_put_price
+
+        base_id = int(datetime.now().timestamp() * 1000)
+        entry.long_call_position_id = f"DRY_{base_id}_LC"
+        entry.long_put_position_id = f"DRY_{base_id}_LP"
+        entry.is_complete = True
+
+        logger.info(
+            "[DRY RUN] Simulated LONG STRANGLE #%d: C %.0f ($%.2f) / P %.0f ($%.2f), "
+            "total debit $%.2f = max loss, %dc",
+            entry.entry_number, entry.long_call_strike, entry.call_debit,
+            entry.long_put_strike, entry.put_debit, entry.total_debit, n,
+        )
+        return True
+
+    def _execute_entry(self, entry) -> bool:
+        """**Refuses.** There is no live placement path for variant H.
+
+        Not merely absent — actively refused. Leaving this inherited would hand H
+        the base's four-leg iron-condor placement, which sells two short legs H
+        does not have and has never sized for. The dry-run lock in ``__init__``
+        should make this unreachable; this is the second lock, because "the other
+        guard will catch it" is how a strategy ends up selling naked options.
+        """
+        raise ConfigError(
+            "LongStrangleStrategy has no live entry path (Step 4 is dry-run only). "
+            "The inherited IC placement would SELL two short legs this strategy "
+            "does not have."
+        )
+
+    # ==================================================================
+    # Step 4 — stops are disarmed, not inherited
+    # ==================================================================
+
+    def _calculate_stop_levels_hydra(self, entry) -> None:
+        """Deliberate no-op: **a long strangle has no stop loss.**
+
+        Max loss is the debit, known before the position opens, so there is
+        nothing to stop out of — no GUARD-FLOOR, no A2 %-of-width, no MKT-046
+        anti-spike, no buffer decay.
+
+        The base computes ``credit + buffer``. With ``total_credit`` truthfully
+        0.0 (Step 2) that collapses to the MIN_STOP_LEVEL floor plus a buffer —
+        a small, arbitrary dollar figure with no relationship to anything, which
+        the monitoring loop would then treat as a real trigger. Setting the stops
+        explicitly unreachable is the difference between "no stop" and "a stop
+        nobody chose".
+
+        Step 5 owns the exits proper (+50% / +100% of debit, EOD) and will
+        replace the monitoring path; this only guarantees that until then nothing
+        fires by accident.
+
+        VERIFIED, not assumed: a SECOND, independent mechanism also blocks the
+        base stop path today. ``_validate_pnl_sanity``'s DATA-004 check rejects a
+        side whose two legs are "partially zero", and H's ``short_*_price`` is
+        permanently 0.0 while its ``long_*_price`` is not — so the guard returns
+        False and ``_check_stop_losses`` skips the entry every tick. This is the
+        exact mirror of G's **S-CRIT-1**, where the same guard was the bug (it
+        kept G's stop from EVER firing). Here it is harmless but NOT free: it
+        logs a WARNING every tick calling an intentionally-absent leg
+        "suspicious". **Step 5 must override this guard to validate the LONG legs
+        only** — both to quiet the log and because Step 5's profit-target path
+        will need the monitoring tick it currently discards.
+        """
+        entry.call_side_stop = float("inf")
+        entry.put_side_stop = float("inf")
+        logger.info(
+            "LS entry #%d: no stop levels — max loss is the $%.2f debit, by "
+            "construction", entry.entry_number, entry.total_debit,
+        )
+
+    # ==================================================================
+    # Step 4 — recording
+    # ==================================================================
+
+    def _record_entry_to_db(self, entry) -> None:
+        """Route H's entries to the isolated DB, NEVER to ``trade_entries``.
+
+        The base writes ``call_credit`` / ``put_credit`` / ``total_credit``, all
+        of which are truthfully 0.0 here — so the shared-shape table would record
+        a strangle that cost nothing, and every consumer would read that zero as
+        fact. Overriding rather than simply not calling it means no inherited
+        call site can leak one in either.
+        """
+        if not self.ls_recorder:
+            return
+        now = get_us_market_time()
+        self.ls_recorder.record_entry(
+            entry, date=now.strftime("%Y-%m-%d"),
+            spx_at_entry=self.current_price,
+            vix_at_entry=float(getattr(self, "current_vix", 0.0) or 0.0),
+            em_source=getattr(entry, "ls_em_source", ""),
+            expected_move=getattr(entry, "ls_expected_move", 0.0),
+            skew_gap_pct=getattr(entry, "ls_skew_gap_pct", 0.0),
         )

@@ -36,6 +36,43 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-23 STRATEGY H (long strangle), PLAYBOOK STEP 4 — entry + dry-run simulation.
+  Variant H can now select strikes and book a SIMULATED entry. It remains dry-run-LOCKED,
+  and the lock's message changed: it used to say "no entry logic", it now says THE EXITS
+  DO NOT EXIST (Step 5). An H entry today is opened and then held to expiry.
+  Four decisions worth recording, each of which would otherwise have produced a
+  believable number rather than a visible failure:
+  * NO FALLBACK between the two expected-move definitions. If the configured source
+    (`long_strangle.expected_move_source`) can't be computed, the entry is SKIPPED. The
+    two disagree ~3x (straddle ~22pt vs VIX-implied ~71pt on 2026-09-22) and the expected
+    move IS the strike choice — a fallback would place a 71pt strangle while the config,
+    the logs and the recorded `em_source` all said "straddle", blending two strategies
+    into one series that could never be separated afterwards.
+  * THE IV-PERCENTILE FILTER FAILS CLOSED and ships disabled. Nothing in this repo stores
+    option-IV history (`market_ticks` keeps VIX, a 30-day INDEX vol, not the IV of the
+    0DTE options being bought). Enabling it without naming a series skips EVERY entry
+    loudly rather than passing everything silently. If the Step 3 probe answers "only VIX
+    exists", the `vix` source is accepted but every skip reason it writes carries
+    "NOT an option-IV percentile".
+  * BUYING-POWER FLOOR OVERRIDDEN DOWNWARD (the opposite of G's S2). Long options are
+    fully paid, so capital = the debit. The base derives `max(call_width,put_width)x$100`
+    = $6,000-7,500/contract of IC width for a position costing a few hundred dollars —
+    which would not have failed loudly, it would have skipped every entry and looked like
+    "no signal". Floor is now the sizing-for-zero loss limit.
+  * STOPS DISARMED EXPLICITLY, not left inherited. With `total_credit` truthfully 0.0
+    (Step 2), the base's credit+buffer collapses to the MIN_STOP_LEVEL floor plus a
+    buffer — a small arbitrary figure the monitoring loop would treat as a real trigger.
+    `_calculate_stop_levels_hydra` now sets both sides unreachable. "No stop" and "a stop
+    nobody chose" are different things.
+  Also: `_execute_entry` RAISES rather than inheriting the base's 4-leg IC placement,
+  which would SELL two short legs H does not have and has never sized for (second lock —
+  the __init__ gate should make it unreachable). `_record_entry_to_db` is overridden to
+  route to the isolated `long_strangle.db`, so no inherited call site can leak a
+  debit-shaped entry into credit-shaped `trade_entries`. The whipsaw gate is KEPT even
+  though it arguably runs backwards for a long-gamma strategy (it skips the wide-range
+  days H wants) — kept for the first observation window so H's gating matches the fleet
+  and the dry-run data is comparable; flagged in the spec rather than silently inverted.
+  53 new tests. Zero effect on A/B/C/D/E/F/G — H is not installed on the VM.
 - 2026-09-18 MKT-011B: A CREDIT OF EXACTLY $0.00 WAS READ AS "I COULD NOT MEASURE THE
   CREDIT". Cost the live seat -$137.20 the day it was found. NOT a regression — the
   branch traces to 0e73b42, the original MEIC->HYDRA rename (v1.5.0).
