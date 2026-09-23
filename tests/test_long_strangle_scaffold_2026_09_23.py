@@ -228,6 +228,22 @@ class TestItIsFaithfulToTheSource:
         for banned in ("call_stop_buffer", "put_stop_buffer", "narrow_spread_stop"):
             assert banned not in cfg, banned
 
+    def test_the_vix_regime_is_OFF(self):
+        """The source specifies no VIX-regime behaviour of any kind, and for H
+        the block is inert anyway — it overwrites credit floors and stop
+        buffers, and H uses NEITHER. Its only live effect was cosmetic and
+        misleading: `_effective_total_entry_count()` estimates from
+        max(max_entries)=2 before VIX is known, so the heartbeat read
+        "Entries: 0/2" for a strategy with exactly ONE entry slot."""
+        assert self._cfg()["vix_regime"]["enabled"] is False
+
+    def test_exactly_one_entry_slot_survives_every_gate(self):
+        """"He generally enters near the market open" — singular. Nothing in
+        the config may expand that."""
+        cfg = self._cfg()
+        assert len(cfg["entry_times"]) == 1
+        assert cfg["vix_regime"]["enabled"] is False   # cannot truncate or pad
+
     def test_the_reasoning_lives_in_the_config_not_only_in_a_test(self):
         """A future reader edits the config, not this file."""
         raw = CONFIG.read_text()

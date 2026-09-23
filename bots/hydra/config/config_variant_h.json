@@ -36,8 +36,8 @@
     "fomc_announcement_skip": false,
     "min_entries_before_roc_gate": 999,
     "vix_regime": {
-      "_comment": "Inherited unchanged via HydraStrategy._should_attempt_entry (Strangle doesn't override it) — the SAME vix_regime block A/B/C use, kept identical for a fresh variant's first observation window rather than inventing new breakpoints untested for this structure.",
-      "enabled": true,
+      "_comment": "DISABLED 2026-09-23. The source specifies no VIX-regime behaviour of any kind, and for H the block is INERT anyway: it overwrites min_call_credit / min_put_credit / call_stop_buffer / put_stop_buffer, and H uses NO credits and NO stops. Its only live effect was cosmetic and misleading — _effective_total_entry_count() estimates from max(max_entries)=2 before VIX is known, so the heartbeat read 'Entries: 0/2' for a strategy with exactly ONE entry slot. The arrays are left in place so the shape is unchanged and re-enabling is one boolean, but nothing reads them while enabled=false.",
+      "enabled": false,
       "breakpoints": [
         18.0,
         22.0,
