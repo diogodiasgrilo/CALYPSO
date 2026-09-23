@@ -1,9 +1,9 @@
 # Strategy H — 0DTE Long Strangle ("Tompkins")
 
-**Status:** Steps 0–5 + 7 built, dry-run-LOCKED. Functionally complete in dry-run — strikes,
-sizing, entry, profit target, settlement — but **this code has never run**, and Steps 8–10
-(observability, hardening, go-live audit) are outstanding. See §8.
-**Written:** 2026-09-23 · **Last updated:** 2026-09-23 (Step 5)
+**Status:** Steps 0–5 + 7–8 built, dry-run-LOCKED. Functionally complete in dry-run — strikes,
+sizing, entry, profit target, settlement — and observable from Telegram and the dashboard. But
+**this code has never run**, and Steps 9–10 (hardening, go-live audit) are outstanding. See §8.
+**Written:** 2026-09-23 · **Last updated:** 2026-09-23 (Step 8)
 **Playbook:** [`docs/NEW_STRATEGY_PLAYBOOK.md`](NEW_STRATEGY_PLAYBOOK.md) Step 0
 **Source:** Jeff Tompkins, via Theta Profits —
 [article](https://www.thetaprofits.com/a-0dte-long-strangle-targeting-50-100-in-24-hours/) ·
@@ -146,9 +146,10 @@ variants' schema untouched, which is the deciding factor while B holds the live 
 | **3** Data plumbing | 🟡 **half done** | `bots/hydra/long_strangle_chain.py` — pure selection helpers, 31 tests, no broker/clock. **The market-hours VM probe is still outstanding** and three assumptions below depend on it. |
 | **4** Entry + dry-run simulation | ✅ | `long_strangle_strategy.py` — expected-move strike selection, skew veto, sizing-for-zero, the shared pre-entry gates, and a `_simulate_entry` booking synthetic DRY fills into `long_strangle.db`. 53 tests. **No real order can reach the broker**: `_execute_entry` raises rather than inheriting the base's 4-leg IC placement (which would SELL two shorts H doesn't have), and `_calculate_stop_levels_hydra` is an explicit no-op setting both stops unreachable. |
 | **5** Exits | ✅ | Percent-of-debit profit target + settlement at intrinsic. 33 tests. **Two inherited exits would have failed SILENTLY** and are overridden: the base books a worthless expiry as "the credit kept" (→ H's total loss recorded as **break-even**), and its DATA-004 sanity guard rejected every H tick as "partial zero prices" (G's S-CRIT-1, mirrored). **No breach-persistence window, on purpose** — see below. |
-| 8–10 | 🔴 **next** | Observability, hardening, go-live audit. These are what still keep H locked. |
 | 6 | **skipped** | Single-day — no sidecar, no multi-day settlement. |
 | **7** Isolated DB | ✅ | `bots/hydra/ls_recorder.py` → `data/variant_h/long_strangle.db`. Four `ls_*` tables, **no credit column anywhere** (asserted). `em_source` stored per entry so the two expected-move regimes stay separable; snapshots accumulate so a +50% peak survives a give-back; `ls_skipped` carries the full counterfactual the GEX work could never recover for B's first 95 vetoes. 18 tests. |
+| **8** Observability | ✅ | `bots/hydra/ls_status.py` (pure, read-only) + `/longstrangle` Telegram command; `dashboard/backend/services/ls_reader.py` + `GET /api/long-strangle/{status,recent}` + a `/long-strangle` page. 50 tests. `tsc -b` and `vite build` clean. |
+| 9–10 | 🔴 **next** | Hardening and the go-live audit. These, plus the plain fact that this code has never run, are what still keep H locked. |
 
 ### Step 2 confirmed Step 0's isolated-DB call, for a concrete reason
 
@@ -357,3 +358,41 @@ inventing one would be worse than saying so.
 **Steps 8–10** — observability (a status reader, a dashboard view for the new `long_gamma_0dte`
 group), hardening, and the go-live audit. Those are now the only things keeping H locked, along with
 the plain fact that **this code has never executed a single tick against a live chain.**
+
+
+### Step 8 — why H needed its own views rather than a row in existing ones
+
+**Every other renderer in this system assumes premium was COLLECTED.** "Expired worthless" is the
+best outcome there and the **worst** one here; P&L is a percentage of a credit there and of a
+**debit** here; capital is a spread width there and there is no spread at all here. Folding H into
+the iron-condor comparison would not merely look odd — it would state its numbers backwards. So H
+gets a Telegram command, an API route and a page of its own:
+
+| surface | what | note |
+|---|---|---|
+| Telegram | `/longstrangle` | **Not** a `/compare` selector. `long_gamma_0dte` has one member and nothing shares its shape, so there is no head-to-head to render. |
+| API | `GET /api/long-strangle/status`, `/recent` | Debit-shaped payload; a test asserts no `total_credit` / `spread_width` key can appear in it. |
+| Page | `/long-strangle` | Tab renders only when the group is registered — taxonomy-driven, no hardcoded letter. |
+
+**Three things this view shows that no other one does:**
+
+1. **Max loss as a fact, not an estimate.** It is the debit paid, known before the position opens.
+   No other strategy on this dashboard can say that about its own day.
+2. **The peak next to the exit.** A long strangle can touch +50% on a gamma spike and give it all
+   back inside a minute, so what a position *reached* and what it *captured* are different numbers.
+   The gap is computed and rendered as a first-class field (`peak_minus_exit_pct`), not left for
+   someone to derive — it is invisible in realized P&L alone, and it is what the source's
+   80%-win-rate claim actually turns on.
+3. **Declined entries with their counterfactual** — proposed strikes, debit and expected move for
+   every skip, so a veto can be scored later rather than reconstructed. The GEX work on variant B had
+   to be retro-fitted for exactly this and could never recover its first 95 vetoes.
+
+**Read-only is asserted, not assumed.** Both readers open `mode=ro` and contain no write verb in any
+*executable* string — checked via the AST rather than a grep, because the module docstrings name
+those verbs on purpose to explain that they are absent (the same fix `test_ls_recorder` needed). The
+dashboard reader also imports no bot code, duplicating its small amount of SQL the way `dc_reader.py`
+does for D and E.
+
+**`available: false` is the expected production response today.** H is dry-run-locked and not
+installed on the VM, so the page renders "no data yet" rather than an error — a 500 for "not
+installed" would be worse than an empty view.

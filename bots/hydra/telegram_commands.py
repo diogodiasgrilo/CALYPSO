@@ -20,6 +20,9 @@ Supported commands:
     /compare  — Group-scoped variant head-to-head (bare = the poller's group, e.g.
                 the 0DTE iron condors A/B/C; "/compare calendars" = D/E)
     /calendars — Multi-day calendar (D, E) status (alias of "/compare calendars")
+    /longstrangle — Strategy H (0DTE long strangle) status — the only LONG-gamma
+        variant, so it has its own view rather than a row in /compare: its P&L is
+        a percentage of a DEBIT and "expired worthless" is its maximum LOSS.
     /restart  — Restart the HYDRA service
     /stop     — Stop the HYDRA service (warns if active positions)
     /help     — List all commands
@@ -338,6 +341,10 @@ class TelegramCommandHandler:
         # with the selector when present and falls back to no-arg on TypeError.
         self._compare_callback: Optional[Callable[..., str]] = None
         self._calendars_callback: Optional[Callable[[], str]] = None
+        # /longstrangle — variant H's native view. Not a /compare selector: its
+        # group is comparable=false (one member, and nothing here shares its
+        # shape), so there is no head-to-head to render.
+        self._long_strangle_callback: Optional[Callable[[], str]] = None
         self._active_positions_callback: Optional[Callable[[], int]] = None
         self._config_path: Optional[str] = None
         self._consecutive_errors = 0
@@ -391,6 +398,7 @@ class TelegramCommandHandler:
         config_callback: Optional[Callable[[], str]] = None,
         compare_callback: Optional[Callable[..., str]] = None,
         calendars_callback: Optional[Callable[[], str]] = None,
+        long_strangle_callback: Optional[Callable[[], str]] = None,
         config_path: Optional[str] = None,
         active_positions_callback: Optional[Callable[[], int]] = None,
     ):
@@ -408,6 +416,7 @@ class TelegramCommandHandler:
         self._config_callback = config_callback
         self._compare_callback = compare_callback
         self._calendars_callback = calendars_callback
+        self._long_strangle_callback = long_strangle_callback
         self._config_path = config_path
         self._active_positions_callback = active_positions_callback
 
@@ -515,6 +524,8 @@ class TelegramCommandHandler:
                 self._handle_compare(chat_id, text)
             elif text.startswith("/calendars"):
                 self._handle_calendars(chat_id)
+            elif text.startswith("/longstrangle"):
+                self._handle_long_strangle(chat_id)
             elif text.startswith("/restart"):
                 self._handle_restart(chat_id)
             elif text.startswith("/help"):
@@ -718,6 +729,25 @@ class TelegramCommandHandler:
         except Exception as e:
             logger.error("Failed to build /calendars response: %s", e)
             self._send_message(chat_id, "Failed to retrieve Strategy D status. Try again shortly.")
+
+    def _handle_long_strangle(self, chat_id: str):
+        """Handle /longstrangle — Strategy H status (variant A's poller only).
+
+        H is the fleet's only LONG-gamma strategy, so it gets its own command
+        rather than a /compare selector: its group has one member and nothing
+        else here shares its P&L shape, so there is no head-to-head to render.
+        """
+        if not self._long_strangle_callback:
+            self._send_message(
+                chat_id,
+                "Strategy H status not available — /longstrangle runs on variant A only.",
+            )
+            return
+        try:
+            self._send_message(chat_id, self._long_strangle_callback())
+        except Exception as e:
+            logger.error("Failed to build /longstrangle response: %s", e)
+            self._send_message(chat_id, "Failed to retrieve Strategy H status. Try again shortly.")
 
     def _handle_config(self, chat_id: str):
         """Handle /config command — current configuration."""
@@ -1207,6 +1237,7 @@ class TelegramCommandHandler:
             "/compare \u2014 0DTE Iron Condor head-to-head (A, B, C)",
             "/compare calendars \u2014 Multi-day Calendar head-to-head (D, E)",
             "/calendars \u2014 Multi-day Calendar status (alias of /compare calendars)",
+            "/longstrangle \u2014 Strategy H (0DTE long strangle) \u2014 long-gamma, dry-run",
             "\n*Control*",
             "/restart \u2014 Restart HYDRA",
             "/stop \u2014 Stop HYDRA (warns if positions)",

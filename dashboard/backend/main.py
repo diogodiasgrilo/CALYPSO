@@ -13,7 +13,8 @@ from dashboard.backend.config import settings
 from dashboard.backend.ws.manager import ConnectionManager
 from dashboard.backend.ws.broadcaster import Broadcaster
 from dashboard.backend.ws import router as ws_router_module
-from dashboard.backend.routers import auth as auth_router, hydra, metrics, market, agents, widget, variants, dc, strategies
+from dashboard.backend.routers import (auth as auth_router, hydra, metrics, market, agents,
+                                       widget, variants, dc, strategies, long_strangle)
 from dashboard.backend.services import auth_db
 from dashboard.backend.services.live_state import LiveStateProvider
 
@@ -84,6 +85,11 @@ app.include_router(widget.router, dependencies=_api_guard)
 app.include_router(variants.router, dependencies=_api_guard)
 app.include_router(dc.router, dependencies=_api_guard)  # Strategy D native view
 app.include_router(strategies.router, dependencies=_api_guard)  # taxonomy-driven strategy + group API
+# Strategy H native view. Separate from /api/variants (credit ICs) and /api/dc
+# (theta-POSITIVE calendars) because H is net-debit AND theta-negative — the
+# only long-gamma strategy here, and the one shape neither renderer states
+# correctly ("expired worthless" is profit there, maximum loss here).
+app.include_router(long_strangle.router, dependencies=_api_guard)
 
 # WebSocket router
 app.include_router(ws_router_module.router)

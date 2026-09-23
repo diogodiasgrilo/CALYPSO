@@ -1,12 +1,13 @@
 import { useState, useCallback } from "react";
 import { Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
-import { LayoutDashboard, CalendarDays, BarChart3, Scale } from "lucide-react";
+import { LayoutDashboard, CalendarDays, BarChart3, Scale, Waves } from "lucide-react";
 import { DashboardLayout } from "./components/layout/DashboardLayout";
 import { ErrorBoundary } from "./components/shared/ErrorBoundary";
 import { Dashboard } from "./pages/Dashboard";
 import { History } from "./pages/History";
 import { Analytics } from "./pages/Analytics";
 import { GroupComparison } from "./pages/GroupComparison";
+import { LongStrangle } from "./pages/LongStrangle";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useStrategyMeta } from "./hooks/useStrategyMeta";
 import { CommandPalette } from "./components/shared/CommandPalette";
@@ -30,6 +31,11 @@ function NavTabs() {
     }`;
 
   const comparableGroups = meta.groups.filter((g) => g.comparable);
+  // Strategy H's own tab. It is NOT under "Compare": its group is
+  // comparable=false (one member, and nothing here shares its P&L shape), and
+  // the page is a view OF one strategy rather than a head-to-head. Driven off
+  // the taxonomy so it simply does not render until the group is registered.
+  const longGamma = meta.groups.find((g) => g.id === "long_gamma_0dte");
 
   return (
     // Horizontally scrollable tab strip — the standard mobile pattern, and the
@@ -53,6 +59,12 @@ function NavTabs() {
         <BarChart3 size={14} />
         Analytics
       </NavLink>
+      {longGamma && (
+        <NavLink to="/long-strangle" className={linkClass}>
+          <Waves size={14} />
+          Long Gamma
+        </NavLink>
+      )}
       {/* Two DIFFERENT axes lived in one undifferentiated row until 2026-09-18.
           Dashboard/History/Analytics are views OF the selected strategy; the
           comparison links LEAVE that strategy and show a whole group. Rendered
@@ -125,6 +137,10 @@ function App() {
           {/* New group-scoped comparison. Route always registered so a direct
               URL works; the page self-handles unknown/unavailable groups. */}
           <Route path="/comparison/:groupId" element={<ErrorBoundary label="Comparison"><GroupComparison /></ErrorBoundary>} />
+          {/* Strategy H's native view. Its own route because every other
+              renderer here assumes premium was COLLECTED — "expired worthless"
+              is the best outcome there and the WORST one here. */}
+          <Route path="/long-strangle" element={<ErrorBoundary label="Long Strangle"><LongStrangle /></ErrorBoundary>} />
           {/* Legacy redirects into the new structure. */}
           <Route path="/comparison" element={<LegacyComparisonRedirect />} />
           <Route path="/dc" element={<LegacyDcRedirect />} />

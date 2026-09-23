@@ -10778,6 +10778,42 @@ class HydraStrategy(MEICStrategy):
         """
         return self.build_telegram_compare(group_id="calendar_multiday")
 
+    def build_telegram_longstrangle(self) -> str:
+        """Telegram ``/longstrangle`` — variant H's native, long-gamma view.
+
+        NOT a ``/compare`` selector, and that is deliberate. H's group
+        (``long_gamma_0dte``) has a single member and nothing else in the fleet
+        shares its P&L shape — A/B/C/F/G sell premium and D/E are net debit but
+        theta-POSITIVE — so there is no head-to-head to render and a credit-shaped
+        comparison would state H's numbers backwards ("expired worthless" is the
+        best outcome there and the maximum LOSS here).
+
+        Reads H's isolated ``long_strangle.db`` cross-variant, the same way
+        ``build_telegram_calendars`` reads D's and E's. Runs on variant A's
+        poller.
+        """
+        from bots.hydra.ls_status import format_long_strangle_telegram, ls_status
+        from shared import strategy_taxonomy as _tax
+
+        data_root = os.path.dirname(self.state_file)  # variant A → data/
+        today = get_us_market_time().strftime("%Y-%m-%d")
+        sections = []
+        for vid in _tax.members("long_gamma_0dte"):
+            db = os.path.join(data_root, f"variant_{vid}", "long_strangle.db")
+            if not os.path.exists(db):
+                continue
+            name = _tax.display_name(vid)
+            try:
+                sections.append(format_long_strangle_telegram(
+                    ls_status(db, today), title=f"{name} ({vid.upper()})"))
+            except Exception as e:
+                logger.error("long-strangle status for variant %s failed: %s", vid, e)
+                sections.append(f"{name} ({vid.upper()}): status unavailable.")
+        if not sections:
+            return ("🎯 *Long-Gamma 0DTE* — no long-strangle strategy has recorded "
+                    "anything yet (variant H is dry-run-locked and not installed).")
+        return "\n\n".join(sections)
+
     def build_telegram_compare(self, group_id: Optional[str] = None) -> str:
         """Telegram /compare command — group-scoped, on-demand comparison.
 

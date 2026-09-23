@@ -383,7 +383,7 @@ resets the Gate-4 streak.**
 >
 > **Strategy H, Playbook Steps 4 + 5 ✅ (this morning, offline).** Entry, dry-run simulation, the
 > percent-of-debit profit target and settlement at intrinsic — **functionally complete in dry-run**,
-> 86 new tests. **Steps 1–5 + 7 done.**
+> 86 new tests. **Steps 1–5 + 7 done.** (Step 8 followed — see below.)
 >
 > Two inherited exits would have failed **silently** and are now overridden: the base books a
 > worthless expiry as *"the credit kept"*, which for H is an unset field — so a **total loss would
@@ -398,7 +398,13 @@ resets the Gate-4 streak.**
 > the debit back out of H's own `ls_entries`, with **zero edits to the shared save/load B trades
 > on live**.
 >
-> **What still keeps H locked: Steps 8–10, and the plain fact that this code has never run** — not
+> **Step 8 ✅ too** — H is now observable from Telegram (`/longstrangle`) and the dashboard
+> (`/long-strangle`, `GET /api/long-strangle/*`), on surfaces of its own because every other
+> renderer here assumes premium was **collected**. The view shows three things no other one does:
+> max loss as a **fact** (the debit, known before entry), the **peak next to the exit** (that gap is
+> the measurement), and declined entries with their counterfactual. `tsc -b` + `vite build` clean.
+>
+> **What still keeps H locked: Steps 9–10, and the plain fact that this code has never run** — not
 > one tick against a live chain. H is **not installed on the VM**, so none of this touches A–G or
 > the Gate-4 streak. Detail: `docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md` §8.
 

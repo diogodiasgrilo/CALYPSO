@@ -36,6 +36,39 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-23 STRATEGY H (long strangle), PLAYBOOK STEP 8 — observability. H is now
+  visible from Telegram and the dashboard, on surfaces of its OWN rather than as a row
+  in existing ones, and the reason is not cosmetic: EVERY other renderer here assumes
+  premium was COLLECTED. "Expired worthless" is the best outcome there and the WORST
+  one here; P&L is a percentage of a credit there and of a DEBIT here; capital is a
+  spread width there and there is no spread at all here. A row in the IC comparison
+  would state H's numbers backwards.
+  * TELEGRAM `/longstrangle` (18 commands now). Deliberately NOT a /compare selector:
+    `long_gamma_0dte` has one member and nothing in the fleet shares its P&L shape, so
+    there is no head-to-head to render. `bots/hydra/ls_status.py` is pure stdlib and
+    read-only; variant A's poller reads H's DB cross-variant the way /calendars reads
+    D's and E's.
+  * DASHBOARD `GET /api/long-strangle/{status,recent}` +
+    `dashboard/backend/services/ls_reader.py` + a `/long-strangle` page. The tab renders
+    only when the group is registered (taxonomy-driven, no hardcoded letter).
+  THREE THINGS THIS VIEW SHOWS THAT NO OTHER ONE DOES:
+  1. MAX LOSS AS A FACT, not an estimate — the debit paid, known before the position
+     opens. No other strategy on this dashboard can say that about its own day.
+  2. THE PEAK NEXT TO THE EXIT. A long strangle can touch +50% on a gamma spike and give
+     it all back inside a minute, so what a position REACHED and what it CAPTURED are
+     different numbers. `peak_minus_exit_pct` is a first-class field, not left for
+     someone to derive — it is invisible in realized P&L alone and it is what the
+     source's 80%-win-rate claim actually turns on.
+  3. DECLINED ENTRIES WITH THEIR COUNTERFACTUAL — proposed strikes, debit and expected
+     move per skip, so a veto can be scored later. The GEX work on B had to be
+     retro-fitted for exactly this and could never recover its first 95 vetoes.
+  Read-only is ASSERTED, not assumed: both readers open mode=ro and contain no write
+  verb in any EXECUTABLE string, checked via the AST rather than a grep — the module
+  docstrings name those verbs on purpose, to explain that they are absent (the same trap
+  test_ls_recorder hit). The dashboard reader imports no bot code, duplicating its SQL
+  the way dc_reader.py does. `available:false` is today's EXPECTED production response
+  (H is not installed), so the page renders "no data yet" rather than a 500.
+  50 tests; `tsc -b` and `vite build` clean. Zero effect on A-G.
 - 2026-09-23 STRATEGY H (long strangle), PLAYBOOK STEP 5 — the exits. H is now
   functionally complete in dry-run (strikes, sizing, entry, profit target, settlement)
   and STILL dry-run-LOCKED. The lock's reason moved again: it is no longer "the exits

@@ -272,12 +272,14 @@ Delays entry up to `calm_entry_max_delay_min` (default 5 min) when SPX moved mor
 
 Mid-day restart recovery is broker-driven: `_recover_positions_from_saxo()` (despite the legacy name) reads state file authoritatively, then reconciles with the broker via `_read_open_positions()`.
 
-### Telegram Commands (17 total)
+### Telegram Commands (18 total)
 Background daemon thread polls Telegram `getUpdates` every 5s. Credentials from Secret Manager (`calypso-telegram-credentials`). Responds only to the configured chat_id. The poller runs on **variant A only** (frozen — `shared/strategy_taxonomy.py` `is_primary`).
 
-`/status`, `/snapshot`, `/entry N`, `/lastday`, `/week`, `/account`, `/stops`, `/config`, `/set <key> <value>`, `/hermes`, `/apollo`, `/clio`, `/compare`, `/calendars`, `/restart`, `/stop`, `/help`.
+`/status`, `/snapshot`, `/entry N`, `/lastday`, `/week`, `/account`, `/stops`, `/config`, `/set <key> <value>`, `/hermes`, `/apollo`, `/clio`, `/compare`, `/calendars`, `/longstrangle`, `/restart`, `/stop`, `/help`.
 
 `/compare` is **group-scoped**: bare `/compare` compares the poller's own group (variant A → the 0DTE-IC group {A,B,C}); `/compare calendars` compares the calendar group {D,E} (never credit-vs-debit). `/calendars` is an alias for `/compare calendars`.
+
+`/longstrangle` is **not** a `/compare` selector. Variant H's group (`long_gamma_0dte`) has one member and nothing else in the fleet shares its P&L shape — A/B/C/F/G sell premium and D/E are net debit but theta-POSITIVE — so there is no head-to-head to render, and a credit-shaped one would state H's numbers backwards ("expired worthless" is the best outcome there and the maximum LOSS here).
 
 Long reports (HERMES/APOLLO/CLIO) split at paragraph/line boundaries with `(1/N)` headers instead of truncating at 4096 chars.
 
@@ -672,6 +674,7 @@ Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
 | Analytics | `/analytics` | 4-tab: Performance / Entries / Stops / Market |
 | Group comparison | `/comparison/:groupId` | Group-aware head-to-head — credit-IC renderer for `ic_0dte`, debit-calendar renderer for `calendar_multiday` (never mixes the two) |
 | Double Calendar | `/dc` | D's calendar status from its isolated `dc_calendar.db` (debit-native, not comparable to the IC pages) |
+| Long Gamma | `/long-strangle` | Variant H's native view from its isolated `long_strangle.db`. Its own page because every other renderer assumes premium was COLLECTED. Shows max loss as a **fact** (the debit, known before entry), the **peak next to the exit** (a long strangle can touch +50% and give it back in a minute — that gap is the measurement), and declined entries with their counterfactual. Tab renders only when the `long_gamma_0dte` group is registered. |
 | Comparison (legacy) | `/comparison` | N-variant panels (gated by `DASHBOARD_COMPARISON_MODE_ENABLED`) |
 
 ### Key API endpoints
@@ -691,6 +694,7 @@ Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
 | `GET /api/variants/{health,list,comparison,aggregate}` | Variant discovery + cross-day analytics |
 | `GET /api/strategies/{meta,{id}/snapshot,groups/{group_id}/comparison}` | Taxonomy boot payload, per-strategy live snapshot, group-scoped head-to-head (also `groups/{group_id}/aggregate`) |
 | `GET /api/dc/status` | D's isolated calendar status (reads `dc_calendar.db` + `dc_open_trades.json` sidecar) |
+| `GET /api/long-strangle/{status,recent}` | H's isolated long-gamma status (reads `long_strangle.db`). Debit-shaped payload — no `total_credit`, no spread width. `available:false` when H has never recorded a row, which is today's expected response. |
 | `GET /api/widget` | Flat JSON for iOS Scriptable |
 | `WS /ws/dashboard` | Real-time updates |
 
