@@ -214,8 +214,12 @@ class TestTheElevatedTarget:
     def test_cheap_AND_rising_raises_it_to_one_hundred(self):
         s = self._s()
         s.current_vix = 14.0                      # above the prior close...
-        s._vix_history_for_percentile = lambda: [20.0, 22.0, 25.0, 30.0, 13.0]
-        assert s._profit_target_pct() == pytest.approx(100.0)   # ...and 20th pct
+        # 79 expensive days then a cheap 13.0 most recent: today is both LOW in
+        # the distribution and ABOVE yesterday. Length matters — under the
+        # 60-day sample floor the target correctly falls back to the base, which
+        # is pinned in tests/test_iv_percentile_sample_floor_2026_09_23.py.
+        s._vix_history_for_percentile = lambda: [20.0 + (i % 11) for i in range(79)] + [13.0]
+        assert s._profit_target_pct() == pytest.approx(100.0)   # ...and low pct
 
     def test_cheap_but_FALLING_keeps_the_ordinary_target(self):
         """Vol collapsing toward a low is not vol expanding from one. Buying

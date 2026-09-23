@@ -41,6 +41,40 @@ to win 80% of the time — a move beyond the expected move is a ~32%-probability
 construction. The only reconciliation is taking profits very early on small gamma moves, which the
 source never quantifies. **Build it to measure it, not because the numbers are believed.**
 
+## 1-bis. Source fidelity — where H is NOT what the video says
+
+Asked directly on 2026-09-23: *"is that exactly how the video says to do it?"* It is not, in
+four places. Three are deliberate and one is a substitution that cannot currently be avoided.
+This table is the honest answer, kept here so it is not re-derived from memory each time.
+
+| Source rule | What H does | Faithful? |
+|---|---|---|
+| Buy an OTM call + an OTM put at the expected move | Same; strikes from the **ATM straddle** | ✅ |
+| No stop — max loss is the debit | Stops explicitly **disarmed**, not merely inherited | ✅ |
+| "Sizing for zero" | Same rule; the loss limit is the buying-power floor | ✅ |
+| +50% profit target | Same | ✅ |
+| **IV percentile below ~35%** | **VIX percentile** — a 30-day *index* vol | ❌ **a proxy for a different quantity** |
+| Traded on **SPY** | **SPX**, for fleet consistency | ❌ deliberate, and **material** |
+| +100% "when IV is expanding from a low base" | Read as: percentile ≤ max **AND** VIX > prior close | ⚠️ our operationalization of a vague phrase |
+| Sell against a loser → butterfly; the 1DTE variant | Out of scope (discretionary / different structure) | ⚠️ deliberate |
+
+**The IV filter is the one that matters.** The RTH probe (Q2) established that IBKR returns
+**no per-option IV fields at all**, so an option-IV percentile is not computable in this repo.
+VIX is substituted, and every skip reason it writes ends `NOT an option-IV percentile` so no
+later analysis can mistake the two. It is honest, and it is still not the source's rule.
+
+**The SPY→SPX change is not cosmetic.** The same strangle costs ~$115 on SPY and ~$775 on SPX,
+which is exactly how the `sizing_for_zero_max_loss: 500` default came to silently permit **zero
+contracts** — H would have skipped every session and collected nothing. That was caught by the
+probe, not by three offline steps and a go-live audit.
+
+**Sample-size floor (2026-09-23).** `iv_percentile()` had no minimum: one prior day returns
+0.0 or 100.0, a number shaped exactly like a percentile with nothing in it. The gate now skips
+below `iv_percentile_min_history_days` (60), states the window actually used whenever it is
+short of the 252-day lookback, and records `iv_percentile_n` beside every value — on **placed**
+entries as well as skipped ones, which previously carried no IV column at all and so left the
+35% threshold untestable against its own outcomes.
+
 ## 2. Why it is worth building anyway
 
 **It is the only long-gamma strategy the fleet could have.** A/B/C/F/G are all short premium; D/E are

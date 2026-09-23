@@ -166,7 +166,8 @@ def size_for_zero(max_acceptable_loss: float, debit_per_contract: float) -> int:
     return int(max_acceptable_loss // debit_per_contract)
 
 
-def iv_percentile(current_iv: float, history: Sequence[float]) -> Optional[float]:
+def iv_percentile(current_iv: float, history: Sequence[float],
+                  min_history: int = 1) -> Optional[float]:
     """Where ``current_iv`` sits within ``history``, as a 0–100 percentile.
 
     The source filters for IV percentile below ~35% — it wants to buy premium
@@ -181,9 +182,35 @@ def iv_percentile(current_iv: float, history: Sequence[float]) -> Optional[float
 
     Returns None on an empty history — "unknown", which a caller must not treat
     as "passes the filter".
+
+    ``min_history`` is the SAMPLE-SIZE FLOOR, and it is not optional padding.
+    Without it a single prior day returns 0.0 or 100.0 — a number with the exact
+    shape of a percentile, the full authority of one, and no information in it at
+    all. That is the failure mode a filter cannot survive: it does not look
+    broken from the outside. Below the floor this returns None ("unknown"), which
+    the caller must treat as a skip, never as a pass.
+
+    ⚠️ **A percentile is only as long as the series it actually had.** Asking for
+    252 days and receiving 94 yields a four-month percentile wearing a one-year
+    label, so callers should record ``len(history)`` alongside the value — see
+    ``iv_percentile_with_n``.
     """
     series = [float(v) for v in history if v is not None and v > 0]
-    if not series:
+    if len(series) < max(1, int(min_history)):
         return None
     at_or_below = sum(1 for v in series if v <= current_iv)
     return at_or_below / len(series) * 100.0
+
+
+def iv_percentile_with_n(current_iv: float, history: Sequence[float],
+                         min_history: int = 1):
+    """``(percentile, n)`` — the value AND the sample it was computed over.
+
+    Exists because a bare percentile is uninterpretable after the fact. A stored
+    ``11.9`` could be a one-year reading or a three-day one, and the difference
+    decides whether a later analysis of H's entries means anything. ``n`` is
+    recorded on the entry so that question is answerable from the data instead of
+    reconstructed from what the config happened to say at the time.
+    """
+    series = [float(v) for v in history if v is not None and v > 0]
+    return iv_percentile(current_iv, series, min_history=min_history), len(series)

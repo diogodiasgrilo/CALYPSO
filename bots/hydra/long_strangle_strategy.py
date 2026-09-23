@@ -67,6 +67,7 @@ from bots.hydra.long_strangle_chain import (
     expected_move_from_straddle,
     expected_move_from_vix,
     iv_percentile,
+    iv_percentile_with_n,
     premiums_are_balanced,
     select_strangle_strikes,
     size_for_zero,
@@ -518,14 +519,33 @@ class LongStrangleStrategy(HydraStrategy):
         # says so, so no later analysis can mistake it for an option-IV
         # percentile.
         history = self._vix_history_for_percentile()
-        pct = iv_percentile(float(getattr(self, "current_vix", 0.0) or 0.0), history)
+        want = int(cfg.get("iv_percentile_lookback_days", 252))
+        floor = int(cfg.get("iv_percentile_min_history_days", 60))
+        pct, n = iv_percentile_with_n(
+            float(getattr(self, "current_vix", 0.0) or 0.0), history,
+            min_history=floor)
         entry.ls_iv_percentile = pct
+        # The SAMPLE, recorded beside the value. A stored "11.9" is
+        # uninterpretable on its own — one year and three days produce the same
+        # shape — and which one it was decides whether a later read of H's
+        # entries means anything.
+        entry.ls_iv_percentile_n = n
         if pct is None:
-            return "VIX-percentile proxy unavailable (empty history)"
+            return (f"VIX-percentile proxy unavailable — {n} prior days of VIX, "
+                    f"below the {floor}-day minimum (a percentile over fewer is "
+                    f"a number with no information in it)")
         max_pct = float(cfg.get("iv_percentile_max", 35.0))
+        # Say the window that was actually used whenever it is short of the one
+        # configured, so nobody reads a 94-day reading as the one-year percentile
+        # the config asks for.
+        window = f"{n}d" if n >= want else f"{n}d of {want}d requested"
         if pct > max_pct:
             return (f"VIX-percentile proxy {pct:.0f}% > {max_pct:.0f}% max "
-                    f"(NOT an option-IV percentile)")
+                    f"over {window} (NOT an option-IV percentile)")
+        if n < want:
+            logger.info(
+                "LS: IV gate PASSED at %.0fth pct, but over %d days not the %d "
+                "configured — this is a partial-window percentile.", pct, n, want)
         return None
 
     def _vix_history_for_percentile(self) -> List[float]:
@@ -848,6 +868,7 @@ class LongStrangleStrategy(HydraStrategy):
                 em_source=getattr(entry, "ls_em_source", ""),
                 expected_move=getattr(entry, "ls_expected_move", 0.0),
                 iv_percentile=getattr(entry, "ls_iv_percentile", None),
+                iv_percentile_n=getattr(entry, "ls_iv_percentile_n", None),
                 skew_gap_pct=getattr(entry, "ls_skew_gap_pct", 0.0),
             )
         logger.info("LONGSTRANGLE entry #%d skipped - %s", entry_num, reason)
@@ -967,6 +988,11 @@ class LongStrangleStrategy(HydraStrategy):
             em_source=getattr(entry, "ls_em_source", ""),
             expected_move=getattr(entry, "ls_expected_move", 0.0),
             skew_gap_pct=getattr(entry, "ls_skew_gap_pct", 0.0),
+            # The reading this entry PASSED at. Recording only the vetoed side
+            # made the source's "< ~35%" threshold untestable against its own
+            # outcomes — the admitted entries carried no IV at all.
+            iv_percentile=getattr(entry, "ls_iv_percentile", None),
+            iv_percentile_n=getattr(entry, "ls_iv_percentile_n", None),
         )
 
     # ==================================================================
@@ -1021,7 +1047,13 @@ class LongStrangleStrategy(HydraStrategy):
             return base
 
         hist = self._vix_history_for_percentile()
-        pct = iv_percentile(float(getattr(self, "current_vix", 0.0) or 0.0), hist)
+        # The SAME sample floor the entry gate uses. Raising the target to +100%
+        # on a percentile computed from three days would be the entry gate's bug
+        # wearing different clothes, and here it decides when to take money off
+        # the table rather than merely whether to enter.
+        pct = iv_percentile(
+            float(getattr(self, "current_vix", 0.0) or 0.0), hist,
+            min_history=int(cfg.get("iv_percentile_min_history_days", 60)))
         if pct is None:
             return base
 

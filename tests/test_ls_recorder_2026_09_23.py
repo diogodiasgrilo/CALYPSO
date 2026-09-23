@@ -66,8 +66,11 @@ class TestSchema:
         assert {"call_debit", "put_debit", "total_debit"} <= set(cols)
 
     def test_schema_version_is_recorded_once(self, rec):
+        """Derived from the class constant, not a literal: a deliberate bump
+        should not read as a failure, while "recorded exactly once, and matching
+        the code" stays pinned across every future migration."""
         rows = list(rec._conn.execute("SELECT version FROM ls_schema_info"))
-        assert rows == [(1,)]
+        assert rows == [(LongStrangleDataRecorder.SCHEMA_VERSION,)]
 
     def test_reopening_an_existing_db_does_not_duplicate_the_version(self, tmp_path):
         """CREATE IF NOT EXISTS means a fresh DB and an existing one take the same

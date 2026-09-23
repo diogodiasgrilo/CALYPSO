@@ -36,6 +36,49 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-23 STRATEGY H — A PERCENTILE MUST NOT OUT-RANK ITS SAMPLE. Found while answering
+  the operator's question "are we free of bugs?", which is its own answer to that question.
+
+  `iv_percentile()` had NO minimum-sample guard. One prior day of history returns 0.0 or
+  100.0 — a value with the exact shape of a percentile, the full authority of one, and no
+  information in it at all. The entry gate compares that against the source's "< ~35%"
+  threshold to decide whether H trades. It does not look broken from the outside, which is
+  the property that makes it dangerous rather than merely wrong.
+
+  The second half: H's config asks for `iv_percentile_lookback_days: 252` while the live-seat
+  DB holds ~94 days, so the gate was applying a four-month percentile wearing a one-year
+  label — and nothing recorded the sample size, so a stored `iv_percentile` could never be
+  interpreted afterwards.
+
+  * `iv_percentile(..., min_history=N)` returns None ("unknown") below the floor, and the
+    gate treats unknown as a SKIP — never a pass. New `iv_percentile_with_n` returns the
+    value AND the sample it came from.
+  * `iv_percentile_min_history_days: 60` on H. Not 252: demanding the full year would block
+    H for months and reproduce the empty dataset the sizing fix already had to rescue it
+    from. A risk dial, reversible, with its reasoning in the config.
+  * The skip reason and the log line both state the window ACTUALLY used whenever it is
+    short of the lookback ("94d of 252d requested").
+  * **The +100% target honours the same floor.** It reads the same series, and there it
+    decides when to take money off the table rather than merely whether to enter.
+  * `ls_recorder` v2: `iv_percentile_n` on `ls_skipped`, and `iv_percentile` +
+    `iv_percentile_n` on `ls_entries` — **which carried no IV column at all**, so the source's
+    35% line could only ever be judged from the entries it REJECTED. First additive migration
+    (`_add_missing_columns`): `CREATE TABLE IF NOT EXISTS` is a no-op on an existing database,
+    so a new column reaches a fresh DB and never the live one. Existing rows read NULL, which
+    keeps "not measured then" distinct from "measured as zero".
+
+  Tests: `tests/test_iv_percentile_sample_floor_2026_09_23.py` (28), including the migration
+  against a synthetic v1 database and a DERIVED check that every schema column is declared for
+  migration. Three negative controls verified by reintroducing each defect. Six pre-existing
+  tests used 5–20-day synthetic histories and correctly hit the new floor; their FIXTURES were
+  widened rather than their assertions relaxed, so they still test what they are named for, and
+  the recorder's version test now derives from `SCHEMA_VERSION` instead of a literal.
+
+  ⚠️ NOT FIXED, and stated plainly: the filter remains a **VIX proxy, not an option-IV
+  percentile** — the RTH probe confirmed IBKR returns no per-option IV fields at all, so the
+  source's actual rule is not computable here. Every skip reason says so. See
+  `LONG_STRANGLE_STRATEGY_SPECIFICATION.md` §"source fidelity".
+
 - 2026-09-23 STRATEGY F — THE EXPECTED MOVE IS THE ATM STRADDLE, AND THE FUDGE FACTOR IS
   RETIRED. Fallout from the inherited-gate audit ("did you do this same mistake with any
   other strategies?"). F did not inherit a GATE it shouldn't run — its problem was one
