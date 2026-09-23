@@ -68,21 +68,23 @@ export function useBotConfig(): BotConfig {
   // request while meta is still loading — it is the historical behaviour and
   // the only sensible default before a selection exists.
   const id = strategy?.id ?? "";
-  const [cfg, setCfg] = useState<BotConfig>(_cache.get(id) ?? DEFAULT_CONFIG);
+  // The value is DERIVED from the cache during render, not synced into state by
+  // an effect. Syncing needs a setState in the effect body on every cache hit —
+  // which `react-hooks/set-state-in-effect` flags, and rightly: on a strategy
+  // switch it renders once with the PREVIOUS strategy's config before
+  // correcting itself, i.e. a visible flash of another strategy's schedule,
+  // which is the exact bug this hook was being fixed for.
+  const [, bump] = useState(0);
 
   useEffect(() => {
-    const hit = _cache.get(id);
-    if (hit) {
-      setCfg(hit);
-      return;
-    }
+    if (_cache.has(id)) return;          // already resolved — render has it
     let cancelled = false;
     const qs = id ? `?strategy_id=${encodeURIComponent(id)}` : "";
     fetch(`/api/hydra/bot-config${qs}`)
       .then((r) => r.json())
       .then((data: BotConfig) => {
         _cache.set(id, data);
-        if (!cancelled) setCfg(data);
+        if (!cancelled) bump((n) => n + 1);   // re-render; render reads the cache
       })
       .catch(() => {
         // On error, keep defaults (show nothing hidden unintentionally)
@@ -92,7 +94,7 @@ export function useBotConfig(): BotConfig {
     };
   }, [id]);
 
-  return cfg;
+  return _cache.get(id) ?? DEFAULT_CONFIG;
 }
 
 /** Returns true if any conditional entry slot (downday OR upday) is enabled. */
