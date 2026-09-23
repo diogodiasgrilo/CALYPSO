@@ -328,3 +328,67 @@ class TestTheEndpoints:
             _enroll_and_login(c, username="ls-empty")
             r = c.get("/api/long-strangle/status")
             assert r.status_code == 200 and r.json()["available"] is False
+
+
+class TestASkipOnlyDayIsStillData:
+    """H's very first live session (2026-09-23) recorded ONE SKIP and no entry —
+    and the page reported "no data".
+
+    `_latest_date` read only `ls_entries`. For a MEASUREMENT strategy the
+    declined entries ARE the data, and early on they are most of it: that skip
+    carried the proposed strikes (7760/7720), the expected move (20.9pt from the
+    straddle) and the reason — exactly the counterfactual the variant exists to
+    collect, and exactly what the GEX work on variant B could never recover for
+    its first 95 vetoes.
+    """
+
+    def _skip_only(self, tmp_path):
+        import sqlite3
+        p = tmp_path / "skiponly.db"
+        con = sqlite3.connect(str(p))
+        con.executescript(
+            "CREATE TABLE ls_entries (date TEXT, entry_number INTEGER, "
+            "  call_strike REAL, put_strike REAL, total_debit REAL);"
+            "CREATE TABLE ls_exits (date TEXT, entry_number INTEGER);"
+            "CREATE TABLE ls_snapshots (date TEXT, entry_number INTEGER, "
+            "  timestamp TEXT, pnl_pct_of_debit REAL);"
+            "CREATE TABLE ls_skipped (date TEXT, entry_number INTEGER, "
+            "  skip_time TEXT, skip_reason TEXT, spx REAL, "
+            "  proposed_call_strike REAL, proposed_put_strike REAL, "
+            "  proposed_debit REAL, em_source TEXT, expected_move REAL);"
+        )
+        con.execute(
+            "INSERT INTO ls_skipped VALUES ('2026-09-23',1,'09:49:57',"
+            "'VIX-percentile proxy unavailable (empty history)',7741.16,"
+            "7760.0,7720.0,0.0,'straddle',20.9)")
+        con.commit()
+        con.close()
+        return str(p)
+
+    def test_the_day_is_available(self, tmp_path):
+        out = read_ls_status(self._skip_only(tmp_path))
+        assert out["available"] is True
+        assert out["date"] == "2026-09-23"
+
+    def test_the_skip_and_its_counterfactual_are_served(self, tmp_path):
+        out = read_ls_status(self._skip_only(tmp_path))
+        assert out["summary"]["skipped_count"] == 1
+        k = out["skipped"][0]
+        assert k["proposed_call_strike"] == 7760.0
+        assert k["proposed_put_strike"] == 7720.0
+        assert k["expected_move"] == 20.9
+        assert k["em_source"] == "straddle"
+
+    def test_a_truly_empty_database_is_still_unavailable(self, tmp_path):
+        """The fix must not make "nothing at all" look like data."""
+        import sqlite3
+        p = tmp_path / "empty.db"
+        con = sqlite3.connect(str(p))
+        con.executescript(
+            "CREATE TABLE ls_entries (date TEXT, entry_number INTEGER);"
+            "CREATE TABLE ls_skipped (date TEXT, entry_number INTEGER);")
+        con.commit()
+        con.close()
+        out = read_ls_status(str(p))
+        assert out["available"] is False
+        assert "declined entries" in out["reason"]

@@ -51,11 +51,21 @@ def _rows(con: sqlite3.Connection, sql: str, params: tuple = ()) -> List[Dict[st
 
 
 def _latest_date(con: sqlite3.Connection) -> str:
-    """The most recent date with any activity, so the page has something to show
-    even when H did not trade today — which, for a dry-run-locked variant that
-    is not installed on the VM, is the normal case."""
-    rows = _rows(con, "SELECT MAX(date) AS d FROM ls_entries")
-    return (rows[0].get("d") if rows else None) or ""
+    """The most recent date with ANY activity — entries **or declined entries**.
+
+    It read only ``ls_entries`` until 2026-09-23, and H's very first session
+    showed why that was wrong: it recorded one skip and no entry, so the page
+    reported "no data" on a day that had produced exactly the counterfactual
+    this variant exists to collect. **For a measurement strategy the declined
+    entries ARE data**, and early on they are most of it.
+    """
+    best = ""
+    for table in ("ls_entries", "ls_skipped"):
+        rows = _rows(con, f"SELECT MAX(date) AS d FROM {table}")
+        d = (rows[0].get("d") if rows else None) or ""
+        if d > best:
+            best = d
+    return best
 
 
 def read_ls_status(db_path: Optional[str], date: str = "") -> Dict[str, Any]:
@@ -83,7 +93,8 @@ def read_ls_status(db_path: Optional[str], date: str = "") -> Dict[str, Any]:
     try:
         day = date or _latest_date(con)
         if not day:
-            empty["reason"] = "long_strangle.db exists but holds no entries yet."
+            empty["reason"] = ("long_strangle.db exists but holds no entries or "
+                               "declined entries yet.")
             return empty
 
         entries = _rows(
