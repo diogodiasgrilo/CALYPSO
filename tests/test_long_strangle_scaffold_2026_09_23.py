@@ -58,11 +58,27 @@ class TestItCannotArm:
         The reason MOVES as the build progresses — at Step 1 it was "no entry
         logic", at Step 4 the missing exits, and since Step 5 it is that the code
         has never executed. What must not change is that the message states a
-        specific unfinished thing, so nobody unlocks on the strength of a generic
-        "not ready yet"."""
+        specific unfinished thing AND points at where the gate lives, so nobody
+        unlocks on the strength of a generic "not ready yet"."""
         src = (ROOT / "bots" / "hydra" / "long_strangle_strategy.py").read_text()
         assert "THIS CODE HAS NEVER RUN" in src
-        assert "Steps 8-10" in src
+        # Step 10: every lock, docstring and the systemd unit name the audit.
+        assert "H_GOLIVE_SCOPE_AND_AUDIT.md" in src
+
+    def test_every_lock_points_at_the_go_live_gate(self):
+        """Playbook Step 10: "wire the code to it" — both ConfigError lock
+        messages, the module/class docstrings, and the systemd Description."""
+        src = (ROOT / "bots" / "hydra" / "long_strangle_strategy.py").read_text()
+        unit = UNIT.read_text()
+        assert src.count("H_GOLIVE_SCOPE_AND_AUDIT.md") >= 4
+        assert "H_GOLIVE_SCOPE_AND_AUDIT.md" in unit
+
+    def test_the_audit_returns_an_explicit_verdict(self):
+        """A NO-GO is a successful, honest outcome — but it has to be STATED,
+        not implied by the absence of a GO."""
+        audit = (ROOT / "docs" / "migration" / "H_GOLIVE_SCOPE_AND_AUDIT.md").read_text()
+        assert "VERDICT — **NO-GO**" in audit
+        assert "HG-1" in audit and "HG-10" in audit
 
     def test_config_ships_dry_run_true(self):
         cfg = json.loads(CONFIG.read_text())

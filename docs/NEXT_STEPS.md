@@ -410,8 +410,23 @@ resets the Gate-4 streak.**
 > built a straddle** instead of a strangle, reachable late in a quiet session; and the **EOD flatten
 > was being skipped by accident**, via a flag three unrelated rationales happen to share.
 >
-> **What still keeps H locked: the market-hours VM probe (Step 9 item 2 — today's RTH task),
-> Step 10, and the plain fact that this code has never run** — not one tick against a live chain. H is **not installed on the VM**, so none of this touches A–G or
+> **Step 10 ✅ — verdict NO-GO**, which the playbook calls a successful outcome and it is.
+> [`docs/migration/H_GOLIVE_SCOPE_AND_AUDIT.md`](migration/H_GOLIVE_SCOPE_AND_AUDIT.md): the
+> verdict, a 15-item risk register, an H-specific gate **HG-1..HG-10** (the credit-shaped checklist
+> asks questions H cannot answer — credit received, spread width, stop level) and 5 halt criteria.
+>
+> **The dominant fact, verified rather than assumed:** H has executed **zero ticks**. Checked on the
+> VM at 08:29 ET — no unit installed, no `data/variant_h`, `systemctl is-active` → inactive.
+>
+> **So the next step is NOT a flip — it is to run the dry run at all.** H's purpose is to measure
+> whether long gamma hedges the short-gamma book's bad days (HG-4: H's daily P&L against B's), and
+> that needs H *running*, not live. Running it costs nothing — no orders, its own database, bounded
+> broker load. The MVL plan and runbook are **deferred with stated preconditions**: with zero
+> observations an MVL plan would be fiction and a runbook would imply a readiness that does not
+> exist.
+>
+> **Playbook Steps 0–10 are now complete for H**, with one item outstanding: the market-hours VM
+> probe (Step 9 item 2) — today's RTH task, after the smoke. H is **not installed on the VM**, so none of this touches A–G or
 > the Gate-4 streak. Detail: `docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md` §8.
 
 ##### S6 — and it needs NO new order

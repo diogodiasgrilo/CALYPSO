@@ -1,9 +1,12 @@
 # Strategy H — 0DTE Long Strangle ("Tompkins")
 
-**Status:** Steps 0–5 + 7–8 built, dry-run-LOCKED. Functionally complete in dry-run — strikes,
-sizing, entry, profit target, settlement — and observable from Telegram and the dashboard. But
-**this code has never run**, and Steps 9–10 (hardening, go-live audit) are outstanding. See §8.
-**Written:** 2026-09-23 · **Last updated:** 2026-09-23 (Step 8)
+**Status:** Steps 0–10 complete (9 offline half; 10 returns **NO-GO**). Dry-run-LOCKED. Functionally complete in dry-run — strikes,
+sizing, entry, profit target, settlement — and observable from Telegram and the dashboard.
+
+**The go-live audit returns NO-GO, and the next step is not a flip — it is to run the dry run at
+all, which it never has.** Verified on the VM 2026-09-23 08:29 ET: no unit installed, no data
+directory, service inactive. Gate: [`H_GOLIVE_SCOPE_AND_AUDIT.md`](migration/H_GOLIVE_SCOPE_AND_AUDIT.md).
+**Written:** 2026-09-23 · **Last updated:** 2026-09-23 (Step 10)
 **Playbook:** [`docs/NEW_STRATEGY_PLAYBOOK.md`](NEW_STRATEGY_PLAYBOOK.md) Step 0
 **Source:** Jeff Tompkins, via Theta Profits —
 [article](https://www.thetaprofits.com/a-0dte-long-strangle-targeting-50-100-in-24-hours/) ·
@@ -150,7 +153,7 @@ variants' schema untouched, which is the deciding factor while B holds the live 
 | **7** Isolated DB | ✅ | `bots/hydra/ls_recorder.py` → `data/variant_h/long_strangle.db`. Four `ls_*` tables, **no credit column anywhere** (asserted). `em_source` stored per entry so the two expected-move regimes stay separable; snapshots accumulate so a +50% peak survives a give-back; `ls_skipped` carries the full counterfactual the GEX work could never recover for B's first 95 vetoes. 18 tests. |
 | **8** Observability | ✅ | `bots/hydra/ls_status.py` (pure, read-only) + `/longstrangle` Telegram command; `dashboard/backend/services/ls_reader.py` + `GET /api/long-strangle/{status,recent}` + a `/long-strangle` page. 50 tests. `tsc -b` and `vite build` clean. |
 | **9** Hardening | 🟡 **offline half done** | Adversarial pass found 3 defects — a **13-round-trip entry path** against the session live B trades through (now 7), a **small expected move silently building a straddle**, and an **EOD flatten skipped by accident**. 18 tests. **Outstanding: the market-hours VM probe** (item 2 — the one that cannot be done offline) and a measured latency figure. |
-| **10** Go-live audit | 🔴 **next** | Scope+audit with a GO/NO-GO verdict, an MVL plan, and a runbook. Plus the plain fact that this code has never run. |
+| **10** Go-live audit | ✅ **NO-GO** | [`docs/migration/H_GOLIVE_SCOPE_AND_AUDIT.md`](migration/H_GOLIVE_SCOPE_AND_AUDIT.md) — verdict, 15-item risk register, the HG-1..HG-10 gate and halt criteria. Locks, docstrings and the systemd `Description=` all point at it. **The MVL plan and runbook are deferred with stated preconditions**: H has ZERO observations, so an MVL plan would be fiction and a runbook would imply a readiness that does not exist. |
 
 ### Step 2 confirmed Step 0's isolated-DB call, for a concrete reason
 

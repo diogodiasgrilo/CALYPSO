@@ -1226,6 +1226,7 @@ For the full 86-fix history including all Saxo-era bugs and resolutions, see `bo
 | Strategy grouping + new-calendar design | [docs/STRATEGY_GROUPING_REDESIGN.md](docs/STRATEGY_GROUPING_REDESIGN.md) | Why the taxonomy/groups exist; comparability rules; D/E calendar design |
 | Living next-steps tracker | [docs/NEXT_STEPS.md](docs/NEXT_STEPS.md) | What's done / in-flight / next across this work |
 | Strategy D go-live (runbook + scope + plan) | [docs/migration/D_GOLIVE_RUNBOOK.md](docs/migration/D_GOLIVE_RUNBOOK.md) | Canonical go-live runbook; [scope+audit (NO-GO verdict)](docs/migration/D_GOLIVE_SCOPE_AND_AUDIT.md); [MVL-D phase-1 plan](docs/migration/D_MVL_PHASE1_PLAN.md) |
+| Strategy H go-live (scope + audit) | [docs/migration/H_GOLIVE_SCOPE_AND_AUDIT.md](docs/migration/H_GOLIVE_SCOPE_AND_AUDIT.md) | **NO-GO** verdict + 15-item risk register + the HG-1..HG-10 gate + halt criteria. H has **zero observations** — the next step is to run the dry run, not to flip it. MVL plan and runbook deliberately deferred with stated preconditions. |
 | HYDRA trading journal | [docs/HYDRA_TRADING_JOURNAL.md](docs/HYDRA_TRADING_JOURNAL.md) | Daily results (updated by HOMER) |
 | Buffer optimization | [docs/HYDRA_BUFFER_OPTIMIZATION.md](docs/HYDRA_BUFFER_OPTIMIZATION.md) | Per-VIX-regime buffer study |
 | Early close analysis | [docs/HYDRA_EARLY_CLOSE_ANALYSIS.md](docs/HYDRA_EARLY_CLOSE_ANALYSIS.md) | Why MKT-018 is disabled |

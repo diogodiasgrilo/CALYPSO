@@ -36,6 +36,41 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-23 STRATEGY H (long strangle), PLAYBOOK STEP 10 — go-live audit. VERDICT:
+  **NO-GO**, and the gap is larger than "it needs a live path".
+  THE DOMINANT FACT, VERIFIED NOT ASSUMED: H has never executed a single tick. Checked
+  on the VM 2026-09-23 08:29 ET — `hydra_variant_h` is not in /etc/systemd/system/,
+  /opt/calypso/data/variant_h does not exist, `systemctl is-active` returns inactive.
+  ZERO observations. That makes H's NO-GO different in kind from D's: D's audit found a
+  strategy whose selling point was a mid-pricing artifact; H's finding is that there is
+  nothing yet to evaluate.
+  Four independently sufficient reasons: (1) no real-order path, DELIBERATELY — three
+  locks, all tested; (2) the edge is unvalidated and the source's claims imply ~+40%
+  expected per trade, which would be the best documented edge in retail options; (3)
+  three Step-3 assumptions still unverified against live data; (4) the expected-move
+  source is a CONFIG VALUE that selects which strategy runs (22pt vs 71pt, ~3x apart).
+  THE NEXT STEP IS NOT A FLIP — IT IS TO RUN THE DRY RUN AT ALL. This is where H's plan
+  legitimately departs from the playbook's Step 10 template, and the departure is
+  stated rather than papered over: the MVL plan and the go-live runbook are DEFERRED
+  with explicit preconditions, because with zero observations an MVL plan would be
+  fiction (no measured behaviour to strip a mechanic from, no fill data to phase, no
+  basis for a first live size) and a runbook would document a flip nobody can
+  responsibly plan while implying a readiness that does not exist.
+  Deliverables: docs/migration/H_GOLIVE_SCOPE_AND_AUDIT.md — the verdict, a 15-item
+  risk register (4 blocking / 5 material / 6 closed-by-construction), an H-SPECIFIC
+  gate HG-1..HG-10 replacing the credit-shaped checklist (which asks questions H cannot
+  answer: credit received, spread width, stop level), and 5 halt criteria. HG-4 names
+  the actual deliverable: H's daily P&L correlated against B's. A NEGATIVE correlation
+  is the result that would justify H existing; a POSITIVE one is a valid and useful NO.
+  HG-7 flags the likeliest way a mid-priced edge evaporates: a long strangle pays the
+  ask on both legs in and takes the bid on both out — FOUR spread crossings against a
+  debit of a few hundred dollars, with B's own ~38%-of-net entry-fill leak as precedent.
+  Per Step 10's "wire the code to it": both ConfigError lock messages, the module and
+  class docstrings, `_execute_entry`, `_close_long_strangle` and the systemd unit's
+  Description= all name the audit document rather than a runbook that does not exist.
+  A NO-GO here is a SUCCESSFUL, HONEST OUTCOME — the playbook says so and D's audit
+  returned the same verdict correctly. H is finished as a MEASUREMENT INSTRUMENT and
+  unproven as a STRATEGY; conflating those is what the document exists to prevent.
 - 2026-09-23 STRATEGY H (long strangle), PLAYBOOK STEP 9 (partial) — hardening.
   Three findings from an adversarial pass over the whole build. The first is the one
   Step 9 exists for; the other two are silent-failure bugs.

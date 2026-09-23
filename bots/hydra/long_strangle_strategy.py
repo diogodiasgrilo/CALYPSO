@@ -45,6 +45,10 @@ as **break-even** rather than a total loss of the premium (see
 ``_settlement_booked_pnl``), and the base's ``credit + buffer`` stop would have produced
 an arbitrary trigger nobody chose (see ``_calculate_stop_levels_hydra``).
 
+**Go-live gate and the NO-GO reasoning:**
+``docs/migration/H_GOLIVE_SCOPE_AND_AUDIT.md`` (HG-1..HG-10). The next step for this
+strategy is **not** a flip — it is to run the dry run at all, which it never has.
+
 Spec + build-weight decision: ``docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md``
 (MEDIUM build — skip Step 6, include a small Step 2 model and a Step 7 isolated DB,
 because ``IronCondorEntry``'s P&L is credit-shaped in every branch and
@@ -123,10 +127,11 @@ class LongStrangleStrategy(HydraStrategy):
         if not kwargs.get("dry_run", False):
             raise ConfigError(
                 "LongStrangleStrategy is dry-run-LOCKED: entry and exits are "
-                "written (Steps 1-5 + 7) but THIS CODE HAS NEVER RUN — not one "
-                "tick against a live chain — and Steps 8-10 (observability, "
-                "hardening, go-live audit) are outstanding. See "
-                "docs/LONG_STRANGLE_STRATEGY_SPECIFICATION.md. Set dry_run=true, "
+                "written but THIS CODE HAS NEVER RUN — not one tick against a "
+                "live chain, verified on the VM 2026-09-23 (no unit, no data "
+                "dir, inactive). The go-live gate HG-1..HG-10 and the reasons "
+                "for the NO-GO are in "
+                "docs/migration/H_GOLIVE_SCOPE_AND_AUDIT.md. Set dry_run=true, "
                 "or do not select strategy.name='long_strangle'."
             )
         super().__init__(*args, **kwargs)
@@ -135,7 +140,8 @@ class LongStrangleStrategy(HydraStrategy):
         if not getattr(self, "dry_run", False):
             raise ConfigError(
                 "LongStrangleStrategy resolved to dry_run=false after init — "
-                "refusing to arm an unfinished strategy scaffold."
+                "refusing to arm a strategy with zero observations. See "
+                "docs/migration/H_GOLIVE_SCOPE_AND_AUDIT.md."
             )
 
         # Step 7's isolated DB, wired here in Step 4 because this is where rows
@@ -959,7 +965,8 @@ class LongStrangleStrategy(HydraStrategy):
         """
         if not self.dry_run:  # pragma: no cover - unreachable while locked
             raise ConfigError(
-                "LongStrangleStrategy has no live close path (Step 5 is dry-run only)."
+                "LongStrangleStrategy has no live close path. "
+                "Gate: docs/migration/H_GOLIVE_SCOPE_AND_AUDIT.md (HG-5)."
             )
         now = now or get_us_market_time()
         proceeds = entry.current_value
