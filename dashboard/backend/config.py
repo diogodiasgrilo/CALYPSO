@@ -265,7 +265,13 @@ class Settings(BaseSettings):
     # and E HOLDS multi-day so the spread amortizes instead of repeating daily) and
     # E has zero completed trades, but worth calibrating before grading its edge.
     variant_d_baseline_date: str = "2026-07-11"
-    variant_e_baseline_date: str = "2026-07-07"
+    # 2026-09-24: moved from "2026-07-07" to E's FIDELITY EPOCH. Its low-IV gate
+    # changed from an absolute VIX cutoff to the percentile its source describes,
+    # which decides WHICH DAYS IT TRADES AT ALL — so the earlier days belong to a
+    # different strategy. Mirrors strategy.metrics_epoch_date in the bot config;
+    # the two must move together or the dashboard and the bot will disagree about
+    # the same lifetime number.
+    variant_e_baseline_date: str = "2026-09-24"
     variant_f_baseline_date: str = ""  # empty = full history; F has no trading history yet
     variant_g_baseline_date: str = ""  # empty = full history; G has no trading history yet
 

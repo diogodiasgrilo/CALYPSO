@@ -204,6 +204,13 @@ export interface StrategySnapshot {
   label: string | null;
   dry_run: boolean | null;
   underlying_symbol: string | null;
+  /**
+   * Set when this variant's LIFETIME RECORD was restarted because its rules
+   * changed — the figures below count only from this date. Without surfacing
+   * it, a strategy that has run for months shows a near-empty record and no
+   * reason, which reads as lost data rather than a deliberate cutover.
+   */
+  metrics_epoch_date?: string | null;
   body: SnapshotBody;
 }
 

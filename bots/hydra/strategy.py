@@ -6514,6 +6514,7 @@ class HydraStrategy(MEICStrategy):
             # SELF-HEAL the cumulative metrics from the just-written DB (root-cause
             # fix for metrics-vs-DB drift, 2026-07-20) — runs AFTER the daily_summary
             # row is durable so the DB is complete for today.
+            self._archive_pre_epoch_metrics()
             self._reconcile_cumulative_metrics_from_db(date_str)
 
             # The only check in this codebase that is NOT circular.
@@ -6664,6 +6665,81 @@ class HydraStrategy(MEICStrategy):
             logger.info("BROKER-RECONCILE %s skipped (%s)", date_str, e)
             return {"skipped": "error", "error": str(e)}
 
+    def _metrics_epoch_date(self) -> Optional[str]:
+        """The date this variant's lifetime record starts, or None for "all of it".
+
+        Set via ``strategy.metrics_epoch_date`` when a variant's RULES change
+        enough that its earlier days were produced by a different strategy.
+        Variant E is the first user: its low-IV gate moved from an absolute
+        ``VIX <= 22`` to the percentile its source actually describes on
+        2026-09-24, so days either side of that answer different questions and
+        averaging them answers neither.
+
+        Returns a ``YYYY-MM-DD`` string or None. A malformed value is ignored
+        rather than raised on — this sits in the settlement path, and a typo in
+        a config should not cost a night's reconciliation.
+        """
+        # `getattr`, not attribute access: this is called from inside
+        # `_reconcile_cumulative_metrics_from_db`, whose broad `except Exception`
+        # would turn a missing attribute into a SILENT no-op of the entire
+        # self-heal — the drift guard would stop running and nothing would say
+        # so. A missing config means "no epoch", which is the prior behaviour.
+        cfg = getattr(self, "strategy_config", None) or {}
+        raw = str(cfg.get("metrics_epoch_date", "") or "").strip()
+        if not raw:
+            return None
+        try:
+            datetime.strptime(raw, "%Y-%m-%d")
+        except ValueError:
+            logger.warning(
+                "metrics_epoch_date %r is not YYYY-MM-DD — ignoring it and "
+                "counting the full history.", raw)
+            return None
+        return raw
+
+    def _archive_pre_epoch_metrics(self) -> None:
+        """Move the pre-epoch lifetime totals aside, ONCE, before the cutover.
+
+        The earlier era is preserved rather than deleted — it was real, it cost
+        real dry-run observation time, and a record that simply vanishes invites
+        the question of what else quietly vanished. It moves to a ``pre_epoch``
+        block in the metrics file, stamped with the epoch that retired it, and
+        the live counters start from zero.
+
+        Idempotent: once ``pre_epoch`` exists it is never rewritten, so a restart
+        cannot archive an already-zeroed set of counters over the real one.
+        """
+        epoch = self._metrics_epoch_date()
+        cm = self.cumulative_metrics
+        if not epoch or cm.get("pre_epoch"):
+            return
+        prior = [r for r in cm.get("daily_returns", [])
+                 if str(r.get("date", "")) < epoch]
+        if not prior and not float(cm.get("cumulative_pnl", 0.0) or 0.0):
+            return                      # nothing to archive; a fresh variant
+        cm["pre_epoch"] = {
+            "retired_on": epoch,
+            "reason": "strategy rules changed; earlier days are a different strategy",
+            "cumulative_pnl": round(float(cm.get("cumulative_pnl", 0.0) or 0.0), 2),
+            "total_entries": int(cm.get("total_entries", 0) or 0),
+            "total_stops": int(cm.get("total_stops", 0) or 0),
+            "winning_days": int(cm.get("winning_days", 0) or 0),
+            "losing_days": int(cm.get("losing_days", 0) or 0),
+            "days": len(prior),
+            "daily_returns": prior,
+        }
+        for k, zero in (("cumulative_pnl", 0.0), ("total_entries", 0),
+                        ("total_credit_collected", 0.0), ("total_stops", 0),
+                        ("double_stops", 0), ("winning_days", 0), ("losing_days", 0)):
+            cm[k] = zero
+        cm["daily_returns"] = [r for r in cm.get("daily_returns", [])
+                               if str(r.get("date", "")) >= epoch]
+        logger.warning(
+            "METRICS-EPOCH: lifetime record restarted at %s. Prior era archived "
+            "under 'pre_epoch' ($%.2f over %d days) — preserved, not deleted.",
+            epoch, cm["pre_epoch"]["cumulative_pnl"], cm["pre_epoch"]["days"])
+        self._save_cumulative_metrics(trading_date=epoch)
+
     def _reconcile_cumulative_metrics_from_db(self, date_str: str) -> None:
         """SELF-HEAL the cumulative metrics (hydra_metrics.json) from the authoritative
         daily_summaries — the ROOT-CAUSE fix for metrics-vs-DB drift (2026-07-20 audit:
@@ -6706,19 +6782,41 @@ class HydraStrategy(MEICStrategy):
         try:
             import sqlite3 as _sqlite
             con = _sqlite.connect(f"file:{self._data_recorder.db_path}?mode=ro", uri=True)
+            # FIDELITY EPOCH (2026-09-24). A variant whose RULES changed is,
+            # for measurement purposes, a different strategy — its earlier days
+            # were produced by something else and averaging the two eras answers
+            # no question anyone has. `metrics_epoch_date` starts the lifetime
+            # count at that cutover.
+            #
+            # It has to be applied HERE, not by zeroing hydra_metrics.json: this
+            # function re-derives cumulative_pnl from the FULL daily_summaries
+            # table on every settlement, so a hand-reset file is silently undone
+            # on the next close. Filtering the source is the only reset that
+            # survives its own self-heal.
+            #
+            # Pre-epoch rows are never deleted — they stay in the DB, and the
+            # archived totals stay in the metrics file under `pre_epoch` — so the
+            # earlier era remains auditable rather than disappearing.
+            epoch = str(self._metrics_epoch_date() or "")
+            _where = " WHERE date >= ?" if epoch else ""
+            _args = (epoch,) if epoch else ()
             db = {r[0]: round((r[1] or 0.0), 2)
-                  for r in con.execute("SELECT date, net_pnl FROM daily_summaries")}
+                  for r in con.execute(
+                      "SELECT date, net_pnl FROM daily_summaries" + _where, _args)}
             _STOP_FILTER = (
                 "(exit_reason IN ('stop_loss','gex_breach') "
                 "OR (exit_reason IS NULL AND net_pnl < 0))"
             )
+            _stop_epoch = (" AND date >= ?" if epoch else "")
             db_total_stops = con.execute(
-                f"SELECT COUNT(*) FROM trade_stops WHERE {_STOP_FILTER}"
+                f"SELECT COUNT(*) FROM trade_stops WHERE {_STOP_FILTER}{_stop_epoch}",
+                _args,
             ).fetchone()[0]
             db_double_stops = con.execute(
                 "SELECT COUNT(*) FROM (SELECT date, entry_number FROM trade_stops "
-                f"WHERE {_STOP_FILTER} GROUP BY date, entry_number "
-                "HAVING COUNT(DISTINCT side) = 2)"
+                f"WHERE {_STOP_FILTER}{_stop_epoch} GROUP BY date, entry_number "
+                "HAVING COUNT(DISTINCT side) = 2)",
+                _args,
             ).fetchone()[0]
             con.close()
             if not db:
@@ -6753,6 +6851,12 @@ class HydraStrategy(MEICStrategy):
                 cm["total_stops"] = db_total_stops
                 cm["double_stops"] = db_double_stops
                 # win/loss over the reconciled per-day rows (trading days only)
+                if epoch:
+                    # Keep win/loss on the SAME era as cumulative_pnl. Counting
+                    # pre-epoch days here while excluding their P&L above would
+                    # produce a win rate for one strategy over another's days.
+                    dr = [r for r in dr if str(r.get("date", "")) >= epoch]
+                    cm["daily_returns"] = dr
                 cm["winning_days"] = sum(1 for r in dr if float(r.get("net_pnl", 0)) >= 0)
                 cm["losing_days"] = sum(1 for r in dr if float(r.get("net_pnl", 0)) < 0)
                 self._save_cumulative_metrics(trading_date=date_str)

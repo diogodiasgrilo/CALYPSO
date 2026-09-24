@@ -57,6 +57,14 @@ export function Header() {
     ? selectedSnapshot!.underlying_symbol || "SPX"
     : "SPX";
 
+  // A RESTARTED lifetime record. Shown because the alternative is a strategy
+  // that has run for months displaying a near-empty record with no explanation,
+  // which reads as data loss rather than as a deliberate cutover after its rules
+  // changed. The prior era is archived, not deleted.
+  const metricsEpoch = usingSelected
+    ? selectedSnapshot!.metrics_epoch_date || null
+    : null;
+
   // Price source. WS primary: last OHLC bar / state-file midpoint. Selected:
   // the snapshot body's spx fields (IC) — calendars carry no intraday SPX/VIX,
   // so we suppress the price chips for them rather than show stale primary data.
@@ -133,6 +141,18 @@ export function Header() {
           title="Dry-run mode: real broker prices, no real orders placed."
         >
           ⚠ DRY-RUN MODE — REAL PRICES, NO REAL ORDERS — POSITION IDs PREFIXED DRY_* ⚠
+        </div>
+      )}
+      {metricsEpoch && (
+        <div
+          className="w-full text-center text-3xs py-0.5 bg-bg-elevated border-b border-border-dim text-text-secondary"
+          title={
+            "This strategy's rules changed, so days before this date were produced " +
+            "by a different strategy. The earlier record is archived, not deleted."
+          }
+        >
+          Record restarted <span className="font-semibold">{metricsEpoch}</span> — rules
+          changed; figures below count from then
         </div>
       )}
       {/* `min-w-0` on the row AND on each group is what actually lets a flex

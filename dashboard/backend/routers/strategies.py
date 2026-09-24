@@ -336,10 +336,16 @@ def _header_chrome(vid: str, m: tax.StrategyMeta) -> dict:
     Read from the variant's OWN config.json (the dry_run + underlying are
     per-strategy — a QQQ/SPY calendar must NOT show the primary's SPX). Missing
     config degrades to taxonomy defaults, never raises.
+
+    Also carries ``metrics_epoch_date`` when the variant's lifetime record has
+    been RESTARTED because its rules changed. Without it the page shows a
+    strategy that has traded for months with a near-empty record and no
+    explanation, which reads as data loss rather than as a deliberate cutover.
     """
     cfg_path = getattr(settings, f"variant_{vid}_config_file", None)
     dry_run: Optional[bool] = None
     underlying: Optional[str] = None
+    epoch: Optional[str] = None
     label = getattr(settings, f"variant_{vid}_label", None) or m.display_name
     if cfg_path is not None:
         try:
@@ -349,6 +355,7 @@ def _header_chrome(vid: str, m: tax.StrategyMeta) -> dict:
             dry_run = bool(cfg.get("dry_run", False))
             s = cfg.get("strategy", {}) or {}
             underlying = s.get("underlying_symbol") or cfg.get("underlying_symbol")
+            epoch = str(s.get("metrics_epoch_date", "") or "").strip() or None
         except Exception as e:  # missing / unreadable config — degrade gracefully
             logger.debug(f"snapshot header chrome: could not read config for {vid}: {e}")
     return {
@@ -356,6 +363,7 @@ def _header_chrome(vid: str, m: tax.StrategyMeta) -> dict:
         "label": label,
         "dry_run": dry_run,
         "underlying_symbol": underlying,
+        "metrics_epoch_date": epoch,
     }
 
 

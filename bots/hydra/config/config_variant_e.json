@@ -185,7 +185,9 @@
     "brandon": {
       "_comment": "OFF on E \u2014 E is its own (CalendarStrategyBase-derived) multi-day strategy, not the Brandon iron-condor stack. Disabling here makes the registry resolve strategy.name='spy_double_calendar'.",
       "enabled": false
-    }
+    },
+    "_comment_metrics_epoch_date": "THE LIFETIME RECORD RESTARTS HERE. On 2026-09-24 E's low-IV entry gate moved from an absolute 'VIX <= 22' to the VIX PERCENTILE its source actually describes ('the lower end of the spectrum'), and its invented knobs were relabelled as ours rather than the video's. A gate change decides WHICH DAYS THE STRATEGY TRADES AT ALL, so days either side of it were produced by different strategies and a blended average answers neither question. Everything before this date is ARCHIVED, not deleted: it stays in backtesting.db and moves to a 'pre_epoch' block in hydra_metrics.json stamped with this date. Applied inside _reconcile_cumulative_metrics_from_db because that function re-derives cumulative_pnl from the FULL daily_summaries table every settlement \u2014 a hand-zeroed metrics file would be silently undone on the next close. Remove this key to count the whole history again.",
+    "metrics_epoch_date": "2026-09-24"
   },
   "trend_filter": {
     "enabled": true,

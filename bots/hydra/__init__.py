@@ -36,6 +36,43 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-24 VARIANT E — THE LIFETIME RECORD RESTARTS AT THE FIDELITY CUTOVER. Operator:
+  "restart the P&L count from when it becomes true to the video, and the online dashboard
+  needs to be updated too."
+
+  E's low-IV gate moved the same day from an absolute `VIX <= 22` to the VIX percentile its
+  source actually describes. That gate decides WHICH DAYS THE STRATEGY TRADES AT ALL, so days
+  either side of it were produced by different strategies and a blended lifetime average
+  answers neither question.
+
+  ⚠️ IT COULD NOT BE DONE BY EDITING THE METRICS FILE. `_reconcile_cumulative_metrics_from_db`
+  re-derives cumulative_pnl from the FULL daily_summaries table every settlement — that is its
+  job, and it is the 2026-07-20 drift fix. A hand-zeroed hydra_metrics.json is silently undone
+  on the next close. Filtering the SOURCE is the only reset that survives its own self-heal.
+
+  * `strategy.metrics_epoch_date` (E: 2026-09-24). The reconcile filters daily_summaries AND
+    trade_stops by it, and trims daily_returns so win/loss covers the same era as the P&L.
+  * `_archive_pre_epoch_metrics()` runs once, before the reconcile: the prior totals move to a
+    `pre_epoch` block stamped with the epoch, and the live counters zero. NOTHING IS DELETED —
+    the rows stay in the DB and the archive stays in the file. Idempotent, so a restart cannot
+    archive already-zeroed counters over the real ones.
+  * Dashboard: `variant_e_baseline_date` moved to the same date (it rebases its own cumulative
+    figures, and the two disagreeing would report different lifetime P&L for one variant), the
+    epoch is published in the strategy snapshot, and the Header renders "Record restarted
+    <date> — rules changed". A restarted record that is not SHOWN reads as data loss.
+
+  ⚠️ FRAGILITY FOUND AND FIXED IN THE SAME CHANGE: `_metrics_epoch_date` first read
+  `self.strategy_config` by attribute. The reconcile wraps everything in a broad
+  `except Exception` logged at DEBUG, so on any instance lacking that attribute the error
+  turned the ENTIRE self-heal into a silent no-op — the drift guard would stop running with
+  nothing in the logs. Now `getattr(..., None) or {}`; six existing tests caught it, and a
+  test now pins that the self-heal still runs without a strategy_config.
+
+  Tests: `tests/test_metrics_epoch_2026_09_24.py` (23). Negative controls verified for the
+  epoch filter, for the archive discarding instead of preserving, and for the attribute-access
+  regression.
+
+
 - 2026-09-24 STRATEGY H — RUNS ON SPY, BECAUSE THAT IS WHAT THE SOURCE TRADES. Operator, twice:
   "I wanna run it JUST like the video says NOTHING different", then "why can't H be exactly like
   in the video". Re-examined, the honest answer was that the underlying was never a constraint —
