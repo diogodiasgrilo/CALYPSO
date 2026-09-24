@@ -1,4 +1,6 @@
 import { useState, useEffect } from "react";
+import { useSelectedSnapshotStore } from "../dashboard/selectedSnapshotStore";
+import { resolveFomcPolicy } from "../../lib/fomcPolicy";
 import { useHydraStore } from "../../store/hydraStore";
 import { formatPnL, winRate } from "../../lib/formatters";
 import { capitalBasisConfig } from "../../lib/pnlShape";
@@ -30,6 +32,12 @@ function formatNextOpen(isoStr: string | undefined): string {
 export function FOMCBanner() {
   const market = useHydraStore((s) => s.market);
   const hydraState = useHydraStore((s) => s.hydraState);
+  // THE SELECTED variant's own policy, not the primary seat's. `hydraState` is
+  // the live seat (B), which DOES skip announcement days — while D, E, F, G and
+  // H all trade through them. Reading B's flags for every selection meant this
+  // banner told the operator that a strategy was flat on exactly the day it was
+  // most exposed, and G is an undefined-risk naked strangle.
+  const selected = useSelectedSnapshotStore((s) => s.snapshot);
   if (!market) return null;
 
   const isFomcDay = market.is_fomc_day;
@@ -38,7 +46,8 @@ export function FOMCBanner() {
   const daysUntil = market.days_until_fomc;
   // FOMC T+1 handling (2026-04-19): skip takes precedence over MKT-038 call-only.
   // Defaults assume today's VM config (skip=true, callonly=false) if state not yet populated.
-  const t1SkipEnabled = hydraState?.fomc_t1_skip_enabled !== false;
+  const effectiveFomc = resolveFomcPolicy(selected?.fomc_policy, hydraState);
+  const t1SkipEnabled = effectiveFomc.t1_skip;
   const mkt038Enabled = hydraState?.fomc_t1_callonly_enabled === true;
   // 2026-04-30: when bot is in dry mode AND dry_run_force_normal_day is set,
   // FOMC date-based skips (announce + T+1 + MKT-038) are runtime-bypassed.
@@ -60,7 +69,7 @@ export function FOMCBanner() {
   if (isAnnouncement) {
     headline = "FOMC Announcement Day — Rate Decision at 2:00 PM ET";
     // fomc_announcement_skip defaults false on VM (Day 2 backtest was coin-flip with slight positive edge)
-    const day2Skip = hydraState?.fomc_announcement_skip === true;
+    const day2Skip = effectiveFomc.announcement_skip;
     if (forceNormalDay) {
       hydraTag = "HYDRA: Trading normally — dry-run force-normal-day bypass active";
       hydraTagColor = colors.warning;

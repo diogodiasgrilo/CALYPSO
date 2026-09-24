@@ -346,6 +346,7 @@ def _header_chrome(vid: str, m: tax.StrategyMeta) -> dict:
     dry_run: Optional[bool] = None
     underlying: Optional[str] = None
     epoch: Optional[str] = None
+    fomc: Optional[dict] = None
     label = getattr(settings, f"variant_{vid}_label", None) or m.display_name
     if cfg_path is not None:
         try:
@@ -356,6 +357,14 @@ def _header_chrome(vid: str, m: tax.StrategyMeta) -> dict:
             s = cfg.get("strategy", {}) or {}
             underlying = s.get("underlying_symbol") or cfg.get("underlying_symbol")
             epoch = str(s.get("metrics_epoch_date", "") or "").strip() or None
+            # The variant's OWN FOMC policy. The banner used to read the
+            # PRIMARY seat's flags for every selection, so on an announcement
+            # day D/E/F/G/H would all have claimed "All entries skipped" while
+            # actually trading through it — B skips, they do not.
+            fomc = {
+                "announcement_skip": bool(s.get("fomc_announcement_skip", False)),
+                "t1_skip": bool(s.get("fomc_t1_skip_enabled", False)),
+            }
         except Exception as e:  # missing / unreadable config — degrade gracefully
             logger.debug(f"snapshot header chrome: could not read config for {vid}: {e}")
     return {
@@ -364,6 +373,7 @@ def _header_chrome(vid: str, m: tax.StrategyMeta) -> dict:
         "dry_run": dry_run,
         "underlying_symbol": underlying,
         "metrics_epoch_date": epoch,
+        "fomc_policy": fomc,
     }
 
 

@@ -69,6 +69,7 @@ from bots.hydra.long_strangle_chain import (
     iv_percentile,
     iv_percentile_with_n,
     premiums_are_balanced,
+    range_expansion_signal,
     chain_snap_cap,
     select_strangle_strikes,
     size_for_zero,
@@ -492,6 +493,74 @@ class LongStrangleStrategy(HydraStrategy):
     # Step 4 — the IV-percentile filter, deliberately OFF
     # ==================================================================
 
+    def _daily_ranges(self, lookback: int = 80) -> list:
+        """Recent daily high-low ranges, oldest last. ``[]`` on any failure.
+
+        Read from the same market database the VIX history uses, for the same
+        reason: a daily range is a property of the MARKET, not of a variant, and
+        a brand-new variant's own database is empty.
+        """
+        import sqlite3
+        db = self._vix_history_db()
+        if not db:
+            return []
+        today = get_us_market_time().strftime("%Y-%m-%d")
+        try:
+            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
+            try:
+                rows = con.execute(
+                    "SELECT date, spx_high - spx_low FROM daily_summaries "
+                    "WHERE spx_high > 0 AND spx_low > 0 AND date < ? "
+                    "ORDER BY date DESC LIMIT ?",
+                    (today, lookback),
+                ).fetchall()
+                return [float(r[1]) for r in reversed(rows) if r and r[1] and r[1] > 0]
+            finally:
+                con.close()
+        except Exception as e:  # noqa: BLE001 — a filter must not break entry
+            logger.warning("LS: daily ranges unavailable: %s", e)
+            return []
+
+    def _range_expansion_gate(self, entry) -> Optional[str]:
+        """The source's THIRD entry condition. Skip reason, or None to proceed.
+
+        Tompkins *"seeks range expansion — a period of narrow daily candle
+        ranges that begins to widen"*. H shipped without it; it was found in the
+        Theta Profits article on 2026-09-24, listed beside the IV filter and the
+        cost cap. For a long strangle it is the thesis stated on the chart: the
+        position needs MOVEMENT, and a market coming out of a quiet stretch is
+        where movement tends to start.
+
+        ⚠️ **FAILS OPEN, unlike the IV gate, and the asymmetry is deliberate.**
+        The source gives IV an explicit number to clear ("below about 35%"), so
+        an unmeasurable IV is a genuine unknown and skipping is conservative. He
+        gives range expansion NO threshold — "narrow", "begins to widen" — so
+        every number here is ours. A filter built entirely from our own
+        thresholds must not be able to silently veto every session; that is how
+        H's first live day produced one skip and no data.
+        """
+        cfg = self._ls_config()
+        if not cfg.get("range_expansion_filter_enabled", False):
+            return None
+        ranges = self._daily_ranges()
+        fires, detail = range_expansion_signal(
+            ranges,
+            narrow_n=int(cfg.get("range_expansion_narrow_days", 10)),
+            baseline_n=int(cfg.get("range_expansion_baseline_days", 60)),
+            compression_max=float(cfg.get("range_expansion_compression_max", 0.90)),
+            expansion_mult=float(cfg.get("range_expansion_mult", 1.10)),
+        )
+        entry.ls_range_expansion = detail
+        if fires:
+            logger.info("LS: range-expansion signal PRESENT — %s", detail)
+            return None
+        if "insufficient" in detail or "degenerate" in detail:
+            logger.info("LS: range-expansion UNMEASURABLE (%s) — proceeding; the "
+                        "source sets no threshold here, so our filter must not "
+                        "veto on its own ignorance.", detail)
+            return None
+        return f"no range expansion ({detail})"
+
     def _snap_cap(self, strikes, spot: float) -> float:
         """How far a strike may be moved to reach a listed one.
 
@@ -821,6 +890,11 @@ class LongStrangleStrategy(HydraStrategy):
             iv_skip = self._iv_percentile_gate(entry)
             if iv_skip:
                 return self._skip(entry, entry_num, iv_skip)
+
+            # The source's chart-side condition, beside the IV one.
+            re_skip = self._range_expansion_gate(entry)
+            if re_skip:
+                return self._skip(entry, entry_num, re_skip)
 
             contracts = self._size_for_zero(entry)
             if contracts <= 0:

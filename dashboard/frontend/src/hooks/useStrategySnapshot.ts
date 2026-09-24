@@ -211,6 +211,12 @@ export interface StrategySnapshot {
    * reason, which reads as lost data rather than a deliberate cutover.
    */
   metrics_epoch_date?: string | null;
+  /**
+   * THIS variant's FOMC policy. The banner previously read the PRIMARY
+   * seat's flags for every selection, so on an announcement day D/E/F/G/H
+   * would each have claimed "All entries skipped" while trading through it.
+   */
+  fomc_policy?: { announcement_skip: boolean; t1_skip: boolean } | null;
   body: SnapshotBody;
 }
 

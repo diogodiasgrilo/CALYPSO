@@ -202,3 +202,60 @@ def size_for_zero(max_acceptable_loss: float, debit_per_contract: float) -> int:
     return int(max_acceptable_loss // debit_per_contract)
 
 
+
+
+def range_expansion_signal(daily_ranges, narrow_n: int = 10,
+                           baseline_n: int = 60,
+                           compression_max: float = 0.90,
+                           expansion_mult: float = 1.10):
+    """Is the market coming OUT of a quiet stretch? ``(fires, detail)``.
+
+    THE SOURCE'S THIRD ENTRY CONDITION, and one H shipped without. The Theta
+    Profits article on Tompkins lists it beside the IV filter and the cost cap:
+    he *"seeks range expansion — a period of narrow daily candle ranges that
+    begins to widen."* It is the chart-side statement of the same bet the IV
+    filter makes on the vol surface, and for a long strangle it is the whole
+    thesis: the position needs MOVEMENT, and a market waking up from a quiet
+    stretch is where movement tends to come from.
+
+    Two conditions, because the phrase has two halves and reading it as one was
+    the easy mistake:
+
+    * **"a period of narrow daily candle ranges"** — the median range over the
+      last ``narrow_n`` completed days sits at or below ``compression_max`` of
+      the median over ``baseline_n`` days. Compression, measured against the
+      market's own recent normal rather than a fixed point value, so it means
+      the same thing at SPY 400 and SPY 800.
+    * **"that begins to widen"** — the MOST RECENT completed day exceeds that
+      narrow median by ``expansion_mult``. The widening has to have started;
+      quiet alone is not the signal, it is the setup.
+
+    ``daily_ranges`` is oldest-first. Returns ``(False, reason)`` when there is
+    not enough history to judge — the caller decides what to do with that, and
+    for this filter the honest answer is to proceed, because "cannot measure the
+    pattern" is not the same as "the pattern is absent". That is the opposite of
+    the IV gate's fail-closed stance on purpose: the source gives IV an explicit
+    number to clear ("below about 35%") and gives this one no threshold at all,
+    so ours is an operationalization and must not silently veto every session.
+    """
+    vals = [float(r) for r in daily_ranges if r is not None and r > 0]
+    if len(vals) < max(narrow_n + 1, 5):
+        return False, f"insufficient daily history ({len(vals)} days)"
+
+    def _median(xs):
+        s = sorted(xs)
+        n = len(s)
+        return s[n // 2] if n % 2 else (s[n // 2 - 1] + s[n // 2]) / 2.0
+
+    latest = vals[-1]
+    narrow = vals[-(narrow_n + 1):-1]          # the quiet stretch, excluding the latest
+    baseline = vals[-(baseline_n + 1):-1] or narrow
+    nm, bm = _median(narrow), _median(baseline)
+    if nm <= 0 or bm <= 0:
+        return False, "degenerate ranges"
+
+    compressed = nm <= bm * compression_max
+    widening = latest >= nm * expansion_mult
+    detail = (f"narrow median {nm:.1f} vs baseline {bm:.1f} "
+              f"({nm / bm:.0%}), latest {latest:.1f} ({latest / nm:.0%} of narrow)")
+    return (compressed and widening), detail
