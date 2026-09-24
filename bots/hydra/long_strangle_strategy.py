@@ -69,6 +69,7 @@ from bots.hydra.long_strangle_chain import (
     iv_percentile,
     iv_percentile_with_n,
     premiums_are_balanced,
+    chain_snap_cap,
     select_strangle_strikes,
     size_for_zero,
     snap_to_chain,
@@ -81,9 +82,11 @@ from shared.market_hours import get_us_market_time
 
 logger = logging.getLogger(__name__)
 
-#: Every strike is snapped to a listed one within this many points, or the entry
-#: is skipped. Same tolerance ``_read_option_chain`` uses — half the widest
-#: far-OTM SPXW spacing. A looser cap would let 7825 quietly resolve to 7700.
+#: FALLBACK snap tolerance, used only when the chain is too sparse to measure.
+#: The real tolerance is derived per-chain by ``chain_snap_cap`` — see there for
+#: why a constant is an instrument assumption in disguise: 25.0 is half the
+#: widest far-OTM SPXW gap and correct on SPX, and on SPY's $1-spaced chain it
+#: would authorise snapping twenty-five strikes.
 MAX_SNAP_DISTANCE = 25.0
 
 
@@ -279,10 +282,11 @@ class LongStrangleStrategy(HydraStrategy):
             return 0.0, source
 
         # Straddle: price the ATM call and put on the live chain.
-        atm = snap_to_chain(spot, strikes, MAX_SNAP_DISTANCE)
+        atm_cap = self._snap_cap(strikes, spot)
+        atm = snap_to_chain(spot, strikes, atm_cap)
         if atm is None:
-            logger.warning("LS: no ATM strike within %.0fpt of spot %.2f",
-                           MAX_SNAP_DISTANCE, spot)
+            logger.warning("LS: no ATM strike within %.2f of spot %.2f",
+                           atm_cap, spot)
             return 0.0, "straddle"
         call_uic, put_uic = self._resolve_pair(expiry, atm, atm)
         call_px, put_px = self._price_pair(call_uic, put_uic)
@@ -373,13 +377,14 @@ class LongStrangleStrategy(HydraStrategy):
             entry.ls_skip_reason = f"expected move unavailable ({em_source})"
             return False
 
-        call_k, put_k = select_strangle_strikes(spot, em, strikes, MAX_SNAP_DISTANCE)
+        snap_cap = self._snap_cap(strikes, spot)
+        call_k, put_k = select_strangle_strikes(spot, em, strikes, snap_cap)
         if call_k is None or put_k is None:
             # One leg is a directional bet, which is not this strategy.
             logger.warning(
-                "LS: chain could not supply both strikes within %.0fpt of "
+                "LS: chain could not supply both strikes within %.2f of "
                 "%.2f ± %.1f (call=%s put=%s)",
-                MAX_SNAP_DISTANCE, spot, em, call_k, put_k,
+                snap_cap, spot, em, call_k, put_k,
             )
             entry.ls_skip_reason = "chain could not supply both strikes"
             return False
@@ -486,6 +491,23 @@ class LongStrangleStrategy(HydraStrategy):
     # ==================================================================
     # Step 4 — the IV-percentile filter, deliberately OFF
     # ==================================================================
+
+    def _snap_cap(self, strikes, spot: float) -> float:
+        """How far a strike may be moved to reach a listed one.
+
+        Measured from the chain rather than configured, because the tolerance is
+        a property of the INSTRUMENT and H is no longer tied to one: SPX lists
+        5pt apart near the money and SPY lists $1 apart, so a single number
+        cannot be right for both. ``max_snap_distance`` overrides it when an
+        operator needs to pin a value; otherwise the chain decides.
+
+        See ``chain_snap_cap`` for what the old hardcoded 25.0 would have done
+        to a SPY chain.
+        """
+        override = self._ls_config().get("max_snap_distance")
+        if override:
+            return float(override)
+        return chain_snap_cap(list(strikes), spot, fallback=MAX_SNAP_DISTANCE)
 
     def _iv_percentile_gate(self, entry) -> Optional[str]:
         """The source's "IV percentile below ~35%" filter. **Default: disabled.**

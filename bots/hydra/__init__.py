@@ -36,6 +36,48 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-24 STRATEGY H — RUNS ON SPY, BECAUSE THAT IS WHAT THE SOURCE TRADES. Operator, twice:
+  "I wanna run it JUST like the video says NOTHING different", then "why can't H be exactly like
+  in the video". Re-examined, the honest answer was that the underlying was never a constraint —
+  it was OUR preference ("to match the rest of the fleet"), and the spec's own §1 already recorded
+  that the source does not restrict it.
+
+  It was not a free preference. The identical strangle costs ~$115 on SPY and ~$775 on SPX, which
+  is exactly how `sizing_for_zero_max_loss: 500` came to permit ZERO contracts — an empty dataset
+  from the one variant that exists to produce one. On SPY his own sizing rule behaves as he
+  describes it: a $1,200 limit buys ~10 contracts. His COST CAP needed no edit at all —
+  `max_debit_pct_of_spot` is spot-relative, so his ~$1.15/share SPY cap and the ~$1,145/contract
+  SPX figure are the same number. Spot-relative was the right shape and it ported for free.
+
+  Verified on the live broker BEFORE switching, not assumed: SPY quotes real-time (6509='Rp',
+  764.81/764.91) where SPX was frozen; the 0DTE chain for 2026-09-24 resolves with 329 strikes at
+  $1 spacing near the money; variant E already trades SPY, so the plumbing is proven.
+
+  ⚠️ THE LANDMINE THE SWITCH EXPOSED. `MAX_SNAP_DISTANCE = 25.0` is half the widest far-OTM SPXW
+  gap — correct on SPX, whose near-the-money strikes are 5pt apart. On SPY's $1 chain the same
+  constant authorises snapping TWENTY-FIVE STRIKES. The entry would still be placed, still be
+  logged, and still look ordinary; it would simply be a different position from the one the
+  strategy chose. **A hardcoded tolerance is an instrument assumption in disguise**, so it is now
+  MEASURED: `chain_snap_cap` takes the median near-the-money gap and allows 2.5x — 12.5 on SPX,
+  2.5 on SPY, and whatever its own chain says for an instrument nobody has tried. Config can pin a
+  value; H deliberately leaves it derived.
+
+  ⚠️ NEW RISK, RECORDED AS GATE HG-11: SPY options are AMERICAN and PHYSICALLY settled, so an ITM
+  leg held to expiry becomes 100 shares/contract. Dry-run P&L is UNAFFECTED (intrinsic − debit is
+  still the correct economic value), but a real-money H would end the session holding stock — at
+  ~10 contracts, roughly $765k of it. H is dry-run-LOCKED and NO-GO, so it costs nothing today and
+  must be closed before it ever could.
+
+  Also corrected in the spec: the IV-percentile filter was described as "a proxy for a different
+  quantity", which was too harsh. The source's "IV percentile" is almost certainly the standard
+  platform metric — the UNDERLYING's ~30-day IV ranked over a year — and for SPY that is
+  essentially VIX. The remaining honest gap is the WINDOW (94 days vs 252 requested), which every
+  reading now states.
+
+  Tests: `tests/test_h_runs_on_spy_2026_09_24.py` (15), including the arithmetic of the 25.0
+  snap defect and a no-op control proving the tighter cap still resolves a normal SPY selection.
+  Full suite 4791 passed.
+
 - 2026-09-23 STRATEGY H — A PERCENTILE MUST NOT OUT-RANK ITS SAMPLE. Found while answering
   the operator's question "are we free of bugs?", which is its own answer to that question.
 

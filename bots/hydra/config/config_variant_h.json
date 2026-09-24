@@ -7,9 +7,9 @@
     "name": "long_strangle",
     "_comment_commission": "IBKR all-in SPX cost ~$1.15/leg/contract \u2014 see config_variant_c.json's comment for the full breakdown.",
     "commission_per_leg": 1.15,
-    "underlying_symbol": "SPX",
-    "trading_class": "SPXW",
-    "exchange": "CBOE",
+    "underlying_symbol": "SPY",
+    "trading_class": "SPY",
+    "exchange": "SMART",
     "target_dte": 0,
     "_comment_entry_times": "The source says only 'he generally enters near the market open' \u2014 a SINGLE entry, not a grid (one slot is the faithful reading; kept as a list for shape-compatibility with the base). \u26a0\ufe0f 09:45 IS OUR CHOICE, NOT HIS NUMBER, and the reason is evidence rather than preference: the ATM STRADDLE PRICE IS THE INPUT TO THE STRIKE CHOICE, so an unreliable opening quote does not merely delay the entry, it picks the WRONG STRIKES. On 2026-09-22 the armed paper smoke aborted TWICE on absent SPXW quotes at 09:29:31 and 09:30:40, and the same check passed cleanly at 09:35 and again at 09:35 on 09-23 (bid 8.1 / ask 8.2, first poll, no re-poll needed) \u2014 the post-mortem's conclusion was 'timing is the primary fix'. 09:45 sits comfortably past that instability. REVISIT once the RTH probe shows how early the straddle quote is actually trustworthy; if it is stable by 09:35 this should move earlier, because 'near the open' is his wording and 15 minutes is a loose reading of it.",
     "entry_times": [
@@ -104,8 +104,16 @@
       "iv_percentile_max": 35,
       "profit_target_pct_of_debit": 50,
       "profit_target_pct_of_debit_iv_expanding": 100,
-      "profit_target_confirm_seconds": 0
-    }
+      "profit_target_confirm_seconds": 0,
+      "_comment_max_debit_pct_of_spot": "His cost cap, and it needs NO change for the SPY switch because it is already expressed relative to spot: 0.1483% of SPY 765 = $1.13/share = ~$113/contract, which IS his stated ~$1.15/share SPY cap. On SPX the same number gave ~$1,143/contract. Spot-relative was the right shape and it ported for free.",
+      "_comment_sizing_for_zero_max_loss": "$1,200. On SPX this bought ONE contract (a $775 debit) and $500 bought zero. On SPY, at ~$113/contract, his own 'size for zero' rule now buys ~10 contracts from the same limit \u2014 which is how he describes it working. RISK DIAL: this is the most you can lose in a day, by construction, and it is the only sizing input the strategy has."
+    },
+    "_comment_underlying_symbol": "SPY, NOT SPX \u2014 changed 2026-09-24 to match the source. Jeff Tompkins trades SPY, and the spec's own \u00a71 records that the source DOES NOT RESTRICT the underlying; SPX was OUR choice 'to match the rest of the fleet'. That choice was not free: the identical strangle costs ~$115 on SPY and ~$775 on SPX, which is exactly how sizing_for_zero_max_loss=$500 came to permit ZERO contracts and would have produced an empty dataset. On SPY his own sizing rule behaves as he describes it \u2014 a $1,200 limit buys ~10 contracts, not 1 or 0. VERIFIED 2026-09-24 03:0x ET before switching: SPY quotes real-time (6509='Rp', bid 764.81 / ask 764.91) where SPX was frozen; the 0DTE chain for 2026-09-24 resolves with 329 strikes at $1 spacing near the money; and variant E already trades SPY, so the plumbing is proven. \u26a0\ufe0f SPY options are AMERICAN and PHYSICALLY settled: an ITM leg held to expiry becomes 100 shares/contract. That does not change dry-run P&L (intrinsic - debit is still the correct economic value) but it is a GO-LIVE PRECONDITION \u2014 see H_GOLIVE_SCOPE_AND_AUDIT HG-11.",
+    "_comment_trading_class": "SPY's own weeklies. SPXW was the SPX 0DTE class; the SPY equivalent is just 'SPY', which lists daily expirations Monday-Friday.",
+    "_comment_strike_increment": "$1 near the money, measured off the live chain 2026-09-24 (755-775 all present). This is the number that makes the old hardcoded 25.0 snap tolerance dangerous \u2014 see max_snap_distance.",
+    "strike_increment": 1.0,
+    "_comment_max_snap_distance": "LEFT NULL ON PURPOSE so the tolerance is DERIVED from the live chain's own near-the-money spacing (chain_snap_cap: 2.5x the median gap -> 12.5 on SPX, 2.5 on SPY). The previous hardcoded 25.0 was half the widest far-OTM SPXW gap: correct on SPX, and on SPY's $1 chain it would have authorised snapping TWENTY-FIVE strikes while still placing, logging and looking like an ordinary entry. Set a number here only to pin a value deliberately.",
+    "max_snap_distance": null
   },
   "trend_filter": {
     "enabled": false

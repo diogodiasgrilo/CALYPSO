@@ -86,6 +86,33 @@ def expected_move_from_vix(spot: float, vix: float,
     return spot * (vix / 100.0) / sqrt(TRADING_DAYS_PER_YEAR) * multiplier
 
 
+def chain_snap_cap(strikes: Sequence[float], spot: float,
+                   multiple: float = 2.5,
+                   fallback: float = 25.0) -> float:
+    """A snap tolerance derived from the chain's OWN near-the-money spacing.
+
+    **This exists because a hardcoded tolerance is an instrument assumption in
+    disguise.** H shipped ``MAX_SNAP_DISTANCE = 25.0``, which is half the widest
+    far-OTM *SPXW* gap and entirely sensible on SPX, where strikes near the money
+    sit 5pt apart. Point the same constant at SPY — whose near-the-money strikes
+    are **$1** apart — and it authorises snapping **twenty-five strikes**. The
+    entry would still be placed, still be logged, and still look ordinary; it
+    would simply be a different position from the one the strategy chose.
+
+    So the tolerance is measured instead: take the median gap between strikes
+    bracketing the spot and allow a small multiple of it. SPX (5pt) yields 12.5,
+    SPY ($1) yields 2.5, and an instrument nobody has tried yet yields whatever
+    its own chain says. ``fallback`` covers a chain too sparse to measure.
+    """
+    near = sorted(s for s in (float(k) for k in strikes if k)
+                  if abs(s - spot) <= max(abs(spot) * 0.02, 1e-9))
+    gaps = sorted(round(b - a, 6) for a, b in zip(near, near[1:]) if b > a)
+    if not gaps:
+        return fallback
+    median = gaps[len(gaps) // 2]
+    return median * multiple if median > 0 else fallback
+
+
 def snap_to_chain(target: float, strikes: Iterable[float],
                   max_distance: Optional[float] = None) -> Optional[float]:
     """Nearest listed strike to ``target``, or None if none is close enough.

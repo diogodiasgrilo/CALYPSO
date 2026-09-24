@@ -169,6 +169,22 @@ spread width, stop level). **All must be objectively true before the dry-run loc
       same-ET-day smoke PASS. **Never an auto-flip.**
 - [ ] **HG-10 — Docs current:** version history, CLAUDE.md operator section, `RUNBOOKS.md` flip +
       flatten entries.
+- [ ] **HG-11 — SPY ASSIGNMENT IS HANDLED.** Added 2026-09-24 with the SPX→SPY switch, and it is
+      the one genuinely new risk that switch introduces. **SPY options are AMERICAN and PHYSICALLY
+      settled**: a leg that finishes ITM is auto-exercised into **100 shares per contract**, so at
+      ~$765/share a single ITM contract becomes a **~$76,500** equity position, and at the ~10
+      contracts the source's sizing rule now buys, **~$765,000** — appearing overnight, in an
+      account that never chose to hold stock.
+      **This does not affect the dry run**: `intrinsic − debit` remains the correct economic value
+      of an ITM option at expiry, so every number H records today is right. It affects the day H
+      places a real order, which is why it is a gate and not a bug.
+      Closing it needs a decision, not just code — **close any ITM leg before the cash close**
+      (the source never states this rule because his platform or his own hand does it, and it is a
+      practical necessity of the instrument he actually uses), or explicitly accept assignment and
+      size for it. The existing `_check_eod_flatten()` returns None **by design** for cash-settled
+      SPX and is the natural hook. Until this is closed, **H must not be flipped**, and the
+      SPX-era reasoning that "there is nothing to stop out of" no longer fully holds — there is
+      nothing to *stop out of*, but there is now something to *be assigned*.
 
 ---
 

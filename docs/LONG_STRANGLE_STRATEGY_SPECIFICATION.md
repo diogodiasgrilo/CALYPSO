@@ -22,7 +22,7 @@ directory, service inactive. Gate: [`H_GOLIVE_SCOPE_AND_AUDIT.md`](migration/H_G
 | **Legs** | Buy 1 OTM call **+** buy 1 OTM put, same underlying, same expiry. Two legs, no wings. |
 | **Direction** | **LONG premium. NET DEBIT.** Long gamma, **short theta**, long vega. |
 | **DTE** | 0DTE (article also describes a 1DTE variant entered near the prior close — out of scope here). |
-| **Underlying** | SPX assumed, to match the rest of the fleet. The source does not restrict it. |
+| **Underlying** | **SPY** — what the source actually trades. (SPX until 2026-09-24, chosen "to match the fleet"; that was ours, not his, and it broke his own sizing rule — see §1-bis.) |
 | **Entry time** | Near the open. |
 | **Strike selection** | Spot ± the options-market **expected move**; then check both sides' premiums are "reasonably similar" to account for skew. |
 | **Sizing** | *"Sizing for zero"* — pick an acceptable loss, size assuming **the entire debit goes to zero**. |
@@ -53,20 +53,34 @@ This table is the honest answer, kept here so it is not re-derived from memory e
 | No stop — max loss is the debit | Stops explicitly **disarmed**, not merely inherited | ✅ |
 | "Sizing for zero" | Same rule; the loss limit is the buying-power floor | ✅ |
 | +50% profit target | Same | ✅ |
-| **IV percentile below ~35%** | **VIX percentile** — a 30-day *index* vol | ❌ **a proxy for a different quantity** |
-| Traded on **SPY** | **SPX**, for fleet consistency | ❌ deliberate, and **material** |
+| **IV percentile below ~35%** | **VIX percentile** over the available window | ⚠️ **closer than first stated — see below** |
+| Traded on **SPY** | **SPY** since 2026-09-24 | ✅ **fixed** |
 | +100% "when IV is expanding from a low base" | Read as: percentile ≤ max **AND** VIX > prior close | ⚠️ our operationalization of a vague phrase |
 | Sell against a loser → butterfly; the 1DTE variant | Out of scope (discretionary / different structure) | ⚠️ deliberate |
 
-**The IV filter is the one that matters.** The RTH probe (Q2) established that IBKR returns
-**no per-option IV fields at all**, so an option-IV percentile is not computable in this repo.
-VIX is substituted, and every skip reason it writes ends `NOT an option-IV percentile` so no
-later analysis can mistake the two. It is honest, and it is still not the source's rule.
+**The underlying is fixed (2026-09-24).** H runs on SPY. Verified before switching: SPY quotes
+real-time (`6509='Rp'`) where SPX was frozen, the 0DTE chain resolves with 329 strikes at **$1**
+spacing near the money, and variant E already trades SPY. This was never a technical constraint —
+it was a preference, and it was not free. The identical strangle costs **~$115 on SPY and ~$775 on
+SPX**, which is exactly how `sizing_for_zero_max_loss: 500` came to permit **zero contracts**. On
+SPY the source's own sizing rule behaves as he describes it: a $1,200 limit buys ~10 contracts.
+His **cost cap needed no edit at all** — `max_debit_pct_of_spot` is expressed relative to spot, so
+his ~$1.15/share SPY cap and the ~$1,145/contract SPX figure are the same number.
 
-**The SPY→SPX change is not cosmetic.** The same strangle costs ~$115 on SPY and ~$775 on SPX,
-which is exactly how the `sizing_for_zero_max_loss: 500` default came to silently permit **zero
-contracts** — H would have skipped every session and collected nothing. That was caught by the
-probe, not by three offline steps and a go-live audit.
+⚠️ **What SPY brings with it: assignment.** SPY options are AMERICAN and PHYSICALLY settled, so an
+ITM leg held to expiry becomes 100 shares per contract. This does **not** change dry-run P&L —
+`intrinsic − debit` remains the correct economic value — but a real-money H would end a session
+holding stock. Recorded as go-live gate **HG-11**; H is dry-run-LOCKED and NO-GO, so it costs
+nothing today and must be closed before it ever costs anything.
+
+**On the IV filter — the first statement of this was too harsh.** The probe (Q2) established that
+IBKR exposes **no per-option IV fields at all**, so a per-contract IV percentile is genuinely not
+computable here. But the source's "IV percentile" is almost certainly the standard platform metric:
+the *underlying's* ~30-day implied volatility ranked over a year. For SPY that is, to a close
+approximation, **VIX** — both measure 30-day S&P implied vol. So the substitution is much nearer to
+his rule than "a proxy for a different quantity" implied. The remaining honest gap is the WINDOW:
+the live-seat DB holds ~94 days against the 252 the config requests, which is why every reading now
+carries its sample size and says `94d of 252d requested`.
 
 **Sample-size floor (2026-09-23).** `iv_percentile()` had no minimum: one prior day returns
 0.0 or 100.0, a number shaped exactly like a percentile with nothing in it. The gate now skips
