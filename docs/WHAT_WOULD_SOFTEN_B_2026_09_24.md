@@ -56,7 +56,56 @@ close strikes, converted into realised losses by its own stop.**
 
 ---
 
-## 3. And the stop looks net-negative
+## 3. The stop — CORRECTED with per-tick data
+
+> ⚠️ **My first pass overstated this by ~4×, and the correction changes the recommendation.**
+> It priced each stopped side against that day's `spx_close`, capped at the spread width, and
+> reported **−$12,381**. That approximation is too crude. Re-run against `spread_snapshots` — the
+> bot's OWN recorded cost-to-close every ~10s, i.e. what the position was actually worth — the
+> real figure is far smaller. The section below is the corrected version; the earlier number
+> should not be used.
+
+### 3a. Stopping vs holding, measured from the bot's own marks
+
+| | B | C |
+|---|---|---|
+| stop-loss sides with snapshot data | 21 | 9 |
+| holding would have been better | **17** | **8** |
+| stopping was better | 4 | 1 |
+| **net of holding instead of stopping** | **+$3,360** | **+$1,195** |
+| median per side | +$175 | +$160 |
+
+Both variants agree in direction: the stop is **mildly net-negative**. But the magnitude is
+~$160–175 per side, not thousands — and the shape matters more than the sign:
+
+```
+2026-08-28 E#4 put   stopped $-1,785   held $-1,225   diff +$560
+2026-07-02 E#2 put   stopped $-2,250   held $-1,900   diff +$350
+2026-07-16 E#5 put   stopped $-2,000   held $-1,675   diff +$325
+```
+
+**Holding does not turn these into winners.** It loses somewhat less. The damage is already done
+by the time the stop fires — the position reached the short strike, and every path from there is a
+large loss. The stop is not the leak; it is a modest tax on top of one.
+
+### 3b. But %-of-width IS better than credit+buffer — that part holds
+
+Running the existing `stop_shadow` aggregator over C (which still runs credit+buffer) against the
+full per-tick record:
+
+| pct | fired | net $ vs credit+buffer | tail-capped | premature |
+|---|---|---|---|---|
+| 25% | 8 | **+$1,890** | +$4,480 (5) | −$1,680 (2) |
+| **40%** | 4 | **+$1,890** | +$1,890 (4) | **$0 (0)** |
+| 50% | 1 | +$700 | +$700 (1) | $0 (0) |
+| 65% | 1 | +$315 | +$315 (1) | $0 (0) |
+
+%-of-width beats credit+buffer at **every** threshold, and **40% reaches the same net as 25% with
+zero premature stops** — the efficient point. **B's existing A2 40% stop is the right choice**, and
+this is the evidence the shadow trial was set up to produce.
+
+(On B the same tool reports ≈$0 at 40%, which is expected and not a result: B has *run* the 40%
+stop since 2026-07-24, so there it is comparing the stop against itself.)
 
 For every `stop_loss` side with a matching entry row, comparing what the stop cost against what
 that side would have cost at settlement (capped at the spread width):
@@ -67,19 +116,22 @@ that side would have cost at settlement (capped at the spread width):
 | stop **cost** money | 15 | $26,550 given up |
 | **net effect of stopping vs holding** | | **−$12,381** |
 
-**15 of 21 stops fired on sides that finished cheaper than the stop.** A 29% hit rate on a
-mechanism that produces the entire loss side.
+### 3c. What this means for the recommendation
 
-⚠️ **Caveats, because this is the load-bearing number.** n=21 (only stops with matching entry
-rows). "Hold to expiry" is a *counterfactual*, not a free alternative: the external literature is
-emphatic that 0DTE gamma explodes in the final 60–90 minutes and that holding narrow spreads near
-the strikes into the close carries real risk — so the honest reading is **"this stop is
-mis-calibrated," not "remove the stop."**
+The stop question is now **answered and largely closed**:
 
-This is already a known open question in the repo: *"OPEN: does credit+buffer stop fit narrow 5pt
-spreads?"* (`brandon_first_live_days_postmortem`), and the A2 %-of-width stop runs in **shadow on
-C** awaiting exactly this decision (`brandon_strike_and_stop_followups`). **The data now says the
-shadow has something to say.**
+* the *type* is right (%-of-width, not credit+buffer) — worth +$1,890 on C;
+* the *threshold* is right (40% — same benefit as 25% with zero premature stops);
+* removing it entirely would have added ~$3,360 over two months on B, at the cost of unbounded
+  intraday risk the external literature warns about specifically for 0DTE gamma in the final
+  60–90 minutes. **That is not a trade worth making for ~$175 a side.**
+
+So **re-calibrating the stop is NOT the big lever I first claimed.** The ~$160–175 per side it
+could recover is real but small against −$7,074 days. The damage is done *before* the stop fires:
+price reaches the short strike, and from there every path is a large loss.
+
+**Which relocates the lever to strike selection and entry selectivity** — not being at those
+strikes on those days. That was item 2, and it should now be item 1.
 
 ---
 
