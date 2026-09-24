@@ -114,6 +114,48 @@ dominant term.
 
 ---
 
+## 4-bis. Named candidates, and why each is eliminated
+
+*"Which strategies exactly?"* — items 1 and 2 are changes to **variant B itself**, not new
+strategies. Item 3 asked for one, so here are the concrete candidates scored against B's measured
+damage profile.
+
+**First, what the profile actually is.** Across B's 15 worst days:
+
+| discriminator | worst days | all other days | usable? |
+|---|---|---|---|
+| VIX change | **−0.11** (rose on only **7 of 15**) | −0.22 | ❌ no vol spike to monetise |
+| direction | **UP 7 / DOWN 6 / chop 2** | mixed | ❌ no side to pick |
+| max intraday excursion | **0.66%** median | 0.55% | ❌ barely distinguishable |
+
+**That table is the whole answer.** A hedge can only be cheap if it fires selectively, and
+selectivity requires the bad days to be *distinguishable* by some market variable. B's are not —
+not by range, not by vol, not by direction, not even by excursion (0.66% vs 0.55%). A hedge that
+cannot tell the days apart pays on all of them, which is precisely the "loses money all the time"
+outcome to be avoided.
+
+| candidate | verdict | why |
+|---|---|---|
+| **Long strangle (H)** | ❌ measured | correlation inverts to **+0.54** once H's filters apply |
+| **Long OTM puts / put backspread** | ❌ | only **6 of 15** worst days were DOWN days |
+| **VIX calls / long VIX futures** | ❌ | **VIX FELL on 8 of 15** worst days; mean change −0.11 |
+| **Tail hedge (far OTM)** | ❌ | there is no tail — 0.66% vs 0.55% excursion |
+| **Trend / momentum overlay** | ⚠️ weak | 13/15 had a direction, but so do most ordinary days |
+| **Second uncorrelated income strategy** | ⚠️ | diversification, not a hedge — helps the average, not the worst days |
+| **Intraday delta hedge of B's own book** | ✅ **the only survivor** | fires on the exact event that does the damage (price nearing a short strike), works **both** directions, and costs **no premium** — only whipsaw and commissions |
+
+### And item 3 has already been tried on B
+
+`config_variant_b.json` → `defensive_overlay`: `debit_spread_enabled: false`,
+`butterfly_enabled: false`. Both overlay hedges are **OFF**, disabled 2026-08-25 and 2026-09-04,
+with the recorded reason being decisive: **the hedge debits ($1,925–$2,240) EXCEEDED the IC-side
+loss they were defending (~$1,400, already bounded by the A2 stop).**
+
+That is this exact experiment, already run on this exact book, and it failed on cost — which is
+the same conclusion the discriminator table reaches from the other direction.
+
+---
+
 ## 5. What I would NOT do
 
 * **Do not size H as the hedge.** Measured separately: correlation inverts to **+0.54** once H's
