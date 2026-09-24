@@ -76,6 +76,16 @@ data/
 
 # Database files
 *.db
+# SQLite WAL sidecars. `*.db` does NOT match these — different extension — and
+# on 2026-09-24 a dashboard restart left dashboard_auth.db-wal / -shm untracked
+# in /opt/calypso. HOMER runs `git add -A && commit && push` on the VM nightly,
+# so the auth database's write-ahead log (recent session rows) was one agent run
+# away from being committed to the repo. Never committed in fact — checked
+# across all history — but only because nothing had created them at the wrong
+# moment before.
+*.db-wal
+*.db-shm
+*.db-journal
 *.sqlite
 *.sqlite3
 
