@@ -226,3 +226,93 @@ python -m scripts.analyze_h_hedges_b       # the H-as-hedge model
 The B decomposition above came from ad-hoc queries over `daily_summaries`, `trade_entries` and
 `trade_stops` in `data/variant_b/backtesting.db`; the stop counterfactual joins `trade_stops` to
 `trade_entries` and prices each side against that day's `spx_close`, capped at the spread width.
+
+
+---
+
+# Item 3 investigated — and it closes too. **B is well-calibrated.**
+
+The stop question resolved to "already correct", which relocated the lever to **strike selection
+and entry selectivity**. That has now been measured, and the answer is that there is nothing to
+take.
+
+## What actually predicts a stop
+
+Per SIDE (the unit the stop acts on), across 485 sides of which 21 stopped:
+
+| entry-time feature | stopped | survived | effect |
+|---|---|---|---|
+| **\|delta\|** | **0.11** | **0.08** | **d = +0.68** |
+| **OTM distance** | **0.54%** | **0.73%** | **d = −0.52** |
+| credit collected | $304 | $218 | d = +0.48 |
+| VIX at entry | 16.20 | 16.79 | d = −0.41 |
+| **entry hour** | 11.01 | 11.10 | **d = −0.10** |
+
+**Timing is noise.** The per-slot table looks compelling (12:15 stops 7.7%, 09:45 stops 44%) but
+entry hour barely separates stopped from surviving sides at all, and the slot CIs almost all cross
+zero at n=9–17. Picking the best four of seven slots post-hoc would have been an overfit.
+
+**Strike placement is the real signal**, and it is monotonic:
+
+| OTM quartile | n | stop rate |
+|---|---|---|
+| Q1 0.20–0.48% | 121 | **8%** |
+| Q2 0.48–0.62% | 121 | 5% |
+| Q3 0.62–0.85% | 121 | **2%** |
+| Q4 0.85–2.57% | 122 | **2%** |
+
+The closest quartile is stopped **4× more often** than the two furthest.
+
+## And acting on it loses money — every way it can be acted on
+
+Baseline: **485 sides, +$66,607, 21 stops.**
+
+**Refusing close sides (an OTM floor):**
+
+| floor | refused | credit forfeited | stops avoided | **net** |
+|---|---|---|---|---|
+| 0.35% | 32 | $8,890 | 3 | **−$5,425** |
+| 0.50% | 134 | $30,910 | 10 | **−$16,550** |
+| 0.60% | 226 | $51,227 | 16 | **−$27,392** |
+
+**Refusing high-delta sides (a delta ceiling):** −$3,180 at 0.20δ through −$40,110 at 0.09δ. Every
+threshold negative.
+
+**Relocating rather than refusing** — keep trading, just further out — is a wash: **+$1,772** at
+best (0.55% floor) and negative at every other threshold. That is noise against a $66,607 base,
+and it leans on the assumption that the safer band's credit and stop rate transfer when you move
+there *deliberately*, which is exactly the kind of assumption that does not hold.
+
+## Why — and this is the real answer
+
+**The close strikes that stop more often also collect materially more credit: $304 vs $218.** The
+extra premium more than pays for the 8%-vs-2% stop rate. Q1 is *net positive*, it is simply
+noisier.
+
+**B's 21 stops are not a defect. They are the price of $66,607 of collected credit.** Every
+mechanism for removing them removes more edge than it saves — which is the definition of a
+well-calibrated premium-selling book.
+
+## So all three levers are closed
+
+| lever | verdict |
+|---|---|
+| **A hedge** | No viable candidate. B's bad days are indistinguishable from good ones by vol, direction, range or excursion — so nothing can fire selectively, and the one overlay already tried cost more than the loss it defended. |
+| **The stop** | Already correct. %-of-width beats credit+buffer (+$1,890 on C), and 40% is the efficient threshold — same benefit as 25% with zero premature stops. |
+| **Strike selectivity** | Measured and negative. Every floor, ceiling and relocation loses money or is noise. |
+
+## What that means for the original question
+
+There is no adjustment to B that softens its curve without costing more than it saves. Its
+drawdowns are **the variance of a positive-expectancy business**, not an engineering defect.
+
+The remaining paths to a better curve are therefore not risk management at all:
+
+* **more edge per trade** — the entry-fill work (`entry_fill_leak_rung_pricing`) measured ~38% of
+  B's net going to crossing the spread; that is a real, already-identified leak;
+* **more independent bets** — not a hedge, but genuinely uncorrelated *income*, which smooths by
+  diversification rather than by insurance;
+* **capital efficiency** — the same edge on less deployed capital.
+
+**Confirming there is nothing to fix here is itself the result.** It redirects attention from a
+risk-management problem that does not exist to an execution problem that is already documented.
