@@ -36,6 +36,29 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-24 RATE BUDGET — STOP SPENDING BROKER REQUESTS ON A DISCARDED SNAPSHOT.
+  Traced from "why did B's stop take 28s to detect and 100s to fill?". The broker's
+  shared IBKR gate (CALYPSO_IBKR_MAX_RPS=5) was measured at **85% saturation** —
+  2,858 requests in 600s — and only 52% of that traffic was market data. 13% was
+  `iserver/exchangerate USD->EUR` (376 calls / 10 min), issued by
+  `HydraStrategy.log_position_snapshot` for the Google Sheets Positions tab.
+  * Sheets has been OFF on every variant since the 2026-07-17 DB migration, and
+    `TradeLoggerService.log_position_snapshot` returns on its FIRST line when it is —
+    so the FX rate, and the entire snapshot built around it, were thrown away.
+  * The conversion was a no-op even in principle: this account's base currency is
+    USD (`ib_client.get_balance` docstring, verified against the live ledger
+    2026-09-10). `currency.enabled` is a SEPARATE config block from
+    `google_sheets.enabled`, which is why it survived the migration.
+  * Fix: `TradeLoggerService.position_snapshot_enabled` (fails OPEN — an unreadable
+    flag keeps today's behaviour rather than silently killing a live sink) and an
+    early return in the HYDRA builder before any broker call.
+  Zero behaviour change while Sheets is off; re-enabling Sheets restores it exactly.
+  Strategies-only restart — the broker does not import `logger_service`.
+  Tests: `tests/test_position_snapshot_skips_dead_fx_2026_09_24.py`, incl. a control
+  that goes red if the guard is written too broadly. Full suite 5,024 passed.
+  Measurements + the full backlog (and TWO REFUTED items — a pre-entry stress gate
+  and a per-side vigilant fetch — recorded so nobody rebuilds them):
+  `docs/EXECUTION_LATENCY_AUDIT_2026_09_24.md`.
 - 2026-09-24 D — BURNICH'S END-OF-DAY HALF-CLOSE, plus the closing fidelity sweep. Operator:
   "I want to do it exactly like he does it... Don't leave anything open and check any other
   strategies for open items too."

@@ -13,6 +13,32 @@
 
 ---
 
+# §A-quad. EXECUTION LATENCY + THE CONSOLIDATED BACKLOG — 2026-09-24
+
+**Read `docs/EXECUTION_LATENCY_AUDIT_2026_09_24.md` before touching the stop path.**
+It carries the measurements (broker rate gate **85% saturated**; ~45% of the budget spent on
+telemetry, not trading), the sequenced backlog, the four still-open live-seat accounting fixes
+from the same day's B diagnosis, and — most importantly — **two REFUTED proposals** recorded so
+they are not rebuilt:
+
+* ❌ **Pre-entry gate on book stress** — entries into a stressed book measured **+$294 mean /
+  100% win (n=5)** vs +$81 / 80% for calm. The gate would have skipped winners.
+* ❌ **Per-side vigilant quote fetch** — the premise was false; `_check_stop_losses` already
+  batches every leg into ONE snapshot call.
+
+**Shipped 2026-09-24:** B1, the discarded-position-snapshot skip (kills 13% of the fleet's IBKR
+request budget, zero behaviour change while Sheets is off). Strategies-only restart.
+
+**Next:** B2 (TTL cache on position reads) → observe one session → the A1–A4 accounting fixes →
+B3/B4/B5 (exit timeout, placement budget, long-leg MARKET escalation).
+
+⚠️ **The prize is still C1 — the entry fill leak, ~38% of B's net.** Everything above is
+execution-quality hardening worth ~$1,078 / 2 months, and the latency half is tail-risk
+insurance, not EV (mean stop overshoot is *negative*). Do not let the backlog displace the three
+tracks (`docs/EXECUTION_LATENCY_AUDIT_2026_09_24.md` §6).
+
+---
+
 # §A0. WHERE WE ARE — 2026-09-19 (Sat), 03:40 ET
 
 **The restart is DONE and verified.** Broker + all 7 strategies came up on the current build

@@ -4289,6 +4289,33 @@ class TradeLoggerService:
         logger.info(f"  Roll Count: {status.get('roll_count', 0)}")
         logger.info("=" * 60)
 
+    @property
+    def position_snapshot_enabled(self) -> bool:
+        """Whether a position snapshot has any sink at all.
+
+        Google Sheets is the ONLY sink for position snapshots —
+        :meth:`log_position_snapshot` below is gated entirely on
+        ``google_logger.enabled`` — and Sheets writes were retired repo-wide
+        in the 2026-07-17 DB migration, so every variant ships
+        ``google_sheets.enabled: false``.
+
+        Callers use this to skip BUILDING a snapshot that nothing consumes.
+        That matters because HYDRA's builder
+        (``HydraStrategy.log_position_snapshot``) makes a live IBKR FX
+        round-trip per call, and the broker's shared rate gate
+        (``CALYPSO_IBKR_MAX_RPS``) is the binding constraint on stop-detection
+        latency — measured 2026-09-24 at 85% saturation, with those FX calls
+        alone consuming 13% of the whole fleet's request budget to produce a
+        value the sink discarded on its first line.
+
+        Fails OPEN: an unreadable flag returns True so we keep doing exactly
+        what we do today. Silently disabling a live sink is the worse error.
+        """
+        try:
+            return bool(self.google_logger.enabled)
+        except Exception:  # noqa: BLE001 — a telemetry predicate is never fatal
+            return True
+
     def log_position_snapshot(self, positions: List[Dict[str, Any]], force: bool = False):
         """
         Log current position snapshot to Google Sheets.

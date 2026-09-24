@@ -12201,6 +12201,20 @@ class HydraStrategy(MEICStrategy):
         - Stop level, distance to stop, whether triggered
         - Trend signal and status (ACTIVE/STOPPED/EXPIRED/SKIPPED)
         """
+        # Skip the entire build when nothing will consume it (2026-09-24).
+        # Google Sheets is the only sink and it is disabled on every variant
+        # since the 2026-07-17 DB migration, so every line below — including a
+        # live IBKR FX round-trip for a EUR conversion this USD-base account
+        # does not even need (see ib_client.get_balance's 2026-09-10 note) —
+        # built a value TradeLoggerService discarded immediately. Those FX calls
+        # measured 13% of the broker's shared 5 req/s rate gate, which runs
+        # 85% saturated and is precisely what stop detection queues behind.
+        # Fails OPEN (see TradeLoggerService.position_snapshot_enabled): an
+        # unreadable flag keeps the old behaviour rather than silently
+        # switching off a live sink.
+        if not self.trade_logger.position_snapshot_enabled:
+            return
+
         try:
             today = get_us_market_time().strftime("%Y-%m-%d")
             positions = []
