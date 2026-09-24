@@ -151,9 +151,39 @@ recorded in its config, which the 2026-09-23 audit already pinned.
 
 ---
 
-## Open items
+## Open items — ALL CLOSED (2026-09-24)
 
-**STATUS 2026-09-24: items 1–5 done.** E now gates on a VIX percentile with a sample floor and its docstring no longer quotes the coaching claim as a property; D stays ungated because Burnich specifies no IV condition, and that asymmetry is now deliberate and documented; F's band is `[0.10, 0.25]`; H's window is backfilled to a real 252 days. Remaining: E's P&L epoch reset + the dashboard surfacing it, and D's partial scale-out.
+| # | Item | Outcome |
+|---|---|---|
+| 1 | E's provenance in code + docs; the ">80% win rate" claim | **Done.** Claim removed; what is his and what is ours stated in the docstring AND the config. |
+| 2 | E's low-IV gate → percentile with a sample floor | **Done.** Shares H's machinery; fails closed. |
+| 3 | D-vs-E gate asymmetry | **Resolved as deliberate.** Burnich specifies no IV condition, so gating D would make it unfaithful. Documented, not accidental. |
+| 4 | F's `delta_band` → `[0.10, 0.25]` | **Done.** |
+| 5 | H's IV window → a real 252 days | **Done.** `scripts/backfill_vix_history.py`; live window now 13.47–31.05. |
+| 6 | D's partial scale-out | **Done.** `_dc_eod_partial_scale_out` — close half of an untransformed, profitable calendar at the close, carry the rest. D sized 1c→2c so the rule can exist. |
+
+### Found by the closing sweep
+
+**The calm-entry filter (MKT-043) was a live-looking dead key on D and E.** Both configs carried
+`calm_entry_threshold_pts: 15.0`, but MKT-043 is applied inside `HydraStrategy._initiate_entry`
+and **both variants override that method in full**, so it never ran. Same shape as the whipsaw and
+FOMC keys the 2026-09-23 audit found, and the same reasoning: a premium-selling concept on a
+positive-vega calendar, mentioned by neither source — Burnich says only *"I put this on in the
+morning"*, and the OptionsKit video gives no timing condition at all. Now nulled with an
+`_comment_calm_entry_INERT` marker, so nobody re-adds it believing the absence was an oversight.
+
+**A stale comment** at E's gate call site still described the retired absolute-VIX proxy as "a
+go-live refinement". Corrected.
+
+### Standing verdicts
+
+| Variant | Verdict |
+|---|---|
+| **D** | ✅ Faithful on every rule the video states, including the EOD half-close. |
+| **E** | ✅ Faithful on every rule the video states; the strike distance and exit ladder are OURS and labelled so, because the video withholds them. |
+| **F** | ✅ Faithful. |
+| **G** | ➖ No source. Its inherited block is a stated choice in its config. |
+| **H** | ✅ Faithful on instrument, structure, sizing, target and stops. The IV filter is a VIX proxy because IBKR exposes no per-option IV at all — the one gap that cannot be closed from this repo. |
 
 | # | Item | Needs |
 |---|---|---|

@@ -36,6 +36,47 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-24 D — BURNICH'S END-OF-DAY HALF-CLOSE, plus the closing fidelity sweep. Operator:
+  "I want to do it exactly like he does it... Don't leave anything open and check any other
+  strategies for open items too."
+
+  His words: "if I did 20 contracts and I come to the end of the day and I have not been able to
+  transform that into a risk-free spread, I might close 10 of those and book a small profit on
+  the double calendar and hold the other 10 till the next day and see if then I can transform it
+  the next day." D had the two ENDS — close everything or hold everything — and not the middle
+  one he actually reaches for, which banks something real while keeping the chance of the
+  risk-free transform the strategy exists to produce.
+
+  * `_dc_eod_partial_scale_out`: past the cutoff, still a CALENDAR, and in PROFIT -> close half,
+    carry the rest. Gated on profit because he describes it only in that case and treats a loss
+    as a whole-position decision; the 20% uncle point already covers the bad tail.
+  * BOTH `contracts` AND `net_debit` are reduced. `calendar_value` recomputes from `contracts`
+    while `net_debit` is a stored dollar figure already multiplied by the original count, so
+    halving one without the other would leave the surviving half marking against the FULL debit
+    — a permanently wrong P&L that reads as a losing strategy rather than as a bug.
+  * Once per entry per day, and the marker is PERSISTED through the sidecar: a restart inside
+    the post-cutoff window would otherwise re-arm the rule and halve an already-halved position.
+  * D sized 1c -> 2c. Half of one contract is zero, so at 1c the rule is unreachable and would
+    have produced an empty dataset for the one behaviour it was added to measure — the same trap
+    `sizing_for_zero_max_loss: 500` set for H.
+
+  SWEEP FINDING — MKT-043 WAS A LIVE-LOOKING DEAD KEY ON BOTH CALENDARS. D and E carried
+  `calm_entry_threshold_pts: 15.0`, but the calm-entry delay is applied inside
+  `HydraStrategy._initiate_entry` and both variants override that method in full, so it never
+  ran. Same shape as the whipsaw/FOMC keys of 2026-09-23, and neither source mentions it.
+  Nulled with `_comment_calm_entry_INERT`. A stale comment still calling E's retired absolute-VIX
+  gate "a go-live refinement" was corrected.
+
+  ⚠️ MY OWN TEST FILE POLLUTED THE SUITE. `_entry()` did `type(e).calendar_value = property(...)`,
+  mutating the REAL CalendarEntry class for the rest of the session: the new tests passed in
+  isolation and broke four unrelated calendar tests in the full run, purely by import order. Now
+  a local subclass. A fixture that mutates a shared class damages its neighbours, and the failure
+  surfaces far from the cause.
+
+  Tests: `tests/test_d_eod_scale_out_2026_09_24.py` (17) + 5 added to the inherited-gate audit.
+  Three negative controls verified: unscaled debit, missing once-per-day guard, halving losers.
+
+
 - 2026-09-24 VARIANT E — THE LIFETIME RECORD RESTARTS AT THE FIDELITY CUTOVER. Operator:
   "restart the P&L count from when it becomes true to the video, and the online dashboard
   needs to be updated too."

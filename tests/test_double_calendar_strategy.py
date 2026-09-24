@@ -541,6 +541,11 @@ class TestManageCalendar:
         inst.dc_stop_confirm_seconds = 20.0
         inst._dc_stop_breach = {}
         inst.dc_eod_close_if_no_transform = True
+        # Burnich's EOD half-close knobs (set by the real __init__). OFF here
+        # so these manager tests stay about transform/stop behaviour; the
+        # half-close is covered in test_d_eod_scale_out_2026_09_24.py.
+        inst.dc_eod_scale_out_enabled = False
+        inst.dc_eod_scale_out_fraction = 0.5
         inst._dc_refresh_marks = lambda e: True  # marks fresh this tick
         inst._dc_attempt_transform = lambda e: transform_ok
         inst._dc_past_eod_cutoff = lambda: past_eod

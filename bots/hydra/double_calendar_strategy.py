@@ -184,6 +184,9 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         self.dc_pre_transform_stop_pct = float(dc.get("pre_transform_stop_pct", 0.20))
         self.dc_wing_width = float(dc.get("wing_width", 5))
         self.dc_eod_close_if_no_transform = bool(dc.get("eod_close_if_no_transform", True))
+        # Burnich's EOD half-close (see _dc_eod_partial_scale_out).
+        self.dc_eod_scale_out_enabled = bool(dc.get("eod_scale_out_enabled", True))
+        self.dc_eod_scale_out_fraction = float(dc.get("eod_scale_out_fraction", 0.5))
         # Prefer the following-week Friday weekly for the short expiry (Burnich's
         # setup); else the earliest in-window candidate. Phase 2.
         self.dc_prefer_friday = bool(dc.get("prefer_friday", True))
@@ -693,7 +696,97 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         if self.dc_eod_close_if_no_transform and self._dc_past_eod_cutoff():
             self._dc_close_calendar(entry, reason="EOD no-transform", loss=False)
             return f"EOD-CLOSE E#{entry.entry_number}"
+
+        # 3b. Burnich's EOD HALF-CLOSE on an untransformed, profitable calendar.
+        scaled = self._dc_eod_partial_scale_out(entry)
+        if scaled:
+            return scaled
         return None
+
+    def _dc_eod_partial_scale_out(self, entry) -> Optional[str]:
+        """Close HALF an untransformed, profitable calendar at the close; carry
+        the rest overnight to try transforming tomorrow.
+
+        THE SOURCE'S OWN WORDS: *"if I did 20 contracts and I come to the end of
+        the day and I have not been able to transform that into a risk-free
+        spread, I might close 10 of those and book a small profit on the double
+        calendar and hold the other 10 till the next day and see if then I can
+        transform it the next day."*
+
+        It is the middle option between the two D already had — close everything
+        or hold everything — and it is the one he actually reaches for, because
+        it banks something real while keeping the chance of the risk-free
+        transform that the whole strategy exists to produce.
+
+        **Gated on PROFIT.** He describes the half-close only in the profitable
+        case; the losing case he treats as a whole-position decision (*"close
+        that out for a small loss… or hold risk overnight"*), and his 20% uncle
+        point already covers the bad tail. Halving a loser would be inventing a
+        rule he does not state.
+
+        BOTH ``contracts`` AND ``net_debit`` are reduced. ``calendar_value``
+        recomputes from ``contracts``, so scaling one without the other would
+        leave the remaining position marking against the FULL original debit —
+        a permanently wrong P&L on the half still at risk.
+
+        Once per day per entry: the manager runs every tick after the cutoff,
+        and without the guard a 5-minute window would halve the position
+        repeatedly down to nothing.
+        """
+        if not self.dc_eod_scale_out_enabled:
+            return None
+        if entry.dc_phase != DCPhase.CALENDAR:
+            return None                      # transformed positions need no rescue
+        if not self._dc_past_eod_cutoff():
+            return None
+
+        today = get_us_market_time().strftime("%Y-%m-%d")
+        if getattr(entry, "dc_scaled_out_on", "") == today:
+            return None
+
+        n = int(entry.contracts or self.contracts_per_entry or 0)
+        k = int(n * self.dc_eod_scale_out_fraction)
+        if n < 2 or k < 1 or k >= n:
+            # One contract cannot be halved. Recorded rather than silent: a rule
+            # that can never fire at the configured size is worth seeing in the
+            # log, not discovering later in an empty dataset.
+            logger.debug(
+                "[DCTM] E#%s EOD scale-out not applicable at %d contract(s)",
+                entry.entry_number, n)
+            return None
+
+        pnl = entry.unrealized_pnl
+        if pnl <= 0:
+            return None                      # he books a PROFIT here, not a loss
+
+        share = pnl * k / n
+        close_comm = 4 * self.commission_per_leg * k
+        self._book_realized_pnl(share, entry=entry)
+        self.daily_state.total_commission += close_comm
+        entry.close_commission = getattr(entry, "close_commission", 0.0) + close_comm
+
+        entry.net_debit = entry.net_debit * (n - k) / n
+        entry.contracts = n - k
+        entry.dc_scaled_out_on = today
+
+        logger.warning(
+            "[CAL-EOD-SCALE] E#%s closed %d of %d contracts for $%.2f (half-close, "
+            "untransformed and in profit) — holding %d overnight to try the "
+            "transform tomorrow.",
+            entry.entry_number, k, n, share, entry.contracts,
+        )
+        if getattr(self, "_dc_recorder", None):
+            entry_date = entry.entry_time.strftime("%Y-%m-%d") if entry.entry_time else ""
+            self._dc_recorder.record_outcome(
+                entry, "eod_scale_out", share,
+                getattr(self, "current_price", None), entry_date, today,
+            )
+        # Persist immediately: the reduced contracts/net_debit must survive a
+        # crash before the next heartbeat, or the carried half would be
+        # re-adopted at its ORIGINAL size and debit from a stale sidecar —
+        # the same crash-window guard _dc_close_calendar takes.
+        self._save_state_to_disk()
+        return f"EOD-SCALE E#{entry.entry_number} {k}/{n}"
 
     def _dc_attempt_transform(self, entry) -> bool:
         """The transformer (dry-run): close the two back-dated long legs and buy

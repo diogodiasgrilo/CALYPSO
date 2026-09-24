@@ -271,3 +271,55 @@ class TestFUsesTheStraddleNotAFudgeFactor:
         analysis cannot separate the two regimes."""
         src = (ROOT / "bots" / "hydra" / "ghauri_strategy.py").read_text()
         assert "_ghauri_em_source_today" in src
+
+
+# ======================================================================
+# 2026-09-24 sweep: the calm-entry filter is inert on the calendars too
+# ======================================================================
+
+class TestTheCalmEntryFilterIsInertOnTheCalendars:
+    """Found by the "check every strategy for open items" sweep.
+
+    MKT-043 delays an entry while the underlying is moving fast. It is applied
+    inside ``HydraStrategy._initiate_entry``, and **D and E override that method
+    in full**, so it never runs for them — yet both configs carried a live-looking
+    ``calm_entry_threshold_pts: 15.0``.
+
+    Same shape as the whipsaw and FOMC keys above, and the same reasoning: a
+    premium-SELLING concept on a positive-vega calendar whose thesis is about IV
+    rather than the last three minutes of price. **Neither source mentions it** —
+    Burnich says only *"I put this on in the morning"*, and the OptionsKit video
+    gives no timing condition at all.
+    """
+
+    @pytest.mark.parametrize("vid", ["d", "e"])
+    def test_the_calendars_override_the_method_that_applies_it(self, vid):
+        """The behavioural claim the whole finding rests on."""
+        src = (ROOT / "bots" / "hydra" /
+               ("double_calendar_strategy.py" if vid == "d"
+                else "spy_double_calendar_strategy.py")).read_text()
+        assert "def _initiate_entry" in src, (
+            f"{vid} must override _initiate_entry, or MKT-043 DOES reach it")
+
+    @pytest.mark.parametrize("vid", ["d", "e"])
+    def test_the_keys_are_nulled_not_merely_unused(self, vid):
+        s = _cfg(vid)
+        for k in ("calm_entry_threshold_pts", "calm_entry_lookback_min",
+                  "calm_entry_max_delay_min"):
+            assert s.get(k) is None, f"{vid}.{k} still carries a live-looking value"
+
+    @pytest.mark.parametrize("vid", ["d", "e"])
+    def test_each_carries_its_reason(self, vid):
+        raw = (CONFIG_DIR / f"config_variant_{vid}.json").read_text()
+        assert "_comment_calm_entry_INERT" in raw
+
+
+class TestDRunsBurnichsEndOfDayHalfClose:
+    """The last rule of his D did not have — see
+    tests/test_d_eod_scale_out_2026_09_24.py for the behaviour."""
+
+    def test_it_is_enabled(self):
+        assert _cfg("d")["double_calendar"]["eod_scale_out_enabled"] is True
+
+    def test_D_is_sized_so_it_can_fire(self):
+        assert _cfg("d")["contracts_per_entry"] >= 2

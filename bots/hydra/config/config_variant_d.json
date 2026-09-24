@@ -1,5 +1,5 @@
 {
-  "_comment_variant": "HYDRA Variant D — Strategy D 'DC Time Machine' (Steve Burnich, video JtGW1wNFNIY): a multi-day SPX double calendar that transforms into a risk-free iron condor. DRY-RUN-LOCKED. The strategy class (bots/hydra/double_calendar_strategy.py:DoubleCalendarStrategy) refuses any non-dry_run construction; the full dry-run strategy IS implemented (Phases 1-7) — it opens net-debit calendars (simulated from real mids), transforms/stops/EOD-closes, persists across restarts, and settles at the short expiry — but places NO real orders. brandon.enabled=false so D runs its own (HydraStrategy-derived) path, not the Brandon stack. alerts + google_sheets are OFF so D never pollutes the canonical record or pages the operator. Do NOT flip dry_run=false next to a live C until MUST-FIX #1/#2/#3 ship (scope STATE-004 + orphan sweep to per-variant conids; budget buying power) — see the module docstring.",
+  "_comment_variant": "HYDRA Variant D \u2014 Strategy D 'DC Time Machine' (Steve Burnich, video JtGW1wNFNIY): a multi-day SPX double calendar that transforms into a risk-free iron condor. DRY-RUN-LOCKED. The strategy class (bots/hydra/double_calendar_strategy.py:DoubleCalendarStrategy) refuses any non-dry_run construction; the full dry-run strategy IS implemented (Phases 1-7) \u2014 it opens net-debit calendars (simulated from real mids), transforms/stops/EOD-closes, persists across restarts, and settles at the short expiry \u2014 but places NO real orders. brandon.enabled=false so D runs its own (HydraStrategy-derived) path, not the Brandon stack. alerts + google_sheets are OFF so D never pollutes the canonical record or pages the operator. Do NOT flip dry_run=false next to a live C until MUST-FIX #1/#2/#3 ship (scope STATE-004 + orphan sweep to per-variant conids; budget buying power) \u2014 see the module docstring.",
   "bot_name": "HYDRA",
   "dry_run": true,
   "_comment_credentials": "IBKR OAuth credentials are loaded from systemd $CREDENTIALS_DIRECTORY on the VM, or env vars in dev. Not in this file.",
@@ -15,23 +15,31 @@
       "long_extra_dte_min": 1,
       "long_extra_dte_max": 4,
       "target_delta": 0.35,
-      "delta_band": [0.30, 0.40],
-      "_comment_delta_scan": "Bounded strike-scan (latency fix): center the window on the VIX-expected-move estimate (delta_otm_fraction x EM_1sd ~ 35-delta OTM distance), restrict to strikes listed on BOTH expiries, and SEED a monotonic step-search at the strike nearest that estimate — reading ~1-4 greeks/side (cold ~3s each), capped at delta_max_reads. Replaces the ~40-strike cold scan that took ~95s/side (and the first bounded pass that still read 10/side = ~67s).",
-      "delta_otm_fraction": 0.40,
+      "delta_band": [
+        0.3,
+        0.4
+      ],
+      "_comment_delta_scan": "Bounded strike-scan (latency fix): center the window on the VIX-expected-move estimate (delta_otm_fraction x EM_1sd ~ 35-delta OTM distance), restrict to strikes listed on BOTH expiries, and SEED a monotonic step-search at the strike nearest that estimate \u2014 reading ~1-4 greeks/side (cold ~3s each), capped at delta_max_reads. Replaces the ~40-strike cold scan that took ~95s/side (and the first bounded pass that still read 10/side = ~67s).",
+      "delta_otm_fraction": 0.4,
       "delta_window": 8,
       "delta_max_reads": 6,
       "profit_trigger_pct": 0.075,
-      "pre_transform_stop_pct": 0.20,
+      "pre_transform_stop_pct": 0.2,
       "wing_width": 5,
-      "_comment_eod_close_if_no_transform": "MUST STAY false. Was true through 2026-07-17, which force-closed this 6-15 DTE structure at 15:55 the SAME session — harvesting ~1/8 to 1/15 of the position's life while paying the full round-trip bid/ask on 4 legs. Result: 19 trades, ZERO wins, -$4,877.40 = 80% of D's entire lifetime loss. That is not the source strategy, it is a different trade. Flipped false ~2026-07-20; D's only winner since (dctm_20260818_001, +$511.50) transformed SEVEN DAYS after entry and would have been deleted by a same-day close. This sample previously said true while the VM said false — and skip-worktree does NOT stop a git pull from overwriting the VM copy (verified 2026-08-19), so that divergence was a live hazard that could have silently reverted D to the losing config.",
+      "_comment_eod_close_if_no_transform": "MUST STAY false. Was true through 2026-07-17, which force-closed this 6-15 DTE structure at 15:55 the SAME session \u2014 harvesting ~1/8 to 1/15 of the position's life while paying the full round-trip bid/ask on 4 legs. Result: 19 trades, ZERO wins, -$4,877.40 = 80% of D's entire lifetime loss. That is not the source strategy, it is a different trade. Flipped false ~2026-07-20; D's only winner since (dctm_20260818_001, +$511.50) transformed SEVEN DAYS after entry and would have been deleted by a same-day close. This sample previously said true while the VM said false \u2014 and skip-worktree does NOT stop a git pull from overwriting the VM copy (verified 2026-08-19), so that divergence was a live hazard that could have silently reverted D to the losing config.",
       "eod_close_if_no_transform": false,
-      "_comment_dry_run_fill_model": "0.5 = half-spread. Synced from the VM 2026-09-06. History worth keeping: this was set to 0.5 on 2026-07-09 but written as a bare scalar under the double_calendar sub-block, a form the pre-0043298 reader only accepted as a dict at the strategy level — so it was SILENTLY IGNORED and D ran at full-touch 1.0 until 2026-07-20. All 19 same-day trades ran at 1.0; the June-July sample therefore contains no agg=0.5 data at all. The resolver now always logs the value it resolved (calendar_strategy_base.py:436-441). NOTE: neither 1.0 nor 0.5 has ever been validated against a real fill — D has never placed an order.",
+      "_comment_dry_run_fill_model": "0.5 = half-spread. Synced from the VM 2026-09-06. History worth keeping: this was set to 0.5 on 2026-07-09 but written as a bare scalar under the double_calendar sub-block, a form the pre-0043298 reader only accepted as a dict at the strategy level \u2014 so it was SILENTLY IGNORED and D ran at full-touch 1.0 until 2026-07-20. All 19 same-day trades ran at 1.0; the June-July sample therefore contains no agg=0.5 data at all. The resolver now always logs the value it resolved (calendar_strategy_base.py:436-441). NOTE: neither 1.0 nor 0.5 has ever been validated against a real fill \u2014 D has never placed an order.",
       "dry_run_fill_model": 0.5,
       "eod_cutoff_et": "15:55",
       "prefer_friday": true,
-      "entry_time_et": "10:00"
+      "entry_time_et": "10:00",
+      "_comment_eod_scale_out": "BURNICH'S END-OF-DAY HALF-CLOSE, implemented 2026-09-24 \u2014 the last rule of his that D did not have. His words: 'if I did 20 contracts and I come to the end of the day and I have not been able to transform that into a risk-free spread, I might close 10 of those and book a small profit on the double calendar and hold the other 10 till the next day and see if then I can transform it the next day.' It is the MIDDLE option between the two D already had (close everything / hold everything) and the one he actually reaches for: it banks something real while keeping the chance of the risk-free transform the strategy exists to produce. GATED ON PROFIT \u2014 he describes the half-close only in the profitable case and treats a loss as a whole-position decision, with the 20% uncle point already covering the bad tail; halving a loser would be inventing a rule he never states. Fires at most ONCE per entry per day, and the guard is persisted so a restart inside the post-cutoff window cannot halve an already-halved position.",
+      "eod_scale_out_enabled": true,
+      "eod_scale_out_fraction": 0.5
     },
-    "entry_times": ["10:00"],
+    "entry_times": [
+      "10:00"
+    ],
     "entry_window_minutes": 5,
     "spread_vix_multiplier": 6.0,
     "min_spread_width": 25,
@@ -61,7 +69,7 @@
     "whipsaw_range_skip_mult": null,
     "max_vix_entry": 999,
     "_comment_contracts": "1c while D is a dry-run scaffold (start small; the source trades SPX 1-lot examples). Raise deliberately only after the entry logic is built and paper-verified.",
-    "contracts_per_entry": 1,
+    "contracts_per_entry": 2,
     "max_contracts_per_order": 5,
     "max_contracts_per_underlying": 20,
     "min_buying_power_per_ic": 500,
@@ -89,9 +97,9 @@
     "cushion_recovery_pct": null,
     "buffer_decay_start_mult": 2.5,
     "buffer_decay_hours": 4.0,
-    "calm_entry_lookback_min": 3,
-    "calm_entry_threshold_pts": 15.0,
-    "calm_entry_max_delay_min": 5,
+    "calm_entry_lookback_min": null,
+    "calm_entry_threshold_pts": null,
+    "calm_entry_max_delay_min": null,
     "stop_confirmation_enabled": false,
     "stop_confirmation_seconds": 75,
     "early_close_enabled": false,
@@ -102,14 +110,53 @@
     "min_entries_before_roc_gate": 3,
     "vix_regime": {
       "enabled": false,
-      "breakpoints": [18.0, 22.0, 28.0],
-      "max_entries": [1, 1, 1, 1],
-      "put_stop_buffer": [null, 2.50, 1.50, null],
-      "call_stop_buffer": [null, 1.50, 1.00, null],
-      "min_call_credit": [0.10, 0.05, 0.05, 0.05],
-      "min_put_credit": [0.15, 0.10, 0.05, 0.05],
-      "shadow_call_otm": [40.0, 50.0, 75.0, 75.0],
-      "shadow_put_otm": [50.0, 75.0, 110.0, 90.0]
+      "breakpoints": [
+        18.0,
+        22.0,
+        28.0
+      ],
+      "max_entries": [
+        1,
+        1,
+        1,
+        1
+      ],
+      "put_stop_buffer": [
+        null,
+        2.5,
+        1.5,
+        null
+      ],
+      "call_stop_buffer": [
+        null,
+        1.5,
+        1.0,
+        null
+      ],
+      "min_call_credit": [
+        0.1,
+        0.05,
+        0.05,
+        0.05
+      ],
+      "min_put_credit": [
+        0.15,
+        0.1,
+        0.05,
+        0.05
+      ],
+      "shadow_call_otm": [
+        40.0,
+        50.0,
+        75.0,
+        75.0
+      ],
+      "shadow_put_otm": [
+        50.0,
+        75.0,
+        110.0,
+        90.0
+      ]
     },
     "directional_pivot": {
       "enabled": false,
@@ -118,9 +165,11 @@
       "pre_entry_defer_minutes": 15
     },
     "brandon": {
-      "_comment": "OFF on D — D is its own (HydraStrategy-derived) multi-day strategy, not the Brandon iron-condor stack. Disabling here makes the registry resolve strategy.name='double_calendar'.",
+      "_comment": "OFF on D \u2014 D is its own (HydraStrategy-derived) multi-day strategy, not the Brandon iron-condor stack. Disabling here makes the registry resolve strategy.name='double_calendar'.",
       "enabled": false
-    }
+    },
+    "_comment_contracts_per_entry": "RAISED 1 -> 2 on 2026-09-24 so the EOD half-close above can EXIST. Half of one contract is zero, so at 1c the rule is unreachable and would have produced an empty dataset for the one behaviour it was added to measure \u2014 the same trap sizing_for_zero_max_loss=$500 set for H. Two is the MINIMUM at which 'close half, carry half' is a real action; Burnich trades 20. D is dry-run-LOCKED with a NO-GO verdict, so this doubles a simulated position and nothing else. RISK DIAL: reversible in one value, and it must be revisited before any go-live.",
+    "_comment_calm_entry_INERT": "INERT, and nulled 2026-09-24 so it cannot be mistaken for live. MKT-043 (the calm-entry delay) is applied inside HydraStrategy._initiate_entry, and this variant OVERRIDES _initiate_entry in full \u2014 the filter never runs here. It is also a premium-SELLING concept: it delays entry while the underlying is moving fast, which has no bearing on a positive-vega calendar whose thesis is about IV, not about the last three minutes of price. NEITHER SOURCE MENTIONS IT (Burnich: 'I put this on in the morning'; OptionsKit gives no timing condition at all). Kept as a key rather than deleted, like the whipsaw and FOMC T+1 keys beside it, so nobody re-adds it believing the absence was an oversight."
   },
   "trend_filter": {
     "enabled": true,
@@ -154,7 +203,7 @@
     "enabled": true
   },
   "google_sheets": {
-    "_comment": "OFF on D (scaffold/dry-run) — D must not write to the canonical Sheets record.",
+    "_comment": "OFF on D (scaffold/dry-run) \u2014 D must not write to the canonical Sheets record.",
     "enabled": false,
     "credentials_file": "config/google_credentials.json",
     "spreadsheet_name": "Calypso_HYDRA_Variant_D",
@@ -162,7 +211,7 @@
     "strategy_type": "hydra"
   },
   "alerts": {
-    "_comment": "OFF on D (scaffold/dry-run) — avoids alert spam and operator paging. NOTE: CRITICAL/HIGH alerts still publish via the L-C2 severity bypass even when disabled; D's dry-run path emits none, but keep this in mind before enabling real-order D.",
+    "_comment": "OFF on D (scaffold/dry-run) \u2014 avoids alert spam and operator paging. NOTE: CRITICAL/HIGH alerts still publish via the L-C2 severity bypass even when disabled; D's dry-run path emits none, but keep this in mind before enabling real-order D.",
     "enabled": false,
     "phone_number": "+1XXXXXXXXXX",
     "email": "your@email.com"
@@ -174,6 +223,6 @@
     "spreadsheet_name": "Calypso_HYDRA_Variant_D",
     "strategy_type": "hydra_double_calendar"
   },
-  "_comment_api_pacing": "2.5 (gentler than C's 2.0) because a real double-calendar would fetch TWO-expiration chains + intraday transform monitoring — extra load on the shared calypso-broker session. Conservative for the dry-run shadow.",
+  "_comment_api_pacing": "2.5 (gentler than C's 2.0) because a real double-calendar would fetch TWO-expiration chains + intraday transform monitoring \u2014 extra load on the shared calypso-broker session. Conservative for the dry-run shadow.",
   "api_pacing_multiplier": 2.5
 }

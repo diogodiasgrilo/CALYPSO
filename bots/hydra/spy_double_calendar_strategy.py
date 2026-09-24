@@ -565,8 +565,10 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
                     f"Entry #{entry_num} skipped - deployed debit ${deployed:.0f} "
                     f">= BP budget ${budget:.0f}"
                 )
-        # LOW-IV entry gate: calendars are positive-vega; enter only when IV is at
-        # the low end (VIX proxy — true IV-rank is a go-live refinement).
+        # LOW-IV entry gate: calendars are positive-vega, so the trade wants vol
+        # to expand after entry. The source's condition is RELATIVE — "the lower
+        # end of the spectrum" — so this is a VIX percentile, not an absolute
+        # cutoff. See _spy_dc_low_iv_gate.
         iv_skip = self._spy_dc_low_iv_gate()
         if iv_skip:
             self.daily_state.entries_skipped += 1

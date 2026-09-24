@@ -23,6 +23,11 @@ def _strat():
     s.dc_max_concurrent = 1
     s.dc_max_deployed_debit = 5000.0
     s.dc_eod_close_if_no_transform = False
+    # Burnich's EOD half-close knobs (set by the real __init__). OFF here so
+    # these stop/transform tests stay about what they are named for; the
+    # half-close has its own file.
+    s.dc_eod_scale_out_enabled = False
+    s.dc_eod_scale_out_fraction = 0.5
     s._dc_stop_breach = {}
     s.daily_state = MagicMock()
     s.daily_state.active_entries = []
