@@ -109,7 +109,7 @@ down.
 | # | Item | Verdict |
 |---|---|---|
 | **B1** | Stop building the discarded position snapshot (kills the FX calls) | ✅ **DONE** — this commit |
-| B2 | TTL cache (~3s) on `_read_open_positions` | ✅ Do |
+| B2 | TTL cache (~3s) on `_read_open_positions` | ✅ **DONE** |
 | B3 | Split the **exit** fill-timeout from the entry one | ✅ Do |
 | B4 | Placement time budget + detection-only telemetry | ✅ Do (substitute for "interleave stop checks") |
 | B5 | Escalate the **riskless long leg** to MARKET | ✅ Do, after B3, exercised on a dry-run seat first |

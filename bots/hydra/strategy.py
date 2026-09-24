@@ -2023,6 +2023,60 @@ class HydraStrategy(MEICStrategy):
             return (bid + ask) / 2
         return quote.get("last") or quote.get("mark") or 0.0
 
+    # ---------------------------------------------------------------
+    # B2 (2026-09-24): position-read micro-cache.
+    #
+    # `portfolio/<acct>/positions/0` was 32% of the broker's shared IBKR
+    # request budget — 904 calls in a 600s window — and that gate runs 85%
+    # saturated, which is what stop DETECTION queues behind. The callers are
+    # get_detailed_position_status() (the status log), _get_total_saxo_pnl()
+    # (the P&L banner) and get_dashboard_metrics(): display, on a per-tick
+    # cadence, all re-fetching the same rows.
+    #
+    # A very short TTL is safe here for a reason IBKR states itself, recorded
+    # in ib_client.get_balance: the underlying risk engine only updates about
+    # every 3s, "so polling faster than that is pointless". The cache is
+    # therefore bounded by the broker's own refresh rate, not by our appetite.
+    #
+    # TWO SAFETY PROPERTIES, both load-bearing:
+    #   1. `strict=True` NEVER reads the cache. Those callers (settlement,
+    #      overnight checks, the EMERGENCY-001 "already closed?" probe) make
+    #      irreversible decisions, and a stale "flat" would abandon an open
+    #      position. They still REFRESH it — a strict read is the freshest
+    #      data available.
+    #   2. Any order action invalidates. A read taken right after a fill must
+    #      never be served from before it (see _place_leg_order/_cancel_order).
+    # Set strategy.positions_cache_ttl_s = 0 to disable entirely.
+    # ---------------------------------------------------------------
+    def _positions_cache_ttl(self) -> float:
+        cfg = getattr(self, "strategy_config", None) or {}
+        try:
+            return float(cfg.get("positions_cache_ttl_s", 3.0))
+        except (TypeError, ValueError, AttributeError):
+            return 3.0
+
+    def _invalidate_positions_cache(self) -> None:
+        """Drop the cached rows. Cheap, idempotent, never raises."""
+        self._positions_cache = None
+
+    def _positions_cache_get(self) -> Optional[List[Dict[str, Any]]]:
+        ttl = self._positions_cache_ttl()
+        if ttl <= 0:
+            return None
+        entry = getattr(self, "_positions_cache", None)
+        if not entry:
+            return None
+        stamped_at, rows = entry
+        if (time.monotonic() - stamped_at) > ttl:
+            return None
+        # Hand back copies: a caller mutating a row must not poison the cache.
+        return [dict(r) for r in rows]
+
+    def _positions_cache_put(self, rows: List[Dict[str, Any]]) -> None:
+        if self._positions_cache_ttl() <= 0:
+            return
+        self._positions_cache = (time.monotonic(), [dict(r) for r in rows])
+
     def _read_open_positions(self, *, strict: bool = False) -> List[Dict[str, Any]]:
         """All open option positions from the active broker, normalized.
 
@@ -2058,6 +2112,12 @@ class HydraStrategy(MEICStrategy):
         Returns:
             list of normalized open-option-position dicts.
         """
+        # B2: serve non-strict reads from the micro-cache (see the block above).
+        if not strict:
+            cached = self._positions_cache_get()
+            if cached is not None:
+                return cached
+
         out: List[Dict[str, Any]] = []
         try:
             raw_list = self.broker.get_positions() or []
@@ -2100,6 +2160,9 @@ class HydraStrategy(MEICStrategy):
                     "position_id": None,
                     "raw": norm.get("raw", raw),
                 })
+            # Populate from strict reads too — a strict read is by definition
+            # the freshest data we have, so the next display tick can use it.
+            self._positions_cache_put(out)
             return out
         except Exception as e:
             logger.warning(
@@ -2320,6 +2383,11 @@ class HydraStrategy(MEICStrategy):
                 "_place_leg_order is IBKR-only — caller must branch on "
                 "self.broker"
             )
+        # B2: any order changes the position book. Invalidate BEFORE placing so
+        # that even an exception mid-flight cannot leave a pre-order snapshot
+        # readable — the conservative direction is an extra fetch, never a
+        # stale one.
+        self._invalidate_positions_cache()
         ib_type = "MKT" if str(order_type).upper().startswith("M") else "LMT"
         # Fill timeout scales modestly with size. A serial multi-contract 0DTE
         # fill needs more poll time than a 1-lot — the 2026-06-08 forensic found
@@ -2429,6 +2497,9 @@ class HydraStrategy(MEICStrategy):
     def _cancel_order(self, order_id) -> bool:
         """Cancel a working order on the active broker. False on
         failure."""
+        # B2: a cancel can race a fill (the ORDER-010 case), so the book may
+        # have moved either way. Drop the cache.
+        self._invalidate_positions_cache()
         try:
             return bool(self.broker.cancel_order(str(order_id)))
         except Exception as e:

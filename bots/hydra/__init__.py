@@ -36,6 +36,27 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-24 B2 — POSITION-READ MICRO-CACHE (~3s TTL). `portfolio/<acct>/positions/0`
+  was **32% of the broker's shared IBKR request budget** — 904 calls in a 600s window —
+  on a gate measured **85% saturated**, which is what stop DETECTION queues behind. All
+  three callers are display: `get_detailed_position_status()` (status log),
+  `_get_total_saxo_pnl()` (P&L banner), `get_dashboard_metrics()`. There was no cache at
+  all; each tick re-fetched identical rows.
+  * The TTL is bounded by IBKR, not by us: `ib_client.get_balance` records that the risk
+    engine updates ~every 3s, "so polling faster than that is pointless".
+  * TWO SAFETY PROPERTIES, both tested as controls:
+      1. `strict=True` NEVER reads the cache — settlement, overnight checks and the
+         EMERGENCY-001 "already closed?" probe act irreversibly, and a stale "flat"
+         would ABANDON an open position. They still REFRESH it.
+      2. Any order action invalidates (`_place_leg_order` — which `_close_leg_order`
+         delegates to — and `_cancel_order`). Invalidation happens BEFORE the order, so
+         an exception mid-flight cannot leave a pre-order snapshot readable.
+  * Rows are copied IN and OUT, so neither a miss-path nor a hit-path caller can poison
+    the cache by mutating what it got. Each copy is covered by its own test — verified
+    by separate controls, after stale `__pycache__` initially made one control look like
+    it was passing (the gotcha CLAUDE.md warns about, hit here in the test loop itself).
+  * `strategy.positions_cache_ttl_s = 0` disables it entirely.
+  Tests: `tests/test_positions_cache_2026_09_24.py`. Full suite 5,048 passed.
 - 2026-09-24 A1 — FAILED-ENTRY UNWIND P&L NOW RECONCILES (live seat). On 09-24 B's
   Entry #6 legged into the Iran-headline melt-up, filled 3 of 4 legs, was refused the
   short put by GUARD-FLOOR, and ORDER-010 unwound the 3 filled legs for **+$5,995 of
