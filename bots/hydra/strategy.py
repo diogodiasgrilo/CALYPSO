@@ -11565,7 +11565,9 @@ class HydraStrategy(MEICStrategy):
 
         # Trend and type
         trend = entry.trend_signal.value.upper() if hasattr(entry, 'trend_signal') and entry.trend_signal else "N/A"
-        if getattr(entry, 'structure', None) == "strangle":
+        if getattr(entry, 'structure', None) == "long_strangle":
+            entry_type = "Long Strangle"   # bought premium; not an IC in any sense
+        elif getattr(entry, 'structure', None) == "strangle":
             entry_type = "Strangle"  # item 6: don't mislabel a naked strangle as an IC
         elif getattr(entry, 'call_only', False):
             entry_type = "Call Only"
@@ -12354,6 +12356,16 @@ class HydraStrategy(MEICStrategy):
                     trend_tag = "[MKT-010]"
                 else:
                     trend_tag = "[BULLISH]"
+            elif getattr(entry, "structure", None) == "long_strangle":
+                # TWO LONG LEGS, NO SHORTS. The IC branch below would render
+                # "C:0.0/767.0 P:0.0/762.0" — the 0.0s are absent short strikes
+                # — and store the type as "Iron Condor". That is wrong in a
+                # PERSISTED row, not just on screen.
+                strike_str = (
+                    f"C:{entry.long_call_strike} P:{entry.long_put_strike}"
+                )
+                entry_type = "Long Strangle"
+                trend_tag = "[LONG-GAMMA]"
             else:
                 # Full IC (neutral)
                 strike_str = (

@@ -66,6 +66,13 @@ class LongStrangleEntry(HydraIronCondorEntry):
     would mis-state P&L everywhere downstream without failing anything loudly.
     """
 
+    #: Structure discriminator, read by the shared recording/label paths in
+    #: strategy.py. Without it those paths fall through to their IC defaults and
+    #: a long strangle is STORED as "Iron Condor"/"full_ic" with a four-strike
+    #: label whose short legs read 0.0 — wrong in a persisted row, not merely on
+    #: screen. G set this for the same reason ("strangle"); H did not.
+    structure: str = "long_strangle"
+
     #: Premium PAID for the long call, in dollars, already × 100 × contracts.
     call_debit: float = 0.0
     #: Premium PAID for the long put, in dollars, already × 100 × contracts.

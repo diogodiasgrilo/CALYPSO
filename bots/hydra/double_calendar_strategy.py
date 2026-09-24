@@ -186,6 +186,9 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         self.dc_eod_close_if_no_transform = bool(dc.get("eod_close_if_no_transform", True))
         # Burnich's EOD half-close (see _dc_eod_partial_scale_out).
         self.dc_eod_scale_out_enabled = bool(dc.get("eod_scale_out_enabled", True))
+        # Opening-rotation guard for the pre-transform stop (see
+        # _dc_stop_disarmed_at_open). 0 disables it.
+        self.dc_stop_arm_delay_min = float(dc.get("stop_arm_delay_min", 5.0))
         self.dc_eod_scale_out_fraction = float(dc.get("eod_scale_out_fraction", 0.5))
         # Prefer the following-week Friday weekly for the short expiry (Burnich's
         # setup); else the earliest in-window candidate. Phase 2.
@@ -668,7 +671,12 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
             # recovery (MKT-046 analogue). Without this a single noisy tick fired
             # a real stop (2026-06-16).
             now = get_us_market_time()
-            if pnl_pct <= -self.dc_pre_transform_stop_pct:
+            if self._dc_stop_disarmed_at_open(now, entry):
+                # Opening rotation: the mark is not yet trustworthy enough to
+                # act on. Any in-flight breach is cleared so the confirmation
+                # window cannot carry an opening print across the boundary.
+                breaches.pop(en, None)
+            elif pnl_pct <= -self.dc_pre_transform_stop_pct:
                 if en not in breaches:
                     breaches[en] = now
                     logger.warning(
@@ -702,6 +710,51 @@ class DoubleCalendarStrategy(CalendarStrategyBase):
         if scaled:
             return scaled
         return None
+
+    def _dc_stop_disarmed_at_open(self, now, entry) -> bool:
+        """Is it too early in the session to trust a 4-leg calendar mark?
+
+        **MEASURED, not theorised.** On 2026-09-24 D's carried calendar marked
+        ``value $50`` on an $868 debit six seconds after the open — ``-86.7%`` —
+        tripping the 20% stop. Eighteen seconds later the SAME position marked
+        ``$570`` (-34.3%). The 20-second confirmation window did its job and
+        turned an $818 book into $267.50, but the close still acted on a number
+        drawn from the opening rotation, when four independent option mids are
+        each stale or spread-wide.
+
+        This is the MKT-046 idea one level up: that filter answers "did the
+        breach persist?", and this one answers "was the quote worth reading at
+        all?". A persistence window cannot help when every tick in it is drawn
+        from the same unreliable minutes.
+
+        ⚠️ **It is not free, and the trade-off is the reason it is short.** A
+        genuine overnight gap against a carried calendar is real, and delaying
+        the stop means riding it for the delay. Five minutes is long enough for
+        the opening rotation to settle and short enough that a true gap is not
+        ridden meaningfully longer — D's own ENTRY is at 10:00, so this only
+        ever covers a position carried in from a previous session.
+
+        Neither source specifies this; Burnich is discretionary and simply is
+        not reading a screen at 09:30:05. It is an automation necessity, in the
+        same family as MKT-046, and it is config-gated so it can be turned off.
+        """
+        mins = float(getattr(self, "dc_stop_arm_delay_min", 0) or 0)
+        if mins <= 0:
+            return False
+        try:
+            open_dt = now.replace(hour=9, minute=30, second=0, microsecond=0)
+        except Exception:  # noqa: BLE001 — never break the manager on a clock
+            return False
+        elapsed = (now - open_dt).total_seconds() / 60.0
+        if 0 <= elapsed < mins:
+            logger.info(
+                "[DCTM] E#%s stop DISARMED — %.1f min into the session (arms at "
+                "%.0f). The opening rotation produced a $50-vs-$570 mark on this "
+                "structure on 2026-09-24; a confirmation window cannot fix a "
+                "quote that was never readable.",
+                entry.entry_number, elapsed, mins)
+            return True
+        return False
 
     def _dc_eod_partial_scale_out(self, entry) -> Optional[str]:
         """Close HALF an untransformed, profitable calendar at the close; carry
