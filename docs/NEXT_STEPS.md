@@ -26,11 +26,17 @@ they are not rebuilt:
 * ❌ **Per-side vigilant quote fetch** — the premise was false; `_check_stop_losses` already
   batches every leg into ONE snapshot call.
 
-**Shipped 2026-09-24:** B1, the discarded-position-snapshot skip (kills 13% of the fleet's IBKR
-request budget, zero behaviour change while Sheets is off). Strategies-only restart.
+**SHIPPED 2026-09-24 — six commits, CI green each, suite 5,074 — but NOT DEPLOYED:**
+`c0a7da0` B1 discarded-snapshot skip · `207a4c0` A1 failed-entry unwind reconciles (+$5,995) ·
+`02a80db` B2 position-read cache · `aafd678` B3 exit fill-timeout split · `c437004` B4 placement
+budget · `d09c1da` A4 dry-run early-close DB row.
 
-**Next:** B2 (TTL cache on position reads) → observe one session → the A1–A4 accounting fixes →
-B3/B4/B5 (exit timeout, placement budget, long-leg MARKET escalation).
+🔴 **Deploy AFTER settlement (~21:45–22:37 ET), never with settlement pending, strategies-only**
+(nothing here is imported by `calypso-broker`). Runbook + what to verify: audit doc §8.
+Tonight's RECONCILE will still report the 09-24 drift — A1 is not retroactive and that is correct.
+
+**Next:** deploy + observe one session → B6 (B's pacing) → B7 (gate 5→8) → A2 (position-delta
+reconciliation; the obvious fixes provably don't work — see audit §6-bis) → B5 → **C1**.
 
 ⚠️ **The prize is still C1 — the entry fill leak, ~38% of B's net.** Everything above is
 execution-quality hardening worth ~$1,078 / 2 months, and the latency half is tail-risk

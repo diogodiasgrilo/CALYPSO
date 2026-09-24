@@ -202,17 +202,108 @@ credit+buffer, 40% is the efficient threshold); strike selectivity loses money
 
 ---
 
+## 6-bis. DEFERRED, with reasons
+
+### A2 — the cancel/fill race. Deferred: the obvious fix does not work.
+
+On 09-24 a partial was cancelled at 5/7, 2 more filled in flight, the
+escalation then bought the 2 it thought were missing, and B ended up long **9
+where it intended 7**. Two left stranded, owned by no entry (~$60, long
+options, defined risk — they expired worthless the same day).
+
+My first instinct — "re-read the terminal fill after the cancel" — **is already
+in the code** (`base_strategy.py`, the `terminal = _extract_filled_quantity(...)`
+block) and is correct. It failed because IBKR's *propagation* lagged the cancel
+ack: the status read returned 5, and the last 2 landed after it.
+
+Order-level reconciliation afterwards **cannot** fix this either: IBKR reports
+a cancelled+purged order as `cum_fill=0.0` (verified directly on order
+331659736, which had really filled 7). The data is gone.
+
+**The design that would work** is position-delta, and it is sound *because the
+bot is single-threaded*: snapshot the broker quantity for that conid before the
+leg starts and after it completes; the difference is this leg's true fill, and
+no other order of ours can be moving that conid concurrently. Anything in
+excess of `target_qty` gets flattened. Merging with other entries at the same
+strike does not confound it, because those positions are static across the
+window.
+
+Costs ~2 extra position reads per leg (~8 per entry, ~1.5% more requests —
+comfortably inside what B1+B2 freed). Not done yet because it is a change to
+the live seat's order path for a ~$60 exposure, and it deserves its own pass.
+
+### B5 — long-leg MARKET escalation. Deferred: B3 captures most of it.
+
+With the exit budget at 10s, today's sequence re-prices at ~12s instead of
+~50s, which recovers most of the $560 without a MARKET order. And the MKT-047
+MARKET path has **never actually fired** in the retained logs, so we have zero
+live observation of how a MARKET option close behaves on this account.
+Escalating there would be the least-evidenced change of the set. Revisit after
+watching B3 for a few stops.
+
+### A3 — the two stranded puts. Self-resolving.
+
+SPX closed far above the 7625 strike, so they expired worthless. The $60 paid
+for them is a real cost booked nowhere, which is A2's territory, not a separate
+fix.
+
+---
+
 ## 7. Sequencing
 
 Everything touching the live seat deploys **after the close**, never with open
 positions (`CLAUDE.md`, and B held 6 open sides while this was written).
 
-1. **B1** — stop building the discarded snapshot ✅ *done, this commit*
-2. **B2** — TTL cache on position reads
-3. *observe one session* — confirm the gate drops off the cap and stop-detection cadence improves
-4. **A1–A4** — the live-seat accounting fixes
-5. **B3** — exit fill-timeout split
-6. **B4** — placement budget + telemetry
-7. **B5** — long-leg MARKET escalation (dry-run seat first)
-8. **B6 / B7** — pacing and gate, with 429 monitoring
-9. **C1** — the fill leak. The actual prize.
+**SHIPPED 2026-09-24** (six commits, CI green on each, full suite 5,074):
+
+| commit | item | effect |
+|---|---|---|
+| `c0a7da0` | B1 | stop building the discarded snapshot — frees 13% of the request budget |
+| `207a4c0` | A1 | failed-entry unwind P&L reconciles (the +$5,995) |
+| `02a80db` | B2 | ~3s position-read cache — targets the 32% |
+| `aafd678` | B3 | exit fill-timeout split from the entry one (the $560) |
+| `c437004` | B4 | placement budget — bounds the blind window |
+| `d09c1da` | A4 | dry-run early close records the result, not the credit |
+
+**NOT DEPLOYED.** All of it waits for after settlement — see below.
+
+**Next:**
+1. *deploy + observe one session* — confirm the gate comes off the cap, that
+   `exchangerate` and most `positions/0` traffic is gone, and that
+   stop-detection cadence improves
+2. **B6** — lower B's `api_pacing_multiplier` once there is headroom
+3. **B7** — consider raising `CALYPSO_IBKR_MAX_RPS` 5 → 8, with 429 monitoring
+4. **A2** — the position-delta reconciliation (§6-bis)
+5. **B5** — revisit after watching B3
+6. **C1** — the fill leak. The actual prize.
+
+## 8. Deploying this
+
+⚠️ **Not before settlement completes** (~21:45–22:37 ET). Restarting B with
+settlement pending is the 2026-07-06 stale-SPX bug that booked a phantom
+−$6,036.92 — see `docs/NEXT_STEPS.md` and the `settlement_stale_spx_bug` note.
+B held 6 open sides while this work was written.
+
+**Strategies-only restart.** None of these changes touch code `calypso-broker`
+imports — `shared/logger_service.py` (B1) is not among them, verified. The
+broker keeps its session.
+
+```bash
+# 1. after settlement completes
+sudo -u calypso bash -c 'cd /opt/calypso && git pull &&   find bots shared -name __pycache__ -type d -exec rm -rf {} + 2>/dev/null'
+# 2. strategies only — NOT calypso-broker
+sudo systemctl restart hydra hydra_variant_{b,c,d,e,f,g,h}
+```
+
+**What to check afterwards:**
+* `journalctl -u calypso-broker` — `iserver/exchangerate` should be **gone**,
+  and `positions/0` far rarer. The 200ms request spacing should break up.
+* B's startup banner still shows its usual config lines.
+* First stop of the next session: the gap between `STOP-DETAIL [FIRST_BREACH]`
+  and `[CONFIRMED]`, and between `STOP TRIGGERED` and the fill.
+* New log lines to watch for: `PLACEMENT-BUDGET` (B4 firing) and
+  `ORDER-010: ... unattributed (failed attempt owns no entry)` (A1).
+
+⚠️ **Tonight's RECONCILE will still report the 2026-09-24 drift.** A1 does not
+apply retroactively — that day's state carries no accumulator. It is correct
+for it to fire: the under-attribution really happened.
