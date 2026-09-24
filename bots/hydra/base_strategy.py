@@ -3301,6 +3301,7 @@ class MEICStrategy(abc.ABC):
         flat = self._place_leg_order(
             instrument_id=conid, side=close_side, quantity=int(filled_qty),
             order_type="MKT", coid=f"{external_ref}_{coid_suffix}",
+            is_exit=True,  # B3: flattening a partial is an exit, not an entry
         )
         if flat and flat.get("filled"):
             # 2026-08-20 (execution audit finding): mirror _unwind_partial_entry's
@@ -4830,6 +4831,7 @@ class MEICStrategy(abc.ABC):
             return self._place_leg_order(
                 instrument_id=uic, side=side, quantity=quantity,
                 order_type="LMT", limit_price=limit_price,
+                is_exit=True,  # B3: THE site that cost $560 on 2026-09-24
             )
         logger.info(
             f"  Close via MARKET — no usable quote to price a marketable limit "

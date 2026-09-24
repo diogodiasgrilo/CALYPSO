@@ -2358,6 +2358,7 @@ class HydraStrategy(MEICStrategy):
         limit_price: Optional[float] = None,
         coid: Optional[str] = None,
         ambiguous_on_timeout: bool = False,
+        is_exit: bool = False,
     ) -> Dict[str, Any]:
         """Place ONE option leg on IBKR; place→poll-to-fill in one call.
 
@@ -2377,6 +2378,9 @@ class HydraStrategy(MEICStrategy):
             order_type: ``"LMT"`` or ``"MKT"``.
             limit_price: required for LMT; ignored for MKT.
             coid: optional client-order-id for retry-safety.
+            is_exit: True when this order CLOSES exposure (stop close, unwind,
+                partial flatten). Selects the short exit fill budget instead of
+                the size-scaled entry one — see the timeout block below.
         """
         if self.broker is None:
             raise RuntimeError(
@@ -2397,7 +2401,38 @@ class HydraStrategy(MEICStrategy):
         # fit the entry window. The BrokerClient HTTP read timeout tracks this
         # per-call (broker_client._http_transport) so a still-filling order does
         # NOT trip an L-H1 transport-timeout abort.
-        fill_timeout = min(30.0 + 3.0 * max(0, int(quantity) - 1), 45.0)
+        if is_exit:
+            # B3 (2026-09-24): an EXIT must not inherit the ENTRY budget.
+            #
+            # The size-scaled value below was calibrated for entries by the
+            # 2026-06-08 partial-fill forensic — a 7-lot entry legging in needs
+            # poll time, and ORDER-010 fills any remainder afterwards. An exit
+            # has the opposite economics: the position is moving against us (or,
+            # once the short is bought back, the remaining long is riskless and
+            # purely decaying), and waiting costs money at the rate the market
+            # moves.
+            #
+            # Measured on B, 2026-09-24: after the short call was covered in 4s,
+            # the long-call sale sat the full 45s budget without filling, and
+            # attempt 2 filled $1.20 lower — about $560, the single largest exit
+            # slippage in the variant's history (25 stops since 2026-07-24:
+            # mean $43.10, total $1,077.50). Typical closes fill in 2-5s, so a
+            # ~10s budget is generous and returns ~35s of that wait.
+            #
+            # Re-placing sooner is safe here because the retry loop that owns
+            # this call (_close_position_with_retry_ib) re-checks the broker
+            # position with strict=True before every attempt after the first, so
+            # a cancel that raced a fill ends the close instead of double-closing.
+            try:
+                fill_timeout = float(
+                    (getattr(self, "strategy_config", None) or {})
+                    .get("exit_fill_timeout_s", 10.0)
+                )
+            except (TypeError, ValueError, AttributeError):
+                fill_timeout = 10.0
+            fill_timeout = max(1.0, fill_timeout)
+        else:
+            fill_timeout = min(30.0 + 3.0 * max(0, int(quantity) - 1), 45.0)
         try:
             res = self.broker.place_and_wait_for_fill(
                 conid=int(instrument_id),
@@ -2491,7 +2526,7 @@ class HydraStrategy(MEICStrategy):
         """
         return self._place_leg_order(
             instrument_id=instrument_id, side=side, quantity=quantity,
-            order_type="MKT", coid=coid,
+            order_type="MKT", coid=coid, is_exit=True,
         )
 
     def _cancel_order(self, order_id) -> bool:

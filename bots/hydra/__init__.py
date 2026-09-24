@@ -36,6 +36,28 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-24 B3 — AN EXIT NO LONGER INHERITS THE ENTRY FILL BUDGET. On 09-24 E#5's call
+  side stopped; the short call was covered in 4s, then the long call — riskless by then,
+  the short already bought back — was offered at a correctly-marketable price, sat the
+  FULL 45s budget unfilled, and attempt 2 filled $1.20 lower. ~$560: the largest exit
+  slippage in B's history (25 stops since 2026-07-24 — mean $43.10, total $1,077.50).
+  * The 45s came from `min(30 + 3*(qty-1), 45)`, which the 2026-06-08 partial-fill
+    forensic calibrated FOR ENTRIES (a 7-lot legging in needs poll time; ORDER-010 fills
+    any remainder). An exit has the opposite economics — the position is moving against
+    us, or is a decaying riskless long — so waiting costs money at the rate of the tape.
+  * `_place_leg_order(is_exit=True)` selects `strategy.exit_fill_timeout_s` (default
+    10.0, floored at 1.0) instead. Typical closes fill in 2-5s, so this returns ~35s of
+    dead wait per missed attempt. The ENTRY budget is untouched and tested as a control.
+  * Tagged at all three exit sites: `_close_leg_order`, `_place_marketable_close` (the
+    one that cost the $560) and `_flatten_accumulated_partial`. Each has its own
+    propagation test, so a future exit path that forgets the flag fails loudly.
+  * Safe to re-place sooner because `_close_position_with_retry_ib` re-checks the broker
+    position with `strict=True` before every attempt after the first — a cancel that
+    raced a fill ENDS the close instead of double-closing. (That strict read also
+    bypasses the B2 cache by construction.)
+  * The BrokerClient HTTP read timeout derives from `timeout_seconds`
+    (`max(default, budget + 10)`), so the transport stays consistent automatically.
+  Tests: `tests/test_exit_fill_timeout_2026_09_24.py`. Full suite 5,057 passed.
 - 2026-09-24 B2 — POSITION-READ MICRO-CACHE (~3s TTL). `portfolio/<acct>/positions/0`
   was **32% of the broker's shared IBKR request budget** — 904 calls in a 600s window —
   on a gate measured **85% saturated**, which is what stop DETECTION queues behind. All
