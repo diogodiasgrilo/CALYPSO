@@ -172,9 +172,10 @@ spread width, stop level). **All must be objectively true before the dry-run loc
 - [ ] **HG-11 — SPY ASSIGNMENT IS HANDLED.** Added 2026-09-24 with the SPX→SPY switch, and it is
       the one genuinely new risk that switch introduces. **SPY options are AMERICAN and PHYSICALLY
       settled**: a leg that finishes ITM is auto-exercised into **100 shares per contract**, so at
-      ~$765/share a single ITM contract becomes a **~$76,500** equity position, and at the ~10
-      contracts the source's sizing rule now buys, **~$765,000** — appearing overnight, in an
-      account that never chose to hold stock.
+      ~$765/share a single ITM contract becomes a **~$76,500** equity position — appearing
+      overnight, in an account that never chose to hold stock. H is capped at **1 contract**
+      (`contracts_per_entry`), so that is the exposure today; the figure scales directly with any
+      future size increase, which is the other reason this gate must close before one.
       **This does not affect the dry run**: `intrinsic − debit` remains the correct economic value
       of an ITM option at expiry, so every number H records today is right. It affects the day H
       places a real order, which is why it is a gate and not a bug.

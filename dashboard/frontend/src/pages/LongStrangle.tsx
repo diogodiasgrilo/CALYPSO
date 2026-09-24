@@ -122,6 +122,8 @@ interface Status {
   closed: Position[];
   skipped: Skip[];
   spx_path?: SpxPoint[];
+  /** What H actually trades. SPY since 2026-09-24; SPX before it. */
+  underlying_symbol?: string | null;
   summary: {
     open_count: number;
     closed_count: number;
@@ -140,7 +142,10 @@ const money = (v: number | null | undefined) =>
 
 /**
  * THE picture a long strangle needs, and the one thing no other view here
- * provides: SPX's path against the expected-move band it was priced at.
+ * provides: the underlying's path against the expected-move band it was priced
+ * at. The SYMBOL is passed in rather than assumed — H traded SPX until
+ * 2026-09-24 and SPY after it, and a chart that hardcodes one silently plots a
+ * different market than the strikes drawn on it.
  *
  * Every H session reduces to one question — **did it move enough?** — and the
  * answer is a glance, not a calculation. It works even on a day H DECLINED to
@@ -158,6 +163,7 @@ function ExpectedMoveBand({
   hypothetical,
   debit,
   sessionDate,
+  symbol,
 }: {
   path: SpxPoint[];
   callStrike: number | null;
@@ -167,6 +173,7 @@ function ExpectedMoveBand({
   hypothetical: boolean;
   debit: number | null;
   sessionDate: string;
+  symbol: string;
 }) {
   if (path.length < 2 || !callStrike || !putStrike) return null;
 
@@ -185,10 +192,16 @@ function ExpectedMoveBand({
 
   // What it would actually have been worth. For a DECLINED entry this is the
   // whole point: "a veto happened" is not a result, "the veto cost $831" is.
-  // SPXW is cash-settled at the close, so intrinsic at the last print is the
-  // FINAL number only once the close has passed — before it, the position is
-  // still worth intrinsic plus whatever time value remains, and the sentence
-  // below says so rather than calling a mid-session mark a settlement.
+  // Intrinsic at the last print is the FINAL number only once the close has
+  // passed — before it the position is still worth intrinsic PLUS whatever time
+  // value remains, and the sentence below says so rather than calling a
+  // mid-session mark a settlement.
+  //
+  // The arithmetic holds for both instruments H has traded, for different
+  // reasons: SPX is cash-settled AT intrinsic, and a physically-settled SPY
+  // option is worth its intrinsic to anyone who exercises and closes. What SPY
+  // adds is that an ITM leg becomes SHARES rather than cash — an assignment
+  // consequence, not a valuation one (go-live gate HG-11).
   const last = path[path.length - 1];
   const settled = sessionIsSettled(sessionDate, todayInNewYork(), last.t);
   const val = valueStrangleAt(last.spx, callStrike, putStrike, debit, settled);
@@ -260,7 +273,7 @@ function ExpectedMoveBand({
                   borderRadius: 4,
                   fontSize: 11,
                 }}
-                formatter={(v: number | undefined) => [v?.toFixed(2) ?? "—", "SPX"]}
+                formatter={(v: number | undefined) => [v?.toFixed(2) ?? "—", symbol]}
               />
               <Line
                 type="monotone"
@@ -544,6 +557,7 @@ export function LongStrangle() {
                 hypothetical={!p && !!k}
                 debit={p?.total_debit ?? k?.proposed_debit ?? null}
                 sessionDate={status.date}
+                symbol={status.underlying_symbol || "SPX"}
               />
             );
           })()}

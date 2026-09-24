@@ -44,8 +44,19 @@ Version History:
 
   It was not a free preference. The identical strangle costs ~$115 on SPY and ~$775 on SPX, which
   is exactly how `sizing_for_zero_max_loss: 500` came to permit ZERO contracts — an empty dataset
-  from the one variant that exists to produce one. On SPY his own sizing rule behaves as he
-  describes it: a $1,200 limit buys ~10 contracts. His COST CAP needed no edit at all —
+  from the one variant that exists to produce one. On SPY his rule stops returning zero.
+
+  ⚠️ CORRECTED SAME DAY: an earlier draft of this entry said the $1,200 limit "buys ~10
+  contracts". That is the SIZING RULE's raw output and not the position. `_size_for_zero` takes
+  `min(rule, contracts_per_entry, max_contracts_per_order)`, and `contracts_per_entry: 1` is what
+  actually sets it — **H places ONE contract**. The loss limit is now $200 so the rule and the cap
+  agree at 1, rather than the cap silently rescuing a limit ten times looser; left as it was, any
+  later increase of `contracts_per_entry` would have jumped the position 10x with nobody deciding
+  to. The SOURCE NAMES NO CONTRACT COUNT — it names a rule whose only input is an acceptable loss.
+  One is right while measuring because H is judged in percent-of-debit and a percentage is
+  invariant to the count; more contracts teach nothing extra and inflate phantom dry-run dollars.
+
+  His COST CAP needed no edit at all —
   `max_debit_pct_of_spot` is spot-relative, so his ~$1.15/share SPY cap and the ~$1,145/contract
   SPX figure are the same number. Spot-relative was the right shape and it ported for free.
 

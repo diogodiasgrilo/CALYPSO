@@ -45,32 +45,96 @@ def _db_path() -> Optional[str]:
     return os.path.join(os.path.dirname(str(sf)), "long_strangle.db")
 
 
-def _market_db() -> Optional[str]:
-    """A database with the session's SPX ticks.
+def _underlying_of(vid: str) -> Optional[str]:
+    """A variant's traded symbol, from its own config. None if unreadable."""
+    cfg_path = getattr(settings, f"variant_{vid}_config_file", None)
+    if not cfg_path:
+        return None
+    try:
+        import json
+        with open(cfg_path) as f:
+            cfg = json.load(f)
+        s = cfg.get("strategy", {}) or {}
+        return (s.get("underlying_symbol") or cfg.get("underlying_symbol") or None)
+    except Exception:  # noqa: BLE001 — a display route must not 500
+        return None
 
-    NOT H's own: SPX is market-wide, and a variant's database only starts when
-    it was installed (H's begins mid-session on 2026-09-23). Resolves through
-    the taxonomy to the live seat — never hardcoded, because that seat has
-    already moved once (C→B) — then falls back to variant A's root DB.
+
+def _market_db() -> Optional[str]:
+    """A database whose price ticks are of the instrument **H actually trades**.
+
+    ⚠️ THIS USED TO RESOLVE TO THE LIVE SEAT, AND THAT BECAME WRONG THE MOMENT
+    H MOVED TO SPY (2026-09-24). The live seat is variant B, which trades SPX:
+    the page would have drawn **SPX at ~7,700 against SPY strikes at ~765**, so
+    the band chart and the "did it break the band?" verdict it feeds would both
+    have been computed from a completely different instrument. Nothing would
+    have errored — the chart would simply have been about another market.
+
+    So the match is on the SYMBOL now, not on a seat:
+
+    1. **H's own database first.** Its ticks are by definition the instrument H
+       traded *on that date*, which also makes history self-consistent: the
+       2026-09-23 rows are SPX and pair correctly with that day's SPX strikes.
+       Its only weakness is coverage — a variant's DB starts when it was
+       installed — and a partial path of the RIGHT instrument beats a complete
+       one of the wrong instrument.
+    2. Any other variant whose configured ``underlying_symbol`` matches H's
+       (variant E trades SPY and has recorded it since long before H did).
+    3. Nothing. An empty path renders no band, which is honest.
+
+    There is deliberately **no generic fallback to the root/live DB**: that is
+    precisely the behaviour that produced the mismatch.
     """
     sf = getattr(settings, f"variant_{_VARIANT}_state_file", None)
     if not sf:
         return None
-    root = os.path.dirname(os.path.dirname(str(sf)))
-    candidates = []
-    try:
-        import shared.strategy_taxonomy as tax
-        for vid in tax.available_ids():
-            if tax.STRATEGIES[vid].status == "live":
-                candidates.append(os.path.join(root, f"variant_{vid}", "backtesting.db"))
-    except Exception:  # noqa: BLE001 — a display route must not 500
-        pass
-    candidates.append(os.path.join(root, "backtesting.db"))
-    candidates.append(os.path.join(os.path.dirname(str(sf)), "backtesting.db"))
+    own = os.path.join(os.path.dirname(str(sf)), "backtesting.db")
+    candidates = [own]
+
+    want = (_underlying_of(_VARIANT) or "").strip().upper()
+    if want:
+        root = os.path.dirname(os.path.dirname(str(sf)))
+        try:
+            import shared.strategy_taxonomy as tax
+            for vid in tax.available_ids():
+                if vid == _VARIANT:
+                    continue
+                if (_underlying_of(vid) or "").strip().upper() == want:
+                    candidates.append(
+                        os.path.join(root, f"variant_{vid}", "backtesting.db"))
+        except Exception:  # noqa: BLE001
+            pass
+
     for c in candidates:
         if os.path.exists(c):
             return c
     return None
+
+
+def _sibling_market_dbs() -> list:
+    """Same-underlying databases OTHER than H's own, in taxonomy order.
+
+    Used only when H's own DB does not cover the requested day — the instrument
+    still has to match, so this never widens to "any DB with ticks".
+    """
+    sf = getattr(settings, f"variant_{_VARIANT}_state_file", None)
+    want = (_underlying_of(_VARIANT) or "").strip().upper()
+    if not sf or not want:
+        return []
+    root = os.path.dirname(os.path.dirname(str(sf)))
+    out = []
+    try:
+        import shared.strategy_taxonomy as tax
+        for vid in tax.available_ids():
+            if vid == _VARIANT:
+                continue
+            if (_underlying_of(vid) or "").strip().upper() == want:
+                p = os.path.join(root, f"variant_{vid}", "backtesting.db")
+                if os.path.exists(p):
+                    out.append(p)
+    except Exception:  # noqa: BLE001
+        pass
+    return out
 
 
 @router.get("/status")
@@ -82,10 +146,24 @@ def long_strangle_status(date: str = Query(default="")):
     dry-run-locked variant that is not installed, is the normal case.
     """
     out = read_ls_status(_db_path(), date=date)
-    # The session's SPX path, so the page can draw the expected-move band and
-    # answer "did it move enough?" — including on days H declined to enter.
+    # The session's underlying path, so the page can draw the expected-move band
+    # and answer "did it move enough?" — including on days H declined to enter.
     if isinstance(out, dict) and out.get("date"):
-        out["spx_path"] = read_spx_path(_market_db(), out["date"])
+        day = out["date"]
+        # H's own DB is the right instrument by construction but may not cover
+        # the day (it only starts when the variant was installed). Take the
+        # symbol-matched fallback when its coverage is too thin to draw.
+        path = read_spx_path(_market_db(), day)
+        if len(path) < 2:
+            for alt in _sibling_market_dbs():
+                path = read_spx_path(alt, day)
+                if len(path) >= 2:
+                    break
+        out["spx_path"] = path
+        # The SYMBOL, so the page stops calling everything SPX. Without it the
+        # axis, the tooltip and the prose all assert an instrument the strategy
+        # no longer trades.
+        out["underlying_symbol"] = _underlying_of(_VARIANT)
     return out
 
 

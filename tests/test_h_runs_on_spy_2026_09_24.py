@@ -115,20 +115,58 @@ class TestTheSourcesOwnSizingRuleNowBehavesAsDescribed:
     SPY_DEBIT = 113.0      # 0.1483% of 765 -> $1.13/share -> $113/contract
     SPX_DEBIT = 775.0      # measured by the RTH probe at SPX 7724
 
+    #: The SPX-era limit, as a literal: it is history, not current config. It
+    #: was chosen so exactly one $775 SPX contract was affordable, and reading
+    #: it from the live config would make this test silently follow any later
+    #: change and stop documenting what happened.
+    SPX_ERA_LIMIT = 1200
+
     def test_on_SPX_his_rule_bought_one_contract(self):
-        assert size_for_zero(LS["sizing_for_zero_max_loss"], self.SPX_DEBIT) == 1
+        assert size_for_zero(self.SPX_ERA_LIMIT, self.SPX_DEBIT) == 1
 
     def test_on_SPX_the_ORIGINAL_500_limit_bought_NONE(self):
         """The empty-dataset bug, preserved as the argument for the switch."""
         assert size_for_zero(500, self.SPX_DEBIT) == 0
 
-    def test_on_SPY_the_same_limit_buys_about_ten(self):
-        """Which is how the source describes his own rule working."""
-        assert size_for_zero(LS["sizing_for_zero_max_loss"], self.SPY_DEBIT) == 10
+    def test_on_SPY_a_realistic_limit_buys_a_position_at_all(self):
+        """The point of the switch: his rule stops returning zero."""
+        assert size_for_zero(LS["sizing_for_zero_max_loss"], self.SPY_DEBIT) >= 1
 
     def test_even_a_small_limit_buys_a_position_on_SPY(self):
         """No limit a real person would choose silently produces nothing."""
         assert size_for_zero(500, self.SPY_DEBIT) >= 4
+
+    def test_THE_EFFECTIVE_COUNT_IS_ONE_not_what_the_rule_alone_says(self):
+        """**The correction.** `size_for_zero` is only the first of three terms —
+        `contracts_per_entry` and `max_contracts_per_order` are applied as a MIN
+        afterwards, and `contracts_per_entry: 1` is what actually determines the
+        position. Reporting the rule's raw output as "H buys ~10 contracts" was
+        wrong about the behaviour, and this pins the number that is real.
+
+        Replicates `_size_for_zero`'s final line rather than trusting it."""
+        rule = size_for_zero(LS["sizing_for_zero_max_loss"], self.SPY_DEBIT)
+        caps = [int(CFG["contracts_per_entry"]), int(CFG["max_contracts_per_order"])]
+        assert max(min(rule, *caps), 0) == 1
+
+    def test_the_limit_AGREES_with_the_cap_rather_than_being_rescued_by_it(self):
+        """A loss limit far looser than the cap that binds is a trap: raise
+        `contracts_per_entry` later and the position jumps by a factor nobody
+        chose. The two knobs must land on the same answer on their own."""
+        rule = size_for_zero(LS["sizing_for_zero_max_loss"], self.SPY_DEBIT)
+        assert rule <= int(CFG["contracts_per_entry"]) * 2, (
+            f"the loss limit alone authorises {rule} contracts while the cap "
+            f"allows {CFG['contracts_per_entry']} — they should agree")
+
+    def test_the_count_carries_no_information_while_measuring(self):
+        """Why 1 is the right starting size, stated as the invariant it rests
+        on: H is judged in percent-of-debit, and a percentage is invariant to
+        the contract count. Ten contracts would teach us exactly nothing more,
+        and would inflate phantom dry-run dollars that can be mistaken for
+        something real."""
+        for n in (1, 2, 10):
+            debit, intrinsic = self.SPY_DEBIT * n, 170.0 * n
+            assert (intrinsic - debit) / debit == pytest.approx(
+                (170.0 - self.SPY_DEBIT) / self.SPY_DEBIT)
 
     def test_the_cost_cap_ported_without_being_touched(self):
         """It is expressed relative to SPOT, so his ~$1.15/share SPY cap and the
