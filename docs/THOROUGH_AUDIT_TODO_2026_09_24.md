@@ -23,19 +23,19 @@ forced it.
 
 | # | Page | Status |
 |---|---|---|
-| B1 | **H** — `/long-strangle` (re-verify after the SPY switch) | ☐ |
-| B2 | **D** — `/dc` + its dashboard view | ☐ |
-| B3 | **E** — its dashboard view + the calendar comparison | ☐ |
-| B4 | **F** — its dashboard view | ☐ |
-| B5 | **G** — its dashboard view (undefined-risk renderer) | ☐ |
+| B1 | **H** | ✅ Re-verified: symbol-aware chart, widest-breach verdict, settlement vs mid-session copy, dry-run LOCKED label. Plus the new range-expansion reading is recorded on the entry. |
+| B2 | **D** | ✅ Audited. Copy is D-native (transform credit, risk-free, wings) and correct for D. |
+| B3 | **E** | 🔴 **FOUND + FIXED.** The shared calendar page rendered `Transformed: 0` / `Risk-Free: 0` at E permanently — D's concepts, which E has no code for. A zero reads as FAILING at something rather than not attempting it. Now capability-gated, with E's actual model named in the slot. Also fixed the D-vs-E comparison caption (different windows). |
+| B4 | **F** | 🔴 **FOUND + FIXED** (FOMC banner read the primary seat's policy). Event-triggered schedule renders correctly; one-sided rendering previously addressed. |
+| B5 | **G** | 🔴 **FOUND + FIXED** (same FOMC banner defect — worst here, as G is the undefined-risk naked strangle that trades announcement days). `UndefinedRiskCard` correctly wired via `capital_basis.boundedLoss`. |
 
 ## C. Re-verify what I claimed closed
 
 | # | Item | Status |
 |---|---|---|
-| C1 | Every fidelity change actually live on the VM (not just committed) | ☐ |
-| C2 | The six audit items, re-checked rather than trusted | ☐ |
-| C3 | Nothing I changed today broke a neighbour (full suite + a deliberate look at what my edits touched) | ☐ |
+| C1 | VM state | ✅ Verified after each deploy: configs read back from `/opt/calypso`, services active, zero errors, `git status` clean. |
+| C2 | The six items | ✅ Re-checked; all closed. A3 turned out to have been faithful all along. |
+| C3 | Collateral damage | ⚠️ **Two found and fixed, both mine.** A test file that mutated `CalendarEntry` globally (broke four unrelated tests by import order), and a `_metrics_epoch_date` attribute read that silently disabled the entire metrics self-heal. Full suite 4,940 green. |
 
 
 ---

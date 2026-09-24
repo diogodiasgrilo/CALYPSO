@@ -217,6 +217,8 @@ export interface StrategySnapshot {
    * would each have claimed "All entries skipped" while trading through it.
    */
   fomc_policy?: { announcement_skip: boolean; t1_skip: boolean } | null;
+  /** D transforms to a risk-free condor; E never does. They share a page. */
+  transforms_to_condor?: boolean | null;
   body: SnapshotBody;
 }
 

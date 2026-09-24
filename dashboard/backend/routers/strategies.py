@@ -347,6 +347,7 @@ def _header_chrome(vid: str, m: tax.StrategyMeta) -> dict:
     underlying: Optional[str] = None
     epoch: Optional[str] = None
     fomc: Optional[dict] = None
+    transforms: Optional[bool] = None
     label = getattr(settings, f"variant_{vid}_label", None) or m.display_name
     if cfg_path is not None:
         try:
@@ -361,6 +362,12 @@ def _header_chrome(vid: str, m: tax.StrategyMeta) -> dict:
             # PRIMARY seat's flags for every selection, so on an announcement
             # day D/E/F/G/H would all have claimed "All entries skipped" while
             # actually trading through it — B skips, they do not.
+            # Does this variant transform into a risk-free condor? D does and
+            # E does not, and they share one page — without this, E renders
+            # "Transformed: 0 / Risk-Free: 0" forever, which reads as failing
+            # at something it structurally never attempts.
+            transforms = s.get("transforms_to_condor")
+            transforms = None if transforms is None else bool(transforms)
             fomc = {
                 "announcement_skip": bool(s.get("fomc_announcement_skip", False)),
                 "t1_skip": bool(s.get("fomc_t1_skip_enabled", False)),
@@ -374,6 +381,7 @@ def _header_chrome(vid: str, m: tax.StrategyMeta) -> dict:
         "underlying_symbol": underlying,
         "metrics_epoch_date": epoch,
         "fomc_policy": fomc,
+        "transforms_to_condor": transforms,
     }
 
 

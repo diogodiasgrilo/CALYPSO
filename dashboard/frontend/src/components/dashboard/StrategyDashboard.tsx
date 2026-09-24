@@ -80,6 +80,7 @@ export function StrategyDashboard() {
         body={snapshot.body as DCSnapshotBody}
         displayName={snapshot.display_name}
         dryRun={snapshot.dry_run}
+        transforms={snapshot.transforms_to_condor}
       />
     );
   }

@@ -152,6 +152,12 @@ function OutcomesTable({ outcomes }: { outcomes: DCRecentOutcome[] }) {
 }
 
 interface CalendarDashboardProps {
+  /**
+   * Does this variant transform to a risk-free condor? D does, E does not,
+   * and they share this page. `undefined` keeps the historical behaviour
+   * (show the metrics) so an older payload is unchanged.
+   */
+  transforms?: boolean | null;
   body: DCSnapshotBody;
   /** Human label from the snapshot envelope (display_name / label). */
   displayName: string;
@@ -159,7 +165,12 @@ interface CalendarDashboardProps {
   dryRun: boolean | null;
 }
 
-export function CalendarDashboard({ body, displayName, dryRun }: CalendarDashboardProps) {
+export function CalendarDashboard({
+  body,
+  displayName,
+  dryRun,
+  transforms,
+}: CalendarDashboardProps) {
   if (!body.available) {
     return (
       <div className="p-6 text-text-secondary">
@@ -197,16 +208,37 @@ export function CalendarDashboard({ body, displayName, dryRun }: CalendarDashboa
         <div className="rounded border border-border-dim bg-card p-3">
           <Metric label="Open Calendars" value={String(s.open_count)} />
         </div>
-        <div className="rounded border border-border-dim bg-card p-3">
-          <Metric label="Transformed" value={String(s.transformed_count)} />
-        </div>
-        <div className="rounded border border-border-dim bg-card p-3">
-          <Metric
-            label="Risk-Free"
-            value={String(s.risk_free_count)}
-            color={s.risk_free_count > 0 ? colors.profit : undefined}
-          />
-        </div>
+        {/* TRANSFORM METRICS ARE D's CONCEPTS. E never transforms — there is
+            no transform code in it at all — so rendering a permanent
+            "Transformed: 0 / Risk-Free: 0" at E reads as failing at something
+            rather than as not having the concept. Same reasoning that gave H
+            its own page instead of folding it into the iron-condor view. */}
+        {transforms !== false ? (
+          <>
+            <div className="rounded border border-border-dim bg-card p-3">
+              <Metric label="Transformed" value={String(s.transformed_count)} />
+            </div>
+            <div className="rounded border border-border-dim bg-card p-3">
+              <Metric
+                label="Risk-Free"
+                value={String(s.risk_free_count)}
+                color={s.risk_free_count > 0 ? colors.profit : undefined}
+              />
+            </div>
+          </>
+        ) : (
+          <div className="rounded border border-border-dim bg-card p-3 col-span-2">
+            <div className="text-3xs uppercase tracking-wide text-text-dim">
+              Management
+            </div>
+            <div className="text-sm text-text-secondary mt-0.5">
+              Laddered profit-taking + time exit
+            </div>
+            <div className="text-3xs text-text-dim mt-0.5">
+              This strategy does not transform to a condor
+            </div>
+          </div>
+        )}
         <div className="rounded border border-border-dim bg-card p-3">
           <Metric
             label="Recent Realized P&L"
