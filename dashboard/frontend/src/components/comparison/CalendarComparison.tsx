@@ -29,6 +29,24 @@ import type {
 } from "../../hooks/useStrategySnapshot";
 
 // ── Payload shapes (debit-native; mirror strategies.py _calendar_group_*) ──
+/** "since D 2026-07-11 · E 2026-09-24", plus a warning when the windows differ.
+ *
+ * Two "lifetime" figures measured over different windows are not comparable, and
+ * the difference is invisible in the numbers themselves. When every variant
+ * shares a baseline this is a quiet one-line caption; when they do not, it says
+ * so, because that is the case where a reader would otherwise draw a false
+ * conclusion from a bigger number.
+ */
+function spanCaption(baselines: Record<string, string>): string {
+  const parts = Object.entries(baselines).filter(([, d]) => d);
+  if (parts.length === 0) return "";
+  const distinct = new Set(parts.map(([, d]) => d));
+  const list = parts.map(([id, d]) => `${id} ${d}`).join(" · ");
+  return distinct.size > 1
+    ? `⚠ different windows — ${list} (not like-for-like)`
+    : `since ${parts[0][1]}`;
+}
+
 interface CalendarLifetime {
   cumulative_pnl?: number;
   capital_at_risk?: number;
@@ -63,7 +81,19 @@ export interface CalendarComparisonPayload {
   baseline_id: string | null;
   member_ids: string[];
   calendars: {
-    leaderboard: { winner: string; scores: Record<string, number>; basis: string };
+    leaderboard: {
+      winner: string;
+      scores: Record<string, number>;
+      basis: string;
+      /**
+       * Per-variant rebase date. The backend has sent these all along with the
+       * comment "so the UI can caption 'since <date>'" — and nothing read them,
+       * so two lifetime figures could be compared over completely different
+       * windows with no indication. It became load-bearing on 2026-09-24 when E's
+       * record was restarted at its fidelity cutover: D spans months, E spans days.
+       */
+      baselines?: Record<string, string>;
+    };
     members: Record<string, CalendarMember>;
   };
 }
@@ -293,6 +323,13 @@ export function CalendarComparison({
             <div className="text-xs uppercase tracking-wide text-text-secondary">
               Leader <span className="text-text-dim normal-case">(lifetime realized P&L)</span>
             </div>
+            {/* The windows these lifetimes actually cover. Without this the
+                comparison silently reads as like-for-like when it is not. */}
+            {lb.baselines && Object.keys(lb.baselines).length > 0 && (
+              <div className="text-3xs text-text-dim mt-0.5">
+                {spanCaption(lb.baselines)}
+              </div>
+            )}
             <div className="text-2xl font-semibold mt-1" style={{ color: winnerColor }}>
               {winnerLabel}
             </div>
