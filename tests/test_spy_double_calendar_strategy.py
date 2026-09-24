@@ -95,6 +95,14 @@ def _strat(ladder=None, time_exit=2, em_fraction=1.0, max_vix=22.0):
     s.spy_dc_long_gap_tolerance = 3
     s.spy_dc_em_fraction = em_fraction
     s.spy_dc_max_vix_entry = max_vix
+    # Gate knobs the real __init__ sets. These tests predate the 2026-09-24
+    # percentile gate and pin the ABSOLUTE branch, which remains reachable
+    # via iv_gate_mode for an A/B; the percentile branch is covered in
+    # tests/test_source_fidelity_fixes_2026_09_24.py.
+    s.spy_dc_iv_gate_mode = "absolute"
+    s.spy_dc_iv_pct_max = 35.0
+    s.spy_dc_iv_lookback = 252
+    s.spy_dc_iv_min_history = 60
     s.spy_dc_profit_ladder = sorted(
         ladder or [
             {"ror": 0.20, "frac": 0.25},

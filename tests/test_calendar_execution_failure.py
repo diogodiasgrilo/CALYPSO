@@ -58,6 +58,12 @@ def _e_strat():
     s.spy_dc_max_concurrent = 1
     s.spy_dc_max_deployed_debit = 0.0
     s.spy_dc_max_vix_entry = 30.0  # current_vix=17.5 must pass under this
+    # Gate knobs the real __init__ sets; absolute mode keeps this fixture
+    # about execution failure rather than about volatility history.
+    s.spy_dc_iv_gate_mode = "absolute"
+    s.spy_dc_iv_pct_max = 35.0
+    s.spy_dc_iv_lookback = 252
+    s.spy_dc_iv_min_history = 60
     return s
 
 

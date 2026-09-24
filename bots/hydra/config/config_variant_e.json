@@ -16,13 +16,19 @@
     "strike_increment": 1,
     "_comment_spy_double_calendar": "Strategy-E-specific knobs (consumed by SpyDoubleCalendarStrategy). Short leg ~35 DTE (\u00b1 tolerance), long leg = short + ~7 days (\u00b1 tolerance), same strike per leg. Strikes are expected-move based: call \u2248 spot + em_fraction\u00d7EM, put \u2248 spot \u2212 em_fraction\u00d7EM (em_fraction 1.0 = \u00b11 SD). Low-IV entry gate: enter only when VIX <= max_vix_entry (a proxy \u2014 true IV-rank vs a 1-yr median is a go-live refinement). Management: laddered profit-taking (close a cumulative share of the original contracts as the return-on-risk crosses each rung), plus a trading-day time-exit that closes ALL remaining contracts within time_exit_days_before trading days of the short expiry (never hold through expiry). NO hard stop.",
     "spy_double_calendar": {
-      "_comment_dry_run_fill_model": "0.5 = half-spread, MATCHING variant D (2026-09-07). Before this, E had NO fill-model key anywhere, so it fell through to the code default of 1.0 (full touch) while D ran at 0.5 — meaning the two members of the calendar_multiday comparability group were simulated under DIFFERENT cost assumptions, which made the D-vs-E head-to-head (the entire point of the group) invalid. Neither 0.5 nor 1.0 has ever been validated against a real fill; the value is chosen for CONSISTENCY, not accuracy. Schema v2 now records each mark at mid AND full touch, so this choice is re-derivable offline by interpolation rather than baked into the record.",
+      "_comment_dry_run_fill_model": "0.5 = half-spread, MATCHING variant D (2026-09-07). Before this, E had NO fill-model key anywhere, so it fell through to the code default of 1.0 (full touch) while D ran at 0.5 \u2014 meaning the two members of the calendar_multiday comparability group were simulated under DIFFERENT cost assumptions, which made the D-vs-E head-to-head (the entire point of the group) invalid. Neither 0.5 nor 1.0 has ever been validated against a real fill; the value is chosen for CONSISTENCY, not accuracy. Schema v2 now records each mark at mid AND full touch, so this choice is re-derivable offline by interpolation rather than baked into the record.",
       "dry_run_fill_model": 0.5,
       "short_dte_target": 35,
       "short_dte_tolerance": 5,
       "long_gap_days": 7,
       "long_gap_tolerance": 3,
       "em_fraction": 1.0,
+      "_comment_iv_gate": "SOURCE-FAITHFUL low-IV gate, 2026-09-24. The video states a RELATIVE condition \u2014 enter 'when the implied volatility is at the LOWER END OF THE SPECTRUM' \u2014 and an absolute VIX cutoff is a different statement: VIX 18 is roughly the 90th percentile of a calm year and the 20th of a volatile one, so a fixed number silently changes meaning with the regime. Now a VIX PERCENTILE, sharing H's machinery (bots/hydra/iv_percentile.py) so the two variants cannot drift on arithmetic. Fails CLOSED below the sample floor, exactly as H does. \u26a0\ufe0f Recorded everywhere as a VIX percentile, NEVER an 'IV percentile': IBKR exposes no per-option IV (2026-09-23 probe), so this is a proxy \u2014 a good one for an S&P-tracking underlying, and still a proxy. Set iv_gate_mode='absolute' to restore max_vix_entry for an A/B.",
+      "iv_gate_mode": "percentile",
+      "iv_percentile_max": 35.0,
+      "iv_percentile_lookback_days": 252,
+      "iv_percentile_min_history_days": 60,
+      "_comment_max_vix_entry": "The pre-2026-09-24 absolute gate. INERT while iv_gate_mode='percentile'; kept so the old behaviour is one value away for a comparison.",
       "max_vix_entry": 22.0,
       "profit_ladder": [
         {
@@ -46,7 +52,8 @@
       "max_concurrent": 1,
       "max_deployed_debit": 5000.0,
       "require_realtime_quotes": false,
-      "entry_time_et": "10:00"
+      "entry_time_et": "10:00",
+      "_comment_em_fraction_provenance": "\u26a0\ufe0f OURS, NOT THE VIDEO'S. The source explains SINGLE calendars in full (35 DTE front, ~1 week gap, ATM for neutral / above-market for bullish / below for bearish) and then introduces the DOUBLE calendar with 'This is my ultimate strategy... if you want to learn this strategy in depth, you can learn it in my coaching program.' It gives no strike distance and no exit rule for the double. So em_fraction (\u00b11.0\u00d7EM) and profit_ladder are OUR inventions, reasoned from the single-calendar explanation, and must not be described as the source's. What IS the source's: SPY, the structure (a call calendar + a put calendar combined), 35 DTE front, ~1 week gap, low-IV entry, and exiting before expiry."
     },
     "entry_times": [
       "10:00"

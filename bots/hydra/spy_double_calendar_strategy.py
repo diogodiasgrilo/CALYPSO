@@ -1,7 +1,31 @@
 """SpyDoubleCalendarStrategy — "SPY Double Calendar" (Strategy E), dry-run-LOCKED.
 
 Source strategy: an OptionsKit "calendar / double calendar" video (YouTube
-GuI-hH_jhlg) — the creator's "ultimate strategy" (>80% win rate). Open a SPY
+GuI-hH_jhlg). Transcript committed at
+``docs/sources/E_optionskit_GuI-hH_jhlg_transcript.txt``.
+
+⚠️ WHAT THE SOURCE DOES AND DOES NOT GIVE US (audited 2026-09-24).
+The video teaches SINGLE calendars completely, then introduces the double
+calendar — the structure E actually trades — with: *"This is my ultimate
+strategy. With this strategy, I have well over 80% win rate... **if you want to
+learn this strategy in depth, you can learn it in my coaching program.**"* It
+then moves on. So the detailed rules for the double are WITHHELD behind a paid
+program, and this docstring used to quote that ">80% win rate" as though it were
+a measured property of the strategy. It is a sales claim for a course, it was
+never verified, and it has been removed.
+
+FROM THE SOURCE: SPY · the structure (a call calendar + a put calendar combined
+in one trade) · ~35 DTE short leg · long leg ~1 week further out at the SAME
+strike · strike placement by directional intent (ATM = neutral, above = bullish,
+below = bearish) · enter when IV is at "the lower end of the spectrum" · exit
+BEFORE expiry (American assignment).
+
+OURS, and labelled as such rather than implied to be his: the ±1.0×EM strike
+distance (``em_fraction``) and the laddered profit-taking (``profit_ladder``).
+The source gives neither for the double calendar. They are reasoned from the
+single-calendar explanation and must justify themselves on E's own record.
+
+Open a SPY
 **double calendar** for a net DEBIT: a CALL calendar ABOVE spot + a PUT calendar
 BELOW spot. Each leg sells a near-dated option and buys a longer-dated option at
 the SAME strike. Unlike Strategy D (the "DC Time Machine"), E does NOT transform
@@ -10,8 +34,9 @@ into a risk-free iron condor — it is a MANAGED double calendar:
   * Strikes are EXPECTED-MOVE based: call strike ≈ spot + em_fraction×EM,
     put strike ≈ spot − em_fraction×EM (em_fraction 1.0 = ±1 standard deviation).
   * Expiries: short leg ~35 DTE; long leg = short + ~1 week (same strike per leg).
-  * Entry only in LOW IV (a proxy gate on VIX, since we have no IV-rank history) —
-    calendars are positive vega and want IV to mean-revert UP.
+  * Entry only in LOW IV — the source's own condition, "the lower end of the
+    spectrum", implemented as a VIX PERCENTILE (not an absolute cutoff) since
+    2026-09-24. Calendars are positive vega and want IV to mean-revert UP.
   * Management is LADDERED early profit-taking (scale out across contracts as the
     return-on-risk rises) plus a TRADING-day TIME-EXIT before the short expiry.
     There is NO hard stop — the defined risk IS the debit paid.
@@ -44,8 +69,11 @@ GO-LIVE GATES (NOT a dry-run concern — documented so they are not forgotten):
     the short near leg (esp. around ex-dividend for calls) must be handled before the
     short expiry — the time-exit ("never hold through expiry") is the first line of
     defense, but a real-order path needs explicit assignment + dividend handling.
-  * True IV-RANK (vs a 1-yr median) is the correct low-IV gate. The VIX-threshold
-    gate here is a dry-run proxy; a go-live refinement needs an IV-history source.
+  * The low-IV gate is a VIX PERCENTILE over prior daily closes (2026-09-24).
+    That is the right SHAPE — the source's condition is relative — but VIX is
+    still a 30-day index vol standing in for per-option IV, which IBKR does not
+    expose at all (2026-09-23 probe). Recorded as a VIX percentile everywhere so
+    it is never promoted to an option-IV percentile.
 In dry_run (the only mode this class permits) E places ZERO real orders.
 """
 
@@ -65,6 +93,8 @@ from bots.hydra.calendar_chain import (
     trading_days_until,
 )
 from bots.hydra.calendar_strategy_base import CalendarStrategyBase
+from bots.hydra.iv_percentile import iv_percentile_with_n, vix_history_from_db
+from bots.hydra.strategy import DATA_DIR, HYDRA_VARIANT_ID
 from bots.hydra.strategy import HydraStrategy  # noqa: F401  (re-exported for back-compat)
 from shared.market_hours import get_us_market_time
 
@@ -141,6 +171,17 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
         self.spy_dc_long_gap_tolerance = int(e.get("long_gap_tolerance", 3))
         self.spy_dc_em_fraction = float(e.get("em_fraction", 1.0))
         self.spy_dc_max_vix_entry = float(e.get("max_vix_entry", 22.0))
+        # SOURCE-FAITHFUL low-IV gate (2026-09-24). OptionsKit states a
+        # RELATIVE condition — enter "when the implied volatility is at the
+        # LOWER END OF THE SPECTRUM" — and an absolute VIX cutoff is not
+        # that: VIX 18 is roughly the 90th percentile in a calm year and the
+        # 20th in a volatile one, so a fixed number means something
+        # different every season. Shares H's percentile machinery, sample
+        # floor included, so the two variants cannot disagree on arithmetic.
+        self.spy_dc_iv_gate_mode = str(e.get("iv_gate_mode", "percentile")).lower()
+        self.spy_dc_iv_pct_max = float(e.get("iv_percentile_max", 35.0))
+        self.spy_dc_iv_lookback = int(e.get("iv_percentile_lookback_days", 252))
+        self.spy_dc_iv_min_history = int(e.get("iv_percentile_min_history_days", 60))
         # Laddered profit-taking: a list of {"ror": fraction, "frac": fraction}
         # steps. ``ror`` = unrealized_pnl / net_debit (return-on-risk). ``frac`` =
         # the share of the ORIGINAL contracts to have closed once that ror is met
@@ -420,6 +461,82 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
     # Pre-entry gates + entry (dry-run simulated)
     # ------------------------------------------------------------------
 
+    def _spy_dc_vix_history(self) -> list:
+        """Prior daily VIX closes, newest last. Read from the LIVE SEAT's DB.
+
+        VIX is market-wide, so it is read from whichever variant has recorded
+        longest rather than from E's own database — the same reasoning, and the
+        same bug, that H hit on its first live tick when its own brand-new DB was
+        empty and the filter skipped every entry.
+        """
+        root = os.path.dirname(DATA_DIR) if HYDRA_VARIANT_ID else DATA_DIR
+        candidates = []
+        try:
+            from shared import strategy_taxonomy as _tax
+            for vid in _tax.available_ids():
+                if _tax.STRATEGIES[vid].status == "live":
+                    candidates.append(
+                        os.path.join(root, f"variant_{vid}", "backtesting.db"))
+        except Exception as e:  # pragma: no cover - taxonomy always imports
+            logger.debug("[SPYDC] taxonomy lookup for VIX history failed: %s", e)
+        candidates.append(os.path.join(root, "backtesting.db"))
+        candidates.append(os.path.join(DATA_DIR, "backtesting.db"))
+
+        today = get_us_market_time().strftime("%Y-%m-%d")
+        for db in candidates:
+            hist = vix_history_from_db(db, today, self.spy_dc_iv_lookback)
+            if hist:
+                return hist
+        return []
+
+    def _spy_dc_low_iv_gate(self) -> Optional[str]:
+        """The source's entry condition, as a RELATIVE measure. Skip reason or None.
+
+        OptionsKit: *"it is best to enter a trade like this when the implied
+        volatility is at the **lower end of the spectrum** and we expect it to go
+        up during our trade duration."* Calendars are positive-vega, so the
+        rationale is real — the trade wants vol to expand after entry.
+
+        E gated on an ABSOLUTE ``VIX <= 22`` until 2026-09-24, which is a
+        different statement: VIX 18 is roughly the 90th percentile of a calm year
+        and the 20th of a volatile one, so a fixed cutoff silently changes
+        meaning with the regime. The percentile says what the source says.
+
+        ⚠️ Named a VIX percentile everywhere it is recorded, never an "IV
+        percentile": IBKR exposes no per-option IV (2026-09-23 probe), so this is
+        a proxy — a good one for an S&P-tracking underlying, and still a proxy.
+
+        ``iv_gate_mode: "absolute"`` restores the old cutoff for an A/B.
+        """
+        vix = float(self.current_vix or 0.0)
+        if vix <= 0:
+            return None                      # unknown vol is not a veto
+
+        if self.spy_dc_iv_gate_mode == "absolute":
+            if vix > self.spy_dc_max_vix_entry:
+                return (f"VIX {vix:.1f} > low-IV gate "
+                        f"{self.spy_dc_max_vix_entry:.1f} (calendars want low IV)")
+            return None
+
+        hist = self._spy_dc_vix_history()
+        pct, n = iv_percentile_with_n(vix, hist,
+                                      min_history=self.spy_dc_iv_min_history)
+        if pct is None:
+            # Fails CLOSED, exactly as H's does: an unknown percentile is not a
+            # pass. A gate that admits everything when it cannot measure is
+            # indistinguishable from a working one from the outside.
+            return (f"VIX-percentile proxy unavailable — {n} prior days, below "
+                    f"the {self.spy_dc_iv_min_history}-day minimum")
+        window = (f"{n}d" if n >= self.spy_dc_iv_lookback
+                  else f"{n}d of {self.spy_dc_iv_lookback}d requested")
+        if pct > self.spy_dc_iv_pct_max:
+            return (f"VIX-percentile proxy {pct:.0f}% > {self.spy_dc_iv_pct_max:.0f}% "
+                    f"max over {window} — source wants the LOWER END of the "
+                    f"spectrum (NOT an option-IV percentile)")
+        logger.info("[SPYDC] low-IV gate PASSED at %.0fth pct over %s (VIX %.2f)",
+                    pct, window, vix)
+        return None
+
     def _pre_entry_gates(self, entry_num: int) -> Optional[str]:
         """Minimal pre-entry gates: concurrent-calendar cap, per-variant BP budget,
         orphaned orders, market halt, buying power, and the LOW-IV entry gate
@@ -450,14 +567,11 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
                 )
         # LOW-IV entry gate: calendars are positive-vega; enter only when IV is at
         # the low end (VIX proxy — true IV-rank is a go-live refinement).
-        vix = self.current_vix
-        if vix and vix > self.spy_dc_max_vix_entry:
+        iv_skip = self._spy_dc_low_iv_gate()
+        if iv_skip:
             self.daily_state.entries_skipped += 1
             self._next_entry_index += 1
-            return (
-                f"Entry #{entry_num} skipped - VIX {vix:.1f} > low-IV gate "
-                f"{self.spy_dc_max_vix_entry:.1f} (calendars want low IV)"
-            )
+            return f"Entry #{entry_num} skipped - {iv_skip}"
         if self._has_orphaned_orders():
             self._next_entry_index += 1
             return f"Entry #{entry_num} skipped - orphaned orders blocking"

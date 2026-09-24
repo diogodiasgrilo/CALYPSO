@@ -72,6 +72,15 @@ Checked against it, D matches on every parameter that can be checked:
 
 ## E — the video withholds the strategy E implements 🔴
 
+> **CORRECTION (same day, after reading the transcript line by line).** The first
+> version of this section overstated the gap. E's *parameters* largely DO come
+> from the video: `short_dte_target: 35` is his *"35 days away"*, `long_gap_days:
+> 7` is his *"1 week away from the short date"*, `time_exit_days_before: 2`
+> honours his *"you always want to make sure that you exit your trade before the
+> expiration"*, and SPY and the structure are his. What is withheld is narrower
+> than "the strategy": the **strike distance** and the **exit ladder** for the
+> double. Those two are ours. The finding below stands; its scope was wrong.
+
 This is the audit's most consequential finding, and it is not a bug that can be fixed by editing
 a config value.
 
@@ -143,6 +152,8 @@ recorded in its config, which the 2026-09-23 audit already pinned.
 ---
 
 ## Open items
+
+**STATUS 2026-09-24: items 1–5 done.** E now gates on a VIX percentile with a sample floor and its docstring no longer quotes the coaching claim as a property; D stays ungated because Burnich specifies no IV condition, and that asymmetry is now deliberate and documented; F's band is `[0.10, 0.25]`; H's window is backfilled to a real 252 days. Remaining: E's P&L epoch reset + the dashboard surfacing it, and D's partial scale-out.
 
 | # | Item | Needs |
 |---|---|---|
