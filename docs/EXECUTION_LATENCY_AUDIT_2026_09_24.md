@@ -167,7 +167,7 @@ rank above most of it, because two are on the live seat.
 | A1 | ✅ **FIXED 2026-09-24.** **ORDER-010 accumulator drift.** Failed-entry unwind P&L books to the day aggregate but no entry: `total_realized_pnl` +$2,600 vs per-entry sum −$3,395, drift +$5,995. Same dual-accumulator class as the L-M3 double-book guard. | live seat |
 | A2 | **Cancel/fill race.** A partial cancelled at 5/7 filled 7 in flight; the escalation then bought 2 more → **9 bought where 7 intended**. Re-read the terminal `cum_fill` after a cancel instead of trusting the count observed at cancel time. | live seat |
 | A3 | **2 stranded long 7625 puts** from that race — owned by no entry, invisible to state. | live seat |
-| A4 | **F's `trade_stops.net_pnl` records the credit, not the P&L** ($167.50 vs $92.50). The documented KNOWN GAP: the DB row is written before the dry-run close-cost correction. Dry-run only, but HOMER/HERMES/CLIO and the Stops tab read that table. | F |
+| A4 | ✅ **FIXED 2026-09-24.** **F's `trade_stops.net_pnl` records the credit, not the P&L** ($167.50 vs $92.50). The documented KNOWN GAP: the DB row is written before the dry-run close-cost correction. Dry-run only, but HOMER/HERMES/CLIO and the Stops tab read that table. | F |
 
 ---
 

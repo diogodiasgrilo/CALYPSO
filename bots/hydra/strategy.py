@@ -3891,10 +3891,37 @@ class HydraStrategy(MEICStrategy):
                 # already set to "TP"/"BREACH" by the Brandon strategy before this.
                 _early_reason = {"TP": "take_profit", "BREACH": "gex_breach"}.get(
                     getattr(entry, "close_reason", None) or "", "early_close")
+                # A4 (2026-09-24): in DRY-RUN there is no fill, so
+                # side_close_cost arrives as 0 and this row records
+                # net_pnl = +credit — the full credit, as though the position
+                # closed for free. Measured on F that day: the row said $167.50
+                # where the true result was $92.50, a $75 overstatement, with
+                # the correct cost sitting in quoted_mid_at_stop on the SAME row.
+                #
+                # The callers (Ghauri's TP, Brandon's TP/breach) already correct
+                # the in-memory total by subtracting the pre-close MARK, but they
+                # run AFTER this write — the documented KNOWN GAP in
+                # _eod_flatten_dry_run_correct. Substitute the same mark here so
+                # the row is right at write time.
+                #
+                # ONLY the DB row: _book_early_close_side_pnl above keeps the raw
+                # side_close_cost, so each caller's own correction still applies
+                # exactly once. No-op on the live seat, where a real fill makes
+                # side_close_cost > 0.
+                _recorded_cost = side_close_cost
+                # getattr-defensive: this is the first line in this method
+                # to read `dry_run`, and callers exist that never set it. An
+                # unknown mode means "don't substitute" — i.e. keep today's
+                # behaviour — which is the conservative direction. (Same class
+                # as the 2026-09-24 _metrics_epoch_date attribute read.)
+                if getattr(self, "dry_run", False) and not side_close_cost:
+                    _mark = getattr(entry, f"{side_name}_spread_value", 0.0) or 0.0
+                    if _mark > 0:
+                        _recorded_cost = float(_mark)
                 self._record_stop_to_db(
                     entry, side_name,
                     getattr(entry, f"{side_name}_side_stop", None) or 0.0,
-                    side_close_cost,
+                    _recorded_cost,
                     exit_reason=_early_reason,
                 )
 

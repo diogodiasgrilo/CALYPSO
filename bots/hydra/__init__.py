@@ -36,6 +36,30 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-24 A4 — A DRY-RUN EARLY CLOSE NO LONGER RECORDS THE FULL CREDIT AS THE RESULT.
+  Found auditing every variant for the accounting class that bit B. F took a take-profit
+  at 12:24:17; its state was right and its DB row was not:
+      state realized_pnl            =  $92.50   (credit 167.50 - close 75.00)
+      trade_stops.net_pnl           = $167.50   <- the CREDIT, not the P&L
+      trade_stops.quoted_mid_at_stop =  $75.00  <- the cost, on the SAME row
+  In dry-run there is no fill, so `side_close_cost` reaches `_record_stop_to_db` as 0 and
+  it books `net_pnl = -(0 - credit)` — the full credit, as though the position closed for
+  free. The callers (Ghauri's TP, Brandon's TP/breach) already correct the in-memory
+  total by subtracting the pre-close MARK, but they run AFTER the write: the KNOWN GAP
+  the `_eod_flatten_dry_run_correct` docstring records.
+  * Substitute the same mark at the RECORD site only. `_book_early_close_side_pnl` keeps
+    the raw cost, so each caller's own correction still applies exactly once (tested as
+    a control — correcting both would double-subtract).
+  * No-op on the live seat: a real fill makes `side_close_cost > 0` (also a control).
+  * Dry-run-only by construction, but HOMER/HERMES/CLIO and the dashboard's
+    Analytics→Stops tab all read `trade_stops`, so every dry-run variant's recorded
+    history was overstating its take-profits.
+  * `dry_run` is read via getattr — it is the first line in this method to touch it and
+    callers exist that never set it. THREE EXISTING TESTS caught that, which is why the
+    full-suite gate runs on every change.
+  Tests: `tests/test_dryrun_early_close_db_row_2026_09_24.py` — drives the REAL
+  `_close_entry_early` (an earlier draft replayed the logic and asserted on the copy,
+  which would have stayed green against a gutted method). Full suite 5,074 passed.
 - 2026-09-24 B4 — PLACEMENT BUDGET: BOUND THE WINDOW WHERE THE LOOP IS BLIND.
   `_handle_monitoring` runs ONE stop check and then calls `_initiate_entry`, which
   blocks the single-threaded loop until every leg places or is abandoned;
