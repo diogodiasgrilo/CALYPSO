@@ -36,6 +36,32 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-24 B4 — PLACEMENT BUDGET: BOUND THE WINDOW WHERE THE LOOP IS BLIND.
+  `_handle_monitoring` runs ONE stop check and then calls `_initiate_entry`, which
+  blocks the single-threaded loop until every leg places or is abandoned;
+  `_check_stop_losses` is never called from inside the placement path. Measured on B
+  over 42 placements: **median 65s, p90 405s (6.8 min), max 558s (9.3 min)** — roughly
+  one entry in four blinds the bot for 5+ minutes.
+  * On 09-24 Entry #6 spent 3.7 minutes on a SINGLE leg (Put 7630) over five rungs that
+    filled nothing, because GUARD-FLOOR correctly refused to cross a price that would
+    have inverted the vertical. The entry failed anyway and was unwound — so the whole
+    8.2-minute blind window bought nothing, and it is what produced that day's stranded
+    contracts and the +$5,995 unattributed booking (see A1).
+  * `strategy.entry_placement_budget_s` (default 150s ≈ 2.3× the median, 0 disables).
+    Exceeding it stops ESCALATING to further rungs, which lands in the existing
+    "all rungs exhausted" path — that already flattens any accumulated partial and
+    fails the leg. A well-trodden route, not a new one.
+  * The FIRST rung of every leg always runs: refusing it would leave a leg unattempted
+    while its siblings are filled — manufacturing the naked-leg state the unwind exists
+    to prevent. Tested as a control.
+  * Gated on `_entry_in_progress` as well as the timestamp, so a deadline left over
+    from a finished entry can never abort the next one. Also tested as a control.
+  * WHY NOT INTERLEAVE STOP CHECKS INTO PLACEMENT (the obvious alternative): a stop
+    close fired mid-placement could land on a conid another leg is actively working,
+    and **74% of B's trading days have two entries sharing a strike** (84 occurrences
+    over 31 days; on 09-24 E#5 and E#6 both used conid 920688820). Those net at the
+    broker. The deadline bounds the same exposure with zero re-entrancy.
+  Tests: `tests/test_placement_budget_2026_09_24.py`. Full suite 5,068 passed.
 - 2026-09-24 B3 — AN EXIT NO LONGER INHERITS THE ENTRY FILL BUDGET. On 09-24 E#5's call
   side stopped; the short call was covered in 4s, then the long call — riskless by then,
   the short already bought back — was offered at a correctly-marketable price, sat the

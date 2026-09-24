@@ -2808,6 +2808,64 @@ class MEICStrategy(abc.ABC):
             round_up=True,
         )
 
+    # ---------------------------------------------------------------
+    # B4 (2026-09-24): bound the window in which the monitoring loop is BLIND.
+    #
+    # `_handle_monitoring` runs ONE stop check and then calls `_initiate_entry`,
+    # which blocks the single-threaded loop until every leg places or is
+    # abandoned. No stop check runs in between — `_check_stop_losses` is only
+    # ever called from the state machine. Measured on B over 42 placements:
+    #   median 65s | p90 405s (6.8 min) | max 558s (9.3 min)
+    # On 2026-09-24 Entry #6 spent 3.7 minutes on a SINGLE leg (Put 7630) across
+    # five rungs that filled nothing, because GUARD-FLOOR correctly refused to
+    # cross a price that would have inverted the vertical. The entry then failed
+    # anyway and was unwound — so the whole 8.2-minute blind window bought
+    # nothing, and it is what produced that day's stranded contracts and the
+    # +$5,995 unattributed booking.
+    #
+    # WHY A DEADLINE AND NOT AN INTERLEAVED STOP CHECK. Calling
+    # `_check_stop_losses` between legs would let a stop close fire at a conid
+    # another leg is actively working — and **74% of B's trading days have two
+    # entries sharing a strike** (84 occurrences over 31 days; on 09-24 E#5 and
+    # E#6 both used conid 920688820). Those net at the broker, which is exactly
+    # the merged-position confusion that made that day's accounting so hard to
+    # unpick. A deadline bounds the same exposure with no re-entrancy at all.
+    #
+    # Exceeding it stops ESCALATING to further rungs. That lands in the existing
+    # "all rungs exhausted" path, which already flattens any accumulated partial
+    # and fails the leg — a well-trodden route, not a new one.
+    #
+    # The default is deliberately loose (150s ≈ 2.3× the median placement) so it
+    # trims the tail without touching ordinary entries. Tune from the logged
+    # PLACEMENT-BUDGET lines. 0 disables it.
+    # ---------------------------------------------------------------
+    def _entry_placement_budget_s(self) -> float:
+        cfg = getattr(self, "strategy_config", None) or {}
+        try:
+            return float(cfg.get("entry_placement_budget_s", 150.0))
+        except (TypeError, ValueError, AttributeError):
+            return 150.0
+
+    def _begin_placement_window(self) -> None:
+        """Start (or restart) the placement budget. Called when an entry begins."""
+        budget = self._entry_placement_budget_s()
+        self._placement_deadline = (
+            time.monotonic() + budget if budget > 0 else None
+        )
+
+    def _placement_deadline_passed(self) -> bool:
+        """True only while an entry is actually in progress AND the budget is
+        spent. Gated on ``_entry_in_progress`` as well as the timestamp so a
+        deadline left over from a previous entry can never abort the next one."""
+        if not getattr(self, "_entry_in_progress", False):
+            return False
+        deadline = getattr(self, "_placement_deadline", None)
+        # `is None`, not falsiness: a deadline of exactly 0.0 is a real (already
+        # elapsed) timestamp, and `not deadline` would read it as "no budget".
+        if deadline is None:
+            return False
+        return time.monotonic() > deadline
+
     def _place_option_order(
         self,
         strike: float,
@@ -2995,6 +3053,21 @@ class MEICStrategy(abc.ABC):
             remaining = target_qty - filled_so_far
             if remaining <= 0:
                 break  # leg already whole (defensive — we return on completion)
+
+            # B4: stop escalating once the placement budget is spent. Only from
+            # the SECOND rung on — the first attempt of every leg always gets to
+            # run, so a budget that has already elapsed can never leave a leg
+            # unattempted while its siblings are filled.
+            if attempt > 0 and self._placement_deadline_passed():
+                logger.warning(
+                    "  PLACEMENT-BUDGET: %s stopping at rung %d/%d — the entry's "
+                    "%.0fs placement budget is spent and the monitoring loop has "
+                    "been blind since it started. Any accumulated partial is "
+                    "flattened below; the entry will be unwound.",
+                    leg_description, attempt + 1, len(PROGRESSIVE_RETRY_SEQUENCE),
+                    self._entry_placement_budget_s(),
+                )
+                break
             quote = self._read_option_quote(conid)
             if not quote:
                 logger.warning(
