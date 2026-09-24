@@ -40,7 +40,7 @@ def _dte(from_iso: Optional[str], to_iso: Optional[str]) -> Optional[int]:
 
 
 class DCDataRecorder:
-    SCHEMA_VERSION = 3
+    SCHEMA_VERSION = 4
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -102,15 +102,43 @@ class DCDataRecorder:
                     short_call_px REAL, short_put_px REAL,
                     mid_credit REAL, touch_credit REAL, fill_agg REAL
                 );
+                -- Entries the gates DECLINED, with the context to score the
+                -- decision later. Added v4 (2026-09-24): D and E recorded no
+                -- skips AT ALL, so a veto left no trace — the exact gap the GEX
+                -- work on variant B had to be retro-fitted for, and which cost
+                -- it its first 95 vetoes permanently. It matters more for E now
+                -- that its low-IV gate is a percentile that can actually veto:
+                -- without this, "E placed nothing today" and "E was vetoed
+                -- today" are indistinguishable in the record.
+                CREATE TABLE IF NOT EXISTS dc_skipped (
+                    date TEXT, strategy_id TEXT, entry_number INTEGER,
+                    skip_time TEXT, skip_reason TEXT,
+                    spx REAL, vix REAL,
+                    iv_percentile REAL, iv_percentile_n INTEGER
+                );
                 CREATE TABLE IF NOT EXISTS dc_schema_info (version INTEGER);
                 """
             )
+            # An existing DB predates dc_skipped; CREATE IF NOT EXISTS is a
+            # no-op on the FILE, not on a missing table, so this is sufficient
+            # for a pure ADDITION (unlike a new COLUMN, which needs ALTER).
             cur = self._conn.execute("SELECT version FROM dc_schema_info LIMIT 1")
             row = cur.fetchone()
             if row is None:
-                self._conn.execute("INSERT INTO dc_schema_info (version) VALUES (?)", (self.SCHEMA_VERSION,))
+                self._conn.execute("INSERT INTO dc_schema_info (version) VALUES (?)",
+                                   (self.SCHEMA_VERSION,))
             else:
+                # MIGRATE FIRST, THEN STAMP. A version bump added on 2026-09-24
+                # was written as an `elif row[0] != SCHEMA_VERSION` branch, which
+                # intercepted precisely the case migration exists for: an older
+                # database had its version stamped forward while _migrate never
+                # ran, silently skipping every ADD COLUMN and the dc_outcomes
+                # unique index. The suite caught it; in production it would have
+                # been a schema that claimed to be current and was not.
                 self._migrate(int(row[0]))
+                if int(row[0]) != self.SCHEMA_VERSION:
+                    self._conn.execute("UPDATE dc_schema_info SET version = ?",
+                                       (self.SCHEMA_VERSION,))
 
     def _migrate(self, from_version: int) -> None:
         """Additive-only migrations for an EXISTING dc_calendar.db.
@@ -334,4 +362,24 @@ class DCDataRecorder:
                 getattr(entry, "strategy_id", "") or None,
                 (getattr(entry, "strategy_id", "") or "")[5:13] or None,
             ),
+        )
+
+
+    def record_skip(self, date: str, strategy_id: str, entry_number: int,
+                    skip_time: str, skip_reason: str,
+                    spx: float = 0.0, vix: float = 0.0,
+                    iv_percentile: float = None,
+                    iv_percentile_n: int = None) -> None:
+        """A declined calendar entry, with enough context to score the veto.
+
+        Fire-and-forget like every other write here: a recording failure costs a
+        row, never a position.
+        """
+        self._exec(
+            """INSERT INTO dc_skipped
+               (date, strategy_id, entry_number, skip_time, skip_reason,
+                spx, vix, iv_percentile, iv_percentile_n)
+               VALUES (?,?,?,?,?,?,?,?,?)""",
+            (date, strategy_id, entry_number, skip_time, skip_reason,
+             spx, vix, iv_percentile, iv_percentile_n),
         )

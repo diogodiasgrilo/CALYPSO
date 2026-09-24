@@ -964,7 +964,7 @@ class LongStrangleStrategy(HydraStrategy):
                 em_source=getattr(entry, "ls_em_source", ""),
                 expected_move=getattr(entry, "ls_expected_move", 0.0),
                 iv_percentile=getattr(entry, "ls_iv_percentile", None),
-                iv_percentile_n=getattr(entry, "ls_iv_percentile_n", None),
+    iv_percentile_n=getattr(entry, "ls_iv_percentile_n", None),
                 skew_gap_pct=getattr(entry, "ls_skew_gap_pct", 0.0),
             )
         logger.info("LONGSTRANGLE entry #%d skipped - %s", entry_num, reason)
@@ -1089,6 +1089,7 @@ class LongStrangleStrategy(HydraStrategy):
             # outcomes — the admitted entries carried no IV at all.
             iv_percentile=getattr(entry, "ls_iv_percentile", None),
             iv_percentile_n=getattr(entry, "ls_iv_percentile_n", None),
+            range_expansion=getattr(entry, "ls_range_expansion", None),
         )
 
     # ==================================================================

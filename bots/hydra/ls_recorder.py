@@ -53,7 +53,7 @@ logger = logging.getLogger(__name__)
 class LongStrangleDataRecorder:
     """Isolated SQLite recorder for variant H. Never raises into the caller."""
 
-    SCHEMA_VERSION = 2
+    SCHEMA_VERSION = 3
 
     def __init__(self, db_path: str):
         self.db_path = db_path
@@ -97,6 +97,10 @@ class LongStrangleDataRecorder:
                     -- vetoed side was recorded and the admitted side was not, so
                     -- no later analysis could ask whether 35 was the right line.
                     iv_percentile REAL, iv_percentile_n INTEGER,
+                    -- What the range-expansion filter measured. Stored on
+                    -- PLACED entries too, or the filter can only ever be
+                    -- judged from the entries it rejected.
+                    range_expansion TEXT,
                     PRIMARY KEY (date, entry_number)
                 );
 
@@ -139,7 +143,8 @@ class LongStrangleDataRecorder:
                     -- How many prior days the percentile was computed over. A
                     -- bare percentile is uninterpretable: one year and three
                     -- days produce the same shape.
-                    iv_percentile_n INTEGER
+                    iv_percentile_n INTEGER,
+                    range_expansion TEXT
                 );
 
                 CREATE TABLE IF NOT EXISTS ls_schema_info (version INTEGER);
@@ -162,6 +167,12 @@ class LongStrangleDataRecorder:
     #: a FRESH database and never an existing one — H's was created 2026-09-23
     #: and already holds rows. Every addition must therefore be listed here too.
     _ADDED_COLUMNS = (
+        # v3: the range-expansion reading. Same lesson as iv_percentile in v2 —
+        # a filter whose decision is not stored cannot be scored later, and the
+        # asymmetry is worse than it looks: the SKIP reason string carries the
+        # detail, so only the days the filter PASSED would have been missing.
+        ("ls_entries", "range_expansion", "TEXT"),
+        ("ls_skipped", "range_expansion", "TEXT"),
         ("ls_entries", "iv_percentile", "REAL"),
         ("ls_entries", "iv_percentile_n", "INTEGER"),
         ("ls_skipped", "iv_percentile_n", "INTEGER"),
@@ -203,7 +214,8 @@ class LongStrangleDataRecorder:
                      vix_at_entry: float = 0.0, em_source: str = "",
                      expected_move: float = 0.0, skew_gap_pct: float = 0.0,
                      iv_percentile: float = None,
-                     iv_percentile_n: int = None) -> None:
+                     iv_percentile_n: int = None,
+                     range_expansion: str = None) -> None:
         """Persist an opened long strangle."""
         self._exec(
             """INSERT OR REPLACE INTO ls_entries
@@ -211,8 +223,8 @@ class LongStrangleDataRecorder:
                 call_strike, put_strike, call_debit, put_debit, total_debit, contracts,
                 long_call_uic, long_put_uic, em_source, expected_move,
                 call_premium_mid, put_premium_mid, skew_gap_pct,
-                iv_percentile, iv_percentile_n)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                iv_percentile, iv_percentile_n, range_expansion)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 date, entry.entry_number,
                 entry.entry_time.isoformat() if getattr(entry, "entry_time", None) else None,
@@ -223,7 +235,7 @@ class LongStrangleDataRecorder:
                 getattr(entry, "long_call_uic", None), getattr(entry, "long_put_uic", None),
                 em_source, expected_move,
                 getattr(entry, "long_call_price", None), getattr(entry, "long_put_price", None),
-                skew_gap_pct, iv_percentile, iv_percentile_n,
+                skew_gap_pct, iv_percentile, iv_percentile_n, range_expansion,
             ),
         )
 
@@ -270,7 +282,8 @@ class LongStrangleDataRecorder:
                     proposed_debit: float = 0.0, em_source: str = "",
                     expected_move: float = 0.0, iv_percentile: float = None,
                     skew_gap_pct: float = 0.0,
-                    iv_percentile_n: int = None) -> None:
+                    iv_percentile_n: int = None,
+                    range_expansion: str = None) -> None:
         """A declined entry, with enough context to score the decision later —
         the counterfactual the GEX work had to be retro-fitted for on variant B
         and could never recover for its first 95 vetoes."""
@@ -279,13 +292,13 @@ class LongStrangleDataRecorder:
                (date, entry_number, skip_time, skip_reason, spx, vix,
                 proposed_call_strike, proposed_put_strike, proposed_debit,
                 em_source, expected_move, iv_percentile, skew_gap_pct,
-                iv_percentile_n)
-               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+                iv_percentile_n, range_expansion)
+               VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
             (
                 date, entry_number, skip_time, skip_reason, spx, vix,
                 proposed_call_strike, proposed_put_strike, proposed_debit,
                 em_source, expected_move, iv_percentile, skew_gap_pct,
-                iv_percentile_n,
+                iv_percentile_n, range_expansion,
             ),
         )
 

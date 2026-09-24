@@ -177,7 +177,10 @@ class TestTheRecorderKeepsTheReadingAndItsSample:
         # "not measured then" must stay distinguishable from "measured as zero".
         assert con.execute(
             "SELECT iv_percentile, iv_percentile_n FROM ls_skipped").fetchone() == (11.9, None)
-        assert con.execute("SELECT version FROM ls_schema_info").fetchone()[0] == 2
+        assert (con.execute("SELECT version FROM ls_schema_info").fetchone()[0]
+                == LongStrangleDataRecorder.SCHEMA_VERSION), (
+            "derived, not a literal: a deliberate schema bump should not read "
+            "as a failure, while 'migrated to current' stays pinned")
 
     def test_the_migration_is_idempotent(self, tmp_path):
         db = str(tmp_path / "long_strangle.db")

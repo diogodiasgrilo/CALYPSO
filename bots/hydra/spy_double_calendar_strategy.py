@@ -521,6 +521,10 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
         hist = self._spy_dc_vix_history()
         pct, n = iv_percentile_with_n(vix, hist,
                                       min_history=self.spy_dc_iv_min_history)
+        # Kept so the skip ROW carries the measurement, not just the prose.
+        # A veto recorded only as a sentence cannot be scored against the
+        # outcome it avoided.
+        self._spy_dc_last_iv = (pct, n)
         if pct is None:
             # Fails CLOSED, exactly as H's does: an unknown percentile is not a
             # pass. A gate that admits everything when it cannot measure is
@@ -536,6 +540,36 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
         logger.info("[SPYDC] low-IV gate PASSED at %.0fth pct over %s (VIX %.2f)",
                     pct, window, vix)
         return None
+
+    def _spy_dc_record_skip(self, entry_num: int, reason: str) -> None:
+        """Persist a declined entry. Never raises into the entry path.
+
+        D and E recorded NO skips at all until 2026-09-24 — a veto left no
+        trace, so "placed nothing today" and "was vetoed today" were
+        indistinguishable in the record. That is the exact gap the GEX work on
+        variant B had to be retro-fitted for, and which cost it its first 95
+        vetoes permanently. It matters more now that E's low-IV gate is a
+        percentile that can actually veto.
+        """
+        rec = getattr(self, "_dc_recorder", None)
+        if rec is None or not hasattr(rec, "record_skip"):
+            return
+        pct, n = getattr(self, "_spy_dc_last_iv", (None, None))
+        try:
+            now = get_us_market_time()
+            rec.record_skip(
+                date=now.strftime("%Y-%m-%d"),
+                strategy_id=self.BOT_NAME,
+                entry_number=entry_num,
+                skip_time=now.strftime("%H:%M:%S"),
+                skip_reason=reason,
+                spx=float(getattr(self, "current_price", 0.0) or 0.0),
+                vix=float(getattr(self, "current_vix", 0.0) or 0.0),
+                iv_percentile=pct,
+                iv_percentile_n=n,
+            )
+        except Exception as e:  # noqa: BLE001 — recording must not block trading
+            logger.debug("[SPYDC] skip not recorded (non-fatal): %s", e)
 
     def _pre_entry_gates(self, entry_num: int) -> Optional[str]:
         """Minimal pre-entry gates: concurrent-calendar cap, per-variant BP budget,
@@ -573,6 +607,7 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
         if iv_skip:
             self.daily_state.entries_skipped += 1
             self._next_entry_index += 1
+            self._spy_dc_record_skip(entry_num, iv_skip)
             return f"Entry #{entry_num} skipped - {iv_skip}"
         if self._has_orphaned_orders():
             self._next_entry_index += 1
