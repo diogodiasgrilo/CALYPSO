@@ -191,3 +191,67 @@ class TestTheVersionBumpDidNotDisableTheMigrations:
         i_mig = src.index("self._migrate(int(row[0]))")
         i_stamp = src.index("UPDATE dc_schema_info SET version")
         assert i_mig < i_stamp, "stamping before migrating re-creates the bug"
+
+
+class TestHReadsTheBackfilledVixHistory:
+    """Caught LIVE, on H's first real entry (2026-09-24 09:45 ET).
+
+    The morning's work backfilled 446 VIX closes into a ``vix_daily`` table and
+    added ``vix_history_from_db`` to union it with ``market_ticks`` — and wired
+    **E** to it. H kept its own private ``market_ticks``-only SELECT, so the
+    backfill reached the variant it was NOT built for and missed the one it was.
+
+    H said so itself. The entry log read *"IV gate PASSED at 33th pct, but over
+    94 days not the 252 configured — this is a partial-window percentile"*, a
+    line added hours earlier precisely so a short window would announce itself.
+    It announced this instead.
+    """
+
+    def test_H_uses_the_shared_reader(self):
+        import inspect
+        from bots.hydra.long_strangle_strategy import LongStrangleStrategy
+        src = inspect.getsource(LongStrangleStrategy._vix_history_for_percentile)
+        assert "vix_history_from_db(" in src
+
+    def test_H_no_longer_runs_its_own_query(self):
+        """Two readers of one series drift apart — that is the whole defect."""
+        import inspect
+        from bots.hydra.long_strangle_strategy import LongStrangleStrategy
+        src = inspect.getsource(LongStrangleStrategy._vix_history_for_percentile)
+        assert "FROM market_ticks" not in src
+
+    def test_H_and_E_now_resolve_the_SAME_function(self):
+        import bots.hydra.long_strangle_strategy as h
+        import bots.hydra.spy_double_calendar_strategy as e
+        from bots.hydra import iv_percentile as shared
+        assert h.vix_history_from_db is shared.vix_history_from_db
+        assert e.vix_history_from_db is shared.vix_history_from_db
+
+    def test_the_backfilled_table_actually_widens_the_window(self, tmp_path):
+        """End to end: ticks alone give few days; ticks + vix_daily give many."""
+        import datetime as dt
+        from bots.hydra.iv_percentile import vix_history_from_db
+        db = tmp_path / "bt.db"
+        con = sqlite3.connect(db)
+        with con:
+            con.execute("CREATE TABLE market_ticks (timestamp TEXT, vix_level REAL)")
+            con.executemany("INSERT INTO market_ticks VALUES (?,?)", [
+                ((dt.date(2026, 5, 1) + dt.timedelta(days=i)).isoformat() + " 15:59:00", 15.0)
+                for i in range(94)])
+        assert len(vix_history_from_db(str(db), "2026-09-24", 252)) == 94
+        with con:
+            con.execute("CREATE TABLE vix_daily (date TEXT PRIMARY KEY, close REAL, source TEXT)")
+            con.executemany("INSERT INTO vix_daily VALUES (?,?,'yahoo')", [
+                ((dt.date(2025, 1, 2) + dt.timedelta(days=i)).isoformat(), 16.0)
+                for i in range(300)])
+        con.close()
+        assert len(vix_history_from_db(str(db), "2026-09-24", 252)) == 252
+
+    def test_the_other_methods_survived_the_edit(self):
+        """I clobbered several of these with a careless slice while making this
+        very fix; the restore is pinned so a re-slice cannot pass silently."""
+        from bots.hydra.long_strangle_strategy import LongStrangleStrategy
+        for meth in ("_daily_ranges", "_range_expansion_gate", "_snap_cap",
+                     "_iv_percentile_gate", "_vix_history_for_percentile",
+                     "_vix_history_db"):
+            assert hasattr(LongStrangleStrategy, meth), meth

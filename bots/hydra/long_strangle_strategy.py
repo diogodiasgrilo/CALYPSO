@@ -75,6 +75,7 @@ from bots.hydra.long_strangle_chain import (
     size_for_zero,
     snap_to_chain,
 )
+from bots.hydra.iv_percentile import vix_history_from_db
 from bots.hydra.long_strangle_entry import LongStrangleEntry
 from bots.hydra.ls_recorder import LongStrangleDataRecorder
 from bots.hydra.strategy import DATA_DIR, HYDRA_VARIANT_ID, HydraStrategy
@@ -674,34 +675,23 @@ class LongStrangleStrategy(HydraStrategy):
         one**, so the history is read from whichever variant has been recording
         longest. See ``_vix_history_db``.
         """
-        import sqlite3
         db = self._vix_history_db()
         if not db:
             return []
-        lookback = int(self._ls_config().get("iv_percentile_lookback_days", 252))
-        today = get_us_market_time().strftime("%Y-%m-%d")
-        try:
-            con = sqlite3.connect(f"file:{db}?mode=ro", uri=True, timeout=5)
-            try:
-                # One value per PRIOR day: today's own ticks would rank the
-                # current reading against itself and drag the percentile toward
-                # the middle on every tick.
-                rows = con.execute(
-                    "SELECT vix_level FROM ("
-                    "  SELECT date(timestamp) AS d, vix_level,"
-                    "         ROW_NUMBER() OVER (PARTITION BY date(timestamp)"
-                    "                            ORDER BY timestamp DESC) AS rn"
-                    "  FROM market_ticks WHERE vix_level > 0 AND date(timestamp) < ?"
-                    ") WHERE rn = 1 ORDER BY d DESC LIMIT ?",
-                    (today, lookback),
-                ).fetchall()
-                return [float(r[0]) for r in reversed(rows) if r and r[0]]
-            finally:
-                con.close()
-        except Exception as e:          # noqa: BLE001 — a filter must not break entry
-            logger.warning("LS: VIX history unavailable for the IV percentile: %s", e)
-            return []
-
+        # THE SHARED READER, not a private query. This method ran its own
+        # market_ticks-only SELECT until 2026-09-24, so the VIX backfill
+        # (scripts/backfill_vix_history.py, which fills the vix_daily table)
+        # reached variant E and NOT H — the variant it was built for. H kept
+        # ranking against ~94 recorded days while its config asked for 252.
+        #
+        # Caught LIVE, by H's own log line "over 94 days not the 252 configured"
+        # on the first real entry of its life. That line exists so a partial
+        # window announces itself; it announced this instead.
+        return vix_history_from_db(
+            db,
+            get_us_market_time().strftime("%Y-%m-%d"),
+            int(self._ls_config().get("iv_percentile_lookback_days", 252)),
+        )
     def _vix_history_db(self) -> Optional[str]:
         """Which ``backtesting.db`` to read VIX history from.
 
