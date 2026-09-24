@@ -2752,14 +2752,19 @@ class BrandonHydraStrategy(HydraStrategy):
         # that causes the condition, so the scalar failed precisely when it was
         # needed. Falls back to the old derivation only when the accumulator is
         # absent (an entry object built before this field existed).
+        # EXTEND the base component (2026-09-24), never replace it: the base
+        # now carries failed-entry unwind P&L (ORDER-010). Returning only the
+        # Brandon part would re-open the exact under-attribution this guard
+        # exists to catch — on the live seat, which is where it fired.
+        base = super()._unattributed_overlay_pnl()
         stored = getattr(self, "_brandon_unattributed_overlay", None)
         if stored is not None:
-            return float(stored)
+            return base + float(stored)
         settlements = getattr(self, "_brandon_hedge_settlements", None)
         if not settlements:
-            return 0.0
+            return base
         present = {e.entry_number for e in self.daily_state.entries}
-        return sum(
+        return base + sum(
             s.total_pnl for s in settlements
             if s.entry_number not in present
         )

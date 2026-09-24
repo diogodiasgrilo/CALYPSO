@@ -12531,6 +12531,13 @@ class HydraStrategy(MEICStrategy):
                 # produced it, or the day reads as an unexplained drift.
                 "brandon_unattributed_overlay": float(
                     getattr(self, "_brandon_unattributed_overlay", 0.0) or 0.0),
+                # Same reasoning, for the failed-entry unwind P&L (2026-09-24):
+                # it is a per-day aggregate-only total consumed by that day's
+                # RECONCILE. A restart between the ORDER-010 booking and the
+                # daily summary would otherwise read the day as unexplained
+                # drift — which is precisely the restart that causes it.
+                "failed_entry_unattributed_pnl": float(
+                    getattr(self.daily_state, "failed_entry_unattributed_pnl", 0.0) or 0.0),
                 "total_commission": self.daily_state.total_commission,
                 "call_stops_triggered": self.daily_state.call_stops_triggered,
                 "put_stops_triggered": self.daily_state.put_stops_triggered,
@@ -14895,6 +14902,11 @@ class HydraStrategy(MEICStrategy):
             # Restore historical data
             self.daily_state.date = today
             self.daily_state.total_realized_pnl = saved_state.get("total_realized_pnl", 0.0)
+            # Restore ATOMICALLY with the total it explains (same-day-gated by
+            # the date check above), or the RECONCILE guard reports the
+            # restored total as drift.
+            self.daily_state.failed_entry_unattributed_pnl = float(
+                saved_state.get("failed_entry_unattributed_pnl", 0.0) or 0.0)
             # Restore the Brandon overlay double-book guard ATOMICALLY with the total
             # it protects (same-day-gated by the date check above). Only on Brandon
             # instances that carry the attr (set in __init__ before recovery runs).

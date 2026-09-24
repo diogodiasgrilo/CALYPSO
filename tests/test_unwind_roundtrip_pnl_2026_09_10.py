@@ -96,7 +96,17 @@ class TestRoundTripPricePnl:
         HydraStrategy._unwind_partial_entry(
             s, [("long_call", "p1", 111), ("long_put", "p2", 222)], e)
         assert len(s.booked) == 2
-        assert e.realized_pnl == pytest.approx(-560.0)   # two longs, both losing
+        # UPDATED 2026-09-24. This used to assert e.realized_pnl == -560.0.
+        # That write happened, but production always threw it away: every
+        # _unwind_partial_entry call site `return False`s, so this entry object
+        # never reaches daily_state and the retry builds a fresh one. On the
+        # live seat that left +$5,995 in the day total and on no entry. The
+        # unwind now books AGGREGATE-ONLY and records the amount as
+        # unattributed, which is what the settlement RECONCILE identity needs.
+        # Full story: tests/test_failed_entry_unwind_attribution_2026_09_24.py
+        assert e.realized_pnl == 0.0
+        assert s.daily_state.total_realized_pnl == pytest.approx(-560.0)
+        assert s.daily_state.failed_entry_unattributed_pnl == pytest.approx(-560.0)
 
     def test_commission_is_STILL_booked(self):
         """Regression guard for the 2026-08-20 fix this builds on."""

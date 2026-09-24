@@ -36,6 +36,42 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-24 A1 — FAILED-ENTRY UNWIND P&L NOW RECONCILES (live seat). On 09-24 B's
+  Entry #6 legged into the Iran-headline melt-up, filled 3 of 4 legs, was refused the
+  short put by GUARD-FLOOR, and ORDER-010 unwound the 3 filled legs for **+$5,995 of
+  real money** (verified leg-by-leg against IBKR fill prices). The day total took it;
+  no entry did:
+      total_realized_pnl      = +2,600.00
+      sum(entry.realized_pnl) = -3,395.00
+      DRIFT                   = +5,995.00
+  The booking site LOOKED right — it called `_book_realized_pnl(leg_pnl, entry)`. But
+  all five `_unwind_partial_entry` call sites `return False` immediately after, so that
+  entry object is discarded and the retry builds a fresh one. The per-entry write went
+  to an object nobody kept; only the aggregate survived.
+  * WHY AGGREGATE-ONLY IS RIGHT, not "attach it to the retry": a failed attempt never
+    becomes a position. Forcing its P&L onto whichever entry later occupies the slot
+    would hand slot_edge a +$5,995 entry that never happened — corrupting the very
+    per-entry attribution the machinery exists to provide.
+  * `MEICDailyState.failed_entry_unattributed_pnl` (lives on daily_state so it resets
+    with the day, beside the total it reconciles against), surfaced through the existing
+    `_unattributed_overlay_pnl()` channel, and PERSISTED in the state file — a restart
+    between the booking and the daily summary is exactly the case that needs it (the
+    same lesson Brandon learned 2026-09-10).
+  * Brandon's override now EXTENDS `super()` instead of replacing it. Variant B IS
+    Brandon, so a replacing override would have re-opened this on the one seat with
+    money on it while every base test stayed green.
+  * `_unattributed_overlay_pnl` and the accumulator increment are both getattr-defensive
+    on `daily_state` — the accessor can be reached before base `__init__` builds it, and
+    the increment sits inside a swallowing try/except where a missing field would have
+    silently reinstated the drift. The first of those was caught by an EXISTING test.
+  NOTE: this does NOT retroactively fix 2026-09-24. That day's state carries no
+  accumulator, so its settlement RECONCILE will report the drift once more — correctly,
+  since the under-attribution really happened.
+  Tests: `tests/test_failed_entry_unwind_attribution_2026_09_24.py` replays the real
+  incident through the real booking site (+$3,640 / +$2,380 / -$25 = +$5,995, identity
+  lands on +$2,600) with five negative controls; `test_unwind_roundtrip_pnl_2026_09_10`
+  updated — its old `e.realized_pnl == -560` assertion described the discarded write.
+  Full suite 5,037 passed.
 - 2026-09-24 RATE BUDGET — STOP SPENDING BROKER REQUESTS ON A DISCARDED SNAPSHOT.
   Traced from "why did B's stop take 28s to detect and 100s to fill?". The broker's
   shared IBKR gate (CALYPSO_IBKR_MAX_RPS=5) was measured at **85% saturation** —

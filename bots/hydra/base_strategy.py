@@ -673,6 +673,16 @@ class MEICDailyState:
     # Aggregate P&L
     total_credit_received: float = 0.0
     total_realized_pnl: float = 0.0
+    # Realized P&L that belongs to the DAY but to no entry: the round-trip
+    # price P&L of a FAILED entry attempt's unwound legs (ORDER-010). Such an
+    # attempt never becomes a position — every `_unwind_partial_entry` call
+    # site `return False`s and the retry builds a fresh entry object — so
+    # attributing it per-entry would both vanish with the discarded object
+    # (measured on B 2026-09-24: +$5,995 of real money in the day total and on
+    # no entry) and pollute slot_edge with an entry that never existed. Lives
+    # on daily_state so it resets with the day, beside the total it reconciles
+    # against. Surfaced via `_unattributed_overlay_pnl()`.
+    failed_entry_unattributed_pnl: float = 0.0
 
     # Commission tracking (display only - does not affect strategy logic)
     total_commission: float = 0.0  # Running total of all commissions paid today
@@ -4200,11 +4210,34 @@ class MEICStrategy(abc.ABC):
                                     if leg_name.startswith("short")
                                     else (close_px - open_px) * per_pt
                                 )
-                                self._book_realized_pnl(leg_pnl, entry)
+                                # Book AGGREGATE-ONLY, and record it as
+                                # unattributed (2026-09-24). Passing `entry`
+                                # here looked like per-entry attribution but
+                                # was a no-op: every caller of
+                                # _unwind_partial_entry `return False`s, so
+                                # this object is discarded and the retry
+                                # builds a fresh one. The money stayed in the
+                                # day total and landed on no entry — B, 09-24:
+                                # total_realized_pnl +$2,600 vs per-entry sum
+                                # -$3,395, drift +$5,995, which the RECONCILE
+                                # guard correctly flagged as under-attribution.
+                                # A failed attempt never became a position, so
+                                # the day is the honest owner; forcing it onto
+                                # the retry's entry would corrupt slot_edge.
+                                self._book_realized_pnl(leg_pnl, entry=None)
+                                # getattr-defensive: this sits inside a
+                                # try/except that swallows, so a daily_state
+                                # predating the field would silently stop
+                                # accumulating and quietly reinstate the drift.
+                                self.daily_state.failed_entry_unattributed_pnl = (
+                                    getattr(self.daily_state,
+                                            "failed_entry_unattributed_pnl", 0.0) or 0.0
+                                ) + leg_pnl
                                 logger.warning(
                                     f"  ORDER-010: booked ${leg_pnl:+.2f} round-trip PRICE "
                                     f"P&L for {leg_name} (open {open_px:.2f} -> close "
-                                    f"{close_px:.2f}, {entry.contracts}c)"
+                                    f"{close_px:.2f}, {entry.contracts}c) — day aggregate, "
+                                    f"unattributed (failed attempt owns no entry)"
                                 )
                             else:
                                 logger.warning(
@@ -4257,7 +4290,9 @@ class MEICStrategy(abc.ABC):
         """P&L that was folded into the day aggregate (``total_realized_pnl``) but
         NOT onto any ``entry.realized_pnl`` — so the true reconciliation identity is
         ``sum(entry.realized_pnl) + _unattributed_overlay_pnl() == total_realized_pnl``.
-        Base strategies run no overlays → always 0.0. Brandon overrides it: a
+        The base component is the failed-entry unwind P&L (ORDER-010) — money the
+        day really made or lost on an attempt that never became a position, so no
+        entry can own it. Brandon EXTENDS this (it calls super()): a
         defensive-overlay hedge whose hedged entry is ABSENT from ``daily_state`` at
         settle (post-close / cross-day restart) is booked aggregate-only, so its P&L
         lands in the day total but on no entry. Kept as a DERIVED method (not a
@@ -4265,7 +4300,13 @@ class MEICStrategy(abc.ABC):
         aggregate double-book on a restart still surfaces as unexplained drift
         instead of being silently masked. See RECONCILE guard in
         strategy.py:_record_entry_realized_pnl."""
-        return 0.0
+        # getattr-defensive on BOTH hops: this is called from settlement and
+        # from get_dashboard_metrics, and an instance can legitimately reach
+        # here before base __init__ builds daily_state (pre-super() recovery,
+        # bare instances in tests). The old body returned a constant and could
+        # not raise; keep that property.
+        ds = getattr(self, "daily_state", None)
+        return float(getattr(ds, "failed_entry_unattributed_pnl", 0.0) or 0.0)
 
     def _execute_stop_loss(
         self, entry: IronCondorEntry, side: str,
