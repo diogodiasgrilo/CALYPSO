@@ -14,10 +14,12 @@
  *     prop, so the primary path is byte-identical.
  *
  * Process-global widgets: AgentStatusPanel is rendered on both (the 5-agent
- * suite is shared, not per-strategy). LiveLogFeed is per-PROCESS (the dashboard
- * tails the primary's log only), so it renders on the primary and shows a small
- * "log lives on the variant's own process" note off-primary — parity of the
- * trading panels is NOT gated on the log.
+ * suite is shared, not per-strategy). LiveLogFeed is per-PROCESS — the dashboard
+ * tails the PRIMARY's log only — so off-primary it names whose log it is
+ * showing. (This paragraph claimed such a note existed from the start; it did
+ * not, and until 2026-09-24 the panel rendered headed "Live Log" on every
+ * variant's page with the primary's lines under it. Parity of the trading
+ * panels is NOT gated on the log.)
  */
 
 import { SPXChart } from "../market/SPXChart";
@@ -120,7 +122,10 @@ function PrimaryICView() {
         )}
 
         <AgentStatusPanel />
-        <LiveLogFeed />
+        {/* The dashboard tails ONE log (the primary's). Off-primary the
+            panel must say so — it used to render headed "Live Log" on
+            every variant's page, so selecting G showed B's lines. */}
+        <LiveLogFeed viewingStrategy={selected?.display_name ?? null} />
       </div>
     </div>
   );

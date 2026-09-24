@@ -10,7 +10,20 @@ const LEVEL_COLORS: Record<string, string> = {
   DEBUG: colors.textDim,
 };
 
-export function LiveLogFeed() {
+interface LiveLogFeedProps {
+  /**
+   * The strategy currently being VIEWED, when it is not the primary seat.
+   *
+   * The dashboard process tails ONE log — the primary's. This panel used to
+   * render headed "Live Log" on every variant's page regardless, so selecting
+   * G showed B's log lines under a heading that implied they were G's. The
+   * module docstring in IronCondorDashboard asserted a note was shown
+   * off-primary; there was no such note. Naming the source is the whole fix.
+   */
+  viewingStrategy?: string | null;
+}
+
+export function LiveLogFeed({ viewingStrategy }: LiveLogFeedProps = {}) {
   const { logLines } = useHydraStore();
   const scrollRef = useRef<HTMLDivElement>(null);
 
@@ -25,6 +38,11 @@ export function LiveLogFeed() {
     <div>
       <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
         Live Log
+        {viewingStrategy && (
+          <span className="ml-2 normal-case font-normal text-text-dim">
+            — the live seat's process, not {viewingStrategy}'s
+          </span>
+        )}
       </h3>
       <div
         ref={scrollRef}
