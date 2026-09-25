@@ -36,6 +36,23 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-25 OVERFITTING PASS — thresholds set with MARGIN, not at the boundary.
+  Operator asked what was overfit. Answer: my own constants. Each was placed AT the
+  highest number its sample happened to contain, which is fitting to one observation.
+  * **Exit budget 25s -> 30s.** The walk was 45 -> 10 -> 15 -> 25 -> 30. 15s was set
+    from 15 fills with a measured max of 12s, and the very first stop under it raced an
+    order still live past 20s. The only hard facts are that 45s never raced and 20s did,
+    so the value belongs INSIDE that range with room — not just above the last thing
+    that broke.
+  * **Leg budget 150s -> 185s.** 150 sat **2 seconds** (1.4%) above the slowest leg that
+    ever filled (148s) — fitted to a single observation; any good leg at 160s would have
+    been killed. The two populations leave a **74-second gap** (148 -> 222) that nothing
+    lands in, so the honest choice is its midpoint: ~37s of headroom on BOTH sides.
+    Verified to keep both properties — zero good legs aborted, both doomed legs caught.
+  * `floor > ask` (n=6) is left as-is: the sample is thin, but the criterion is
+    arithmetic (a sell above the best offer cannot trade) rather than statistical, and
+    its failure mode is declining an entry that failed 2-for-2 anyway.
+  Full suite 5,110 passed.
 - 2026-09-25 A2 — OVER-CLOSE DETECTION, after the race cost the live seat a position.
   A CRITICAL orphan alert fired at 12:33: **LONG 7 x SPX 7750C that HYDRA did not
   track**. It was E#3's SHORT call. Its stop had to buy 7 back:

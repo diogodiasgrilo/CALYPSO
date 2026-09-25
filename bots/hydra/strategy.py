@@ -2431,10 +2431,16 @@ class HydraStrategy(MEICStrategy):
             # max of 12s. Fifteen fills cannot characterise a tail.
             #
             # That race left the live seat LONG 7 calls it never intended (see
-            # `_correct_over_close`). 25s still beats the old 45s by 20s on a
-            # dead order, while giving a slow-but-live fill far more room. The
-            # over-close correction is the real defence; this is the hedge that
-            # makes the race rarer rather than relying on the timeout alone.
+            # `_correct_over_close`).
+            #
+            # 30s, set with MARGIN rather than at a boundary. The walk was
+            # 45 -> 10 -> 15 -> 25 -> 30, and every step before this one put the
+            # value AT the highest number the sample happened to contain — which
+            # is how 15s got shipped against a tail it could not see. The only
+            # hard facts are that 45s never raced and 20s did, so the honest
+            # placement is inside that range with room, not just above the last
+            # thing that broke. 30s still detects a dead order 15s sooner than
+            # 45s; the over-close correction, not the timeout, is the defence.
             #
             # Re-placing sooner is safe here because the retry loop that owns
             # this call (_close_position_with_retry_ib) re-checks the broker
@@ -2443,10 +2449,10 @@ class HydraStrategy(MEICStrategy):
             try:
                 fill_timeout = float(
                     (getattr(self, "strategy_config", None) or {})
-                    .get("exit_fill_timeout_s", 25.0)
+                    .get("exit_fill_timeout_s", 30.0)
                 )
             except (TypeError, ValueError, AttributeError):
-                fill_timeout = 25.0
+                fill_timeout = 30.0
             fill_timeout = max(1.0, fill_timeout)
         else:
             fill_timeout = min(30.0 + 3.0 * max(0, int(quantity) - 1), 45.0)

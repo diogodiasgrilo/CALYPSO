@@ -2826,6 +2826,15 @@ class MEICStrategy(abc.ABC):
     #   per-LEG   150s  -> aborts ZERO legs that would have filled, and catches
     #                      BOTH legs that were doomed.
     #
+    # THE DEFAULT IS 185s, NOT 150s — set with MARGIN, not at the boundary.
+    # 150 sat 2 seconds above the slowest leg that ever filled (148s), i.e. it
+    # was fitted to a single observation and any good leg at 160s would have
+    # been killed. The two populations leave a 74-SECOND GAP (148 -> 222) and
+    # nothing lands in it, so the honest choice is the middle of the gap: ~37s
+    # of headroom above the slowest good leg AND ~37s below the fastest doomed
+    # one. Same zero-false-aborts, same both-doomed-caught, without pretending
+    # 59 samples pin a boundary to the second.
+    #
     # Because the two populations separate cleanly:
     #       legs that eventually FILLED : median 16s, p99 148s, MAX 148s
     #       legs that FAILED all rungs  : median 222s, MAX 223s
@@ -2880,10 +2889,10 @@ class MEICStrategy(abc.ABC):
         try:
             # `entry_placement_budget_s` accepted as the pre-rescope alias.
             v = cfg.get("entry_leg_budget_s",
-                        cfg.get("entry_placement_budget_s", 150.0))
+                        cfg.get("entry_placement_budget_s", 185.0))
             return float(v)
         except (TypeError, ValueError, AttributeError):
-            return 150.0
+            return 185.0
 
     def _leg_budget_spent(self, leg_started_at: float) -> bool:
         """True when this leg has been grinding longer than the budget allows."""

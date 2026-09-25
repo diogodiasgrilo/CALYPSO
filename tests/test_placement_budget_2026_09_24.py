@@ -57,8 +57,8 @@ def _s(cfg=None):
 
 
 class TestBudgetResolution:
-    def test_default_is_150s(self):
-        assert _s()._entry_leg_budget_s() == 150.0
+    def test_default_is_185s(self):
+        assert _s()._entry_leg_budget_s() == 185.0
 
     def test_configurable(self):
         assert _s({"entry_leg_budget_s": 90})._entry_leg_budget_s() == 90.0
@@ -68,7 +68,7 @@ class TestBudgetResolution:
         assert _s({"entry_placement_budget_s": 90})._entry_leg_budget_s() == 90.0
 
     def test_garbage_falls_back(self):
-        assert _s({"entry_leg_budget_s": "soon"})._entry_leg_budget_s() == 150.0
+        assert _s({"entry_leg_budget_s": "soon"})._entry_leg_budget_s() == 185.0
 
 
 class TestLegClock:
