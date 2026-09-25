@@ -2843,6 +2843,23 @@ class MEICStrategy(abc.ABC):
     # benefit never once observed to pay (no stop has been found late because of
     # a blind window). Taking the free win and declining the speculative one.
     #
+    # BE HONEST ABOUT THE SIZE OF THAT WIN (measured 2026-09-25, 16 placements
+    # with per-leg detail): this rule touches **2 of 16** placements and removes
+    # **145 seconds of blindness in total**. Median blind window is unchanged;
+    # the worst case goes 558s -> 486s. It is cheap insurance against the
+    # pathological leg, NOT a meaningful bound on the blind window.
+    #
+    # WHERE THE BLIND WINDOW ACTUALLY GOES, since that was worth knowing:
+    #     pre-placement (init -> first order): median 40s, p90 69s
+    #     whole window                       : median 78s, p90 307s, max 558s
+    # So roughly HALF the median is pre-placement — GEX refresh, chain and quote
+    # fetches, credit estimation — every bit of it broker round-trips queued
+    # behind the shared 5 rps gate. B1/B2 freed ~45% of that gate, so they
+    # should shrink this window too; that is measurable and not yet measured.
+    # The TAIL is legitimate slow fills (the 558s case legged in over three
+    # rungs per leg and SUCCEEDED), which only a between-legs stop check would
+    # help — see the re-entrancy note above for why that is not free either.
+    #
     # WHY A DEADLINE AND NOT AN INTERLEAVED STOP CHECK. Calling
     # `_check_stop_losses` between legs would let a stop close fire at a conid
     # another leg is actively working — and **74% of B's trading days have two

@@ -36,6 +36,33 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-25 CONVERGENCE PASS (audit-after, second round). NO new defects in the code
+  shipped that day — but two of my own CLAIMS were wrong, and the correction matters
+  more than the code.
+  * 🔴 **B4's benefit is much smaller than stated.** Measured over 16 placements with
+    per-leg detail: it touches **2 of them** and removes **145 seconds of blindness in
+    total**. Median blind window UNCHANGED; worst case 558s -> 486s. It is cheap
+    insurance against a pathological leg, NOT "a bound on the blind window" as the
+    09-24 entry claimed. Kept (it is free), re-described.
+  * ✅ **Hypothesis tested and REFUTED: the MKT-043 calm wait is not a blind spot.**
+    It calls `_check_stop_losses()` every 10s inside the wait (an earlier "Bug #3 fix"),
+    so it is monitored BETTER than the normal ~33s cadence — and in any case it has
+    fired **0 times** in all retained logs. The heartbeat-gap measurement therefore
+    stands as genuine blindness.
+  * 📊 **Where the blind window actually goes**, which nobody had measured:
+        pre-placement (init -> first order): median 40s, p90 69s, max 74s
+        whole window                       : median 78s, p90 307s, max 558s
+    ~HALF the median is pre-placement — GEX refresh, chain/quote fetches, credit
+    estimation — all broker round-trips queued behind the saturated 5 rps gate. So
+    **B1/B2 should shrink the blind window too**, not just stop-detection latency.
+    Testable at RTH, not yet tested. The TAIL is legitimate slow fills (the 558s case
+    legged in over three rungs per leg and SUCCEEDED) — only a between-legs stop check
+    would help, and the merged-conid hazard makes that not free either.
+  Mechanical checks all clean: no orphaned refs to the removed `_begin_placement_window`
+  / `_placement_deadline_passed` / `_entry_placement_budget_s`; both exit-budget paths
+  consistently 15.0 with the entry budget intact at 45.0; the reconcile dict is
+  fire-and-forget so its new per-leg key breaks no consumer; `verify_broker_contract`
+  PASSES against the live broker. Full suite 5,087.
 - 2026-09-25 RESEARCH PASS on the five things I had left as caveats. Two were WRONG
   DEFAULTS, one open question CLOSED, one made answerable, one honestly unresolved.
   * **B3 default 10s -> 15s.** Measured over 15 close fills + 6 that never filled:
