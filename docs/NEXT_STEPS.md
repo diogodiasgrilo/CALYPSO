@@ -31,9 +31,15 @@ they are not rebuilt:
 `02a80db` B2 position-read cache · `aafd678` B3 exit fill-timeout split · `c437004` B4 placement
 budget · `d09c1da` A4 dry-run early-close DB row.
 
-🔴 **Deploy AFTER settlement (~21:45–22:37 ET), never with settlement pending, strategies-only**
-(nothing here is imported by `calypso-broker`). Runbook + what to verify: audit doc §8.
-Tonight's RECONCILE will still report the 09-24 drift — A1 is not retroactive and that is correct.
+✅ **DEPLOYED 2026-09-24 21:48 ET.** Settlement done 21:45:31, account flat, strategies-only
+restart of all 8 units, NRestarts=0, tree clean, broker session untouched. Each fix verified
+functionally on the deployed code (after-hours traffic is ~0, so a request-mix measurement would
+have proven nothing). **Still to confirm during RTH: the gate coming off the 5 rps cap and the
+stop-detection cadence.**
+
+The settlement RECONCILE fired at exactly **−$5,995**, confirming A1's diagnosis to the dollar.
+⚠️ BROKER-RECONCILE showed a SEPARATE unexplained gap: IBKR realized $4,108.43 vs ours $3,565.00
+(**−$543.43**), matching the ~$558 measured intraday. Not A1 — worth chasing.
 
 **Next:** deploy + observe one session → B6 (B's pacing) → B7 (gate 5→8) → A2 (position-delta
 reconciliation; the obvious fixes provably don't work — see audit §6-bis) → B5 → **C1**.
