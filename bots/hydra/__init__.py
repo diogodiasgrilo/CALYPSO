@@ -36,6 +36,22 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-25 DASHBOARD — the day's headline no longer hides failed-entry P&L.
+  On 09-24 the live card read **+$3,565** while the strategy had **LOST $2,430**: a
+  broken entry (legs filled, entry aborted, legs unwound) happened to unwind into a
+  headline-driven melt-up for **+$5,995**. Answering "why is this positive?" took a full
+  day of forensics — and the next day the identical broken entry lost $468. One opaque
+  number cannot tell those apart, and only one of them is the strategy's own result.
+  * `/api/strategies/{id}/snapshot` summary now carries `unattributed_pnl` (the
+    failed-entry component, from `daily_state.failed_entry_unattributed_pnl`) and
+    `trading_pnl` (net minus it). History already carried it — the daily-summaries
+    reader is `SELECT *` and the column was back-filled for the 5 affected days.
+  * `DailyPnLCard` renders a two-line breakdown under the hero figure, **only when the
+    component is non-zero**, so an ordinary day looks exactly as it did.
+  * `net_pnl` KEEPS its existing meaning — this adds a breakdown, it does not redefine
+    the number people already read. Pinned by a control.
+  Tests: `tests/test_failed_entry_split_in_summary_2026_09_25.py`. Frontend typecheck +
+  production build clean. Full suite 5,117 passed.
 - 2026-09-25 OVERFITTING PASS — thresholds set with MARGIN, not at the boundary.
   Operator asked what was overfit. Answer: my own constants. Each was placed AT the
   highest number its sample happened to contain, which is fitting to one observation.

@@ -289,6 +289,9 @@ def _summary_from_state(state: dict) -> dict:
     total_credit = state.get("total_credit_received", 0) or 0
     realized = state.get("total_realized_pnl", 0) or 0
     commission = state.get("total_commission", 0) or 0
+    # Absent on a state file written before the field existed, and on variants
+    # that have never had a failed entry — 0.0 either way, never None.
+    unattributed = float(state.get("failed_entry_unattributed_pnl", 0) or 0)
     unrealized = _compute_unrealized_pnl(entries)
     call_stops = state.get("call_stops_triggered", 0) or 0
     put_stops = state.get("put_stops_triggered", 0) or 0
@@ -313,6 +316,19 @@ def _summary_from_state(state: dict) -> dict:
         "unrealized_pnl": unrealized,
         "total_commission": commission,
         "net_pnl": realized + unrealized - commission,  # LIVE: matches chart
+        # FAILED-ENTRY SPLIT (2026-09-25). P&L from an entry that never became
+        # a position — its legs filled, the entry aborted, and ORDER-010 unwound
+        # them — lands in the day total but on no entry, by design (see
+        # MEICDailyState.failed_entry_unattributed_pnl).
+        #
+        # It is surfaced separately because it is NOT the strategy's result and
+        # is not repeatable. On 2026-09-24 the live seat showed +$3,565 for the
+        # day while the strategy itself had LOST $2,430: a broken entry unwound
+        # into a headline-driven melt-up for +$5,995. It took a day of forensics
+        # to answer "why is this positive", and the next day the same broken
+        # entry lost $468. One opaque number cannot tell those apart.
+        "unattributed_pnl": unattributed,
+        "trading_pnl": realized + unrealized - commission - unattributed,
         "call_stops": call_stops,
         "put_stops": put_stops,
         "total_stops": call_stops + put_stops,

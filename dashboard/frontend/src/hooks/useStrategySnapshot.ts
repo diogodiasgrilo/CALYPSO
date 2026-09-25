@@ -68,6 +68,14 @@ export interface ICSnapshotSummary {
   total_realized_pnl: number;
   total_commission: number;
   net_pnl: number;
+  /** P&L from entries that never became positions — a failed entry's legs
+   *  filled, the entry aborted, and unwinding them booked a result. It belongs
+   *  to the DAY but to no entry, so the headline mixes it with the strategy's
+   *  own result. Optional: absent on older payloads and on strategies that
+   *  have never had a failed entry. */
+  unattributed_pnl?: number;
+  /** net_pnl minus unattributed_pnl — what the strategy itself did. */
+  trading_pnl?: number;
   call_stops: number;
   put_stops: number;
   total_stops: number;

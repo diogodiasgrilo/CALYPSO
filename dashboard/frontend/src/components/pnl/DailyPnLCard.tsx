@@ -123,6 +123,22 @@ export function DailyPnLCard({ summary, cumulative, entries: entriesProp }: Dail
 
   const animatedPnl = useAnimatedNumber(netPnl);
 
+  // FAILED-ENTRY SPLIT (2026-09-25). P&L from an entry that never became a
+  // position — its legs filled, the entry aborted, and the unwind booked a
+  // result — belongs to the DAY but to no entry, so the headline number mixes
+  // it with the strategy's own result.
+  //
+  // That is not cosmetic. On 2026-09-24 this card read +$3,565 while the
+  // strategy had LOST $2,430: a broken entry unwound into a headline-driven
+  // melt-up for +$5,995. Answering "why is this positive?" took a day of
+  // forensics. The next day the same broken entry lost $468 — one opaque
+  // number cannot tell those two apart, and only one of them is repeatable.
+  //
+  // Shown ONLY when non-zero, so an ordinary day is unchanged.
+  const unattributedPnl = summary ? summary.unattributed_pnl ?? 0 : 0;
+  const hasUnattributed = Math.abs(unattributedPnl) >= 0.01;
+  const tradingPnl = netPnl - unattributedPnl;
+
   // Cumulative
   const cumulativePnl = metrics?.cumulative_pnl ?? 0;
   const winningDays = metrics?.winning_days ?? 0;
@@ -195,6 +211,27 @@ export function DailyPnLCard({ summary, cumulative, entries: entriesProp }: Dail
           {comparisons && (
             <div className="text-3xs mt-0.5 opacity-60" style={{ color: pnlColor(avgPnl) }}>
               avg {formatPnL(avgPnl)}
+            </div>
+          )}
+          {hasUnattributed && (
+            <div
+              className="text-3xs mt-1.5 space-y-0.5"
+              title={
+                "A failed entry's legs filled, the entry aborted, and unwinding " +
+                "them booked this result. It belongs to the day but to no entry, " +
+                "and it is not the strategy's result — nor is it repeatable."
+              }
+            >
+              <div className="flex justify-between px-4">
+                <span className="text-text-dim">trading</span>
+                <span style={{ color: pnlColor(tradingPnl) }}>{formatPnL(tradingPnl)}</span>
+              </div>
+              <div className="flex justify-between px-4">
+                <span className="text-text-dim">failed entries</span>
+                <span style={{ color: pnlColor(unattributedPnl) }}>
+                  {formatPnL(unattributedPnl)}
+                </span>
+              </div>
             </div>
           )}
         </div>
