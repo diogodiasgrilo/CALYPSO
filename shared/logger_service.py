@@ -3770,7 +3770,7 @@ class TradeLoggerService:
 
         # Currency configuration
         self.currency_config = config.get("currency", {})
-        self.currency_enabled = self.currency_config.get("enabled", False)
+        self._currency_requested = self.currency_config.get("enabled", False)
         self.base_currency = self.currency_config.get("base_currency", "USD")
         self.account_currency = self.currency_config.get("account_currency", "USD")
 
@@ -3779,6 +3779,32 @@ class TradeLoggerService:
 
         # Initialize Google Sheets logger (optional)
         self.google_logger = GoogleSheetsLogger(config)
+
+        # CURRENCY CONVERSION REQUIRES A SINK (2026-09-25). Every consumer of the
+        # converted value builds a Google Sheets COLUMN — `pnl_eur`,
+        # `cumulative_pnl_eur`, `pos_pnl_eur`. Sheets has been off on every
+        # variant since the 2026-07-17 DB migration, but `currency.enabled` is a
+        # SEPARATE config block, so the conversion kept running for a sink that
+        # discards it.
+        #
+        # That is not free: each conversion is a live `iserver/exchangerate`
+        # round-trip, and `log_account_summary` runs every status tick. Measured
+        # at market open on 2026-09-25 — AFTER a first fix that only guarded the
+        # position-snapshot call site — it was still **265 calls per 10 minutes,
+        # 9% of the whole fleet's IBKR request budget**, on a gate running 95%
+        # saturated. Guarding call sites one at a time missed three of the four
+        # (log_trade, log_recovered_positions_full, log_performance_metrics,
+        # log_account_summary); gating the capability kills all of them at once
+        # and cannot drift per-variant.
+        #
+        # It is also a NO-OP conversion on this account: base currency is USD
+        # (verified against the live ledger, `ib_client.get_balance`, and by
+        # `scripts/verify_broker_contract`).
+        #
+        # Re-enabling Sheets restores the old behaviour exactly.
+        self.currency_enabled = bool(
+            self._currency_requested and self.google_logger.enabled
+        )
 
         # Initialize Microsoft logger (optional)
         self.microsoft_logger = MicrosoftSheetsLogger(config)
@@ -3812,7 +3838,14 @@ class TradeLoggerService:
         logger.info(f"  - Google Sheets: {'ENABLED' if self.google_logger.enabled else 'DISABLED'}")
         logger.info(f"  - Microsoft Excel: {'ENABLED' if self.microsoft_logger.enabled else 'DISABLED'}")
         logger.info(f"  - Email Alerts: {'ENABLED' if self.email_alerter.enabled else 'DISABLED'}")
-        logger.info(f"  - Currency Conversion: {'ENABLED' if self.currency_enabled else 'DISABLED'} ({self.base_currency} -> {self.account_currency})")
+        _cur_why = ""
+        if self._currency_requested and not self.currency_enabled:
+            _cur_why = " [requested, but suppressed — no Sheets sink to consume it]"
+        logger.info(
+            f"  - Currency Conversion: "
+            f"{'ENABLED' if self.currency_enabled else 'DISABLED'} "
+            f"({self.base_currency} -> {self.account_currency}){_cur_why}"
+        )
         logger.info(f"  - Monitor Log: ENABLED (logs/monitor.log)")
 
         # Log bot startup to monitor log

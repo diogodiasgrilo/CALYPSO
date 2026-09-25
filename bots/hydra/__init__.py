@@ -36,6 +36,33 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-25 RTH MEASUREMENT — B1 WAS ONLY A THIRD OF A FIX. The first market-open
+  measurement after the 09-24 work, and it contradicted what I had reported:
+      exchangerate  265 calls/10min (9% of budget)  — I had called this eliminated
+      portfolio/    469 (was 904)                   — B2 worked, halved
+      saturation    95% of seconds at the cap (was 85%)
+  * **Root cause**: `currency_enabled` gates FX fetches at FOUR sites in
+    `logger_service`, and B1 guarded ONE call site in the strategy. The live source was
+    `log_performance_metrics` — no sheets-guard AND called every status tick from
+    `main.py` on all eight variants. (`log_account_summary` DOES return early on
+    sheets-off, so despite also running per-tick it was never a source; `log_trade` and
+    `log_recovered_positions_full` lack the guard but are event-driven.)
+  * **Fix at the capability, not the call site**: `currency_enabled` now requires a
+    sink (`currency.enabled AND google_sheets.enabled`). Every consumer of the converted
+    value builds a Sheets COLUMN (`pnl_eur`, `cumulative_pnl_eur`, `pos_pnl_eur`), and
+    the conversion is a no-op on a USD account anyway. Guarding sites one at a time
+    missed three of four; gating the capability cannot drift per-variant. Re-enabling
+    Sheets restores it exactly — pinned by a control.
+  * **Saturation ROSE to 95% and that is not a regression.** Freed capacity was
+    immediately spent on market data (52% -> 71% of traffic), because the loop now runs
+    more iterations. The outcome that matters moved the right way: **B's loop cadence
+    went 33s -> 27s median**, i.e. ~18% faster stop checking. The gate remains the
+    binding constraint, which makes B7 (raising it from 5 rps) worth more than I thought.
+  * ⚠️ A test written for this fix was BLIND on first pass — it targeted
+    `log_account_summary` and stayed green with the bug restored, because of that
+    method's early return. Retargeted at `log_performance_metrics` and verified to fail
+    under the restored bug.
+  Full suite 5,093.
 - 2026-09-25 CONVERGENCE PASS (audit-after, second round). NO new defects in the code
   shipped that day — but two of my own CLAIMS were wrong, and the correction matters
   more than the code.
