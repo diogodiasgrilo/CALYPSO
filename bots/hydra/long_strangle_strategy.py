@@ -863,11 +863,6 @@ class LongStrangleStrategy(HydraStrategy):
 
         self._entry_in_progress = True
         self.state = MEICState.ENTRY_IN_PROGRESS
-        # B4 (2026-09-24): start the placement budget here too. This variant
-        # fully OVERRIDES _initiate_entry and never calls super(), so without
-        # this line it inherits none of the blind-window bound that A/B/C get —
-        # and it reaches the same rung loop via _place_option_order.
-        self._begin_placement_window()
         try:
             entry = LongStrangleEntry(entry_number=entry_num)
             # Structure discriminator so logging/analytics never label this an

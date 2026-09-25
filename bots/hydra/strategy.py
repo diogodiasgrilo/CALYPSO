@@ -7286,9 +7286,6 @@ class HydraStrategy(MEICStrategy):
 
         self._entry_in_progress = True
         self.state = MEICState.ENTRY_IN_PROGRESS
-        # B4: the monitoring loop is blind from here until this call returns —
-        # every retry included, since they all happen inside this one block.
-        self._begin_placement_window()
 
         # Entry retry loop
         last_error = None

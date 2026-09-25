@@ -36,6 +36,31 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-25 B4 RESCOPED — PER LEG, NOT PER ENTRY. Researching "is 150s safe?" showed
+  the first version would have done real damage. Across all retained logs (60 placements
+  with a known outcome, 59 leg placements):
+      per-ENTRY 150s -> aborts 7 placements that SUCCEEDED (64% of the 11 that ran
+                        long) — ~12% of entries turned into needless unwinds
+      per-LEG   150s -> aborts ZERO legs that would have filled, catches BOTH doomed
+  because the populations separate cleanly, with a gap nothing lands in:
+      legs that eventually FILLED : median 16s, p99 148s, MAX 148s
+      legs that FAILED all rungs  : median 222s, MAX 223s
+  A slow ENTRY is usually several legs each filling normally; the pathology is a SINGLE
+  leg grinding rungs that fill nothing — exactly E#6's Put 7630 (five rungs, 223s, zero
+  filled). The 150s number was right; the SCOPE was wrong.
+  * `entry_leg_budget_s` (default 150; `entry_placement_budget_s` still honoured as the
+    alias). Clock starts at the leg's first attempt inside `_place_option_order_ib`.
+  * Deliberately does NOT cap the whole entry. Four legs at budget is a worse
+    theoretical bound, but a per-entry cap has a CERTAIN cost (aborting good entries)
+    against a benefit never once observed to pay — no stop has ever been found late
+    because of a blind window. Free win taken, speculative one declined.
+  * The rescope also DELETES the 09-24 follow-up: `_begin_placement_window` in five
+    variant overrides is gone, because a per-leg clock needs no per-variant wiring and
+    cannot go stale. Five chances to forget a sixth variant, removed.
+  * The `attempt > 0` guard is now structurally unreachable (the clock starts
+    microseconds before the first check) — kept as defence in depth, and the test says
+    so rather than pretending to control for it.
+  Full suite 5,076 passed.
 - 2026-09-24 B4-FOLLOWUP — THE PLACEMENT BUDGET NOW REACHES D/E/F/G/H. Found by
   auditing the shipped change rather than by a failure: D, E, F, G and H each fully
   OVERRIDE `_initiate_entry` and never call `super()`, so none of them started the

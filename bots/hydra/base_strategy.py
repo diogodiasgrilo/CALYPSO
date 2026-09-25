@@ -2809,62 +2809,71 @@ class MEICStrategy(abc.ABC):
         )
 
     # ---------------------------------------------------------------
-    # B4 (2026-09-24): bound the window in which the monitoring loop is BLIND.
+    # B4 (2026-09-24, RESCOPED 09-25): bound the window in which the monitoring
+    # loop is BLIND — PER LEG, not per entry.
     #
     # `_handle_monitoring` runs ONE stop check and then calls `_initiate_entry`,
     # which blocks the single-threaded loop until every leg places or is
-    # abandoned. No stop check runs in between — `_check_stop_losses` is only
-    # ever called from the state machine. Measured on B over 42 placements:
-    #   median 65s | p90 405s (6.8 min) | max 558s (9.3 min)
-    # On 2026-09-24 Entry #6 spent 3.7 minutes on a SINGLE leg (Put 7630) across
-    # five rungs that filled nothing, because GUARD-FLOOR correctly refused to
-    # cross a price that would have inverted the vertical. The entry then failed
-    # anyway and was unwound — so the whole 8.2-minute blind window bought
-    # nothing, and it is what produced that day's stranded contracts and the
-    # +$5,995 unattributed booking.
+    # abandoned; `_check_stop_losses` is never called from inside the placement
+    # path. Measured on B over 42 placements: median 65s, p90 405s, max 558s.
+    #
+    # THE SCOPE MATTERS, and the first version got it wrong. Measured across all
+    # retained logs (60 placements with a known outcome, 59 leg placements):
+    #
+    #   per-ENTRY 150s  -> would abort 7 placements that SUCCEEDED (64% of the
+    #                      11 that ran long) — ~12% of all entries turned into
+    #                      needless unwinds.
+    #   per-LEG   150s  -> aborts ZERO legs that would have filled, and catches
+    #                      BOTH legs that were doomed.
+    #
+    # Because the two populations separate cleanly:
+    #       legs that eventually FILLED : median 16s, p99 148s, MAX 148s
+    #       legs that FAILED all rungs  : median 222s, MAX 223s
+    # A slow ENTRY is usually several legs each filling normally; the pathology
+    # is a SINGLE leg grinding through rungs that fill nothing — exactly what
+    # E#6 did on 2026-09-24 (Put 7630, five rungs, 223s, zero filled, because
+    # GUARD-FLOOR correctly refused to cross a price that would have inverted
+    # the vertical). The entry failed anyway and was unwound, so its 8.2-minute
+    # blind window bought nothing, and it produced that day's stranded contracts
+    # and the +$5,995 unattributed booking.
+    #
+    # NOTE what this deliberately does NOT do: cap the whole entry. Four legs at
+    # the budget is a worse theoretical bound than the old per-entry cap — but
+    # the per-entry cap has a CERTAIN cost (aborting good entries) against a
+    # benefit never once observed to pay (no stop has been found late because of
+    # a blind window). Taking the free win and declining the speculative one.
     #
     # WHY A DEADLINE AND NOT AN INTERLEAVED STOP CHECK. Calling
     # `_check_stop_losses` between legs would let a stop close fire at a conid
     # another leg is actively working — and **74% of B's trading days have two
     # entries sharing a strike** (84 occurrences over 31 days; on 09-24 E#5 and
-    # E#6 both used conid 920688820). Those net at the broker, which is exactly
-    # the merged-position confusion that made that day's accounting so hard to
-    # unpick. A deadline bounds the same exposure with no re-entrancy at all.
+    # E#6 both used conid 920688820). Those net at the broker. A deadline bounds
+    # the same exposure with no re-entrancy at all.
     #
-    # Exceeding it stops ESCALATING to further rungs. That lands in the existing
-    # "all rungs exhausted" path, which already flattens any accumulated partial
+    # Exceeding it stops ESCALATING to further rungs, landing in the existing
+    # "all rungs exhausted" path which already flattens any accumulated partial
     # and fails the leg — a well-trodden route, not a new one.
     #
-    # The default is deliberately loose (150s ≈ 2.3× the median placement) so it
-    # trims the tail without touching ordinary entries. Tune from the logged
-    # PLACEMENT-BUDGET lines. 0 disables it.
+    # Per-leg and measured from the leg's own first attempt, so there is no
+    # cross-entry state to go stale and every variant gets it automatically,
+    # including the five that fully override `_initiate_entry`. 0 disables it.
     # ---------------------------------------------------------------
-    def _entry_placement_budget_s(self) -> float:
+    def _entry_leg_budget_s(self) -> float:
         cfg = getattr(self, "strategy_config", None) or {}
         try:
-            return float(cfg.get("entry_placement_budget_s", 150.0))
+            # `entry_placement_budget_s` accepted as the pre-rescope alias.
+            v = cfg.get("entry_leg_budget_s",
+                        cfg.get("entry_placement_budget_s", 150.0))
+            return float(v)
         except (TypeError, ValueError, AttributeError):
             return 150.0
 
-    def _begin_placement_window(self) -> None:
-        """Start (or restart) the placement budget. Called when an entry begins."""
-        budget = self._entry_placement_budget_s()
-        self._placement_deadline = (
-            time.monotonic() + budget if budget > 0 else None
-        )
-
-    def _placement_deadline_passed(self) -> bool:
-        """True only while an entry is actually in progress AND the budget is
-        spent. Gated on ``_entry_in_progress`` as well as the timestamp so a
-        deadline left over from a previous entry can never abort the next one."""
-        if not getattr(self, "_entry_in_progress", False):
+    def _leg_budget_spent(self, leg_started_at: float) -> bool:
+        """True when this leg has been grinding longer than the budget allows."""
+        budget = self._entry_leg_budget_s()
+        if budget <= 0:
             return False
-        deadline = getattr(self, "_placement_deadline", None)
-        # `is None`, not falsiness: a deadline of exactly 0.0 is a real (already
-        # elapsed) timestamp, and `not deadline` would read it as "no budget".
-        if deadline is None:
-            return False
-        return time.monotonic() > deadline
+        return (time.monotonic() - leg_started_at) > budget
 
     def _place_option_order(
         self,
@@ -3045,6 +3054,9 @@ class MEICStrategy(abc.ABC):
         decision_mid = None
         bid = ask = spread = 0.0  # ORDER-DIAG: always defined for the failure log
 
+        # B4: this leg's own clock. Per-leg, so nothing carries across entries.
+        _leg_started_at = time.monotonic()
+
         # Progressive retry sequence (same as the Saxo path).
         for attempt, (slippage_percent, is_market) in enumerate(
             PROGRESSIVE_RETRY_SEQUENCE
@@ -3054,18 +3066,20 @@ class MEICStrategy(abc.ABC):
             if remaining <= 0:
                 break  # leg already whole (defensive — we return on completion)
 
-            # B4: stop escalating once the placement budget is spent. Only from
-            # the SECOND rung on — the first attempt of every leg always gets to
-            # run, so a budget that has already elapsed can never leave a leg
-            # unattempted while its siblings are filled.
-            if attempt > 0 and self._placement_deadline_passed():
+            # B4: stop escalating once THIS LEG has spent its budget. Only
+            # from the SECOND rung on — the first attempt of every leg always
+            # runs, so a leg can never be left unattempted while its siblings
+            # are filled.
+            if attempt > 0 and self._leg_budget_spent(_leg_started_at):
                 logger.warning(
-                    "  PLACEMENT-BUDGET: %s stopping at rung %d/%d — the entry's "
-                    "%.0fs placement budget is spent and the monitoring loop has "
-                    "been blind since it started. Any accumulated partial is "
-                    "flattened below; the entry will be unwound.",
+                    "  PLACEMENT-BUDGET: %s stopping at rung %d/%d after %.0fs "
+                    "— this leg has spent its %.0fs budget and the monitoring "
+                    "loop has been blind throughout. Measured across all retained "
+                    "logs, no leg that eventually filled ever took this long "
+                    "(max 148s) while both legs that were doomed took 222s+. Any "
+                    "accumulated partial is flattened below.",
                     leg_description, attempt + 1, len(PROGRESSIVE_RETRY_SEQUENCE),
-                    self._entry_placement_budget_s(),
+                    time.monotonic() - _leg_started_at, self._entry_leg_budget_s(),
                 )
                 break
             quote = self._read_option_quote(conid)
