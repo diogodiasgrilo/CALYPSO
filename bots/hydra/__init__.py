@@ -36,6 +36,36 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-25 A2 — OVER-CLOSE DETECTION, after the race cost the live seat a position.
+  A CRITICAL orphan alert fired at 12:33: **LONG 7 x SPX 7750C that HYDRA did not
+  track**. It was E#3's SHORT call. Its stop had to buy 7 back:
+      12:05:54  BUY 7 @ $9.60  attempt 1
+      12:06:14  "did not fill" -> cancelled after 20s
+      12:06:22  BUY 7 @ $8.80  attempt 2 -> filled
+  Short 7 -> LONG 7 means **14 were bought**: the cancelled order filled in the gap
+  between the cancel being sent and the exchange acting on it. The strategy had cleared
+  its conids and believed the leg closed, so nothing managed the result; by the time it
+  was flattened manually the call had decayed $4.00 -> $2.55.
+  ⚠️ **I shipped B3 (45s -> 15s) that morning having explicitly flagged this exact race
+  as something the change would make more frequent. It bit on the first stop.**
+  * `_correct_over_close` compares the broker's ACTUAL change at the conid against the
+    INTENDED one and undoes only the difference. A DELTA, not "did we end up flat",
+    because a conid is not one entry — IBKR merges at (conid, side) and **74% of B's
+    days have two entries sharing a strike**, so ending long after closing a short is
+    often correct. Sound because the bot is single-threaded.
+  * **ONE-DIRECTIONAL: it can only ever undo trading TOO MUCH, never "finish" an
+    under-close.** An EXISTING close test found this — its rig yields an empty position
+    read, giving qty_before 0 / expected +7 / actual 0, and the first version would have
+    BOUGHT 7 more contracts on a read that told it nothing. A safety net must not be
+    able to OPEN a position. (Fourth time the full-suite gate has caught something the
+    new code's own tests could not.)
+  * Hardened against non-numeric broker data throughout: anything unparseable means
+    "unknown" and it declines rather than trading.
+  * **Exit budget widened 15s -> 25s.** The 15s came from 15 close fills (median 2s,
+    p90 5s, max 12s). Today's cancelled order was still live past 20s — so that sample
+    was too small to see the tail. 25s still beats the old 45s by 20s; the correction,
+    not the timeout, is the real defence.
+  Tests: `tests/test_over_close_correction_2026_09_25.py`. Full suite 5,110 passed.
 - 2026-09-25 GUARD-FLOOR-UNFILLABLE + the failed-entry backfill. Operator noticed B had
   "ANOTHER failed entry". Measured: **5 failed entries in 8 retained days, EVERY ONE on
   a SHORT leg** (3x short call, 2x short put), never a long. Cost excluding one lucky

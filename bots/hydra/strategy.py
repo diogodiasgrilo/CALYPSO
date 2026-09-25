@@ -2424,12 +2424,17 @@ class HydraStrategy(MEICStrategy):
             #     a 10s budget cuts 1 of 15 fills (7%) short needlessly
             #     a 15s budget cuts ZERO, and still detects a genuine non-fill
             #     30s earlier than the old 45s
-            # 15s is therefore strictly better than the 10s first shipped: it
-            # buys the same escape from a dead order while never interrupting
-            # one that was going to complete. Cutting a live fill short is not
-            # free — it re-places at a wider cross AND adds a cancel that can
-            # race a late fill (the A2 class), so the right default is the
-            # largest one that costs nothing.
+            # WIDENED 15s -> 25s the same day, after the sample proved too
+            # small to see the tail. On the first stop under the 15s budget
+            # (2026-09-25 12:05) the cancelled order filled AFTER its cancel —
+            # so it was live somewhere past 20s, well outside that measured
+            # max of 12s. Fifteen fills cannot characterise a tail.
+            #
+            # That race left the live seat LONG 7 calls it never intended (see
+            # `_correct_over_close`). 25s still beats the old 45s by 20s on a
+            # dead order, while giving a slow-but-live fill far more room. The
+            # over-close correction is the real defence; this is the hedge that
+            # makes the race rarer rather than relying on the timeout alone.
             #
             # Re-placing sooner is safe here because the retry loop that owns
             # this call (_close_position_with_retry_ib) re-checks the broker
@@ -2438,10 +2443,10 @@ class HydraStrategy(MEICStrategy):
             try:
                 fill_timeout = float(
                     (getattr(self, "strategy_config", None) or {})
-                    .get("exit_fill_timeout_s", 15.0)
+                    .get("exit_fill_timeout_s", 25.0)
                 )
             except (TypeError, ValueError, AttributeError):
-                fill_timeout = 15.0
+                fill_timeout = 25.0
             fill_timeout = max(1.0, fill_timeout)
         else:
             fill_timeout = min(30.0 + 3.0 * max(0, int(quantity) - 1), 45.0)

@@ -5036,6 +5036,144 @@ class MEICStrategy(abc.ABC):
         except Exception as exc:
             logger.error("emergency-close alert failed: %s", describe_exception(exc))
 
+    def _net_qty_at_conid(self, uic, positions) -> int:
+        """Signed net quantity the broker shows at one conid. 0 when flat.
+
+        Sums rather than picks: IBKR merges at (conid, side) and several of our
+        entries can share a strike, so one conid is one NET number, not one
+        entry's.
+        """
+        total = 0
+        try:
+            rows = list(positions or [])
+        except Exception:  # noqa: BLE001 — a non-iterable is "unknown", not 0
+            return 0
+        for p in rows:
+            try:
+                if int(p.get("instrument_id") or 0) == int(uic):
+                    total += int(p.get("quantity") or 0)
+            except (TypeError, ValueError, AttributeError):
+                continue
+        return total
+
+    def _correct_over_close(self, uic, side: str, qty_before: int,
+                            intended_qty: int, leg_name: str) -> None:
+        """A2 (2026-09-25): detect and undo a close that traded MORE than asked.
+
+        THE RACE. Cancelling an order is not instantaneous. When a close order
+        does not fill in time we cancel it and re-place at a better price — but
+        the cancelled order can still fill in the gap between the cancel being
+        sent and the exchange acting on it. Both fills land, and we trade twice
+        what we meant to.
+
+        REAL INCIDENT, live seat, 2026-09-25 12:05. E#3's stop had to buy back
+        7 short calls:
+            12:05:54  BUY 7 @ $9.60  attempt 1
+            12:06:14  "did not fill" -> cancelled after 20s
+            12:06:22  BUY 7 @ $8.80  attempt 2 -> filled
+        It was short 7. It ended up LONG 7, i.e. 14 were bought. The strategy
+        believed the leg closed and cleared its conids, so nothing managed the
+        resulting position — it surfaced only as a CRITICAL orphan alert, and
+        by the time it was flattened the call had decayed from $4.00 to $2.55.
+
+        WHY A DELTA AND NOT "DID WE END UP FLAT". Because a conid is NOT one
+        entry: IBKR merges at (conid, side) and **74% of B's trading days have
+        two entries sharing a strike**. Ending LONG after closing a short can be
+        perfectly correct when a sibling entry holds the long. So this compares
+        the OBSERVED change against the INTENDED change and only corrects the
+        difference. Sound because the bot is single-threaded — no other order of
+        ours can move that conid while this close runs.
+
+        Never raises: a correction that throws must not turn a completed close
+        into a failed one.
+        """
+        try:
+            positions = self._read_open_positions(strict=True)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(
+                "  A2: could not verify the close of %s (conid %s) — strict "
+                "position read failed (%s). NOT assuming an over-close.",
+                leg_name, uic, exc,
+            )
+            return
+        # Everything below is arithmetic on broker data. A safety correction
+        # that misbehaves on junk is worse than one that declines, so anything
+        # non-numeric means "unknown" and we do nothing rather than trade.
+        try:
+            qty_after = int(self._net_qty_at_conid(uic, positions))
+            delta = int(intended_qty) if str(side).upper() == "BUY" else -int(intended_qty)
+            expected = int(qty_before) + delta
+            excess = qty_after - expected
+        except (TypeError, ValueError):
+            logger.warning(
+                "  A2: non-numeric position data for %s (conid %s) — skipping "
+                "the over-close check rather than acting on it.", leg_name, uic,
+            )
+            return
+        if abs(excess) < 1:
+            return
+
+        # ONLY ever undo trading TOO MUCH — never "finish" an under-close.
+        #
+        # An over-close moves the conid FURTHER in the direction we traded than
+        # we asked for, so `excess` carries the same sign as `delta`. The
+        # opposite sign means the book moved LESS than requested, which is an
+        # incomplete close — already the retry loop's job, and not something to
+        # act on here.
+        #
+        # This is not hypothetical: an existing close test (whose rig yields an
+        # empty position read) produced qty_before 0 / expected +7 / actual 0,
+        # i.e. excess -7. Acting on that would have BOUGHT 7 more contracts on
+        # the strength of a read that told us nothing. A safety net must not be
+        # able to open a position.
+        if excess * delta <= 0:
+            logger.info(
+                "  A2: %s (conid %s) moved LESS than requested (%+d vs %+d) — "
+                "an incomplete close, which the retry loop owns. Not acting.",
+                leg_name, uic, qty_after - qty_before, delta,
+            )
+            return
+
+        fix_side = "SELL" if excess > 0 else "BUY"
+        logger.critical(
+            "  A2 OVER-CLOSE on %s (conid %s): broker went %+d -> %+d but we "
+            "asked for %+d, so %+d contract(s) traded beyond the request — the "
+            "cancelled order filled after its cancel. Correcting with %s %d.",
+            leg_name, uic, qty_before, qty_after, delta, excess,
+            fix_side, abs(excess),
+        )
+        try:
+            res = self._place_leg_order(
+                instrument_id=uic, side=fix_side, quantity=abs(int(excess)),
+                order_type="MKT", is_exit=True,
+                coid=f"a2fix_{uic}_{uuid.uuid4().hex[:8]}",
+            )
+            ok = bool(res and res.get("filled"))
+        except Exception as exc:  # noqa: BLE001
+            ok = False
+            logger.error("  A2: correction order failed for %s: %s", leg_name, exc)
+        if ok:
+            logger.warning(
+                "  A2: over-close on %s corrected (%s %d filled).",
+                leg_name, fix_side, abs(excess),
+            )
+        else:
+            self._add_orphaned_order(f"A2_{uic}")
+            try:
+                self.alert_service.send_alert(
+                    alert_type=AlertType.EMERGENCY_CLOSE,
+                    title="A2 OVER-CLOSE NOT CORRECTED",
+                    message=(
+                        f"{leg_name} (conid {uic}) traded {excess:+d} beyond the "
+                        f"close request and the correcting {fix_side} did not "
+                        f"fill. MANUAL FLATTEN REQUIRED."
+                    ),
+                    priority=AlertPriority.CRITICAL,
+                    contracts=abs(int(excess)),
+                )
+            except Exception:  # noqa: BLE001 — alerting must never raise here
+                pass
+
     def _close_position_with_retry_ib(
         self, position_id: str, leg_name: str, uic: int = None,
         entry_number: int = None, contracts: Optional[int] = None,
@@ -5082,6 +5220,21 @@ class MEICStrategy(abc.ABC):
         # size — that over-closes, potentially eating a co-located entry's short
         # on a merged conid book), and fold the partial's fill price into the
         # returned close cost so P&L stays accurate.
+        # A2: the broker's net at this conid BEFORE we touch it, so the close
+        # can be checked as a DELTA afterwards (see _correct_over_close). Read
+        # strictly — a cached or swallowed read here would silently disable the
+        # check. None means "unknown", and the check then skips rather than
+        # guessing.
+        try:
+            _qty_before = int(self._net_qty_at_conid(
+                uic, self._read_open_positions(strict=True)))
+        except Exception as _e:  # noqa: BLE001
+            _qty_before = None
+            logger.warning(
+                "  A2: pre-close position read failed for %s (%s) — over-close "
+                "detection disabled for this close.", leg_name, _e,
+            )
+
         qty_remaining = int(close_contracts)
         filled_price_qty = 0.0   # Σ fill_price_i × filled_qty_i (priced legs only)
         filled_qty_priced = 0    # Σ filled_qty_i for legs that carried a price
@@ -5137,6 +5290,9 @@ class MEICStrategy(abc.ABC):
                         _blended_fill_price()
                         if filled_qty_priced >= close_contracts else None
                     )
+                    if _qty_before is not None:
+                        self._correct_over_close(
+                            uic, side, _qty_before, int(close_contracts), leg_name)
                     return True, out_price, last_order_id
 
                 logger.info(
@@ -5174,6 +5330,9 @@ class MEICStrategy(abc.ABC):
                         + (f"fill_price=${out_price:.2f}" if out_price is not None
                            else "fill_price=unknown")
                     )
+                    if _qty_before is not None:
+                        self._correct_over_close(
+                            uic, side, _qty_before, int(close_contracts), leg_name)
                     return True, out_price, res.get("order_id")
 
                 # #14/#44/#46: partial fill — SOME contracts closed but not all.
