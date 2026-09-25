@@ -2416,8 +2416,20 @@ class HydraStrategy(MEICStrategy):
             # the long-call sale sat the full 45s budget without filling, and
             # attempt 2 filled $1.20 lower — about $560, the single largest exit
             # slippage in the variant's history (25 stops since 2026-07-24:
-            # mean $43.10, total $1,077.50). Typical closes fill in 2-5s, so a
-            # ~10s budget is generous and returns ~35s of that wait.
+            # mean $43.10, total $1,077.50).
+            #
+            # THE DEFAULT IS MEASURED, not guessed (2026-09-25, all retained
+            # logs, 15 close fills + 6 attempts that never filled):
+            #     fill latency: median 2s, p90 5s, MAX 12s
+            #     a 10s budget cuts 1 of 15 fills (7%) short needlessly
+            #     a 15s budget cuts ZERO, and still detects a genuine non-fill
+            #     30s earlier than the old 45s
+            # 15s is therefore strictly better than the 10s first shipped: it
+            # buys the same escape from a dead order while never interrupting
+            # one that was going to complete. Cutting a live fill short is not
+            # free — it re-places at a wider cross AND adds a cancel that can
+            # race a late fill (the A2 class), so the right default is the
+            # largest one that costs nothing.
             #
             # Re-placing sooner is safe here because the retry loop that owns
             # this call (_close_position_with_retry_ib) re-checks the broker
@@ -2426,10 +2438,10 @@ class HydraStrategy(MEICStrategy):
             try:
                 fill_timeout = float(
                     (getattr(self, "strategy_config", None) or {})
-                    .get("exit_fill_timeout_s", 10.0)
+                    .get("exit_fill_timeout_s", 15.0)
                 )
             except (TypeError, ValueError, AttributeError):
-                fill_timeout = 10.0
+                fill_timeout = 15.0
             fill_timeout = max(1.0, fill_timeout)
         else:
             fill_timeout = min(30.0 + 3.0 * max(0, int(quantity) - 1), 45.0)
@@ -6785,13 +6797,57 @@ class HydraStrategy(MEICStrategy):
             logger.warning(
                 "BROKER-RECONCILE %s: IBKR realized $%.2f | ours gross $%.2f "
                 "(drift $%+.2f) / net $%.2f (drift $%+.2f) | closest $%.2f. "
-                "INDEPENDENT of total_realized_pnl. Semantics of IBKR's "
-                "realizedpnl (net-of-commission? reset cadence?) are still "
-                "UNVERIFIED — compare which drift tracks across sessions before "
-                "trusting either.",
+                "INDEPENDENT of total_realized_pnl. VERIFIED 2026-09-25: the "
+                "figure does NOT accumulate across sessions — it read 0.0 at "
+                "03:26 ET the morning after a session that realized $4,108.43, "
+                "which a cumulative counter could not — so this IS a same-day "
+                "comparison and the drift is a real disagreement, not an "
+                "accumulation artefact. (That does not pin the reset MECHANISM, "
+                "only that day-to-day comparison is valid.) Net-of-commission "
+                "is still open: it "
+                "fitted exactly once (09-18, $1.13) and the drift has since "
+                "flipped SIGN (09-23 $+622 vs 09-24 $-543), which no "
+                "commission convention explains. See the per-conid breakdown "
+                "below — that is the piece needed to close it, and the daily "
+                "reset destroys it overnight, which is why it is captured here.",
                 date_str, broker_realized, gross, out["drift_vs_gross"],
                 net, out["drift_vs_net"], best,
             )
+            # PER-CONID BREAKDOWN (2026-09-25). The aggregate above cannot be
+            # decomposed after the fact: `realizedpnl` resets daily and the
+            # per-position rows vanish with it, so a drift can only ever be
+            # investigated with data captured DURING the session that produced
+            # it. Read raw — `_read_open_positions` drops qty-0 rows, and at
+            # settlement the rows carrying realizedPnl are exactly the closed
+            # (qty-0) ones. Never fatal: this is a diagnostic inside a
+            # diagnostic.
+            try:
+                raw = self.broker.get_positions() or []
+                legs = []
+                for r in raw:
+                    rp = r.get("realizedPnl")
+                    if rp in (None, 0, 0.0):
+                        continue
+                    legs.append((
+                        r.get("contractDesc") or r.get("conid"),
+                        float(rp), r.get("position"),
+                    ))
+                if legs:
+                    legs.sort(key=lambda x: -abs(x[1]))
+                    out["broker_realized_by_leg"] = [
+                        {"leg": str(d), "realized": round(v, 2), "qty": q}
+                        for d, v, q in legs
+                    ]
+                    logger.warning(
+                        "BROKER-RECONCILE %s per-leg (sums to $%.2f): %s",
+                        date_str, sum(v for _, v, _ in legs),
+                        " | ".join(f"{d}={v:+.2f}" for d, v, _ in legs[:12]),
+                    )
+            except Exception as _be:  # noqa: BLE001 — diagnostic only
+                logger.info(
+                    "BROKER-RECONCILE %s: per-leg breakdown unavailable (%s)",
+                    date_str, _be,
+                )
             return out
         except Exception as e:
             # Never let a diagnostic disturb settlement.

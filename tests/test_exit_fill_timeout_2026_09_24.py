@@ -68,11 +68,14 @@ class TestTheBudgets:
         assert _timeout_used(s) == 30.0
 
     def test_exit_uses_the_short_budget(self):
+        """15s, not the 10s first shipped. Measured 2026-09-25 over 15 close
+        fills: median 2s, p90 5s, MAX 12s — so 10s cut 1 in 15 short for no
+        gain, while 15s cuts zero and still beats the old 45s by 30s."""
         s = _strategy()
         HydraStrategy._place_leg_order(
             s, instrument_id=1, side="SELL", quantity=7, order_type="LMT",
             limit_price=1.0, is_exit=True)
-        assert _timeout_used(s) == 10.0
+        assert _timeout_used(s) == 15.0
 
     def test_exit_budget_is_configurable(self):
         s = _strategy({"exit_fill_timeout_s": 6.0})
@@ -86,7 +89,7 @@ class TestTheBudgets:
         HydraStrategy._place_leg_order(
             s, instrument_id=1, side="SELL", quantity=7, order_type="MKT",
             is_exit=True)
-        assert _timeout_used(s) == 10.0
+        assert _timeout_used(s) == 15.0
 
     def test_exit_budget_never_drops_below_one_second(self):
         """A 0 in config must not mean 'time out instantly'."""

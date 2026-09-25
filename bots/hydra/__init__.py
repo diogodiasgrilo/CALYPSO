@@ -36,6 +36,32 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-25 RESEARCH PASS on the five things I had left as caveats. Two were WRONG
+  DEFAULTS, one open question CLOSED, one made answerable, one honestly unresolved.
+  * **B3 default 10s -> 15s.** Measured over 15 close fills + 6 that never filled:
+    latency median 2s, p90 5s, **MAX 12s**. A 10s budget cut 1 in 15 short for no gain;
+    15s cuts ZERO and still detects a dead order 30s sooner than the old 45s. Cutting a
+    live fill is not free — it re-places at a wider cross and adds a cancel that can
+    race a late fill (the A2 class) — so the right default is the largest that costs
+    nothing. (B4 was rescoped the same day for the same reason; see its entry.)
+  * **BROKER-RECONCILE: the accumulation question is CLOSED.** The ledger figure does
+    NOT accumulate across sessions — it read 0.0 at 03:26 ET the morning after a session
+    that realized $4,108.43, which a cumulative counter could not. (An earlier 0.0 on a
+    flat pre-market account had been recorded as "consistent but not proof" — correctly.
+    Following a KNOWN non-zero session is what makes it decisive.) So the drift on all
+    five recorded sessions is a REAL same-day disagreement.
+  * **The drift itself is NOT explained, and the data to explain it was being destroyed
+    nightly.** "Net of commission" fits exactly once (09-18, $1.13) and the drift then
+    FLIPS SIGN (09-23 $+622 vs 09-24 $-543). Decomposing it needs per-position
+    `realizedPnl`, which vanishes with the daily reset. Now captured at settlement
+    (`BROKER-RECONCILE ... per-leg`), read RAW because `_read_open_positions` drops the
+    qty-0 rows that are exactly the ones carrying it.
+    ⚠️ One contradiction already visible and worth chasing: the single leg pair
+    reconstructible from an intraday sample (E#4 7715/7720) came to IBKR -$1,504.58 vs
+    ours -$1,470.00 gross / -$1,502.20 with commissions — so the PER-POSITION figure
+    looks net-of-commission, which would make IBKR LOWER than our gross, while that
+    day's AGGREGATE was HIGHER. Those do not reconcile.
+  Tests: `tests/test_broker_reconcile_perleg_2026_09_25.py`. Full suite 5,082 passed.
 - 2026-09-25 B4 RESCOPED — PER LEG, NOT PER ENTRY. Researching "is 150s safe?" showed
   the first version would have done real damage. Across all retained logs (60 placements
   with a known outcome, 59 leg placements):
