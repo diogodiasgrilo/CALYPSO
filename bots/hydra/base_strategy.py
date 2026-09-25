@@ -3160,6 +3160,65 @@ class MEICStrategy(abc.ABC):
                 buy_sell, paired_long_fill_per_share
             )
 
+            # GUARD-FLOOR-UNFILLABLE (2026-09-25): abandon a SELL leg the moment
+            # the net-credit floor rises ABOVE the current offer, instead of
+            # grinding every rung against a price that cannot trade.
+            #
+            # WHY THE FLOOR GOES UNREACHABLE. Viability is decided ONCE, at the
+            # credit gate, and the legs then take minutes to place — on
+            # 2026-09-25 the gate passed at 11:15:46 and this leg was first
+            # attempted at 11:20:46, FIVE MINUTES later. The paired long is
+            # already bought at its own price, so the floor (long + min credit)
+            # is fixed while the market keeps moving. When the market falls, the
+            # floor ends up above the offer and the leg is unsellable.
+            #
+            # A sell limit above the best offer makes us the worst-priced seller
+            # in the book: it can only fill if the market comes back UP to us.
+            # That is arithmetic, not a forecast. Measured across the retained
+            # logs, on the legs where a floor applied:
+            #     floor >  ask : n=2, filled 0 — BOTH of the failed entries
+            #     floor == ask : n=3, filled 2 (67%)
+            #     floor <  ask : n=1, filled 1
+            # Hence the threshold is strictly `>`: at the ask we are merely
+            # passive and usually still fill, so aborting there would kill good
+            # entries.
+            #
+            # This does NOT rescue the entry — it is already uneconomic, and the
+            # floor refusing to cross is CORRECT (crossing would leg into a net
+            # debit). What it saves is the drift: every rung spent here is more
+            # time holding legs that must then be unwound at market. On
+            # 2026-09-25 the long put fell ~$0.20 (≈$140 on 7 contracts) during
+            # the rungs after the floor first went unreachable.
+            #
+            # Checked on EVERY attempt, not just the first: today's leg was
+            # fillable at rung 1 (floor 1.00 vs ask 1.05) and only went
+            # unreachable by rung 3 (floor 1.00 vs ask 0.85).
+            # From the SECOND rung only. The first attempt always rests at
+            # the floor: the market may come back to us, resting costs nothing
+            # yet, and `test_sell_limit_is_floored_not_the_low_mid` (2026-06-10)
+            # deliberately pins that a floored SELL is still PLACED at the floor
+            # rather than skipped — that intent is correct and is preserved.
+            # What is not worth doing is the three rungs AFTER it, once the
+            # market has shown it is moving away.
+            if (
+                attempt > 0
+                and buy_sell == BuySell.SELL
+                and sell_floor_ps is not None
+                and ask and ask > 0
+                and sell_floor_ps > ask
+            ):
+                logger.warning(
+                    "  GUARD-FLOOR-UNFILLABLE: %s abandoning at rung %d/%d — the "
+                    "net-credit floor $%.2f is ABOVE the offer $%.2f, so this leg "
+                    "cannot trade without the market coming back to us. The paired "
+                    "long is already filled, so the floor cannot move; grinding the "
+                    "remaining rungs only adds drift to the unwind. Entry will be "
+                    "unwound.",
+                    leg_description, attempt + 1, len(PROGRESSIVE_RETRY_SEQUENCE),
+                    sell_floor_ps, ask,
+                )
+                break
+
             if is_market:
                 # GUARD-FLOOR: never MARKET-fill a floored SELL — a market order
                 # can't honour the net-credit floor and could fill into a debit.

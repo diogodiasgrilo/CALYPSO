@@ -36,6 +36,35 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-25 GUARD-FLOOR-UNFILLABLE + the failed-entry backfill. Operator noticed B had
+  "ANOTHER failed entry". Measured: **5 failed entries in 8 retained days, EVERY ONE on
+  a SHORT leg** (3x short call, 2x short put), never a long. Cost excluding one lucky
+  windfall: **-$739.70 / 8 days ≈ -$92/day**, against a mean day of ~$229.
+  * **Mechanism** (09-25 11:15-11:23): the credit gate passes ONCE at 11:15:46, then the
+    legs take minutes — the short put was first attempted at **11:20:46, five minutes
+    later**. The paired long is already bought, so the floor (long + min credit) is FIXED
+    while the market moves. It fell, and the floor ended up $0.15 ABOVE the offer. A sell
+    limit above the best offer can only fill if the market comes back; that is arithmetic.
+  * **Threshold MEASURED, not chosen**: on legs where a floor applied,
+    `floor > ask` n=2 filled 0 (both failed entries) · `floor == ask` n=3 filled 2 (67%)
+    · `floor < ask` n=1 filled 1. Hence strictly `>` — at the ask we are merely passive
+    and usually still fill.
+  * **Fires from rung 2**, not rung 1. The first attempt still rests at the floor: the
+    market may come back, and `test_sell_limit_is_floored_not_the_low_mid` (2026-06-10)
+    deliberately pins that a floored SELL is PLACED rather than skipped. ⚠️ **That
+    EXISTING test caught my first version**, which aborted before placing anything —
+    the third time the full-suite gate has caught something unit tests of new code could
+    not see.
+  * This does NOT rescue the entry (it is uneconomic, and the floor refusing to cross is
+    CORRECT — crossing legs into a net debit). It saves the DRIFT: on 09-25 the long put
+    fell ~$0.20 (~$140 on 7c) during the rungs after the floor went unreachable.
+  * **DATA: back-filled `daily_summaries.unattributed_overlay_pnl` for 5 days**
+    (09-15 -310, 09-18 -105, 09-22 -125, 09-23 +115, 09-24 +5995). Every drift matches a
+    failed-entry unwind to the cent (drift + commission == the logged net), confirming
+    A1 had been mis-attributing EVERY failed-entry day, not just 09-24. Residual now
+    $-0.00. **Verified NO P&L number moved**: sum(gross) $44,722.07 and sum(net)
+    $25,073.47 identical before/after, cumulative unchanged. Two WAL-safe backups taken.
+  Tests: `tests/test_guard_floor_unfillable_2026_09_25.py`. Full suite 5,099 passed.
 - 2026-09-25 RTH MEASUREMENT — B1 WAS ONLY A THIRD OF A FIX. The first market-open
   measurement after the 09-24 work, and it contradicted what I had reported:
       exchangerate  265 calls/10min (9% of budget)  — I had called this eliminated
