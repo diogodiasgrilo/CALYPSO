@@ -36,6 +36,27 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-24 B4-FOLLOWUP — THE PLACEMENT BUDGET NOW REACHES D/E/F/G/H. Found by
+  auditing the shipped change rather than by a failure: D, E, F, G and H each fully
+  OVERRIDE `_initiate_entry` and never call `super()`, so none of them started the
+  placement window — B4 protected only A/B/C. **G matters most**: it is the
+  undefined-risk naked strangle and it reaches the SAME rung loop via
+  `_place_option_order`.
+  * NOT a live bug: `_placement_deadline` is simply never set on those variants and the
+    guard returns False when it is None (the `is None` check added while writing B4's
+    controls is what makes that safe rather than accidental). But the protection did not
+    reach them, which is not what B4 claimed.
+  * Also recorded from the same audit, as NON-issues after checking: the exit path
+    already cancels a timed-out close before retrying (so B3's shorter budget does not
+    open a double-close), every position read that makes an irreversible decision is
+    already `strict=True` (so B2's cache cannot serve one), `_process_expired_credits`
+    can only ever be stale in the SAFE direction (positions do not reappear), and
+    `log_position_snapshot` mutates nothing (so B1's early return drops no side effect).
+  * One semantic widening worth knowing: A1's failed-entry P&L now also flows into
+    `daily_summaries.unattributed_overlay_pnl`, a v13 column created for Brandon's
+    overlay residual. Same meaning — "in the day total, on no entry" — but the column
+    name now under-describes it.
+  Tests: `TestEveryVariantStartsTheWindow`. Full suite 5,079 passed.
 - 2026-09-24 A4 — A DRY-RUN EARLY CLOSE NO LONGER RECORDS THE FULL CREDIT AS THE RESULT.
   Found auditing every variant for the accounting class that bit B. F took a take-profit
   at 12:24:17; its state was right and its DB row was not:

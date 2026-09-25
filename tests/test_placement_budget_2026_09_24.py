@@ -183,3 +183,40 @@ class TestRungLoopHonoursIt:
             7630.0, "Put", BuySell.BUY, "2026-09-24", "ref",
         )
         assert len(s.attempts) == len(PROGRESSIVE_RETRY_SEQUENCE)
+
+
+class TestEveryVariantStartsTheWindow:
+    """CONTROL for a coverage gap found by auditing the shipped change.
+
+    D, E, F, G and H each fully OVERRIDE ``_initiate_entry`` and never call
+    ``super()``, so none of them was starting the placement budget — B4
+    protected only A/B/C. G matters most: it is the undefined-risk naked
+    strangle and it reaches the same rung loop via ``_place_option_order``.
+
+    (It was not a live *bug* — ``_placement_deadline`` is simply never set on
+    those variants, and the guard returns False when it is None — but the
+    protection did not reach them, which is not what B4 claimed.)
+
+    These assert on the SHIPPED source because the alternative is constructing
+    five heterogeneous strategies; the behaviour they gate is already covered
+    by TestDeadlineSemantics above. A missing call is a deleted line, which
+    this does catch.
+    """
+
+    import pytest
+
+    @pytest.mark.parametrize("module", [
+        "strangle_strategy", "ghauri_strategy", "long_strangle_strategy",
+        "double_calendar_strategy", "spy_double_calendar_strategy",
+    ])
+    def test_entry_start_also_begins_the_window(self, module):
+        import importlib
+        import inspect
+        m = importlib.import_module(f"bots.hydra.{module}")
+        src = inspect.getsource(m)
+        i = src.index("self._entry_in_progress = True")
+        window = src[i:i + 600]
+        assert "_begin_placement_window()" in window, (
+            f"{module} sets _entry_in_progress=True without starting the "
+            f"placement budget — B4's blind-window bound does not reach it"
+        )
