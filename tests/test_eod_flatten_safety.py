@@ -439,44 +439,61 @@ class TestEodFlattenPerSideSkip:
 
 # ──────────── skip_otm_pts config wiring (2026-08-18: 20 -> 10) ────────────
 class TestEodFlattenSkipOtmPtsConfigWiring:
-    """REVERSED 2026-09-27: 10pt -> 25pt. Read this before lowering it again.
+    """REVISED 2026-09-27: 10pt -> 20pt. Read this before changing it again.
 
-    The 2026-08-18 audit that set 10pt was careful but measured the wrong
-    thing. It found the 20pt cushion had a 0/19 win rate against holding to
-    expiry and cost ~$805 — then concluded the cushion was too wide. But this
-    is a TAIL guard, and 0/19 is what fire insurance looks like in a sample
-    where the house did not burn down. The audit priced the frequent small
-    cost of flattening unnecessarily and could not price the rare large one,
-    because no tail event was in the window.
+    The 2026-08-18 audit that set 10pt measured the wrong thing. It found the
+    20pt cushion had a 0/19 win rate against holding to expiry and cost ~$805,
+    and concluded the cushion was too wide. But this guards a directional
+    crossing, and 0/19 is what fire insurance looks like in a sample where the
+    house did not burn down.
 
-    The decisive number was already in the code comment above the knob: the
-    84-day maximum final-10-minute SPX move is 18.4pt. At 10pt the cushion sat
-    BELOW the largest move already observed, so a repeat would carry a short
-    that was 10pt OTM at the checkpoint straight through its strike. The
-    asymmetry is the argument, but measure it honestly (done 2026-09-27):
-    SPX moves >10pt in the final 10 minutes on 8 of 45 days (17.8%), only 6
-    short legs over 32 traded days sat in the newly-flattened 10-25pt band,
-    and buying them back costs ~$945 total (~$30/day, upper bound at the ask).
-    Against that, one short settling ITM on B is $3,500 per side.
+    WHY 10pt WAS TOO NARROW, measured from B's own ticks over 45 live days:
+    the final-10-minute SPX move has median 3.89pt, 90th pct 11.02pt, max
+    16.80pt, and **exceeds 10pt on 8 of 45 days (17.8%)**. An earlier 84-day
+    study put the max at 18.4pt. So "10pt OTM at 15:50" was crossed by a move
+    of ordinary size roughly one day in six, and a crossed short does not lose
+    a little — the spread settles ITM.
 
-    On the OBSERVED distribution that is roughly break-even to slightly
-    negative EV -- it buys variance reduction, not expected profit. The real
-    justification is a tail the 45-day sample does not contain: no shock day
-    appears in it, and on one a 10pt cushion fails far worse than a 25pt one.
-    Do not describe this change as free.
+    WHY 20pt AND NOT 25pt. 20pt covers every final-10-min move ever recorded
+    (18.4pt over 84 days; 16.8pt over 45). The marginal 20->25 step covers the
+    20-25pt band, which has **zero observations across 129 combined days**,
+    costs ~$210 per 32 traded days (~$1,600/yr) and buys on the order of
+    $112/yr of expected protection — about 14:1 against.
 
-    25pt is the first value with real margin over the 18.4pt observed max
-    (~36%). 20pt was itself set AT the sample maximum (8.7% margin), which is
-    the same overfitting error in a milder form.
+    A 25pt cushion was briefly deployed on 2026-09-27 and reverted the same
+    day. The argument for it was "insure a tail the sample does not contain",
+    and that argument is WRONG here: B's spreads are defined-risk, so the loss
+    is bounded by width at `5 x 100 x 7 = $3,500/side` whether SPX moves 21
+    points or 60. There is no fat tail for the cushion to insure. Recording
+    that explicitly because it is the kind of argument that sounds good and
+    reads as prudence.
 
-    Historical note, kept because it is the strongest argument against going
-    back: the 10pt setting did correctly discriminate on 2026-08-17, protecting
-    E4 (6.62pt at flatten, which settled 0.36pt from its strike) while letting
-    E3 (11.62pt) ride free. That near-miss is mass sitting right at the
-    boundary, not evidence the boundary is safe.
+    WHAT DOES JUSTIFY WIDENING TO 20 is narrower: the protection is
+    CORRELATED with bad days. A short near its strike at 15:50 on a trend day
+    is the same session in which other entries already stopped, so the cushion
+    trims the worst sessions specifically. That is worth a premium while sizing
+    up on a t = 0.83 edge — but it justifies covering the OBSERVED range, not
+    padding past it.
 
-    Deployed as a config change (no
-    code change — skip_otm_pts was already fully config-driven), so what
+    ACCEPTED WEAKNESS, stated rather than hidden: 20pt clears the 18.4pt
+    observed max by only 1.6pt (8.7%), and a threshold sitting near its sample
+    maximum is exactly the pattern criticised elsewhere in this project. It is
+    accepted here because the loss is width-bounded (so the cost of being
+    wrong is capped, unlike a halt criterion) and because the real inadequacy
+    is different in kind: **the cushion is regime-blind.** It is a fixed point
+    value, while the final-10-min move scales with VIX. B's 45-day sample
+    averages VIX 16; at VIX 30 neither 20 nor 25 is adequate and ~40pt would
+    be. B has never traded above VIX 19, so this has never bitten. VIX-scaling
+    the cushion is the proper fix and is logged as a pre-registered item in
+    docs/NEXT_STEPS.md — deliberately NOT built during the config freeze.
+
+    Historical note, kept because it is the strongest argument against
+    narrowing again: the 10pt setting did discriminate correctly on
+    2026-08-17, protecting E4 (6.62pt at flatten, which settled 0.36pt from
+    its strike) while letting E3 (11.62pt) ride free. That near-miss is mass
+    sitting right at the boundary, not evidence the boundary is safe.
+
+    Deployed as a config change (nocode change — skip_otm_pts was already fully config-driven), so what
     actually needs testing here is the WIRING: that config.json's
     strategy.eod_flatten.skip_otm_pts JSON path is spelled correctly and
     parses to a float, using the identical extraction expression
@@ -498,13 +515,13 @@ class TestEodFlattenSkipOtmPtsConfigWiring:
         with open(path) as f:
             return json.load(f)
 
-    def test_variant_b_config_sets_25pt(self):
+    def test_variant_b_config_sets_20pt(self):
         cfg = self._load("config_variant_b.json")
-        assert self._extract_skip_otm_pts(cfg) == 25.0
+        assert self._extract_skip_otm_pts(cfg) == 20.0
 
-    def test_variant_c_config_sets_25pt(self):
+    def test_variant_c_config_sets_20pt(self):
         cfg = self._load("config_variant_c.json")
-        assert self._extract_skip_otm_pts(cfg) == 25.0
+        assert self._extract_skip_otm_pts(cfg) == 20.0
 
     def test_the_REAL_MONEY_variant_gets_it_too(self):
         """bm inherits B's shape, so it inherited B's 10pt cushion as well.
@@ -512,7 +529,7 @@ class TestEodFlattenSkipOtmPtsConfigWiring:
         It is the one variant where an ITM settlement is not paper.
         """
         cfg = self._load("config_variant_bm.json")
-        assert self._extract_skip_otm_pts(cfg) == 25.0
+        assert self._extract_skip_otm_pts(cfg) == 20.0
 
     def test_the_cushion_clears_the_observed_max_final_move(self):
         """The invariant, not the number: 18.4pt is the 84-day max final-10-min
@@ -559,7 +576,7 @@ class TestEodFlattenSkipOtmPtsConfigWiring:
         # the checkpoint" was never a safe read at that distance.
         cfg = self._load("config_variant_b.json")
         cushion = self._extract_skip_otm_pts(cfg)
-        assert cushion == 25.0
+        assert cushion == 20.0
 
         s = HydraStrategy.__new__(HydraStrategy)
         s.eod_flatten_skip_otm_pts = cushion
@@ -575,20 +592,21 @@ class TestEodFlattenSkipOtmPtsConfigWiring:
         s.current_price = 7515.0
         assert s._eod_flatten_can_skip_side(e, "put") is False
 
-        # 19pt OTM — past the 18.4pt observed max, but still inside the
-        # cushion's margin. Still flattened: the margin is the point.
+        # 19pt OTM — inside 20pt, and inside the 18.4pt observed max move.
+        # Still flattened.
         s.current_price = 7519.0
         assert s._eod_flatten_can_skip_side(e, "put") is False
 
-        # 30pt OTM: comfortably clear of any observed final-10-min move, so
-        # it rides free and we do not pay a needless debit.
-        s.current_price = 7530.0
+        # 22pt OTM: clear of every final-10-min move ever recorded (max
+        # 18.4pt over 84 days, 16.8pt over 45), so it rides free rather than
+        # paying a debit for a band with ZERO observations behind it.
+        s.current_price = 7522.0
         assert s._eod_flatten_can_skip_side(e, "put") is True
 
     def test_the_boundary_is_exactly_the_configured_cushion(self):
         """Pin the comparison itself, so a >= / > slip cannot pass silently."""
         s = HydraStrategy.__new__(HydraStrategy)
-        s.eod_flatten_skip_otm_pts = 25.0
+        s.eod_flatten_skip_otm_pts = 20.0
         e = base_mod.IronCondorEntry(entry_number=1)
         e.contracts = 7
         e.short_put_strike = 7500.0
@@ -596,7 +614,7 @@ class TestEodFlattenSkipOtmPtsConfigWiring:
         e.is_complete = False
         e.call_side_skipped = True
 
-        s.current_price = 7524.99          # a hair inside -> flatten
+        s.current_price = 7519.99          # a hair inside -> flatten
         assert s._eod_flatten_can_skip_side(e, "put") is False
-        s.current_price = 7525.0           # exactly at the cushion -> ride
+        s.current_price = 7520.0           # exactly at the cushion -> ride
         assert s._eod_flatten_can_skip_side(e, "put") is True

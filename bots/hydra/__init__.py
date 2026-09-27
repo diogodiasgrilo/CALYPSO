@@ -36,6 +36,32 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-27 EOD flatten cushion settled at 20pt (was briefly 25pt the same day; 10pt before).
+  25pt was deployed and REVERTED within hours because the argument for it was wrong, and the
+  error is worth recording: "insure a tail the sample does not contain" does not apply here,
+  because B's spreads are DEFINED-RISK — the loss is bounded by width at 5 x 100 x 7 =
+  $3,500/side whether SPX moves 21 points or 60. There is no fat tail for the cushion to
+  insure, so the marginal 20->25 step is pure expected cost.
+  THE NUMBERS (B's own ticks, 45 live days; plus an earlier 84-day study):
+      final-10-min SPX move: median 3.89pt, 90th pct 11.02pt, max 16.80pt (84-day max 18.4pt)
+      exceeds 10pt on 8 of 45 days = 17.8%  <- why 10pt was too narrow
+      20-25pt band: ZERO observations across 129 combined days
+      cost 10->20: +$735 / 32 traded days   ·   cost 20->25: a further +$210 (~$1,600/yr)
+      expected protection bought by that last 5pt: ~$112/yr  -> about 14:1 against
+  So 20pt: covers every final-10-min move ever recorded, and stops paying for a band with no
+  observations behind it. Applied to a/b/c/bm.
+  WHAT ACTUALLY JUSTIFIES 20 is narrower than a tail story — the protection is CORRELATED with
+  bad days (a short near its strike at 15:50 on a trend day is the same session other entries
+  already stopped), so it trims the worst sessions specifically. Worth a premium while sizing
+  up on a t = 0.83 edge; it does not justify padding beyond the observed range.
+  ACCEPTED WEAKNESS, stated not hidden: 20pt clears the 18.4pt observed max by only 1.6pt
+  (8.7%) — a threshold near its sample max, the pattern criticised elsewhere in this project.
+  Accepted because the loss is width-bounded, so being wrong is capped. The genuine gap is
+  different in kind: the cushion is REGIME-BLIND. It is a fixed point value while the
+  final-10-min move scales with VIX; B's sample averages VIX 16, and at VIX 30 neither 20 nor
+  25 is adequate (~40pt would be). B has never traded above VIX 19. VIX-scaling is the proper
+  fix and is PRE-REGISTERED with a decision rule in docs/NEXT_STEPS.md — deliberately NOT built
+  during the config freeze. Reasoning + the cost table: docs/GO_LIVE_MASTER.md 2-quater.
 - 2026-09-27 H1 BREACH INVESTIGATED — it is not a bug, and automating the fix would
   have LOST money. Documentation + a reproducible measurement; no behaviour change.
   The 2026-09-21 session breached both H1 (−$441.17/contract vs −$400) and H3 (3 stops

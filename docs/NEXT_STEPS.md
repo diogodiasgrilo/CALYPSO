@@ -41,6 +41,26 @@ The settlement RECONCILE fired at exactly **−$5,995**, confirming A1's diagnos
 ⚠️ BROKER-RECONCILE showed a SEPARATE unexplained gap: IBKR realized $4,108.43 vs ours $3,565.00
 (**−$543.43**), matching the ~$558 measured intraday. Not A1 — worth chasing.
 
+### 📋 PRE-REGISTERED (not to be built during the freeze) — VIX-scale the EOD flatten cushion
+
+`eod_flatten.skip_otm_pts` is a **fixed point value** (20pt as of 2026-09-27) but the quantity it
+guards — the final-10-minute SPX move — **scales with VIX**. Measured over B's 45 live days at a
+mean VIX of 16: median move 3.89pt, 90th pct 11.02pt, max 16.80pt. At VIX 30 that distribution
+roughly doubles, so neither 20pt nor 25pt is adequate and ~40pt would be. **B has never traded
+above VIX 19**, which is why this has never bitten — and it is the same "unobserved zone" problem
+as the `max_entries` cap.
+
+**Decision rule, registered in advance so the change cannot be fitted after the fact:**
+
+* Trigger: B trades **≥ 10 sessions with VIX ≥ 22**, OR any session where the final-10-min move
+  exceeds the then-current cushion.
+* Form: `cushion = clamp(round(VIX × k), 20, 60)` with `k` fixed at **1.25** (so VIX 16 → 20pt,
+  matching today's value exactly, and VIX 32 → 40pt). `k` is set by matching the current value at
+  the current regime, NOT by optimising P&L.
+* Pass criterion: it must not increase flatten cost at VIX < 22 — by construction it cannot, since
+  it reproduces 20pt there.
+* Re-run `scripts/halt_criteria_counterfactual.py`-style measurement on the flatten band first.
+
 ### ⚠️ 2026-09-27 — the over-fill correction shipped this morning was very likely a NO-OP
 
 Worth reading before trusting any "over-fill is handled" claim. `_correct_over_fill` (shipped

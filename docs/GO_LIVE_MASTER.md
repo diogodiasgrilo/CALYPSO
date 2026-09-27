@@ -257,34 +257,41 @@ All three pass the fix-vs-tune test — each would be made regardless of P&L —
 pinned by tests (`tests/test_config_freeze_invariants_2026_09_27.py`,
 `tests/test_eod_flatten_safety.py`), with negative controls.
 
-**1. `eod_flatten.skip_otm_pts` 10 → 25pt (b, c, bm).** The 2026-08-18 audit that set 10pt
-measured the wrong thing: it found the 20pt cushion had a 0/19 win rate against holding and
-concluded it was too wide. But this is a **tail guard**, and 0/19 is what fire insurance looks
-like in a sample where the house did not burn down. The decisive number was already in the code
-comment above the knob — the **84-day maximum final-10-minute move is 18.4pt** — so at 10pt the
-cushion sat *below the largest move already observed*. 20pt was itself set AT the sample max
-(8.7% margin) — the same error, milder. 25pt is the first value with real margin (~36%).
+**1. `eod_flatten.skip_otm_pts` 10 → 20pt (a, b, c, bm).** The 2026-08-18 audit that set 10pt
+found the 20pt cushion had a 0/19 win rate against holding and concluded it was too wide — but
+0/19 is what fire insurance looks like in a sample where the house did not burn down.
 
-**Measured properly 2026-09-27** (the earlier "~$42/event" estimate was too low — corrected here):
+Measured from B's own ticks, 45 live days: the final-10-minute SPX move has median 3.89pt, 90th
+pct 11.02pt, max 16.80pt, and **exceeds 10pt on 8 of 45 days (17.8%)**. The earlier 84-day study
+put the max at 18.4pt. So a short 10pt OTM at 15:50 was crossed by a move of ordinary size about
+one day in six, and a crossed short settles the spread ITM.
 
-| | |
-|---|---|
-| SPX moves **>10pt in the final 10 min** | **8 of 45 days = 17.8%** (median move 3.89pt, 90th pct 11.02pt, max 16.80pt) |
-| short legs alive at 15:50 in the newly-flattened 10–25pt band | **6** over 32 traded days |
-| cost to buy them back at the ask | **$945 total ≈ $30/day** (upper bound; ≥1 was already being flattened, so the incremental figure is lower) |
-| consequence if one crosses | spread settles ITM — up to **$3,500/side** on B at 7 contracts |
+**25pt was deployed briefly the same day and reverted.** The stated reason for it — "insure a tail
+the sample does not contain" — **is wrong here, and worth recording as a trap**: B's spreads are
+defined-risk, so the loss is bounded by width at `5 × 100 × 7 = $3,500/side` whether SPX moves 21
+points or 60. There is no fat tail for the cushion to insure. The marginal 20→25 step covers the
+20–25pt band, which has **zero observations across 129 combined days**, costs ~$1,600/yr and buys
+~$112/yr of expected protection — about **14:1 against**.
 
-⚠️ **Be honest about the EV: on the observed distribution this change is roughly break-even to
-slightly negative.** Expected ITM settlements avoided ≈ 1.8/yr × ~$1,400 partial-breach loss ≈
-$2,500/yr, against ~$4,000–7,400/yr of insurance. **It buys variance reduction, not expected
-profit.** The justification is a tail the sample does not contain — no shock day (Fed surprise,
-geopolitical, flash move) appears in 45 days, and on one of those a 10pt cushion fails far worse
-than a 25pt one. For a strategy with a **t = 0.83** edge about to take real money, that trade is
-worth making; it is not a free lunch and should not be described as one.
+| cushion | covers | cost / 32 traded days | verdict |
+|---|---|---|---|
+| 10pt | 82% of final-10-min moves | — (baseline) | crossed ~1 day in 6 |
+| **20pt** | **every move ever recorded** | **+$735** | **chosen** |
+| 25pt | + a band with zero observations | +$945 | reverted — 14:1 against |
 
-**20pt is a defensible cheaper alternative** — it covers everything observed and would save $210
-of the $945 (the three legs at 21.9 / 23.6 / 23.7pt would ride free). The 20-vs-25 gap is purely
-a judgement about unobserved tail.
+What justifies 20 is narrower than a tail story: the protection is **correlated with bad days** —
+a short near its strike at 15:50 on a trend day is the same session other entries already stopped,
+so it trims the worst sessions specifically. Worth a premium while sizing up on a t = 0.83 edge.
+It does **not** justify padding past what has been observed.
+
+⚠️ **Accepted weakness, and the real gap.** 20pt clears the 18.4pt observed max by only 1.6pt
+(8.7%) — a threshold near its sample maximum, the pattern criticised throughout this document.
+Accepted because the loss is width-bounded, so being wrong is capped. But the genuine inadequacy
+is different in kind: **the cushion is regime-blind.** It is a fixed point value while the
+final-10-min move scales with VIX. B's sample averages VIX 16; at VIX 30 neither 20 nor 25 is
+adequate and ~40pt would be. B has never traded above VIX 19, so it has never bitten.
+**VIX-scaling the cushion is the proper fix, pre-registered in `NEXT_STEPS.md` and deliberately
+NOT built during the freeze.**
 
 **2. MKT-043 calm-entry keys removed (b, c, bm).** Fired **zero** times in 101 days. Removed not
 for the parameter count but because a path that has never executed, and only activates in the
