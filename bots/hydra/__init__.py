@@ -36,6 +36,41 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-27 H1 BREACH INVESTIGATED — it is not a bug, and automating the fix would
+  have LOST money. Documentation + a reproducible measurement; no behaviour change.
+  The 2026-09-21 session breached both H1 (−$441.17/contract vs −$400) and H3 (3 stops
+  vs >=3). Two things were checked: whether an automated halt exists, and whether it
+  failed.
+  FINDING 1 — there is no automated halt. `_is_daily_loss_limit_reached()` is wired
+  (base_strategy MULTI-005, and it correctly stops NEW entries while continuing to
+  monitor open ones) but HydraStrategy stubs it to `return False`. H1-H10 are entirely
+  MANUAL criteria, enforced by an operator running `systemctl stop`.
+  FINDING 2 — un-stubbing it would have cost money. Measured across B's whole 32-day
+  live era (scripts/halt_criteria_counterfactual.py, added here):
+      halt at −$400/contract OR >=3 stops -> 1 entry blocked, on 1 day
+      halt at −$600/contract OR >=3 stops -> 0 entries blocked, EVER
+  The single blocked entry was 2026-09-24 e#7, which collected $280 and never stopped.
+  Net effect of automation: **−$280 over 32 days.**
+  WHY, and it is the schedule not the thresholds: a daily-loss halt's only lever is
+  refusing to open NEW entries, and B's grid runs 09:45-12:45, so entries finish before
+  the afternoon in which losses accumulate. On 09-21 the threshold was crossed at 13:19
+  — 32 minutes AFTER the last entry (12:47). Even a perfect H1/H3 would have blocked
+  nothing on the day it was breached, and e#7 (the entry a harsher rule would have
+  stopped) made +$70.
+  CORRECTION: an earlier note in GO_LIVE_MASTER said "no review is recorded" for the
+  breach. That was WRONG — a detailed review was recorded 2026-09-22 inside
+  LIVE_HALT_CRITERIA.md, including why a "1.6x the worst observation" threshold is
+  guaranteed to break whenever the sample grows a new tail, plus two replacement
+  options. What is actually open is the operator's Gate-9 CHOICE between them.
+  Recommended: Option A (structural) — H1 = max_sides_tolerated x $200 = −$600/contract,
+  making H3 the binding trigger and H1 its dollar shadow; self-consistent and stable as
+  the sample grows, unlike a "worst observed" rule.
+  ALSO: `max_daily_loss_percent` is DEAD CONFIG — assigned in base_strategy and read
+  nowhere (verified repo-wide). It reads as a live 2% daily limit; there is none. Both
+  it and the stub now carry comments saying so, so a future reader does not mistake
+  either for a guard. What actually bounds a single session is the A2 %-of-width stop
+  ($200/contract/side, structural) — it saved $6,200 on 09-21.
+  No code behaviour changed. Docs + comments + one analysis script.
 - 2026-09-27 CONFIG FREEZE + three pre-freeze safety corrections (b, c, bm).
   B carries 154 free parameters against 32 live trading days, and its live edge is NOT
   statistically distinguishable from zero (mean $137.81/day, SE $166.36, t = 0.83). The

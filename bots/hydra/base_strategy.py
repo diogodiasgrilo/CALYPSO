@@ -1228,6 +1228,13 @@ class MEICStrategy(abc.ABC):
         self.meic_plus_reduction = self.strategy_config.get("meic_plus_reduction", 0.10) * 100
 
         # Risk parameters
+        # DEAD KNOB — read here and referenced NOWHERE else in the codebase
+        # (verified 2026-09-27: this assignment is the only occurrence). It
+        # reads as a live 2% daily-loss limit; there is no such limit. The
+        # enforcement hook `_is_daily_loss_limit_reached()` is stubbed to
+        # `return False` in HydraStrategy, deliberately and with a measurement
+        # behind it. Kept rather than deleted so an operator config carrying
+        # the key does not start erroring, but do not mistake it for a guard.
         self.max_daily_loss_percent = self.strategy_config.get("max_daily_loss_percent", 2.0)
         self.max_vix_entry = self.strategy_config.get("max_vix_entry", DEFAULT_MAX_VIX_ENTRY)
         self.contracts_per_entry = self.strategy_config.get("contracts_per_entry", 1)

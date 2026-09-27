@@ -1536,7 +1536,32 @@ class HydraStrategy(MEICStrategy):
         return (window_end - now).total_seconds()
 
     def _is_daily_loss_limit_reached(self) -> bool:
-        """Disabled for HYDRA — bot always attempts all entries."""
+        """Disabled for HYDRA — the bot always attempts all entries.
+
+        MEASURED before leaving it that way (2026-09-27, B's 32-day live era,
+        `scripts/halt_criteria_counterfactual.py`):
+
+            halt at -$400/contract OR >=3 stops -> 1 entry blocked, on 1 day
+            halt at -$600/contract OR >=3 stops -> 0 entries blocked, ever
+
+        The one blocked entry was 2026-09-24 e#7, which collected $280 and
+        never stopped — so automating this would have COST $280, not saved
+        anything.
+
+        THE STRUCTURAL REASON, which matters more than the number: the only
+        lever a daily-loss halt has is refusing to open NEW entries, and B's
+        grid runs 09:45-12:45, so entries are finished before the afternoon in
+        which losses accumulate. On 2026-09-21 — the day that breached both H1
+        and H3 — the threshold was crossed at 13:19, after the last entry at
+        12:47. A same-day entry-blocking halt is close to inert for this
+        strategy by construction of the schedule, not by choice of threshold.
+
+        So do NOT un-stub this as a reaction to a bad session. Re-run the
+        counterfactual first; if a later sample makes the blocked-entry count
+        materially positive, the conclusion changes. The halt criteria that CAN
+        bite are the next-day ones (H2/H4 shape) — see
+        docs/migration/LIVE_HALT_CRITERIA.md.
+        """
         return False
 
     # =========================================================================

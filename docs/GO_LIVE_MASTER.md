@@ -235,9 +235,21 @@ exactly what should break it.
 | **External change** — IBKR fill behaviour, SPX settlement, commissions, entitlements | Another variant looking better (multiple-comparisons trap) |
 | **Risk-limit** breach — margin, account, exposure | "We have learned a lot since then" |
 
-⚠️ **Open:** H1 breached on 2026-09-21 (−$441.17/contract vs −$400) and no review is recorded.
-A breach with no review means the protocol already failed once. Close it before relying on the
-freeze.
+⚠️ **Open (corrected 2026-09-27):** H1 and H3 were both breached on 2026-09-21
+(−$441.17/contract vs −$400; 3 stops vs ≥3). An earlier draft of this section said *"no review
+is recorded"* — **that was wrong.** A detailed review was recorded 2026-09-22 inside
+[`LIVE_HALT_CRITERIA.md`](migration/LIVE_HALT_CRITERIA.md), including why a
+"1.6× the worst observation" threshold is *guaranteed* to break whenever the sample grows a new
+tail, and two coherent replacement options.
+
+What is genuinely open is the **operator's Gate-9 choice** between them. Recommendation:
+**Option A (structural)** — `H1 = max_sides_tolerated × $200` → **−$600/contract**, making H3
+(≥3 stops) the binding trigger and H1 its dollar shadow. It is self-consistent, and unlike a
+"worst observed" rule it does not move when the sample grows.
+
+And a finding from 2026-09-27 that changes what these criteria are *for*: **a same-day halt is
+structurally close to inert for B** — see LIVE_HALT_CRITERIA.md §2-bis. Do not automate it as a
+reaction to a bad session.
 
 ### Pre-freeze corrections applied 2026-09-27
 

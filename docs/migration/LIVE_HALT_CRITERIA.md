@@ -109,6 +109,67 @@ Any one of these. Halting is `systemctl stop` on the strategy unit — never `ki
 > 3-stop session is simultaneously "within H3's limit if it is exactly 3" and "past H1". Recorded
 > 2026-09-22; the choice is the operator's and belongs in the Gate-9 approval commit.
 
+## 2-bis. MEASURED 2026-09-27 — a SAME-DAY halt is structurally near-inert for B
+
+**Read this before automating anything here.** The natural reaction to the 09-21 breach is to
+enforce H1/H3 in code — the hook already exists (`_is_daily_loss_limit_reached()` in
+`bots/hydra/strategy.py`, wired at `base_strategy.py` MULTI-005) and is merely stubbed to
+`return False`. It was measured before being left that way.
+
+Across B's **entire 32-day live era** (`scripts/halt_criteria_counterfactual.py`):
+
+| Rule | Days a later entry would be blocked | Entries blocked | Net effect |
+|---|---|---|---|
+| halt at −$400/contract **or** ≥3 stops | **1 / 32** | **1** | **−$280** |
+| halt at −$600/contract **or** ≥3 stops | **0 / 32** | **0** | **$0** |
+
+The single blocked entry was **2026-09-24 e#7**, which collected **$280 and never stopped**.
+Automating the halt would have **cost** $280, not saved anything.
+
+### Why — and it is the schedule, not the thresholds
+
+The only lever a daily-loss halt has is **refusing to open new entries**. B's grid runs
+**09:45 → 12:45**, so entries are finished before the afternoon in which losses accumulate.
+
+On 2026-09-21 specifically:
+
+| time | event | realised / contract |
+|---|---|---|
+| 09:52 | e#1 opened | — |
+| 10:20 | e#2 opened | — |
+| 11:38 | e#1 stopped, call, −$1,570 | −$224 |
+| 11:39 | e#2 stopped, call, −$780 | −$336 |
+| 11:48 | **e#5 opened** — H1 (−$400) not yet crossed, 2 stops < H3 | −$336 |
+| 12:47 | **e#7 opened** — still −$336, still 2 stops | −$336 |
+| 13:19 | e#5 stopped, call, −$910 | **−$466 ← H1 crosses here** |
+| 15:52 | e#7 flattened **+$70** | −$456 |
+
+**The threshold was crossed at 13:19, 32 minutes after the last entry.** Even a perfectly
+implemented H1/H3 would have blocked nothing on the day it was breached. And e#7 — the entry a
+more aggressive rule would have stopped — made money.
+
+### What follows
+
+1. **Do not un-stub the same-day hook as a reaction to a bad session.** Re-run the
+   counterfactual first. If a later sample makes the blocked-entry count materially positive,
+   the conclusion changes and this paragraph should be revisited.
+2. **The criteria that can actually bite are the next-day ones** (H2 cumulative, H4 consecutive
+   stop-days). Those gate a whole session's 7 entries, not the tail of one. If anything here is
+   ever automated, it should be a **next-day** halt, and it belongs on **`bm` (real money)**,
+   where stopping is the point — not on the paper seat, where it would interrupt the data
+   collection the freeze is waiting on.
+3. **Say plainly what actually protects the account**, so the halt table is not read as more
+   than it is. On 09-21 the protection that worked was the **A2 %-of-width stop** — structurally
+   bounded at `0.40 × 5 × 100 = $200/contract/side`, independent of how far the market runs. It
+   saved **$6,200** that day. The halt criteria bound *operational* damage across sessions; they
+   do not bound a single session's loss. The A2 stop does.
+4. ⚠️ **`max_daily_loss_percent` is dead config.** It is assigned in `base_strategy.py` and read
+   **nowhere** (verified 2026-09-27). It reads like a live 2% daily limit. There is none.
+
+---
+
+## 2-ter. The thresholds as drafted (superseded in part — see 2-bis and the breach note above)
+
 | # | Trigger | Threshold (1 contract) | Why this number |
 |---|---|---|---|
 | H1 | Realized loss in one session | **≤ −$400** | 1.6× the worst of 25 paper sessions (−$256) |
