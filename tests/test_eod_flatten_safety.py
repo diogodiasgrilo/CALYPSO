@@ -453,9 +453,17 @@ class TestEodFlattenSkipOtmPtsConfigWiring:
     84-day maximum final-10-minute SPX move is 18.4pt. At 10pt the cushion sat
     BELOW the largest move already observed, so a repeat would carry a short
     that was 10pt OTM at the checkpoint straight through its strike. The
-    asymmetry settles it: a needless flatten costs ~$42 (~$805/19), while one
-    short settling ITM on B is $3,500 per side — and 2026-09-21 put three call
-    spreads at or through the long strike simultaneously.
+    asymmetry is the argument, but measure it honestly (done 2026-09-27):
+    SPX moves >10pt in the final 10 minutes on 8 of 45 days (17.8%), only 6
+    short legs over 32 traded days sat in the newly-flattened 10-25pt band,
+    and buying them back costs ~$945 total (~$30/day, upper bound at the ask).
+    Against that, one short settling ITM on B is $3,500 per side.
+
+    On the OBSERVED distribution that is roughly break-even to slightly
+    negative EV -- it buys variance reduction, not expected profit. The real
+    justification is a tail the 45-day sample does not contain: no shock day
+    appears in it, and on one a 10pt cushion fails far worse than a 25pt one.
+    Do not describe this change as free.
 
     25pt is the first value with real margin over the 18.4pt observed max
     (~36%). 20pt was itself set AT the sample maximum (8.7% margin), which is

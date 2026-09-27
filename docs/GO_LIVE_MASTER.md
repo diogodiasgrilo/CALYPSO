@@ -262,10 +262,29 @@ measured the wrong thing: it found the 20pt cushion had a 0/19 win rate against 
 concluded it was too wide. But this is a **tail guard**, and 0/19 is what fire insurance looks
 like in a sample where the house did not burn down. The decisive number was already in the code
 comment above the knob — the **84-day maximum final-10-minute move is 18.4pt** — so at 10pt the
-cushion sat *below the largest move already observed*. Asymmetry: a needless flatten costs ~$42
-(~$805/19 events); one short settling ITM on B is **$3,500 per side**, and 2026-09-21 put three
-call spreads at or through the long strike simultaneously. 20pt was itself set AT the sample
-max (8.7% margin) — the same error, milder. 25pt is the first value with real margin (~36%).
+cushion sat *below the largest move already observed*. 20pt was itself set AT the sample max
+(8.7% margin) — the same error, milder. 25pt is the first value with real margin (~36%).
+
+**Measured properly 2026-09-27** (the earlier "~$42/event" estimate was too low — corrected here):
+
+| | |
+|---|---|
+| SPX moves **>10pt in the final 10 min** | **8 of 45 days = 17.8%** (median move 3.89pt, 90th pct 11.02pt, max 16.80pt) |
+| short legs alive at 15:50 in the newly-flattened 10–25pt band | **6** over 32 traded days |
+| cost to buy them back at the ask | **$945 total ≈ $30/day** (upper bound; ≥1 was already being flattened, so the incremental figure is lower) |
+| consequence if one crosses | spread settles ITM — up to **$3,500/side** on B at 7 contracts |
+
+⚠️ **Be honest about the EV: on the observed distribution this change is roughly break-even to
+slightly negative.** Expected ITM settlements avoided ≈ 1.8/yr × ~$1,400 partial-breach loss ≈
+$2,500/yr, against ~$4,000–7,400/yr of insurance. **It buys variance reduction, not expected
+profit.** The justification is a tail the sample does not contain — no shock day (Fed surprise,
+geopolitical, flash move) appears in 45 days, and on one of those a 10pt cushion fails far worse
+than a 25pt one. For a strategy with a **t = 0.83** edge about to take real money, that trade is
+worth making; it is not a free lunch and should not be described as one.
+
+**20pt is a defensible cheaper alternative** — it covers everything observed and would save $210
+of the $945 (the three legs at 21.9 / 23.6 / 23.7pt would ride free). The 20-vs-25 gap is purely
+a judgement about unobserved tail.
 
 **2. MKT-043 calm-entry keys removed (b, c, bm).** Fired **zero** times in 101 days. Removed not
 for the parameter count but because a path that has never executed, and only activates in the
