@@ -101,7 +101,14 @@ def run(db_path: Path, since: str, thresholds):
         print(f"     stop P&L avoided by blocking them         : ${realized_after:,.2f}")
         print(f"     credit FORGONE (they never stopped)       : ${credit_forgone:,.2f}")
         net = realized_after - credit_forgone
-        verdict = "would have HELPED" if net > 0 else "would have COST money"
+        if blocked == 0:
+            verdict = "never fires — no entry was ever blocked"
+        elif net > 0:
+            verdict = "would have HELPED"
+        elif net < 0:
+            verdict = "would have COST money"
+        else:
+            verdict = "no effect"
         print(f"     net effect of automating                  : ${net:,.2f}  <- {verdict}")
         for line in detail:
             print(line)
