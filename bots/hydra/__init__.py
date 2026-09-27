@@ -36,6 +36,21 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-27 FLATTEN PRICE P&L — the last "NOT separately tracked" gap closed.
+  `_flatten_accumulated_partial` booked COMMISSION ONLY and admitted it in its own log
+  line: *"market-order slippage on this round trip is NOT separately tracked"*. That
+  slippage is real money — the partial was a genuine broker fill on the way in and a
+  MARKET order on the way out, so the round trip almost always loses the spread — and
+  none of it reached the books.
+  * Booked AGGREGATE-ONLY and recorded as unattributed, identically to
+    `_unwind_partial_entry`. Keeping the two consistent is what lets the settlement
+    RECONCILE identity hold on a failed-entry day; booking it per-entry, or forgetting
+    the accumulator, would re-open the drift A1 closed. Both are controls.
+  * All THREE rung-loop call sites now pass the blended open price
+    (`weighted_fill_sum / filled_so_far`), with a test that fails if a future site
+    forgets — the booking is worthless if the caller supplies no price.
+  * Degrades to commission-only when either price is missing, rather than inventing one.
+  Tests: `tests/test_flatten_partial_price_pnl_2026_09_27.py`. Full suite 5,136.
 - 2026-09-27 A2 EXTENDED TO THE ENTRY PATH — the same race, the third time.
   The cancel/fill race bites when OPENING a leg too. On 2026-09-24 the rung loop
   cancelled a partial at 5/7, two more filled in the gap, the escalation bought the 2 it

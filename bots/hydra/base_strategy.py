@@ -3337,6 +3337,8 @@ class MEICStrategy(abc.ABC):
                 self._flatten_accumulated_partial(
                     conid, side, filled_so_far, external_ref,
                     f"{placement_nonce}flatamb", leg_description,
+                    open_price_per_share=(
+                        weighted_fill_sum / filled_so_far if filled_so_far else None),
                 )
                 return None
 
@@ -3388,6 +3390,8 @@ class MEICStrategy(abc.ABC):
                         self._flatten_accumulated_partial(
                             conid, side, filled_so_far, external_ref,
                             f"{placement_nonce}flatlc", leg_description,
+                            open_price_per_share=(
+                                weighted_fill_sum / filled_so_far if filled_so_far else None),
                         )
                         return None
 
@@ -3465,6 +3469,8 @@ class MEICStrategy(abc.ABC):
             self._flatten_accumulated_partial(
                 conid, side, filled_so_far, external_ref,
                 f"{placement_nonce}flatexh", leg_description,
+                open_price_per_share=(
+                    weighted_fill_sum / filled_so_far if filled_so_far else None),
             )
             # A2: filled then flattened == a net delta of ZERO. Anything the
             # broker still shows beyond the starting quantity is an over-fill
@@ -3493,6 +3499,7 @@ class MEICStrategy(abc.ABC):
     def _flatten_accumulated_partial(
         self, conid, side: str, filled_qty: int, external_ref: str,
         coid_suffix: str, leg_description: str,
+        open_price_per_share: Optional[float] = None,
     ) -> None:
         """ORDER-010 last resort: market-close an accumulated partial leg.
 
@@ -3526,9 +3533,52 @@ class MEICStrategy(abc.ABC):
             logger.warning(
                 f"  ORDER-010: booked ${round_trip_commission:.2f} round-trip "
                 f"commission for the flattened {filled_qty}-contract partial on "
-                f"{leg_description} — market-order slippage on this round trip "
-                f"is NOT separately tracked"
+                f"{leg_description}"
             )
+            # PRICE P&L (2026-09-27). Until now this booked COMMISSION ONLY and
+            # said so in its own log line — "market-order slippage on this round
+            # trip is NOT separately tracked". That slippage is real money: the
+            # partial was a genuine broker fill on the way in and a MARKET order
+            # on the way out, so the round trip almost always loses the spread,
+            # and none of it reached the books.
+            #
+            # Booked AGGREGATE-ONLY and recorded as unattributed, exactly like
+            # `_unwind_partial_entry`: a leg flattened because its entry aborted
+            # never became a position, so no entry can own its result. See
+            # MEICDailyState.failed_entry_unattributed_pnl.
+            #
+            # Sign: a leg opened with a BUY is closed by a SELL, so P&L =
+            # close - open; a leg opened with a SELL is the reverse.
+            try:
+                close_px = float(flat.get("fill_price") or 0.0)
+                open_px = float(open_price_per_share or 0.0)
+                if open_px > 0 and close_px > 0:
+                    per_pt = 100.0 * int(filled_qty)
+                    leg_pnl = ((close_px - open_px) if side == "BUY"
+                               else (open_px - close_px)) * per_pt
+                    self._book_realized_pnl(leg_pnl, entry=None)
+                    self.daily_state.failed_entry_unattributed_pnl = (
+                        getattr(self.daily_state,
+                                "failed_entry_unattributed_pnl", 0.0) or 0.0
+                    ) + leg_pnl
+                    logger.warning(
+                        "  ORDER-010: booked $%+.2f round-trip PRICE P&L for the "
+                        "flattened partial on %s (open %.2f -> close %.2f, %dc) "
+                        "— day aggregate, unattributed (failed attempt owns no "
+                        "entry)", leg_pnl, leg_description, open_px, close_px,
+                        int(filled_qty),
+                    )
+                else:
+                    logger.warning(
+                        "  ORDER-010: flattened partial on %s — price P&L NOT "
+                        "booked (open=%s close=%s). Commission still booked.",
+                        leg_description, open_px or None, close_px or None,
+                    )
+            except Exception as _pe:  # noqa: BLE001 — never cost us the flatten
+                logger.error(
+                    "  ORDER-010: failed to book flatten price P&L for %s (%s) "
+                    "— commission still booked.", leg_description, _pe,
+                )
         else:
             logger.critical(
                 f"  ORDER-010: FAILED to flatten the {filled_qty}-contract "
