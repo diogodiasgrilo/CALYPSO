@@ -439,12 +439,35 @@ class TestEodFlattenPerSideSkip:
 
 # ──────────── skip_otm_pts config wiring (2026-08-18: 20 -> 10) ────────────
 class TestEodFlattenSkipOtmPtsConfigWiring:
-    """A 19-event historical audit (2026-08-18) found MKT-047's 20pt OTM-skip
-    cushion never once beat just holding to expiry, and cost real money on
-    2026-08-17 (B lost $175 flattening two puts that both settled OTM). A
-    15/10/5pt sensitivity re-check picked 10pt as the one that still protects
-    the closest real call (E4, 0.36pt from the strike at settlement) while
-    recovering ~52% of the historical cost. Deployed as a config change (no
+    """REVERSED 2026-09-27: 10pt -> 25pt. Read this before lowering it again.
+
+    The 2026-08-18 audit that set 10pt was careful but measured the wrong
+    thing. It found the 20pt cushion had a 0/19 win rate against holding to
+    expiry and cost ~$805 — then concluded the cushion was too wide. But this
+    is a TAIL guard, and 0/19 is what fire insurance looks like in a sample
+    where the house did not burn down. The audit priced the frequent small
+    cost of flattening unnecessarily and could not price the rare large one,
+    because no tail event was in the window.
+
+    The decisive number was already in the code comment above the knob: the
+    84-day maximum final-10-minute SPX move is 18.4pt. At 10pt the cushion sat
+    BELOW the largest move already observed, so a repeat would carry a short
+    that was 10pt OTM at the checkpoint straight through its strike. The
+    asymmetry settles it: a needless flatten costs ~$42 (~$805/19), while one
+    short settling ITM on B is $3,500 per side — and 2026-09-21 put three call
+    spreads at or through the long strike simultaneously.
+
+    25pt is the first value with real margin over the 18.4pt observed max
+    (~36%). 20pt was itself set AT the sample maximum (8.7% margin), which is
+    the same overfitting error in a milder form.
+
+    Historical note, kept because it is the strongest argument against going
+    back: the 10pt setting did correctly discriminate on 2026-08-17, protecting
+    E4 (6.62pt at flatten, which settled 0.36pt from its strike) while letting
+    E3 (11.62pt) ride free. That near-miss is mass sitting right at the
+    boundary, not evidence the boundary is safe.
+
+    Deployed as a config change (no
     code change — skip_otm_pts was already fully config-driven), so what
     actually needs testing here is the WIRING: that config.json's
     strategy.eod_flatten.skip_otm_pts JSON path is spelled correctly and
@@ -467,13 +490,33 @@ class TestEodFlattenSkipOtmPtsConfigWiring:
         with open(path) as f:
             return json.load(f)
 
-    def test_variant_b_config_sets_10pt(self):
+    def test_variant_b_config_sets_25pt(self):
         cfg = self._load("config_variant_b.json")
-        assert self._extract_skip_otm_pts(cfg) == 10.0
+        assert self._extract_skip_otm_pts(cfg) == 25.0
 
-    def test_variant_c_config_sets_10pt(self):
+    def test_variant_c_config_sets_25pt(self):
         cfg = self._load("config_variant_c.json")
-        assert self._extract_skip_otm_pts(cfg) == 10.0
+        assert self._extract_skip_otm_pts(cfg) == 25.0
+
+    def test_the_REAL_MONEY_variant_gets_it_too(self):
+        """bm inherits B's shape, so it inherited B's 10pt cushion as well.
+
+        It is the one variant where an ITM settlement is not paper.
+        """
+        cfg = self._load("config_variant_bm.json")
+        assert self._extract_skip_otm_pts(cfg) == 25.0
+
+    def test_the_cushion_clears_the_observed_max_final_move(self):
+        """The invariant, not the number: 18.4pt is the 84-day max final-10-min
+        move. A cushion at or below it cannot cover a move we have already
+        seen, so this fails for 10pt AND for 20pt, not just for 10."""
+        OBSERVED_MAX_FINAL_10MIN_MOVE_PTS = 18.4
+        for fname in ("config_variant_b.json", "config_variant_c.json",
+                      "config_variant_bm.json"):
+            got = self._extract_skip_otm_pts(self._load(fname))
+            assert got > OBSERVED_MAX_FINAL_10MIN_MOVE_PTS, (
+                f"{fname}: cushion {got}pt does not clear the "
+                f"{OBSERVED_MAX_FINAL_10MIN_MOVE_PTS}pt observed max move")
 
     def test_variant_b_config_is_a_real_float_not_a_string(self):
         # A JSON "10.0" (string) would pass a naive equality check against the
@@ -496,19 +539,23 @@ class TestEodFlattenSkipOtmPtsConfigWiring:
         assert self._extract_skip_otm_pts({}) == 20.0
 
     def test_wired_value_actually_drives_the_real_skip_gate(self):
-        # End-to-end: take the REAL parsed config value (not a hand-typed 10.0)
-        # and feed it through the actual _eod_flatten_can_skip_side gate, to
-        # prove the deployed number changes real behavior at the boundary it's
-        # supposed to change: a short that was previously (20pt) flattened at
-        # 15pt OTM now correctly rides free at the new 10pt cushion.
+        # End-to-end: take the REAL parsed config value (not a hand-typed
+        # number) and feed it through the actual _eod_flatten_can_skip_side
+        # gate, to prove the deployed number changes real behaviour at the
+        # boundary it is supposed to change.
+        #
+        # 2026-09-27: the direction REVERSED. Under the old 10pt cushion a
+        # 15pt-OTM short rode free into settlement; at 25pt it is flattened.
+        # That is the whole point of the change — 15pt is inside the 18.4pt
+        # largest final-10-minute move ever observed, so "comfortably OTM at
+        # the checkpoint" was never a safe read at that distance.
         cfg = self._load("config_variant_b.json")
         cushion = self._extract_skip_otm_pts(cfg)
-        assert cushion == 10.0
+        assert cushion == 25.0
 
         s = HydraStrategy.__new__(HydraStrategy)
         s.eod_flatten_skip_otm_pts = cushion
         # OTM for a short PUT means spot ABOVE the strike (spot - strike).
-        s.current_price = 7515.0  # short put 7500 -> 15pt OTM
         e = base_mod.IronCondorEntry(entry_number=1)
         e.contracts = 7
         e.short_put_strike = 7500.0
@@ -516,11 +563,32 @@ class TestEodFlattenSkipOtmPtsConfigWiring:
         e.is_complete = False
         e.call_side_skipped = True  # put-only
 
-        # At the OLD 20pt cushion this would have been flattened (15 < 20).
-        assert s._eod_flatten_can_skip_side(e, "put") is True  # rides free at 10pt (15 >= 10)
-
-        # And confirm the boundary genuinely moved: a short still within the
-        # NEW 10pt cushion is still correctly flattened, not accidentally
-        # let through by the config change.
-        s.current_price = 7507.0  # 7pt OTM — inside the new cushion
+        # 15pt OTM: rode free at 10pt, MUST now be flattened at 25pt.
+        s.current_price = 7515.0
         assert s._eod_flatten_can_skip_side(e, "put") is False
+
+        # 19pt OTM — past the 18.4pt observed max, but still inside the
+        # cushion's margin. Still flattened: the margin is the point.
+        s.current_price = 7519.0
+        assert s._eod_flatten_can_skip_side(e, "put") is False
+
+        # 30pt OTM: comfortably clear of any observed final-10-min move, so
+        # it rides free and we do not pay a needless debit.
+        s.current_price = 7530.0
+        assert s._eod_flatten_can_skip_side(e, "put") is True
+
+    def test_the_boundary_is_exactly_the_configured_cushion(self):
+        """Pin the comparison itself, so a >= / > slip cannot pass silently."""
+        s = HydraStrategy.__new__(HydraStrategy)
+        s.eod_flatten_skip_otm_pts = 25.0
+        e = base_mod.IronCondorEntry(entry_number=1)
+        e.contracts = 7
+        e.short_put_strike = 7500.0
+        e.short_put_uic = 111
+        e.is_complete = False
+        e.call_side_skipped = True
+
+        s.current_price = 7524.99          # a hair inside -> flatten
+        assert s._eod_flatten_can_skip_side(e, "put") is False
+        s.current_price = 7525.0           # exactly at the cushion -> ride
+        assert s._eod_flatten_can_skip_side(e, "put") is True

@@ -36,6 +36,46 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-27 CONFIG FREEZE + three pre-freeze safety corrections (b, c, bm).
+  B carries 154 free parameters against 32 live trading days, and its live edge is NOT
+  statistically distinguishable from zero (mean $137.81/day, SE $166.36, t = 0.83). The
+  headline Sharpe decayed 4.96 (n=9) -> 4.33 (n=25, where "3.99" was recorded) -> 2.37
+  (n=32) — but the daily MEAN was flat across halves ($208.74 vs $196.05 at VIX 16.01 vs
+  15.70) and removing 2026-09-21 alone restores 3.97. Nothing degraded; the VARIANCE
+  estimate got honest when a tail day arrived. So August's 4.96 was a shorter sample, not
+  a better config, and reverting to it would be the overfitting error itself.
+  FREEZE RULE: "would I make this change if the P&L had come out the other way?" Yes ->
+  fix (always permitted). No -> tune (needs a pre-registered decision rule). Note these
+  come apart from the STATISTICS: any change to money behaviour resets the sample, bug
+  fixes INCLUDED — rung pricing was a legitimate fix and it moved fill quality $59.91/entry.
+  THE BINDING CONSTRAINT IS DEFECTS, NOT TUNING. Commits to B's live money path per week
+  since go-live: 2,1,2,3,8,7,10,20,10,18 — accelerating. 30 change-days out of ~45 trading
+  days, median gap 1 day, longest clean stretch 9 calendar days. The measurement clock
+  therefore starts after 15 consecutive trading days with NO economics-changing commit —
+  never yet achieved, and that is the real gate. t = 2 needs ~179 traded days (~9 months).
+  THREE CORRECTIONS, all passing the fix-vs-tune test, all negative-controlled:
+  (1) eod_flatten.skip_otm_pts 10 -> 25pt. The 2026-08-18 audit judged a TAIL guard by its
+      win rate in a sample with no tail event (0/19 is fire insurance in a year the house
+      did not burn). The number that settles it was already in the comment above the knob:
+      the 84-day max final-10-min move is 18.4pt, so 10pt sat BELOW the largest move already
+      observed. A needless flatten costs ~$42; one short settling ITM on B is $3,500/side,
+      and 2026-09-21 put three call spreads at/through the long strike at once. 20pt was
+      itself set AT the sample max (8.7% margin) — same error, milder. 25pt gives ~36%.
+  (2) MKT-043 calm-entry keys REMOVED. Fired zero times in 101 days. Removed because a path
+      that has never executed and only arms in a crisis is not protection, it is untested
+      code — the same class of thing as the over-fill check found dead earlier the same day.
+      No `enabled` flag exists (the gate is "all three keys present"), so removing them IS
+      the off switch, and it is behaviourally a no-op.
+  (3) vix_regime.max_entries [7,7,7,7] -> [7,7,3,1] on b and bm. B has never traded above
+      VIX 19.0 — zones 2/3 have ZERO observed days. It compounds: above VIX 22 Brandon
+      widens 5pt -> 10pt, doubling the A2 stop to $2,800/side while the count stays at 7
+      = $39,200 theoretical daily max in a regime never observed. The cap holds DOLLAR
+      exposure flat across the width doubling. Zones 0/1 deliberately unchanged at 7 —
+      freezing means not re-tuning what has been running.
+  bm (REAL MONEY) had inherited B's 10pt cushion and uncapped [7,7,7,7] by copy-and-forget;
+  a test now pins bm to B on every frozen safety knob, and that bm stays dry_run=true.
+  Protocol, unfreeze triggers, and the open H1-breach-with-no-review item:
+  docs/GO_LIVE_MASTER.md section 2-quater.
 - 2026-09-27 A2 RE-CHECKS AFTER THE BOOK SETTLES — the over-fill correction was
   almost certainly a no-op in production, and this is what makes it real.
   `_correct_over_fill` read positions the INSTANT a leg returned. IBKR's position

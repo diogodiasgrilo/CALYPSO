@@ -73,9 +73,6 @@
     "cushion_recovery_pct": null,
     "buffer_decay_start_mult": 2.5,
     "buffer_decay_hours": 4.0,
-    "calm_entry_lookback_min": 3,
-    "calm_entry_threshold_pts": 15.0,
-    "calm_entry_max_delay_min": 5,
     "stop_confirmation_enabled": false,
     "stop_confirmation_seconds": 75,
     "_comment_mkt046": "2026-08-28: same disable as B (see config_variant_b.json's comment + bots/hydra/__init__.py version history for the full study) -- C's own history independently showed the identical result (6/6 delayed stops worse, 0 better, $718.55 additional cost). C is dry-run-shadow, zero real-money risk either way.",
@@ -211,7 +208,7 @@
     },
     "eod_flatten": {
       "_comment_skip_otm_pts": "2026-08-18: skip_otm_pts lowered 20 -> 10 after a 19-event MKT-047 historical audit (all variants, back to the mechanism's 2026-06-17 birth) found a 0/19 win rate flattening vs just holding to expiry (net cost ~$805 in the recoverable window) and a real-money 0-for-2 on 2026-08-17 (B lost $175 flattening two puts that both settled OTM). A 15/10/5pt sensitivity re-check on the same 19 events found 10pt recovers ~52% of the historical gap while still protecting the one 2026-08-17 trade that came within 0.36pt of the strike at settlement (E4) -- 15pt changes nothing on that trade, 5pt would have let it ride. See bots/hydra/__init__.py version history.",
-      "skip_otm_pts": 10.0
+      "skip_otm_pts": 25.0
     }
   },
   "trend_filter": {

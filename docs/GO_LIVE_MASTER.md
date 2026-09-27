@@ -150,6 +150,132 @@ live deployment sized so its **purpose is learning, not earning**:
 
 ---
 
+## 2-quater. THE CONFIG FREEZE — 2026-09-27
+
+**Read this before changing any live-seat parameter, and before quoting a Sharpe.**
+
+### Why
+
+B carries **154 free parameters** (45 of them boolean switches) against **32 live trading
+days / 98 entries**. Roughly five tuned knobs per observed day. Under that ratio the
+performance numbers cannot distinguish skill from fitting.
+
+The measured record, from B's own `backtesting.db`:
+
+| Window | n (traded days) | Net | Annualised Sharpe | **t-stat** |
+|---|---|---|---|---|
+| live, all calendar days | 46 | $6,339 | 1.94 | **0.83** |
+| live, traded days only | 32 | $6,477 | 2.37 | **0.85** |
+
+**The live edge is not statistically distinguishable from zero.** Mean $137.81/day against a
+standard error of $166.36.
+
+And the headline Sharpe decayed monotonically as data arrived — 4.96 (n=9) → 4.33 (n=25, the
+window in which "Sharpe 3.99" was recorded) → 3.61 (n=27) → 2.37 (n=32). **But nothing
+degraded.** The two chronological halves have near-identical means ($208.74 vs $196.05) at
+near-identical VIX (16.01 vs 15.70). Removing 2026-09-21 alone restores it to 3.97. The
+Sharpe fell because the *variance estimate* got honest when a −$3,088 day finally appeared.
+
+The corollary matters: **August's 4.96 was not a better config, it was a shorter sample.**
+Reverting to an earlier config to "get the good Sharpe back" is the overfitting error itself —
+selecting parameters by the P&L of the window they were measured in.
+
+### What is frozen, and the test
+
+Two questions that look like one but come apart:
+
+| | May I change it? | Does the sample reset? |
+|---|---|---|
+| **Defect fix** that changes money behaviour | Yes, always | **YES** |
+| **Defect fix** with no economic effect (logging, dashboards, telemetry, accounting-only) | Yes | No |
+| **Tune** | Only with a pre-registered decision rule | Yes |
+
+The test for which one you have: **would I have made this change if the P&L had come out the
+other way?** Yes → fix. No → tune.
+
+Note the correction in row 1. A bug fix is *permitted* but still **resets the statistical
+clock**: rung pricing was unambiguously a fix and it moved fill quality by $59.91/entry, so
+pre-fix and post-fix days are not draws from the same distribution.
+
+### The measurement clock has not started — and bugs, not tuning, are why
+
+Commits to B's live money path, per week since it went live:
+
+```
+W30  W31  W32  W33  W34  W35  W36  W37  W38  W39
+  2    1    2    3    8    7   10   20   10   18
+```
+
+**Accelerating, not settling.** 30 distinct change-days out of ~45 trading days. Median gap
+between changes: **1 day**. Longest stretch with no change: **9 calendar days**.
+
+So the freeze has two separate start dates:
+
+1. **Tuning freeze: 2026-09-27.** Immediate. Costs nothing.
+2. **Measurement clock: starts after 15 consecutive trading days with no economics-changing
+   commit to the live path.** Never yet achieved. **Achieving it is the gate** — and it is a
+   better gate than any P&L number, because it is not noisy.
+
+At mean $202/day and sd $1,354, reaching t = 2 needs ≈ **179 traded days (~9 months)**. No
+config choice shortens that; only n does. Which is the argument for Gate 8's one contract:
+**go live on the strength of the risk controls, not the Sharpe.** Those *are* established —
+the A2 %-of-width stop saved $6,200 on 2026-09-21 as a matter of arithmetic, not as a fitted
+result.
+
+### What legitimately unfreezes it
+
+The freeze exists to stop reactions to **noise**, not to disasters. A devastating finding is
+exactly what should break it.
+
+| Legitimate unfreeze | **Not** a reason |
+|---|---|
+| A **mechanism** is broken — a stop cannot fire, a gate is inverted, a guard is a no-op | A drawdown inside pre-registered tolerance |
+| A **halt criterion** breaches → mandatory recorded review (which may or may not change a parameter) | A run of losing days |
+| **Unobserved regime** — VIX enters a zone never traded, so the config's behaviour there is untested | A backtest on the same history suggesting better |
+| **External change** — IBKR fill behaviour, SPX settlement, commissions, entitlements | Another variant looking better (multiple-comparisons trap) |
+| **Risk-limit** breach — margin, account, exposure | "We have learned a lot since then" |
+
+⚠️ **Open:** H1 breached on 2026-09-21 (−$441.17/contract vs −$400) and no review is recorded.
+A breach with no review means the protocol already failed once. Close it before relying on the
+freeze.
+
+### Pre-freeze corrections applied 2026-09-27
+
+All three pass the fix-vs-tune test — each would be made regardless of P&L — and all three are
+pinned by tests (`tests/test_config_freeze_invariants_2026_09_27.py`,
+`tests/test_eod_flatten_safety.py`), with negative controls.
+
+**1. `eod_flatten.skip_otm_pts` 10 → 25pt (b, c, bm).** The 2026-08-18 audit that set 10pt
+measured the wrong thing: it found the 20pt cushion had a 0/19 win rate against holding and
+concluded it was too wide. But this is a **tail guard**, and 0/19 is what fire insurance looks
+like in a sample where the house did not burn down. The decisive number was already in the code
+comment above the knob — the **84-day maximum final-10-minute move is 18.4pt** — so at 10pt the
+cushion sat *below the largest move already observed*. Asymmetry: a needless flatten costs ~$42
+(~$805/19 events); one short settling ITM on B is **$3,500 per side**, and 2026-09-21 put three
+call spreads at or through the long strike simultaneously. 20pt was itself set AT the sample
+max (8.7% margin) — the same error, milder. 25pt is the first value with real margin (~36%).
+
+**2. MKT-043 calm-entry keys removed (b, c, bm).** Fired **zero** times in 101 days. Removed not
+for the parameter count but because a path that has never executed, and only activates in the
+most stressed conditions, is not protection — it is untested code waiting for a crisis, the same
+class of thing as the over-fill correction found dead on the morning of 2026-09-27. There is no
+`enabled` flag (the gate is "all three keys present"), so removing the keys *is* the off switch,
+and it is behaviourally a no-op. To restore it, calibrate the threshold to fire a few times a
+month so it actually gets exercised.
+
+**3. `vix_regime.max_entries` [7,7,7,7] → [7,7,3,1] (b, bm).** B has never traded above **VIX
+19.0** — zones 2 (22–28) and 3 (≥28) have **zero** observed days. It also compounds: above VIX
+22 Brandon widens spreads 5pt → 10pt, so the A2 stop doubles to $2,800/side while the entry
+count stays at 7 — **$39,200** theoretical daily max in a regime never observed. The cap holds
+*dollar* exposure flat across the width doubling rather than letting it double silently.
+Mechanical, not fitted. **Zones 0 and 1 are deliberately unchanged at 7** — freezing means not
+re-tuning what has actually been running.
+
+Note `bm` (real money) inherited B's 10pt cushion and uncapped `[7,7,7,7]` by copy-and-forget.
+A test now pins bm to B on the frozen safety knobs.
+
+---
+
 ## 3. Level I — dry-run → live-PAPER (the flip that actually happens here)
 
 **Canonical procedures:** [`RUNBOOKS.md` RB-8](migration/RUNBOOKS.md) ("Flip a variant from dry-run to LIVE
