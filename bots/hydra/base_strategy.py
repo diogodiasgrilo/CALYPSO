@@ -1451,6 +1451,13 @@ class MEICStrategy(abc.ABC):
             if self._has_orphaned_orders():
                 return f"Blocked by {len(self._orphaned_orders)} orphaned order(s) - manual intervention required"
 
+        # A2-DEFERRED: settle any parked over-fill check before anything else
+        # this tick. Placed here, ahead of the market-data read and every
+        # early return below it, because it must run on EVERY tick — a stale
+        # SPX snapshot or a data-freshness bail must not be able to leave the
+        # account silently over-filled. Cheap when nothing is parked.
+        self._sweep_deferred_fill_checks()
+
         # Update market data
         self._update_market_data()
 
@@ -5154,8 +5161,131 @@ class MEICStrategy(abc.ABC):
                 continue
         return total
 
+    # ------------------------------------------------------------------
+    # A2-DEFERRED: re-check a suspected over-fill AFTER the broker's
+    # position book has caught up.
+    # ------------------------------------------------------------------
+    #
+    # WHY THIS EXISTS. `_correct_over_fill` reads positions the instant the
+    # leg returns, and that is too early to see the very race it hunts.
+    # IBKR's position endpoint LAGS a fill by up to ~20s (measured
+    # 2026-09-25: it still reported qty 7 after a confirmed 7-lot sale).
+    # During the lag the book looks like it moved LESS than we asked, which
+    # is exactly the shape the lag-safe guard declines to act on. So the
+    # immediate check reliably says "incomplete fill, not my job" in the one
+    # scenario it was built for, and the over-fill survives to be found
+    # ~27 minutes later by POS-003 — which only ALERTS, it does not flatten
+    # (that is the 2026-09-25 incident: an orphan sat from 12:06 until a
+    # human flattened it at 13:36, by which time the call had decayed from
+    # $4.00 to $2.55).
+    #
+    # THE FIX. When the immediate check declines for a lag-shaped reason, do
+    # not drop the expectation — park it and re-check it on a later
+    # monitoring tick, once the book has settled. Same arithmetic, same
+    # reduce-only invariant; only the timing changes.
+
+    _DEFERRED_FILL_MAX_AGE_S = 600.0
+
+    def _deferred_fill_settle_s(self) -> float:
+        """How long to let the broker's book settle before re-checking.
+
+        45s by default against a ~20s measured lag — a 2.25x margin, chosen
+        so the threshold is not sitting on its own sample maximum.
+        """
+        cfg = getattr(self, "strategy_config", None) or {}
+        try:
+            return float(cfg.get("fill_verify_settle_s", 45.0))
+        except (TypeError, ValueError, AttributeError):
+            return 45.0
+
+    def _pending_fill_checks(self) -> dict:
+        """The park bay, created lazily so no __init__ change is required."""
+        pending = getattr(self, "_pending_fill_checks_map", None)
+        if not isinstance(pending, dict):
+            pending = {}
+            self._pending_fill_checks_map = pending
+        return pending
+
+    def _defer_fill_check(self, uic, side: str, qty_before: int,
+                          intended_qty: int, leg_name: str) -> None:
+        """Park an expectation for re-verification after the settle delay."""
+        try:
+            key = str(uic)
+            self._pending_fill_checks()[key] = {
+                "uic": uic,
+                "side": str(side).upper(),
+                "qty_before": int(qty_before),
+                "intended_qty": int(intended_qty),
+                "leg_name": leg_name,
+                "at": time.monotonic(),
+            }
+        except (TypeError, ValueError, AttributeError) as exc:
+            logger.warning("  A2-DEFERRED: could not park %s: %s", leg_name, exc)
+            return
+        logger.info(
+            "  A2-DEFERRED: parked %s (conid %s) — expecting %+d, will re-check "
+            "in %.0fs once the broker's book has settled.",
+            leg_name, uic, int(qty_before) + (
+                int(intended_qty) if str(side).upper() == "BUY" else -int(intended_qty)
+            ), self._deferred_fill_settle_s(),
+        )
+
+    def _sweep_deferred_fill_checks(self) -> None:
+        """Re-run any parked over-fill check whose settle delay has elapsed.
+
+        Called once per monitoring tick. Cheap when idle: it touches the
+        broker only when something is actually due.
+
+        Never raises — a safety sweep must not be able to break the trading
+        loop it runs inside.
+        """
+        try:
+            pending = self._pending_fill_checks()
+            if not pending:
+                return
+            now = time.monotonic()
+            settle = self._deferred_fill_settle_s()
+            due = []
+            for key, rec in list(pending.items()):
+                age = now - float(rec.get("at", now))
+                if age > self._DEFERRED_FILL_MAX_AGE_S:
+                    # Too old to reason about: other activity may have moved
+                    # this conid since. Drop it rather than trade on a stale
+                    # baseline, but say so — a silent drop would hide a real
+                    # unresolved over-fill.
+                    pending.pop(key, None)
+                    logger.warning(
+                        "  A2-DEFERRED: dropping the parked check on %s (conid "
+                        "%s) — %.0fs old, its baseline is no longer "
+                        "trustworthy. If the account is over-filled, POS-003 "
+                        "is now the only net.",
+                        rec.get("leg_name"), rec.get("uic"), age,
+                    )
+                    continue
+                if age >= settle:
+                    due.append((key, rec))
+            for key, rec in due:
+                # Pop FIRST: `_correct_over_fill` may re-park, and a
+                # correction that throws must not leave a poison entry that
+                # re-fires every tick forever.
+                pending.pop(key, None)
+                logger.info(
+                    "  A2-DEFERRED: re-checking %s (conid %s) now that the "
+                    "book has had %.0fs to settle.",
+                    rec.get("leg_name"), rec.get("uic"),
+                    now - float(rec.get("at", now)),
+                )
+                self._correct_over_fill(
+                    rec.get("uic"), rec.get("side"), rec.get("qty_before"),
+                    rec.get("intended_qty"), rec.get("leg_name"),
+                    allow_defer=False,
+                )
+        except Exception as exc:  # noqa: BLE001
+            logger.error("  A2-DEFERRED: sweep failed (non-fatal): %s", exc)
+
     def _correct_over_fill(self, uic, side: str, qty_before: int,
-                           intended_qty: int, leg_name: str) -> None:
+                           intended_qty: int, leg_name: str,
+                           allow_defer: bool = True) -> None:
         """A2: detect and undo an order that traded MORE than we asked for.
 
         Used on BOTH paths — closing a leg (2026-09-25) and opening one
@@ -5189,6 +5319,15 @@ class MEICStrategy(abc.ABC):
         Never raises: a correction that throws must not turn a completed close
         into a failed one.
         """
+        # This call carries a fresher baseline than anything already parked
+        # for this conid, so it supersedes it. Clearing first guarantees at
+        # most one pending expectation per conid and always the newest — which
+        # matters because a conid is shared: IBKR merges at (conid, side) and
+        # a later leg of the same entry can legitimately trade the same strike.
+        try:
+            self._pending_fill_checks().pop(str(uic), None)
+        except Exception:  # noqa: BLE001
+            pass
         try:
             positions = self._read_open_positions(strict=True)
         except Exception as exc:  # noqa: BLE001
@@ -5197,6 +5336,10 @@ class MEICStrategy(abc.ABC):
                 "position read failed (%s). NOT assuming an over-close.",
                 leg_name, uic, exc,
             )
+            if allow_defer:
+                # A failed read is not evidence of anything. Try again later
+                # rather than let a transient broker blip retire the check.
+                self._defer_fill_check(uic, side, qty_before, intended_qty, leg_name)
             return
         # Everything below is arithmetic on broker data. A safety correction
         # that misbehaves on junk is worse than one that declines, so anything
@@ -5256,6 +5399,15 @@ class MEICStrategy(abc.ABC):
                 "Not acting.",
                 leg_name, uic, qty_after, expected,
             )
+            # ...but "the book moved less than we asked" is ALSO what a fill
+            # that has not propagated yet looks like, and that is the race we
+            # are hunting. An immediate read cannot tell the two apart, so
+            # park it and let a later tick decide on settled data. Only on the
+            # first (immediate) pass: the deferred re-check reads a settled
+            # book, so its decline is a real answer and must be final or the
+            # entry would re-park itself forever.
+            if allow_defer:
+                self._defer_fill_check(uic, side, qty_before, intended_qty, leg_name)
             return
 
         fix_side = "SELL" if excess > 0 else "BUY"

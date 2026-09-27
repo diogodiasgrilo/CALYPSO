@@ -36,6 +36,43 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-27 A2 RE-CHECKS AFTER THE BOOK SETTLES — the over-fill correction was
+  almost certainly a no-op in production, and this is what makes it real.
+  `_correct_over_fill` read positions the INSTANT a leg returned. IBKR's position
+  endpoint lags a fill by up to ~20s — measured 2026-09-25, when it still reported
+  qty 7 after a confirmed 7-lot sale and only cleared ~20s later. During that lag
+  the book looks like it moved LESS than we asked, which is exactly the shape the
+  lag-safe guard declines to act on. So the check reliably answered "incomplete
+  fill, not my job" in the one scenario it was written for, and the over-fill
+  survived to be found ~27 minutes later by POS-003 — which only ALERTS, it does
+  not flatten. That is the 2026-09-25 incident verbatim: the orphan sat from 12:06
+  until a human flattened it at 13:36, by which time the call had decayed
+  $4.00 -> $2.55.
+  THE FIX. A lag-shaped decline (or a failed strict read) now PARKS the expectation
+  instead of dropping it, and `_sweep_deferred_fill_checks()` re-runs the identical
+  arithmetic on a later monitoring tick, once the book has settled
+  (`fill_verify_settle_s`, default 45s against the ~20s measured lag — 2.25x, so the
+  threshold is not sitting on its own sample maximum). Hooked into
+  `_run_strategy_check_internal` AHEAD of `_update_market_data`, so a stale-SPX or
+  data-freshness bail cannot skip it; no variant overrides that method, so all eight
+  inherit it (the B4 coverage hole, deliberately avoided — and pinned by a test that
+  scans every strategy module for an override).
+  DISCIPLINE. At most one parked check per conid, newest wins: a conid is shared
+  (IBKR merges at (conid, side)) so a later leg supersedes an earlier expectation.
+  The deferred re-check may not re-park — it reads a settled book, so its answer is
+  final and a self-renewing entry would re-fire every tick forever. Anything older
+  than 600s is DROPPED with a warning rather than traded on, because by then the
+  baseline is no longer trustworthy. The sweep cannot raise, and it touches the
+  broker only when something is actually due. The reduce-only invariant is unchanged
+  and carries onto the deferred path: a correction may only ever REDUCE net exposure.
+  17 tests, five of them negative controls — removing the park, the settle delay,
+  the no-re-park rule, the reduce-only half, or the tick hook each fails a specific
+  test. The reduce-only control needed THREE attempts to become sighted: the obvious
+  cases all exit earlier at `abs(excess) < 1` or on the lag condition and never reach
+  the guard at all.
+  NOT CHANGED: POS-003 stays alert-only. It fires on UNTRACKED conids, where we have
+  no expectation to compare against and auto-flattening could close something
+  legitimate. It remains the last net, and it works — it is what caught 09-25.
 - 2026-09-27 FLATTEN PRICE P&L — the last "NOT separately tracked" gap closed.
   `_flatten_accumulated_partial` booked COMMISSION ONLY and admitted it in its own log
   line: *"market-order slippage on this round trip is NOT separately tracked"*. That

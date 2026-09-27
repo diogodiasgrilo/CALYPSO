@@ -41,6 +41,35 @@ The settlement RECONCILE fired at exactly **−$5,995**, confirming A1's diagnos
 ⚠️ BROKER-RECONCILE showed a SEPARATE unexplained gap: IBKR realized $4,108.43 vs ours $3,565.00
 (**−$543.43**), matching the ~$558 measured intraday. Not A1 — worth chasing.
 
+### ⚠️ 2026-09-27 — the over-fill correction shipped this morning was very likely a NO-OP
+
+Worth reading before trusting any "over-fill is handled" claim. `_correct_over_fill` (shipped
+`b630046` + `eae508c`) read the position book the instant a leg returned. **IBKR's position
+endpoint lags a fill by up to ~20s** — measured 2026-09-25, when it still reported qty 7 after a
+confirmed 7-lot sale and cleared only ~20s later. During the lag the book looks like it moved
+*less* than we asked, and that is precisely the shape the lag-safe guard declines to act on. So
+the check answered *"incomplete fill, not my job"* in the one scenario it existed for.
+
+That is not a hypothesis about the failure — it is the 09-25 incident: the over-fill was found
+**~27 minutes later by POS-003, which only ALERTS**. The orphan sat from 12:06 until a human
+flattened it at 13:36, by which time the call had decayed $4.00 → $2.55.
+
+**FIXED the same day.** A lag-shaped decline (or a failed strict read) now *parks* the
+expectation, and `_sweep_deferred_fill_checks()` re-runs the identical arithmetic on a later
+monitoring tick once the book has settled (`fill_verify_settle_s`, default **45s** vs the ~20s
+measured lag). Hooked ahead of `_update_market_data` so a stale-SPX bail cannot skip it; no
+variant overrides that method, so all eight inherit it. One parked check per conid, newest wins;
+the deferred pass may not re-park; >600s is dropped with a warning rather than traded on; the
+reduce-only invariant carries over unchanged. 17 tests, **five negative controls**.
+
+POS-003 deliberately stays alert-only — it fires on *untracked* conids where there is no
+expectation to compare against, so auto-flattening could close something legitimate. It is the
+last net and it demonstrably works.
+
+**Monday, add to the observation list:** any `A2-DEFERRED: parked` line (how often the immediate
+check is inconclusive — i.e. how much this was missing), and any `A2-DEFERRED: re-checking`
+followed by a correction.
+
 **Next:** deploy + observe one session → B6 (B's pacing) → B7 (gate 5→8) → A2 (position-delta
 reconciliation; the obvious fixes provably don't work — see audit §6-bis) → B5 → **C1**.
 
