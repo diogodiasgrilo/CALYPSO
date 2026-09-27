@@ -3045,6 +3045,27 @@ class MEICStrategy(abc.ABC):
 
         side = "BUY" if buy_sell == BuySell.BUY else "SELL"
 
+        # A2 ON THE ENTRY PATH (2026-09-27). The same cancel/fill race that
+        # left the live seat LONG 7 calls on a CLOSE (2026-09-25) also bites
+        # when OPENING: on 2026-09-24 this loop cancelled a partial at 5/7, two
+        # more filled in the gap, the escalation then bought the 2 it thought
+        # were missing, and the account ended up long 9 where 7 were intended.
+        # Two contracts sat untracked until expiry.
+        #
+        # I sized that incident at "~$60 exposure" and deferred it. The same
+        # race on the exit path then cost ~$4,200. It is the same bug, and the
+        # correction is the same delta comparison — so the entry path gets it
+        # too rather than waiting for a third demonstration.
+        try:
+            _entry_qty_before = int(self._net_qty_at_conid(
+                uic=conid, positions=self._read_open_positions(strict=True)))
+        except Exception as _e:  # noqa: BLE001
+            _entry_qty_before = None
+            logger.warning(
+                "  A2: pre-placement position read failed for %s (%s) — "
+                "over-fill detection disabled for this leg.", leg_description, _e,
+            )
+
         # ORDER-009b: fresh client-order-id base per placement invocation.
         # external_ref is stable per (day, entry, leg), so reusing it as the
         # cOID makes every progressive-slippage rung AND any same-day
@@ -3387,6 +3408,11 @@ class MEICStrategy(abc.ABC):
                     first_fill_mid = mid_price
 
                 if filled_so_far >= target_qty:
+                    # A2: verify the broker moved by what we believe we filled.
+                    if _entry_qty_before is not None:
+                        self._correct_over_fill(
+                            conid, side, _entry_qty_before, filled_so_far,
+                            leg_description)
                     # LEG WHOLE — return the blended average across all chunks.
                     avg_fill = weighted_fill_sum / filled_so_far
                     logger.info(
@@ -3440,6 +3466,13 @@ class MEICStrategy(abc.ABC):
                 conid, side, filled_so_far, external_ref,
                 f"{placement_nonce}flatexh", leg_description,
             )
+            # A2: filled then flattened == a net delta of ZERO. Anything the
+            # broker still shows beyond the starting quantity is an over-fill
+            # (and, if the flatten itself failed, this is a second attempt at
+            # clearing it rather than leaving a naked leg).
+            if _entry_qty_before is not None:
+                self._correct_over_fill(
+                    conid, side, _entry_qty_before, 0, leg_description)
             return None
 
         logger.error(
@@ -3449,6 +3482,12 @@ class MEICStrategy(abc.ABC):
             f"If the conid is the live contract and bid/ask look fillable, this is "
             f"order-routing/transient, NOT liquidity (see ORDER-DIAG lines above)."
         )
+        # A2: we believe NOTHING filled on this leg. If the broker disagrees,
+        # a cancelled rung filled after its cancel — exactly the 2026-09-24
+        # shape, where the leg was reported unfilled and contracts were held.
+        if _entry_qty_before is not None:
+            self._correct_over_fill(
+                conid, side, _entry_qty_before, 0, leg_description)
         return None
 
     def _flatten_accumulated_partial(
@@ -5065,9 +5104,13 @@ class MEICStrategy(abc.ABC):
                 continue
         return total
 
-    def _correct_over_close(self, uic, side: str, qty_before: int,
-                            intended_qty: int, leg_name: str) -> None:
-        """A2 (2026-09-25): detect and undo a close that traded MORE than asked.
+    def _correct_over_fill(self, uic, side: str, qty_before: int,
+                           intended_qty: int, leg_name: str) -> None:
+        """A2: detect and undo an order that traded MORE than we asked for.
+
+        Used on BOTH paths — closing a leg (2026-09-25) and opening one
+        (2026-09-27). The race and the arithmetic are identical; only the
+        direction of the intended trade differs.
 
         THE RACE. Cancelling an order is not instantaneous. When a close order
         does not fill in time we cancel it and re-place at a better price — but
@@ -5122,24 +5165,46 @@ class MEICStrategy(abc.ABC):
         if abs(excess) < 1:
             return
 
-        # ONLY ever undo trading TOO MUCH — never "finish" an under-close.
+        # THE INVARIANT: a correction may only ever REDUCE net exposure.
         #
-        # An over-close moves the conid FURTHER in the direction we traded than
-        # we asked for, so `excess` carries the same sign as `delta`. The
-        # opposite sign means the book moved LESS than requested, which is an
-        # incomplete close — already the retry loop's job, and not something to
-        # act on here.
+        # Stated directly rather than inferred from signs. Correcting moves the
+        # conid from `qty_after` to `expected`, so the correction is safe
+        # exactly when |expected| < |qty_after|. Everything we want falls out:
+        #   believed 7, broker 9   -> |7| < |9|   correct (sell 2)
+        #   believed 0, broker 5   -> |0| < |5|   correct (sell 5)
+        #   believed 7, broker 5   -> |7| > |5|   SKIP: an under-fill is the
+        #                                         rung loop's job
+        #   sibling -7, read 0     -> |7| > |0|   SKIP: a stale/empty read must
+        #                                         never make us open a short
         #
-        # This is not hypothetical: an existing close test (whose rig yields an
-        # empty position read) produced qty_before 0 / expected +7 / actual 0,
-        # i.e. excess -7. Acting on that would have BOUGHT 7 more contracts on
-        # the strength of a read that told us nothing. A safety net must not be
-        # able to open a position.
-        if excess * delta <= 0:
+        # PLUS the book must have moved MORE than we asked, not less. That is
+        # the lag-safe half, and it matters because IBKR's position endpoint
+        # LAGS a fill: on 2026-09-25 it still reported qty 7 after a confirmed
+        # 7-lot sale, clearing only ~20s later. Lag makes the book look like it
+        # moved LESS than it did — it can never invent contracts we did not
+        # trade. So "moved more" is trustworthy evidence and "moved less" is
+        # not, and only the first may trigger a trade. Without this, a lagging
+        # read after a successful close ("nothing moved") would make us close
+        # it a SECOND time.
+        #
+        # The first version used a sign test (`excess * delta <= 0`). It was
+        # wrong in the case that matters MOST: a leg that reports nothing
+        # filled but actually did. There `delta` is 0, so the product is 0 and
+        # the guard skipped every time — the 2026-09-24 shape exactly. An
+        # entry-path test caught it.
+        #
+        # An existing close test found the other half: its rig yields an empty
+        # position read, giving qty_before 0 / expected +7 / actual 0, and the
+        # unguarded version would have BOUGHT 7 more contracts on a read that
+        # told it nothing. A safety net must not be able to OPEN a position.
+        actual_delta = qty_after - qty_before
+        if abs(actual_delta) <= abs(delta) or abs(expected) >= abs(qty_after):
             logger.info(
-                "  A2: %s (conid %s) moved LESS than requested (%+d vs %+d) — "
-                "an incomplete close, which the retry loop owns. Not acting.",
-                leg_name, uic, qty_after - qty_before, delta,
+                "  A2: %s (conid %s) sits at %+d against an expected %+d — "
+                "correcting would not REDUCE exposure, so this is an "
+                "incomplete fill (the retry loop's job) or an unreliable read. "
+                "Not acting.",
+                leg_name, uic, qty_after, expected,
             )
             return
 
@@ -5230,7 +5295,7 @@ class MEICStrategy(abc.ABC):
         # on a merged conid book), and fold the partial's fill price into the
         # returned close cost so P&L stays accurate.
         # A2: the broker's net at this conid BEFORE we touch it, so the close
-        # can be checked as a DELTA afterwards (see _correct_over_close). Read
+        # can be checked as a DELTA afterwards (see _correct_over_fill). Read
         # strictly — a cached or swallowed read here would silently disable the
         # check. None means "unknown", and the check then skips rather than
         # guessing.
@@ -5300,7 +5365,7 @@ class MEICStrategy(abc.ABC):
                         if filled_qty_priced >= close_contracts else None
                     )
                     if _qty_before is not None:
-                        self._correct_over_close(
+                        self._correct_over_fill(
                             uic, side, _qty_before, int(close_contracts), leg_name)
                     return True, out_price, last_order_id
 
@@ -5340,7 +5405,7 @@ class MEICStrategy(abc.ABC):
                            else "fill_price=unknown")
                     )
                     if _qty_before is not None:
-                        self._correct_over_close(
+                        self._correct_over_fill(
                             uic, side, _qty_before, int(close_contracts), leg_name)
                     return True, out_price, res.get("order_id")
 

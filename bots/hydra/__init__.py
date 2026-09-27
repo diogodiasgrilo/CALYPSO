@@ -36,6 +36,31 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-09-27 A2 EXTENDED TO THE ENTRY PATH — the same race, the third time.
+  The cancel/fill race bites when OPENING a leg too. On 2026-09-24 the rung loop
+  cancelled a partial at 5/7, two more filled in the gap, the escalation bought the 2 it
+  believed missing, and the account ended up LONG 9 where 7 were intended — proven by
+  the residual's avgPrice ($0.3008, the cancelled rung's $0.30 lot, not the escalation's
+  $0.25). I sized it at "~$60" and deferred it; the identical race on the EXIT path then
+  cost ~$4,200. Same bug, same arithmetic, so both paths now share `_correct_over_fill`
+  (renamed from `_correct_over_close`) and the entry path checks at all THREE exits:
+  leg-whole, flatten-partial, and failed-all-rungs.
+  * 🔴 **The guard's invariant was WRONG and two tests found it.**
+    - The original sign test (`excess * delta <= 0`) skipped whenever `delta == 0` —
+      i.e. precisely the nastiest case, a leg that reports NOTHING filled but actually
+      did, which is the 09-24 shape. An entry-path test caught it.
+    - Replacing it with "never increase exposure" alone then re-broke a close test:
+      **IBKR's position endpoint LAGS a fill** (09-25: still reported qty 7 after a
+      confirmed 7-lot sale, clearing ~20s later). Lag makes the book look like it moved
+      LESS than it did; it can NEVER invent contracts we did not trade. So "moved more"
+      is trustworthy evidence and "moved less" is not — acting on the latter would close
+      a position a SECOND time on a stale read.
+    - Final rule needs BOTH, and neither subsumes the other:
+        `abs(actual_delta) > abs(delta)`   (lag-safe: only act on "moved MORE")
+        `abs(expected) < abs(qty_after)`   (a correction may only REDUCE exposure)
+      Each has its own control; the exposure guard's case (short 10, buy 7, broker -1)
+      passes the lag check yet would enlarge the position.
+  Tests: `tests/test_entry_over_fill_2026_09_27.py`. Full suite 5,128 passed.
 - 2026-09-25 DASHBOARD — the day's headline no longer hides failed-entry P&L.
   On 09-24 the live card read **+$3,565** while the strategy had **LOST $2,430**: a
   broken entry (legs filled, entry aborted, legs unwound) happened to unwind into a

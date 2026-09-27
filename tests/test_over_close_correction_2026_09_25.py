@@ -65,7 +65,7 @@ class TestTheIncident:
     def test_the_real_case_is_detected_and_corrected(self):
         """Short 7, BUY 7 to close, ended LONG 7 -> 7 too many bought."""
         s = _rig(qty_after=+7)
-        s._correct_over_close(111, "BUY", qty_before=-7, intended_qty=7,
+        s._correct_over_fill(111, "BUY", qty_before=-7, intended_qty=7,
                               leg_name="short_call")
         assert len(s.orders) == 1, "over-close not corrected"
         assert s.orders[0]["side"] == "SELL"
@@ -75,7 +75,7 @@ class TestTheIncident:
     def test_a_clean_close_does_nothing(self):
         """Short 7, BUY 7, ended flat — the normal path must not trade."""
         s = _rig(qty_after=0)
-        s._correct_over_close(111, "BUY", qty_before=-7, intended_qty=7,
+        s._correct_over_fill(111, "BUY", qty_before=-7, intended_qty=7,
                               leg_name="short_call")
         assert s.orders == []
 
@@ -88,14 +88,14 @@ class TestTheIncident:
         would sell a position that belongs to another entry.
         """
         s = _rig(qty_after=+7)
-        s._correct_over_close(111, "BUY", qty_before=0, intended_qty=7,
+        s._correct_over_fill(111, "BUY", qty_before=0, intended_qty=7,
                               leg_name="short_call")
         assert s.orders == [], "flattened a sibling entry's position"
 
     def test_over_sell_on_a_long_close_is_corrected(self):
         """Mirror case: closing a LONG by selling, and selling too much."""
         s = _rig(qty_after=-5)
-        s._correct_over_close(111, "SELL", qty_before=+7, intended_qty=7,
+        s._correct_over_fill(111, "SELL", qty_before=+7, intended_qty=7,
                               leg_name="long_put")
         assert len(s.orders) == 1
         assert s.orders[0]["side"] == "BUY" and s.orders[0]["quantity"] == 5
@@ -115,14 +115,14 @@ class TestItNeverBreaksTheClose:
         """
         s = _rig(qty_after=0)
         s._read_open_positions = MagicMock(side_effect=RuntimeError("broker down"))
-        s._correct_over_close(111, "BUY", qty_before=+7, intended_qty=7,
+        s._correct_over_fill(111, "BUY", qty_before=+7, intended_qty=7,
                               leg_name="short_call")
         assert s.orders == [], "traded on an unreadable position book"
 
     def test_a_failed_correction_alerts_and_orphans(self):
         """If the fix itself will not fill, a human must be told."""
         s = _rig(qty_after=+7, fill_ok=False)
-        s._correct_over_close(111, "BUY", qty_before=-7, intended_qty=7,
+        s._correct_over_fill(111, "BUY", qty_before=-7, intended_qty=7,
                               leg_name="short_call")
         assert s.orphans == ["A2_111"]
         assert s.alerts and "MANUAL FLATTEN" in s.alerts[0]["message"]
@@ -133,9 +133,48 @@ class TestItNeverBreaksTheClose:
         def _boom(**kw):
             raise RuntimeError("order rejected")
         s._place_leg_order = _boom
-        s._correct_over_close(111, "BUY", qty_before=-7, intended_qty=7,
+        s._correct_over_fill(111, "BUY", qty_before=-7, intended_qty=7,
                               leg_name="short_call")
         assert s.orphans == ["A2_111"]
+
+
+class TestLagSafety:
+    """IBKR's position endpoint LAGS a fill — on 2026-09-25 it still reported
+    qty 7 after a confirmed 7-lot sale, clearing only ~20s later. Lag makes the
+    book look like it moved LESS than it did; it can never invent contracts we
+    did not trade. So only "moved MORE than asked" may trigger a trade."""
+
+    def test_a_lagging_read_after_a_good_close_does_NOT_reclose(self):
+        """CONTROL. Held +7, sold 7, broker still shows +7 because it lagged.
+        Acting would sell a second time and leave us SHORT 7."""
+        s = _rig(qty_after=+7)
+        s._correct_over_fill(111, "SELL", qty_before=+7, intended_qty=7,
+                             leg_name="long_put")
+        assert s.orders == [], "re-closed on a lagging position read"
+
+    def test_moved_MORE_is_still_acted_on(self):
+        """The trustworthy direction: lag cannot invent extra contracts."""
+        s = _rig(qty_after=-7)
+        s._correct_over_fill(111, "SELL", qty_before=+7, intended_qty=7,
+                             leg_name="long_put")
+        assert len(s.orders) == 1 and s.orders[0]["side"] == "BUY"
+
+
+class TestNeverIncreasesExposure:
+    """The second guard, which the lag check does NOT subsume.
+
+    Construct a case that passes "moved more than asked" yet where correcting
+    would ENLARGE the position: start short 10, buy 7 (expected -3), broker
+    shows -1. actual_delta +9 exceeds the intended +7, so the lag check waves
+    it through — but "correcting" to -3 would take exposure from 1 back up to
+    3. Both guards are therefore load-bearing; neither alone is enough.
+    """
+
+    def test_a_correction_that_would_enlarge_the_position_is_refused(self):
+        s = _rig(qty_after=-1)
+        s._correct_over_fill(111, "BUY", qty_before=-10, intended_qty=7,
+                             leg_name="short_call")
+        assert s.orders == [], "correction increased net exposure"
 
 
 class TestItOnlyEverUndoesOverTrading:
@@ -150,13 +189,13 @@ class TestItOnlyEverUndoesOverTrading:
 
     def test_an_under_close_is_NOT_finished_here(self):
         s = _rig(qty_after=0)
-        s._correct_over_close(111, "BUY", qty_before=0, intended_qty=7,
+        s._correct_over_fill(111, "BUY", qty_before=0, intended_qty=7,
                               leg_name="short_call")
         assert s.orders == [], "tried to complete an incomplete close"
 
     def test_an_under_close_on_a_SELL_is_also_ignored(self):
         s = _rig(qty_after=+7)
-        s._correct_over_close(111, "SELL", qty_before=+7, intended_qty=7,
+        s._correct_over_fill(111, "SELL", qty_before=+7, intended_qty=7,
                               leg_name="long_put")
         assert s.orders == []
 
