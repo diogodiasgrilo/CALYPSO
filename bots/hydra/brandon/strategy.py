@@ -1953,6 +1953,51 @@ class BrandonHydraStrategy(HydraStrategy):
                     structure_enabled = (
                         cfg.debit_spread_enabled if is_morning_watch else cfg.butterfly_enabled
                     )
+                    # 2026-09-28: `gex_confirmed` is computed BEFORE the
+                    # enabled/disabled branch, and the telemetry below records
+                    # in BOTH. It used to live only in the `else`, which made
+                    # it unreachable the moment a structure was switched off.
+                    #
+                    # THE BUG THAT COST 23 DAYS OF DATA. The debit spread was
+                    # disabled 2026-08-25 and the butterfly 2026-09-04. This
+                    # overlay telemetry was added 2026-09-05 — the day AFTER —
+                    # into the `else` branch that the disable had already made
+                    # dead. It recorded ZERO rows in 23 days, while its own
+                    # comment said it existed to "show whether the corrected
+                    # gate would have confirmed on the put side where the live
+                    # one never does". The one question it was built to answer
+                    # is the one it could not observe.
+                    #
+                    # This is pure telemetry: `_has_accel_zone_on_side` is a
+                    # pure function over an already-fetched GEX profile — no
+                    # broker call, no order path, and `gex_confirmed` is not
+                    # consulted by any disabled-structure code path. The hedges
+                    # stay off; only the recording changes.
+                    gex_confirmed = bool(
+                        profile is not None
+                        and defensive_overlay._has_accel_zone_on_side(
+                            side, spot, profile,
+                            min_strength_pct=gex_confirm_min_strength_pct,
+                            reference_strike=short,
+                            peak_locality_pts=gex_confirm_peak_locality_pts,
+                            peak_persistence_enabled=gex_confirm_peak_persistence_enabled,
+                            peak_persistence_tolerance_pts=self.brandon_accel_peak_persistence_tolerance_pts,
+                            prior_profile=overlay_prior_profile,
+                            force_unconfirmed=overlay_force_unconfirmed,
+                        )
+                    )
+                    try:
+                        self._brandon_record_gex_decision(
+                            consumer="overlay", entry_number=entry.entry_number,
+                            side=side, spot=spot, reference_strike=short,
+                            live_action=str(bool(gex_confirmed)),
+                            live_adjuster_predicate=False,
+                            live_overlay_predicate=bool(gex_confirmed),
+                            profile=profile,
+                        )
+                    except Exception as _exc:  # noqa: BLE001 — telemetry must never break the loop
+                        logger.debug("BRANDON: overlay telemetry record failed: %s", _exc)
+
                     if not structure_enabled:
                         logger.info(
                             "BRANDON-OVERLAY-WATCH E#%s %s: %.2fpt from short %.1f "
@@ -1962,47 +2007,33 @@ class BrandonHydraStrategy(HydraStrategy):
                             cfg.trigger_distance_pts,
                             "debit_spread" if is_morning_watch else "butterfly",
                         )
+                        # NOTE: gex_confirmed is deliberately NOT logged here.
+                        # An audit on 2026-08-25 found that printing
+                        # "gex_confirmed=True" on a window whose structure is
+                        # disabled misleads an operator into thinking a hedge
+                        # fired or could fire, and
+                        # test_watch_log_reports_disabled_structure_instead_of_
+                        # a_misleading_gex_confirmed pins that. The value is
+                        # still RECORDED to gex_decisions above — the database
+                        # is where the arming-gate question gets answered; the
+                        # log line is for the operator, and for them the only
+                        # relevant fact is that nothing will hedge.
                     else:
                         # Mirrors the SAME check evaluate_overlay itself uses below
                         # (module-private but called directly here so the logged
                         # value can never drift from the real gate) — now including
                         # the locality/persistence gate, not just the threshold.
-                        gex_confirmed = bool(
-                            profile is not None
-                            and defensive_overlay._has_accel_zone_on_side(
-                                side, spot, profile,
-                                min_strength_pct=gex_confirm_min_strength_pct,
-                                reference_strike=short,
-                                peak_locality_pts=gex_confirm_peak_locality_pts,
-                                peak_persistence_enabled=gex_confirm_peak_persistence_enabled,
-                                peak_persistence_tolerance_pts=self.brandon_accel_peak_persistence_tolerance_pts,
-                                prior_profile=overlay_prior_profile,
-                                force_unconfirmed=overlay_force_unconfirmed,
-                            )
-                        )
                         logger.info(
                             "BRANDON-OVERLAY-WATCH E#%s %s: %.2fpt from short %.1f "
                             "(trigger=%.1fpt, gex_confirmed=%s)",
                             entry.entry_number, side, watch_distance, short,
                             cfg.trigger_distance_pts, gex_confirmed,
                         )
-                        # v16 telemetry (2026-09-05). Recorded on the SAME
-                        # 60s-throttled cadence as the watch line above, not
-                        # every tick — the throttle already gives one sample
-                        # per side per minute inside the watch band, which is
-                        # the resolution the 2026-09-04 audit needed and could
-                        # not get. This is the record that will show whether
-                        # the corrected gate would have confirmed on the put
-                        # side where the live one never does (0 of 843 ticks
-                        # inside 25pt).
-                        self._brandon_record_gex_decision(
-                            consumer="overlay", entry_number=entry.entry_number,
-                            side=side, spot=spot, reference_strike=short,
-                            live_action=str(bool(gex_confirmed)),
-                            live_adjuster_predicate=False,
-                            live_overlay_predicate=bool(gex_confirmed),
-                            profile=profile,
-                        )
+                        # v16 telemetry (2026-09-05) now records ABOVE, for
+                        # both the enabled and disabled branches — see the
+                        # 2026-09-28 note. Recording here as well would
+                        # double-count every sample whenever a structure is
+                        # re-enabled.
 
             proposal = defensive_overlay.evaluate_overlay(
                 threatened_side=side,

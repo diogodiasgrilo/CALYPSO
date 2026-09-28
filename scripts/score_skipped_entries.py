@@ -170,7 +170,7 @@ def score(db_path: Path, since: str, write: bool):
         con.commit()
         print(f"\n  WROTE {len(updates)} rows "
               "(would_have_stopped = strike touched intraday; "
-              "theoretical_pnl = held-to-expiry)")
+              "theoretical_pnl = A2-stop-capped)")
     else:
         print("\n  (report only — pass --write to populate the DB columns)")
     con.close()
