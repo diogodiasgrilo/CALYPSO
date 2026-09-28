@@ -116,7 +116,14 @@ deploy/
   hydra_variant_e.service     # parallel dry-run-locked instance (E "SPY Double Calendar")
   hydra_variant_f.service     # parallel dry-run-locked instance (F "Ghauri Mean Reversion", 0DTE)
   hydra_variant_g.service     # parallel dry-run-locked instance (G "Strangle", 0DTE undefined-risk)
-  hydra_variant_h.service     # parallel dry-run-locked instance (H "Long Strangle", 0DTE net-debit LONG gamma — the mirror of G)
+  hydra_variant_h.service     # parallel dry-run-locked instance (H "Long Strangle", 0DTE net-debit LONG gamma)
+                              # ⚠️ H trades **SPY**, not SPX (config: underlying_symbol/trading_class "SPY",
+                              # strike_increment 1.0, exchange SMART) — verified against its own fills
+                              # 2026-09-28 (entries at 764.69/769.57 while SPX was ~7710). Its systemd unit
+                              # description and earlier docs called it "0DTE SPX LONG Strangle", which is
+                              # WRONG. This matters for any cross-variant comparison: 1 SPX ~ 10 SPY, so H at
+                              # 1 contract is ~1/70th of B at 7 SPX contracts — it is NOT the structural
+                              # mirror of G (short SPX strangle) in notional, only in payoff shape.
   IBKR_CREDENTIALS_SETUP.md   # one-time-setup + pre-start verification runbook
   hermes/apollo/clio/homer/argus .service + .timer  # agent timers
   token_keeper.service.disabled-on-this-branch  # Saxo-only — DEAD on this branch
