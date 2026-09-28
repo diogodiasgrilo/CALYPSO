@@ -517,6 +517,22 @@ Up to **7 parallel HYDRA processes** run concurrently, clustered into **3 compar
 
 D and E both subclass `bots/hydra/calendar_strategy_base.py` (`CalendarStrategyBase`); D is byte-identical to its pre-lift body after the extraction. Both are **fully simulated (NOT stubbed)** — the entire entry/monitor/settlement lifecycle runs in dry-run; only the real-order placement path + go-live gates are intentionally absent. They cannot place real orders until a deliberate operator flip (D's verdict is currently NO-GO — see the D go-live docs).
 
+> ⚠️ **B is NOT Brandon's strategy — audited 2026-09-28 against the actual video transcript**
+> ([`docs/SOURCE_FIDELITY_AUDIT_B_C_2026_09_28.md`](docs/SOURCE_FIDELITY_AUDIT_B_C_2026_09_28.md),
+> transcript at [`docs/sources/BC_brandon_jones_trojan_horse_uJSi0AvYcr8_transcript.txt`](docs/sources/BC_brandon_jones_trojan_horse_uJSi0AvYcr8_transcript.txt)).
+> B implements **4 of the source's 10 stated rules**. The source requires **VIX 19–40**
+> (*"my first criteria is the VIX must be between 19 to 40"*), **one trade per day**, entry at
+> **9:31**, **no fixed stop** (*"you have a mental stop loss… in 90% of cases that is 100% true"*),
+> and **hedging** as the adverse-move response. B has **no VIX floor, 7 entry slots, a fixed 40%-of-width
+> stop, and both hedges disabled.**
+>
+> 🔴 **B has traded 0 of 45 live days at VIX ≥ 19** (max seen: 18.97). Its entire **+$6,476.60**
+> was earned in a regime the source explicitly excludes — so **his 22.5%/"40% in a quarter"
+> results are NOT evidence for B** and must not be cited at any go-live gate. Applying his VIX
+> filter retroactively yields **zero trades in 45 days**, so "make B faithful" would delete the
+> strategy, not fix it. B is HYDRA's IC engine using three of his ideas (8δ strikes, GEX adjuster,
+> 80% TP) on a MEIC grid he never proposed. Judge it on our own record (**t = 0.83**), not his.
+
 **Brandon Trojan Horse features (LIVE on B/C):** take-profit at 80% credit captured, GEX-aware strike adjuster (skips sides inside accel zones, shifts toward decel walls), GEX breach exit (closes IC after sustained 90s breach of decel wall), defensive overlay (debit spread / butterfly hedge), delta-target strike selection anchored to 8δ from the live Polygon chain (replaces HYDRA's OTM-multiplier).
 
 Only HYDRA's credit+buffer stop runs in `hydra_stop_shadow` on B/C — parallel for head-to-head journal comparison, never acts on B/C.
