@@ -116,6 +116,7 @@ deploy/
   hydra_variant_e.service     # parallel dry-run-locked instance (E "SPY Double Calendar")
   hydra_variant_f.service     # parallel dry-run-locked instance (F "Ghauri Mean Reversion", 0DTE)
   hydra_variant_g.service     # parallel dry-run-locked instance (G "Strangle", 0DTE undefined-risk)
+  hydra_variant_h.service     # parallel dry-run-locked instance (H "Long Strangle", 0DTE net-debit LONG gamma — the mirror of G)
   IBKR_CREDENTIALS_SETUP.md   # one-time-setup + pre-start verification runbook
   hermes/apollo/clio/homer/argus .service + .timer  # agent timers
   token_keeper.service.disabled-on-this-branch  # Saxo-only — DEAD on this branch
@@ -748,14 +749,14 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 ```bash
 # Stop HYDRA + variants (broker keeps the IBKR session — strategies stop trading; session stays up)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g hydra_variant_h"
 
 # Stop just HYDRA
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
 
 # Start the broker FIRST (it owns the session the strategies depend on), then HYDRA + variants
 # (run pre-start verification first — see deploy/IBKR_CREDENTIALS_SETUP.md)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start calypso-broker hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start calypso-broker hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g hydra_variant_h"
 
 # Restart HYDRA (config / strategy change pickup — does NOT re-auth the IBKR session)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart hydra"
@@ -768,7 +769,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 ```bash
 # All active HYDRA-related services (calypso-broker = the shared IBKR session owner)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status calypso-broker hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g dashboard"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status calypso-broker hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g hydra_variant_h dashboard"
 
 # Broker session health + re-auth loop logs (where session/auth problems show up in broker mode)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u calypso-broker -n 50 --no-pager"
@@ -800,7 +801,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u h
 # F and G running while claiming to stop everything. They are dry-run-locked so nothing
 # was at risk, but a command labelled "emergency stop" must not need that caveat to be
 # true. Add hydra_variant_bm once real money runs.
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g calypso-broker"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g hydra_variant_h calypso-broker"
 ```
 
 Stopping `calypso-broker` drops the one shared IBKR session; the `hydra*` units will fail their `ensure_connected()` health probe and `break` (then systemd retries them, but they stay down without a healthy broker). Bring the broker back FIRST when restarting.
@@ -1250,7 +1251,7 @@ For the full 86-fix history including all Saxo-era bugs and resolutions, see `bo
 ## Important Notes
 
 1. **Git on VM:** must run as `calypso`: `sudo -u calypso bash -c 'cd /opt/calypso && git pull'`
-2. **Service names use underscores:** `hydra`, `hydra_variant_b`, `hydra_variant_c`, `hydra_variant_d`, `hydra_variant_e`, `hydra_variant_f`, `hydra_variant_g`, `dashboard` (plus `hydra_variant_bm` + `calypso-broker-live`, built but not installed)
+2. **Service names use underscores:** `hydra`, `hydra_variant_b`, `hydra_variant_c`, `hydra_variant_d`, `hydra_variant_e`, `hydra_variant_f`, `hydra_variant_g`, **`hydra_variant_h`**, `dashboard` (plus `hydra_variant_bm` + `calypso-broker-live`, built but not installed). ⚠️ **`hydra_variant_h` was missing from every list in this file until 2026-09-28** — including the emergency stop, which therefore did not stop it. It is dry-run-locked so nothing was at risk, but that is the same defect this file already recorded for D/E/F/G on 2026-09-19, repeated. It was also found `systemctl is-enabled` = **disabled** (running, but would not survive a reboot) and on older bytecode than the rest of the fleet; both fixed 2026-09-28. **When adding a variant, grep this file for `hydra_variant_g` and add the new unit to every hit.**
 3. **Log locations:** `/opt/calypso/logs/hydra/bot.log`; variants under `/opt/calypso/logs/hydra_variant_{b,c,d,e,f,g}/`; the real-money broker would write to `logs/broker-live/broker.log`
 4. **State files:** `data/hydra_state.json`, `data/variant_{b,c,d,e,f,g}/hydra_state.json`. Calendar variants D/E also keep a sidecar `data/variant_{d,e}/dc_open_trades.json` (open calendars) + an isolated `data/variant_{d,e}/dc_calendar.db` (calendar tables, separate from the shared `backtesting.db`).
 5. **Position Registry:** `data/position_registry.json` — vestigial on IBKR (always empty), kept loaded for back-compat
