@@ -50,6 +50,8 @@ from pathlib import Path
 # headline honest; the report prints gross alongside so the assumption is
 # visible rather than buried.
 COMMISSION_PER_CONTRACT_PER_LEG = 0.65
+# B's acting stop: strategy.narrow_spread_stop.pct_of_width on the live config.
+A2_PCT_OF_WIDTH = 0.40
 
 
 def _spread_value(settle, short_strike, long_strike, is_call):
@@ -98,10 +100,23 @@ def score(db_path: Path, since: str, write: bool):
         gross = (credit_ps - cv - pv) * 100.0 * k
         comm = COMMISSION_PER_CONTRACT_PER_LEG * k * 4 * 2   # 4 legs, in+out
         pnl = gross - comm
+
+        # STOP-CAPPED variant. Held-to-expiry overstates a breach: B's acting
+        # stop is A2 %-of-width, which exits a side once its cost-to-close
+        # reaches `pct_of_width x width`, so a side can never cost the full
+        # width. Capping each side's value at that level is the closer model
+        # of what B would ACTUALLY have booked. Verified against 2026-09-21,
+        # where three stopped call spreads cost $4,300 to exit rather than the
+        # $10,500 they were worth at expiry (~$1,433/side vs a $1,400 nominal).
+        cw = abs((lc or sc) - sc) or 5.0
+        pw = abs(sp - (lp or sp)) or 5.0
+        cvs = min(cv, A2_PCT_OF_WIDTH * cw)
+        pvs = min(pv, A2_PCT_OF_WIDTH * pw)
+        pnl_stopped = (credit_ps - cvs - pvs) * 100.0 * k - comm
         touched = bool(
             (hi is not None and hi >= sc) or (lo is not None and lo <= sp))
-        scored.append((d, en, reason, sc, sp, settle, credit_ps, pnl, touched, k))
-        updates.append((1 if touched else 0, pnl, rid))
+        scored.append((d, en, reason, sc, sp, settle, credit_ps, pnl, touched, k, pnl_stopped))
+        updates.append((1 if touched else 0, pnl_stopped, rid))
 
     print(f"{db_path}")
     print(f"scored {len(scored)} skipped entries since {since} "
@@ -123,26 +138,30 @@ def score(db_path: Path, since: str, write: bool):
     for r in scored:
         groups.setdefault(bucket(r), []).append(r)
 
-    print(f"{'reason':<22} {'n':>4} {'held-to-expiry P&L':>20} {'mean':>10} "
-          f"{'wins':>6} {'threatened':>11}")
+    print(f"{'reason':<22} {'n':>4} {'held-to-expiry':>16} {'WITH A2 STOP':>16} "
+          f"{'wins':>8} {'threatened':>11}")
     for name, rs in sorted(groups.items(), key=lambda kv: -len(kv[1])):
         tot = sum(r[7] for r in rs)
-        wins = sum(1 for r in rs if r[7] > 0)
+        tots = sum(r[10] for r in rs)
+        wins = sum(1 for r in rs if r[10] > 0)
         touch = sum(1 for r in rs if r[8])
-        print(f"{name:<22} {len(rs):>4} {tot:>20,.2f} {st.mean(r[7] for r in rs):>10,.2f} "
-              f"{wins:>4}/{len(rs):<2} {touch:>6}/{len(rs):<4}")
+        print(f"{name:<22} {len(rs):>4} {tot:>16,.2f} {tots:>16,.2f} "
+              f"{wins:>5}/{len(rs):<2} {touch:>7}/{len(rs):<4}")
 
     allp = [r[7] for r in scored]
-    print(f"\n{'TOTAL':<22} {len(scored):>4} {sum(allp):>20,.2f} {st.mean(allp):>10,.2f}")
+    alls = [r[10] for r in scored]
+    print(f"\n{'TOTAL':<22} {len(scored):>4} {sum(allp):>16,.2f} {sum(alls):>16,.2f}")
+    print(f"\n  ^ the WITH-A2-STOP column is the one to read. B does not hold a")
+    print("    breached side to expiry; it exits at 40% of width.")
     print(f"\n  NEVER THREATENED (short strike untouched all day): "
           f"{sum(1 for r in scored if not r[8])}/{len(scored)}")
     print("  A skip whose strike was never touched cannot have protected anything.")
 
-    worst = sorted(scored, key=lambda r: r[7])[:5]
-    print("\n  the 5 skips that would have LOST the most (held to expiry):")
-    for d, en, _r, sc, sp, settle, cps, pnl, t, k in worst:
+    worst = sorted(scored, key=lambda r: r[10])[:6]
+    print("\n  the 6 skips that would have LOST the most (with the A2 stop):")
+    for d, en, _r, sc, sp, settle, cps, pnl, t, k, pns in worst:
         print(f"     {d} e#{en}  SC {sc:.0f} / SP {sp:.0f}  settle {settle:.1f}  "
-              f"P&L {pnl:>10,.2f}  threatened={t}")
+              f"expiry {pnl:>9,.0f}  stopped {pns:>9,.0f}  threatened={t}")
 
     if write:
         cur.executemany(
