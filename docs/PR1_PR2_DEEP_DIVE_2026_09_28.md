@@ -64,6 +64,41 @@ comparable to B's entire live P&L of $6,476.60.
 recording every skip without ever scoring it. That is the cheapest missing measurement in the
 project and it should be fixed regardless of what is decided about SKIP.
 
+## Finding 5 — the counterfactual, now scored (`scripts/score_skipped_entries.py`)
+
+Built 2026-09-28. Two numbers, both narrow on purpose:
+
+* `theoretical_pnl` — the IC's P&L **with the A2 stop modelled** (each side's value capped at
+  `pct_of_width × width`). Held-to-expiry is also printed but is the WRONG model for B: it
+  turned the same 26 skips from **+$1,976 into −$4,324**, because it lets a breached side cost
+  the full width when B actually exits at 40% of it. Verified against 2026-09-21, where three
+  stopped call spreads cost **$4,300** to exit rather than the **$10,500** they were worth at
+  expiry.
+* `would_have_stopped` — **not** a stop simulation. It records whether SPX ever traded through
+  the short strike intraday. A skip whose strike was never touched cannot have protected
+  anything.
+
+**Result over the scorable window:**
+
+| reason | n | held-to-expiry | **with the A2 stop** | winners | ever threatened |
+|---|---|---|---|---|---|
+| require-both-sides | 26 | −$4,323.90 | **+$1,976.10** | 20/26 | **7/26** |
+| credit gate | 5 | +$45.50 | +$45.50 | 3/5 | 0/5 |
+| **TOTAL** | **31** | −$4,278.40 | **+$2,021.60** | | **24/31 never threatened** |
+
+**The skips cost roughly $2,000 in foregone profit**, and three-quarters of them vetoed a strike
+the market never came near.
+
+### Why only 31 of 200 rows are scorable — and why that is fine
+
+Not bias. Commit `ec71967` (*"record the strikes a skipped entry would have used"*) landed
+**2026-09-11**; before that date **zero** skips captured their theoretical strikes, so they can
+never be scored. Post-09-11 coverage is **29 of 34 (85%)**. The one anomaly worth a later look is
+**2026-09-17: 7 skips, 0 with strikes.**
+
+So the counterfactual pipeline is already in place upstream; what was missing was anything that
+*scored* it. That is now closed.
+
 ## Recommendation — PR-1
 
 **Replace SKIP with try-SHIFT-then-KEEP.** On an accel-zone hit, attempt to move the short past
