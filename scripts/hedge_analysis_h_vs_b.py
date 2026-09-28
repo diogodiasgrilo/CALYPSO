@@ -140,17 +140,31 @@ def main():
         return 0
 
     # ---- 1. COVERAGE -------------------------------------------------------
+    # H STARTED LATER THAN B, so "days B traded that H did not" over B's whole
+    # history mostly measures H's age, not H's selectivity. Quoting that number
+    # raw would be a loose inference dressed as a finding. Coverage is computed
+    # inside H's OWN era — the first date H recorded anything, entry or skip —
+    # and the pre-era days are reported separately as what they are.
+    h_era = min(list(H) + [str(r[0]) for r in hskips]) if (H or hskips) else None
     both = sorted(set(B) & set(H))
-    b_only = sorted(set(B) - set(H))
+    in_era = sorted(d for d in B if h_era and d >= h_era)
+    unhedged_era = sorted(d for d in in_era if d not in H)
+    pre_era = sorted(d for d in B if h_era and d < h_era)
     print("1. COVERAGE — a hedge absent on the day you need it is not a hedge")
-    print(f"   days B traded            : {len(B)}")
-    print(f"   days BOTH traded         : {len(both)}")
-    print(f"   days B traded, H did NOT : {len(b_only)}"
-          f"   ({100*len(b_only)/len(B):.0f}% of B's days unhedged)" if B else "")
-    if b_only:
-        worst = sorted(((B[d], d) for d in b_only))[:3]
+    print(f"   H's data begins          : {h_era}")
+    print(f"   B days BEFORE H existed  : {len(pre_era)}  (not H's fault — excluded below)")
+    print(f"   B days INSIDE H's era    : {len(in_era)}")
+    print(f"   ...of which BOTH traded  : {len(both)}")
+    if in_era:
+        print(f"   ...of which H was ABSENT : {len(unhedged_era)}"
+              f"   ({100*len(unhedged_era)/len(in_era):.0f}% of eligible days unhedged)")
+    for d in unhedged_era:
+        print(f"       {d}  B {B[d]:+8.2f}/contract  — NO HEDGE ON")
+    if pre_era:
+        worst = sorted(((B[d], d) for d in pre_era))[:3]
+        print("   B's worst days predating H (context only, NOT a coverage failure):")
         for pnl, d in worst:
-            print(f"       {d}  B {pnl:+8.2f}/contract  — NO HEDGE ON")
+            print(f"       {d}  B {pnl:+8.2f}/contract")
     if hskips:
         print(f"   H skip reasons ({len(hskips)}):")
         for d, t, why in hskips[-4:]:
