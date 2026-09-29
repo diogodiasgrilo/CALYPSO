@@ -41,6 +41,21 @@ The settlement RECONCILE fired at exactly **−$5,995**, confirming A1's diagnos
 ⚠️ BROKER-RECONCILE showed a SEPARATE unexplained gap: IBKR realized $4,108.43 vs ours $3,565.00
 (**−$543.43**), matching the ~$558 measured intraday. Not A1 — worth chasing.
 
+### 📋 PRE-REGISTERED 2026-09-29 — slot pruning on B (cut-off date already set)
+
+[`docs/PREREG_SLOT_PRUNE_2026_09_29.md`](PREREG_SLOT_PRUNE_2026_09_29.md). **Nothing pruned; the
+grid is unchanged.** Per-slot P&L looked damning, and tested properly it mostly is not — 7 slots
+were tested, so after multiple-comparison correction (|t| ≳ 3.6) **only e#7 clears the bar**.
+**e#5 was removed as a candidate** (t = −0.73, noise; it looked bad only because its total is
+large, an artifact of n). e#4 is the sole candidate at t = −1.69, and there is **no structural
+mechanism** — credit per hour at risk is monotone across the grid with no anomaly at e#4.
+
+Registered: e#4 only, first evaluable date **2026-09-30**, 27 out-of-sample entries (~66 trading
+days), prune iff mean < 0 **and** |t| ≥ 2; on "keep" the hypothesis is recorded FAILED, not
+re-tested. Separately registered as a **non-inferiority** test (better powered, and justified by
+the SOURCE rather than by our P&L): reducing toward **one entry a day**, adopt if the
+out-of-sample daily difference is ≥ 0 over 40 days.
+
 ### 📋 PRE-REGISTERED (not to be built during the freeze) — VIX-scale the EOD flatten cushion
 
 `eod_flatten.skip_otm_pts` is a **fixed point value** (20pt as of 2026-09-27) but the quantity it
