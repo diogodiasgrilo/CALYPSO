@@ -1019,6 +1019,58 @@ class DataRecorder:
         an UPDATE happening here today — it does not.
         """
         def _write():
+            # ── AMNESIA GUARD (2026-09-29) ──────────────────────────────────
+            # A restarted process writes settlement from EMPTY daily state and
+            # silently buries a day that traded.
+            #
+            # It happened. On 2026-05-29 the calypso-broker cutover restarted
+            # A, B and C mid-session: every one of them lost position
+            # monitoring within eight seconds of each other (12:23:11,
+            # 12:23:17, 12:23:19) and each then wrote a summary of 0 entries,
+            # $0 gross, $0 net over a day that had real fills. B 2026-05-05 is
+            # a fourth instance. Reconstructed from surviving credits, strikes
+            # and the settlement price, those four days were worth
+            # **+$3,510.20**, and the books read zero.
+            #
+            # Worse than the loss: the zero looked plausible. HOMER read it,
+            # found no entries, and wrote a confident narrative into the
+            # trading journal about credit-gate failures that NO row supports
+            # — a fabricated explanation of corrupted data, ticked as
+            # reconciled. A missing row would have been noticed. A zero row was
+            # not, for four months.
+            #
+            # So: REFUSE rather than write. A gap is visibly a gap; a zero is a
+            # lie that reconciles. HOMER's later INSERT OR IGNORE then wins and
+            # can fill the day properly.
+            #
+            # Only fires on the contradiction — a genuinely flat day (no
+            # entries recorded) writes its zero exactly as before.
+            try:
+                claims_nothing = (
+                    not (summary_data.get("entries_placed") or 0)
+                    and not (summary_data.get("gross_pnl") or 0)
+                    and not (summary_data.get("net_pnl") or 0)
+                )
+                if claims_nothing and summary_data.get("date"):
+                    with self._connect() as _c:
+                        n = _c.execute(
+                            "SELECT COUNT(*) FROM trade_entries WHERE date = ?",
+                            (summary_data["date"],)).fetchone()[0]
+                    if n:
+                        logger.critical(
+                            "SETTLEMENT-AMNESIA GUARD: refusing to write an empty "
+                            "daily_summaries row for %s — %d trade_entries row(s) "
+                            "exist for that date. This is the 2026-05-29 broker-cutover "
+                            "shape: a restarted process settling from empty state. The "
+                            "day is left WITHOUT a summary row (visibly missing) rather "
+                            "than recorded as a flat zero (silently wrong); HOMER's "
+                            "later insert can fill it.",
+                            summary_data["date"], n,
+                        )
+                        return
+            except Exception as _exc:  # noqa: BLE001 — a guard must not block settlement
+                logger.warning("SETTLEMENT-AMNESIA GUARD check failed (writing anyway): %s", _exc)
+
             cols = [
                 "date", "spx_open", "spx_close", "spx_high", "spx_low", "day_range",
                 "vix_open", "vix_close",
