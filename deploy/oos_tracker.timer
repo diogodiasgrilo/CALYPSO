@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the OOS tracker daily, AFTER settlement completes
+
+[Timer]
+# 23:15 ET — after settlement (~21:45-22:37 ET) and after HERMES at 23:00,
+# so the day's daily_summaries row and per-entry realized_pnl are final.
+# Reading before settlement would append a row built on unsettled numbers,
+# which is the 2026-09-19 HERMES/HOMER mistake in a different costume.
+OnCalendar=Mon..Fri *-*-* 23:15:00 America/New_York
+Persistent=true
+
+[Install]
+WantedBy=timers.target

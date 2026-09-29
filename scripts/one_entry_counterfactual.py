@@ -49,6 +49,13 @@ from pathlib import Path
 
 LIVE_ERA = "2026-07-24"
 
+# The registered out-of-sample cut-off. Everything on or before 2026-09-28 was
+# used to FORM the hypothesis and cannot also test it. See
+# docs/PREREG_SLOT_PRUNE_2026_09_29.md. Changing this constant invalidates the
+# registration — it does not extend it.
+OOS_SINCE = "2026-09-30"
+OOS_REQUIRED_DAYS = 40
+
 
 def load(db: Path, since: str):
     con = sqlite3.connect(f"file:{db}?mode=ro", uri=True)
@@ -83,9 +90,81 @@ def apportion_commission(days, entries, stops):
     return out
 
 
+def oos_report(db: Path, oos_since: str, append_to: Path | None):
+    """Evaluate the REGISTERED one-entry-a-day test on out-of-sample days only.
+
+    The rule, fixed in writing before any of this data existed
+    (docs/PREREG_SLOT_PRUNE_2026_09_29.md):
+
+        statistic  daily net P&L difference, first-entry-only minus all-entries
+        n required 40 trading days from 2026-09-30
+        ADOPT      mean difference >= 0        (non-inferiority — the rule comes
+                                                from the SOURCE, so the data only
+                                                has to show it does no harm)
+        REJECT     mean difference < 0 AND |t| >= 2
+
+    Non-inferiority is deliberate. Demanding the rule prove SUPERIORITY would
+    need ~771 entries (~18 months), because the 95% CI on the extra entries'
+    gross is [-$139, +$138] and spans their $41.63 commission.
+    """
+    days, entries, stops = load(db, oos_since)
+    comm = apportion_commission(days, entries, stops)
+    by_day = defaultdict(list)
+    for e in entries:
+        by_day[e[0]].append(e)
+
+    diffs = []
+    for d, ents in sorted(by_day.items()):
+        allnet = sum((e[3] or 0) - comm.get((e[0], e[1]), 0.0) for e in ents)
+        f = sorted(ents, key=lambda x: str(x[2]))[0]
+        firstnet = (f[3] or 0) - comm.get((f[0], f[1]), 0.0)
+        diffs.append((d, firstnet - allnet, len(ents)))
+
+    n = len(diffs)
+    vals = [x[1] for x in diffs]
+    mean = st.mean(vals) if n else 0.0
+    sd = st.stdev(vals) if n > 1 else 0.0
+    se = sd / n ** 0.5 if n > 1 else 0.0
+    t = mean / se if se else 0.0
+
+    if n < OOS_REQUIRED_DAYS:
+        verdict = f"PENDING — {n}/{OOS_REQUIRED_DAYS} days"
+    elif mean >= 0:
+        verdict = "ADOPT — does no harm (non-inferiority met)"
+    elif abs(t) >= 2:
+        verdict = "REJECT — the data contradicts the source"
+    else:
+        verdict = "ADOPT — negative but not significantly (non-inferiority met)"
+
+    print(f"\nREGISTERED TEST — one entry a day, OUT OF SAMPLE from {oos_since}")
+    print(f"   trading days          {n:>6} / {OOS_REQUIRED_DAYS} required")
+    print(f"   mean daily difference {mean:>10,.2f}   (first-only minus all)")
+    print(f"   sd / SE / t           {sd:>10,.2f} / {se:,.2f} / {t:+.2f}")
+    print(f"   VERDICT               {verdict}")
+    if n and n <= 10:
+        for d, v, k in diffs:
+            print(f"      {d}  {k} entries  diff {v:>+10,.2f}")
+
+    if append_to is not None:
+        import json
+        from datetime import datetime as _dt
+        row = {"recorded_at": _dt.now().isoformat(timespec="seconds"),
+               "oos_since": oos_since, "days": n, "mean_diff": round(mean, 2),
+               "sd": round(sd, 2), "t": round(t, 3), "verdict": verdict}
+        append_to.parent.mkdir(parents=True, exist_ok=True)
+        with open(append_to, "a") as fh:
+            fh.write(json.dumps(row) + "\n")
+        print(f"   appended to {append_to}")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--variant", default="b")
+    ap.add_argument("--oos", action="store_true",
+                    help="evaluate the REGISTERED out-of-sample test and exit")
+    ap.add_argument("--append", action="store_true",
+                    help="with --oos, append a dated row to the tracking file")
     ap.add_argument("--since", default=LIVE_ERA)
     ap.add_argument("--root", default="/opt/calypso")
     a = ap.parse_args()
@@ -93,6 +172,9 @@ def main():
     if not db.exists():
         print(f"no such database: {db}")
         return 1
+    if a.oos:
+        track = (db.parent / "oos_one_entry.jsonl") if a.append else None
+        return oos_report(db, OOS_SINCE, track)
 
     days, entries, stops = load(db, a.since)
     comm = apportion_commission(days, entries, stops)

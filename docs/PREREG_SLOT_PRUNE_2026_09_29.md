@@ -77,6 +77,44 @@ is specified because commission apportionment is an estimate, not a measurement)
 
 ---
 
+## FORMALLY CLOSED — "just keep the slots that made money"
+
+The most attractive option on the board is to keep only the in-sample winners,
+**e#2, e#6 and e#7**, which shows **+$8,581.91** net against +$2,302 for first-entry-only and
+−$574 for all seven. It is closed here so it cannot be reopened as a fresh idea later.
+
+**There are 35 ways to choose 3 slots from 7, and that figure is the best of the 35** — chosen
+after seeing the results. To measure how much of it is the choosing rather than the slots, the
+per-entry P&L was randomly reassigned across entries (destroying any real slot effect) and the
+best-of-35 taken again, 2,000 times:
+
+| | net |
+|---|---|
+| best of 35, **observed** | **$8,581.91** |
+| best of 35, **by chance alone** — median of 2,000 shuffles | **$5,538.97** |
+| best of 35, by chance — 95th percentile | $8,486.80 |
+| **P(chance ≥ observed)** | **0.045** |
+
+**With no slot effect whatsoever, picking the winner in hindsight still pays $5,539.** So roughly
+**65% of the apparent $8,582 is selection, not edge.** The observed value clears the 95th
+percentile by $95 — p = 0.045, from a test run *after* seven individual slot comparisons had
+already been made. Corrected for that, it does not survive.
+
+For completeness, the median of all 35 combinations is **+$57.39** and the worst, (1,4,5), is
+**−$9,095.20** — the spread is enormous relative to any signal, which is what makes best-of-N
+here worthless.
+
+**And there is no mechanism to fall back on.** The plausible story was that later entries are
+structurally safer (less time at risk, rising credit per hour). Tested directly:
+**corr(entry hour, P&L) = +0.049, t = +0.49, n = 101 — not supported.**
+
+> **Not permitted under this registration:** adopting any subset of slots chosen by its own
+> P&L. If a slot-selection rule is ever proposed again it needs (a) a mechanism stated before the
+> data, and (b) a significance bar corrected for every combination considered, not just the one
+> reported.
+
+---
+
 ## A separate, stronger test — and why it needs less evidence
 
 **Reducing the grid toward one entry a day is justified by the SOURCE, not by our P&L.** Brandon

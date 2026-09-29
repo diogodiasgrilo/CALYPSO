@@ -1,0 +1,19 @@
+[Unit]
+Description=CALYPSO OOS tracker — appends one dated row for the REGISTERED one-entry-a-day test (docs/PREREG_SLOT_PRUNE_2026_09_29.md). Read-only on backtesting.db; it opens the database with mode=ro and writes only its own append-only JSONL. It cannot place, cancel or modify an order, and it does not import IBClient or BrokerClient. It exists because a 40-trading-day out-of-sample test that depends on someone remembering to run a script is a test that will quietly not happen.
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+ExecStart=/opt/calypso/.venv/bin/python -m scripts.one_entry_counterfactual --variant b --oos --append
+# Never let a tracker failure look like a trading failure.
+SuccessExitStatus=0 1
+StandardOutput=journal
+StandardError=journal
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/calypso/data
