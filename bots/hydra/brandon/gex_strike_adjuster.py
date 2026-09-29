@@ -107,6 +107,92 @@ def _cluster_covering(clusters: tuple[GEXCluster, ...], strike: float) -> Option
     return None
 
 
+def shadow_shift_first(
+    *,
+    side: str,
+    spot: float,
+    proposed_short: float,
+    profile: GEXProfile,
+    config: AdjusterConfig = AdjusterConfig(),
+) -> dict:
+    """SHADOW ONLY — what a SHIFT-FIRST policy would decide. Never acts.
+
+    THE QUESTION THIS ANSWERS. `adjust_call_strike` / `adjust_put_strike`
+    evaluate acceleration zones FIRST and `return SKIP` immediately, so the
+    decel/SHIFT block below that return is unreachable whenever a zone fires.
+    The consequence, measured 2026-09-28 over 148 live adjuster decisions on
+    variant B: **23 SKIP, 125 KEEP, and SHIFT has never once executed.**
+
+    That inverts the source. The only placement behaviour Brandon Jones
+    describes is moving the band — *"I would manipulate the lower bands to
+    move a little bit lower… to be able to have these areas of deceleration
+    captured within"* — and the word "skip" never appears in the transcript
+    (`docs/sources/BC_brandon_jones_trojan_horse_uJSi0AvYcr8_transcript.txt`).
+    Our own SKIP docstring concedes it was a convenience: *"don't place this
+    side at all (HYDRA already supports one-sided entries)"*.
+
+    It also has a measured cost. Every one of the **21 evaluable SKIPs was
+    wrong** — the vetoed strike was never breached, with misses up to 43.9pt —
+    and on 2026-09-28 the adjuster vetoed 7755 twice while B went on to sell
+    7720 three times, which is the strike that actually got breached.
+
+    THE POLICY. On an accel-zone hit, move the short OUTWARD past the zone
+    (plus `shift_buffer_pts`) if that lands within `max_shift_pts`; SKIP only
+    when nothing viable remains. This respects the zone rather than ignoring
+    it, which is why it is not simply "delete the SKIP".
+
+    Returns a JSON-safe verdict; the caller records it beside the live
+    decision. Nothing here is consulted by any trading path.
+    """
+    verdict = {"action": None, "target": None, "reason": None}
+    try:
+        is_call = str(side).lower().startswith("c")
+        if (is_call and proposed_short <= spot) or ((not is_call) and proposed_short >= spot):
+            verdict.update(action="n/a", reason="proposed short on the wrong side of spot")
+            return verdict
+
+        accel_zones = profile.negative_clusters(min_strength_pct=config.accel_min_pct)
+        hit = None
+        for c in accel_zones:
+            if c.strike_low <= proposed_short <= c.strike_high:
+                if abs(proposed_short - c.peak_strike) <= config.accel_peak_locality_pts:
+                    hit = c
+                    break
+        if hit is None:
+            # No zone fired, so live and shift-first agree by construction.
+            # Recorded as "n/a" rather than "KEEP" so the comparison counts
+            # only the decisions where the policies can actually differ.
+            verdict.update(action="n/a", reason="no accel zone hit — policies cannot differ")
+            return verdict
+
+        if is_call:
+            target = _snap(hit.strike_high + config.shift_buffer_pts, config.strike_increment)
+            viable = (target > proposed_short
+                      and target - proposed_short <= config.max_shift_pts)
+        else:
+            target = _snap(hit.strike_low - config.shift_buffer_pts, config.strike_increment)
+            viable = (target < proposed_short
+                      and proposed_short - target <= config.max_shift_pts)
+
+        if viable:
+            verdict.update(
+                action="SHIFT", target=float(target),
+                reason=(f"live SKIPped; shift-first moves {proposed_short:.0f} → "
+                        f"{target:.0f} to clear accel zone "
+                        f"[{hit.strike_low:.0f}-{hit.strike_high:.0f}] "
+                        f"peak {hit.peak_strike:.0f}"))
+        else:
+            verdict.update(
+                action="SKIP", target=None,
+                reason=(f"live SKIPped; shift-first AGREES — clearing zone "
+                        f"[{hit.strike_low:.0f}-{hit.strike_high:.0f}] needs "
+                        f"{abs(target - proposed_short):.0f}pt > "
+                        f"max_shift {config.max_shift_pts:.0f}pt"))
+    except Exception as exc:  # noqa: BLE001 — a shadow must never raise
+        verdict.update(action="error", reason=f"{type(exc).__name__}: {exc}")
+    return verdict
+
+
 def adjust_call_strike(
     *,
     spot: float,

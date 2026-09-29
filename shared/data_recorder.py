@@ -34,7 +34,7 @@ Schema v10 (2026-06-12) adds: a first-class `date` column on spread_snapshots
 backfilled from the timestamp prefix, with an index — so per-day queries and
 per-day maintenance match every other table (date, entry_number).
 
-Current SCHEMA_VERSION = 17 (see the module constant; this docstring intro
+Current SCHEMA_VERSION = 18 (see the module constant; this docstring intro
 describes v10 as an example of the migration pattern, not the current version —
 see the dated comment blocks above each MIGRATION_V{N}_SQL for the full history).
 """
@@ -60,7 +60,7 @@ def _describe_exception(e: Exception) -> str:
 
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 17
+SCHEMA_VERSION = 18
 
 # ============================================================================
 # Schema Migration SQL
@@ -250,6 +250,25 @@ MIGRATION_V17_SQL = [
     "ALTER TABLE trade_entries ADD COLUMN long_call_mid_at_decision REAL",
     "ALTER TABLE trade_entries ADD COLUMN short_put_mid_at_decision REAL",
     "ALTER TABLE trade_entries ADD COLUMN long_put_mid_at_decision REAL",
+]
+
+MIGRATION_V18_SQL = [
+    # v18 (2026-09-29): the SHIFT-FIRST shadow verdict on an adjuster decision.
+    #
+    # It gets its OWN column rather than being appended to `shadow_json`,
+    # because that array holds the GATE shadow arms (gex_shadow.SHADOW_VARIANTS
+    # — width, normalization, sign convention) and a consumer parsing it
+    # expects exactly those. test_decision_record_writes_both_predicates_and_
+    # shadow_json pins that invariant, and it caught the first attempt, which
+    # had appended a foreign entry.
+    #
+    # The two shadows answer different questions. The gate shadow asks "would a
+    # corrected reading still see an acceleration zone here?" This asks "given
+    # that a zone fired, should we have MOVED the strike instead of dropping
+    # the side?" — raised by 148 live adjuster decisions producing 23 SKIPs,
+    # 125 KEEPs and ZERO shifts, where every one of the 21 evaluable SKIPs
+    # vetoed a strike the market never reached.
+    "ALTER TABLE gex_decisions ADD COLUMN shift_first_json TEXT",
 ]
 
 MIGRATION_V15_SQL = [
@@ -575,6 +594,9 @@ class DataRecorder:
                 if current_version < 17:
                     # v17: decision-time mid per leg (drift measurement)
                     migration_sql += MIGRATION_V17_SQL
+                if current_version < 18:
+                    # v18: SHIFT-FIRST shadow verdict on adjuster decisions
+                    migration_sql += MIGRATION_V18_SQL
 
                 for sql in migration_sql:
                     try:
@@ -959,7 +981,7 @@ class DataRecorder:
                 "live_adjuster_predicate", "live_overlay_predicate",
                 "cluster_low", "cluster_high", "cluster_peak",
                 "cluster_n_strikes", "cluster_strength_pct",
-                "shadow_json", "shadow_disagrees",
+                "shadow_json", "shadow_disagrees", "shift_first_json",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)

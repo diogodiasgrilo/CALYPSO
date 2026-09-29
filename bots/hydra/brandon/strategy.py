@@ -3206,6 +3206,43 @@ class BrandonHydraStrategy(HydraStrategy):
                     min_strength_pct=self.brandon_accel_min_pct,
                     peak_locality_pts=getattr(self, "brandon_accel_peak_locality_pts", 25.0),
                 )
+            # PR-1 SHADOW (2026-09-29): what a SHIFT-FIRST policy would have
+            # decided. The live adjuster returns SKIP before the SHIFT block
+            # can run, so SHIFT has never once executed in 148 live decisions
+            # while SKIP fired 23 times — every evaluable one of which was
+            # wrong. Recorded, never acted on; `shadow_shift_first` cannot
+            # raise and nothing in the trading path reads it.
+            shift_first = None
+            if consumer == "adjuster" and profile is not None:
+                try:
+                    from .gex_strike_adjuster import (
+                        AdjusterConfig as _ACfg, shadow_shift_first as _ssf,
+                    )
+                    shift_first = _ssf(
+                        side=side, spot=spot, proposed_short=reference_strike,
+                        profile=profile,
+                        config=_ACfg(
+                            accel_min_pct=self.brandon_accel_min_pct,
+                            accel_peak_locality_pts=getattr(
+                                self, "brandon_accel_peak_locality_pts", 25.0),
+                            max_shift_pts=getattr(
+                                self, "brandon_gex_max_shift_pts", 25.0),
+                            shift_buffer_pts=getattr(
+                                self, "brandon_gex_shift_buffer_pts", 5.0),
+                        ),
+                    )
+                except Exception as _exc:  # noqa: BLE001 — shadow only
+                    shift_first = {"action": "error", "target": None,
+                                   "reason": f"{type(_exc).__name__}: {_exc}"}
+                if (live_action == "SKIP"
+                        and shift_first.get("action") == "SHIFT"):
+                    logger.info(
+                        "BRANDON-GEX-SHIFT-SHADOW E#%s %s: live SKIP, "
+                        "shift-first would move %s → %s (%s)",
+                        entry_number, side, reference_strike,
+                        shift_first.get("target"), shift_first.get("reason"),
+                    )
+
             disagreement = disagreement_summary(shadow)
             if disagreement:
                 # Only log when a correction would have decided differently —
@@ -3247,6 +3284,12 @@ class BrandonHydraStrategy(HydraStrategy):
                     for v in shadow
                 ]),
                 "shadow_disagrees": 1 if disagreement else 0,
+                # PR-1 action shadow — its OWN column, not appended to
+                # shadow_json, which holds the GATE arms and whose exact
+                # membership is pinned by
+                # test_decision_record_writes_both_predicates_and_shadow_json.
+                "shift_first_json": (
+                    _json.dumps(shift_first) if shift_first else None),
             })
         except Exception as exc:
             logger.debug("GEX decision record failed (non-fatal): %s", exc)
