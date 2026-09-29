@@ -257,6 +257,12 @@ def read_ls_recent(db_path: Optional[str], limit: int = 30) -> List[Dict[str, An
             con,
             "SELECT x.date, x.entry_number, x.exit_time, x.exit_reason, "
             "       x.realized_pnl, x.pnl_pct_of_debit, x.minutes_held, "
+            # `commissions` is carried so the page's "Net" card can be net.
+            # It was previously omitted and the card showed GROSS — on a
+            # strategy whose debits are $83-$102, a $4.60 round trip is ~5% of
+            # the risk, so calling the gross figure "Net" overstated every
+            # summary on the page (2026-09-29).
+            "       x.commissions, "
             "       e.total_debit, e.contracts, e.call_strike, e.put_strike, "
             "       e.em_source "
             "FROM ls_exits x LEFT JOIN ls_entries e "

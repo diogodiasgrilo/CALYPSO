@@ -100,6 +100,10 @@ interface RecentRow {
   entry_number: number;
   exit_reason: string | null;
   realized_pnl: number | null;
+  /** Round-trip fees on this exit. Carried so "Net" can be net — see
+   *  RunningRecord. Optional because rows written before the reader selected
+   *  it will not have one, and a missing fee must read as 0, never as NaN. */
+  commissions?: number | null;
   pnl_pct_of_debit: number | null;
   minutes_held: number | null;
   total_debit: number | null;
@@ -205,6 +209,34 @@ function ExpectedMoveBand({
   const last = path[path.length - 1];
   const settled = sessionIsSettled(sessionDate, todayInNewYork(), last.t);
   const val = valueStrangleAt(last.spx, callStrike, putStrike, debit, settled);
+
+  /* THE SETTLE IS NOT THE RESULT (fixed 2026-09-29).
+   *
+   * This panel used to show the settlement value alone, which scores a
+   * declined entry as if it were HELD TO EXPIRY. H does not hold to expiry —
+   * both of its real trades exited on profit targets, at 19 and 175 minutes.
+   * The table below this scores those at their ACTUAL exits, so the page was
+   * using two different yardsticks on one screen and the veto always looked
+   * better for it.
+   *
+   * 2026-09-28 is the case in point: the put went 1.18pt through its strike
+   * intraday (worth $118 against a $94 debit) and then settled 0.51pt outside
+   * it, worth nothing. "-100%" is true of holding; it is not true of how H
+   * trades.
+   *
+   * So both ends are shown. The peak is INTRINSIC ONLY — the real position
+   * also carried time value, so it is a FLOOR on what it was worth, never an
+   * overstatement. The honest reading sits between the two rows, and the note
+   * underneath says so rather than leaving the reader to infer it. */
+  const peakPoint = path.reduce((best, pt) => {
+    const iv =
+      Math.max(0, pt.spx - callStrike) + Math.max(0, putStrike - pt.spx);
+    const bv =
+      Math.max(0, best.spx - callStrike) + Math.max(0, putStrike - best.spx);
+    return iv > bv ? pt : best;
+  }, path[0]);
+  const peak = valueStrangleAt(peakPoint.spx, callStrike, putStrike, debit, true);
+  const peakBeatsClose = peak.intrinsic > val.intrinsic + 1e-9;
 
   return (
     <section>
@@ -318,37 +350,94 @@ function ExpectedMoveBand({
               a real position has an actual exit and does not need a
               counterfactual. */}
           {hypothetical && debit != null && debit > 0 && (
-            <div className={val.pnl >= 0 ? "text-profit" : "text-loss"}>
-              {val.settled ? (
-                <>
-                  Settled at {last.spx.toFixed(2)} ({last.t}) worth{" "}
-                  {formatCurrency(val.intrinsic, 0)} against a{" "}
-                  {formatCurrency(debit, 0)} debit —{" "}
-                  <span className="font-semibold">
-                    {formatPnL(val.pnl, 0)} ({val.pctOfDebit?.toFixed(0)}%)
-                  </span>
-                  {val.pnl > 0 && " that declining the entry gave up"}
-                </>
-              ) : (
-                <>
-                  At the last print ({last.t}, {last.spx.toFixed(2)}) the legs hold{" "}
-                  {formatCurrency(val.intrinsic, 0)} of intrinsic value against a{" "}
-                  {formatCurrency(debit, 0)} debit —{" "}
-                  <span className="font-semibold">
-                    {formatPnL(val.pnl, 0)} ({val.pctOfDebit?.toFixed(0)}%)
-                  </span>
-                  <span className="text-text-dim">
-                    {" "}
-                    · intrinsic only — the session is still open, so the position
-                    is worth this plus its remaining time value
-                  </span>
-                </>
+            <div className="mt-2 rounded-lg border border-border-dim bg-bg-elevated/60 overflow-hidden">
+              <div className="px-3 py-1.5 flex items-baseline justify-between gap-2 text-3xs uppercase tracking-wider text-text-dim border-b border-border-dim">
+                <span>What the declined position was worth</span>
+                <span className="normal-case tracking-normal">
+                  against a {formatCurrency(debit, 0)} debit
+                </span>
+              </div>
+
+              <div className="divide-y divide-border-dim">
+                {peakBeatsClose && (
+                  <Worth
+                    when={`At its best · ${peakPoint.t}`}
+                    level={peakPoint.spx}
+                    value={peak.intrinsic}
+                    pnl={peak.pnl}
+                    pct={peak.pctOfDebit}
+                    note="intrinsic only — a floor, the legs also held time value"
+                  />
+                )}
+                <Worth
+                  when={settled ? `At the close · ${last.t}` : `Latest print · ${last.t}`}
+                  level={last.spx}
+                  value={val.intrinsic}
+                  pnl={val.pnl}
+                  pct={val.pctOfDebit}
+                  note={
+                    settled
+                      ? "if it had been held to expiry"
+                      : "intrinsic only — the session is still open"
+                  }
+                />
+              </div>
+
+              {peakBeatsClose && settled && (
+                <div className="px-3 py-2 text-3xs text-text-secondary border-t border-border-dim bg-bg-base/40">
+                  H exits on <span className="text-text-primary">profit targets</span>, not at
+                  expiry — both of its real trades did, at 19m and 175m. So the close is the{" "}
+                  <span className="text-text-primary">floor</span>, not the outcome, and the true
+                  cost of this veto lies between these two rows.
+                </div>
               )}
             </div>
           )}
         </div>
       </div>
     </section>
+  );
+}
+
+/** One end of the "what was it worth" comparison — a single aligned row.
+ *
+ * Deliberately a table-like row rather than a sentence: the whole point is
+ * that two numbers are being compared, and prose buries the comparison. */
+function Worth({
+  when, level, value, pnl, pct, note,
+}: {
+  when: string;
+  level: number;
+  value: number;
+  pnl: number;
+  pct: number | null;
+  note: string;
+}) {
+  return (
+    <div className="px-3 py-2 flex flex-wrap items-baseline gap-x-3 gap-y-0.5">
+      <div className="min-w-[9.5rem] text-xs text-text-secondary">{when}</div>
+      <div className="min-w-[4.5rem] text-xs tabular-nums text-text-dim">
+        {level.toFixed(2)}
+      </div>
+      <div className="min-w-[4rem] text-xs tabular-nums text-text-primary">
+        {formatCurrency(value, 0)}
+      </div>
+      <div
+        className={`min-w-[7.5rem] text-xs tabular-nums font-semibold ${
+          pnl >= 0 ? "text-profit" : "text-loss"
+        }`}
+      >
+        {formatPnL(pnl, 0)}
+        {pct != null && (
+          <span className="font-normal">
+            {" "}
+            ({pct >= 0 ? "+" : ""}
+            {pct.toFixed(0)}%)
+          </span>
+        )}
+      </div>
+      <div className="text-3xs text-text-dim flex-1 min-w-[12rem]">{note}</div>
+    </div>
   );
 }
 
@@ -375,11 +464,28 @@ function Card({ label, value, hint }: { label: string; value: string; hint?: str
 function RunningRecord({ rows }: { rows: RecentRow[] }) {
   const scored = rows.filter((r) => r.realized_pnl !== null);
   if (scored.length === 0) return null;
-  const wins = scored.filter((r) => (r.realized_pnl ?? 0) > 0).length;
-  const net = scored.reduce((a, r) => a + (r.realized_pnl ?? 0), 0);
+
+  /* NET MEANS NET (fixed 2026-09-29). Both of these cards read the GROSS
+     figure and called it net. `realized_pnl` on an exit row is before
+     commission, and on a strategy risking $83-$102 a $4.60 round trip is ~5%
+     of the debit — large enough that the headline and the per-trade return
+     were both overstated. A card labelled "Net" must not be a gross number. */
+  const commOf = (r: RecentRow) => r.commissions ?? 0;
+  const netOf = (r: RecentRow) => (r.realized_pnl ?? 0) - commOf(r);
+
+  const wins = scored.filter((r) => netOf(r) > 0).length;
+  const net = scored.reduce((a, r) => a + netOf(r), 0);
+  const gross = scored.reduce((a, r) => a + (r.realized_pnl ?? 0), 0);
+  const fees = scored.reduce((a, r) => a + commOf(r), 0);
   const risked = scored.reduce((a, r) => a + (r.total_debit ?? 0), 0);
+  /* Return on debit, recomputed from NET rather than reading the stored
+     `pnl_pct_of_debit`, which is gross for the same reason. */
   const avgPct =
-    scored.reduce((a, r) => a + (r.pnl_pct_of_debit ?? 0), 0) / scored.length;
+    scored.reduce(
+      (a, r) => a + (r.total_debit ? (netOf(r) / r.total_debit) * 100 : 0),
+      0,
+    ) / scored.length;
+  const thin = scored.length < 10;
 
   return (
     <section>
@@ -391,15 +497,25 @@ function RunningRecord({ rows }: { rows: RecentRow[] }) {
           label="Win rate"
           value={`${((wins / scored.length) * 100).toFixed(0)}%`}
           /* An `n` is not decoration. The source claims 80% and the only honest
-             way to read ours is against how many trades produced it. */
-          hint={`${wins} of ${scored.length} — source claims ~80%`}
+             way to read ours is against how many trades produced it — and
+             below ~10 trades the comparison should not be made at all, which
+             the hint now says outright rather than leaving to the reader. */
+          hint={
+            thin
+              ? `${wins} of ${scored.length} — too few to compare with the source`
+              : `${wins} of ${scored.length} — source claims ~80%`
+          }
         />
         <Card
           label="Avg return on debit"
           value={`${avgPct >= 0 ? "+" : ""}${avgPct.toFixed(0)}%`}
-          hint="source claims +50–100% per winner"
+          hint="net of fees · source claims +50–100% per winner"
         />
-        <Card label="Net" value={formatPnL(net, 0)} />
+        <Card
+          label="Net"
+          value={formatPnL(net, 0)}
+          hint={`${formatPnL(gross, 0)} gross − ${money(fees)} fees`}
+        />
         <Card
           label="Total risked"
           value={money(risked)}
@@ -413,7 +529,7 @@ function RunningRecord({ rows }: { rows: RecentRow[] }) {
               <th className="py-1 pr-3 font-medium">date</th>
               <th className="py-1 pr-3 font-medium">exit</th>
               <th className="py-1 pr-3 font-medium text-right">debit</th>
-              <th className="py-1 pr-3 font-medium text-right">P&amp;L</th>
+              <th className="py-1 pr-3 font-medium text-right">P&amp;L net</th>
               <th className="py-1 pr-3 font-medium text-right">% of debit</th>
               <th className="py-1 pr-3 font-medium text-right">held</th>
               <th className="py-1 font-medium">EM</th>
@@ -426,10 +542,22 @@ function RunningRecord({ rows }: { rows: RecentRow[] }) {
                 <td className="py-1 pr-3 text-text-dim">{r.exit_reason}</td>
                 <td className="py-1 pr-3 text-right text-text-dim">{money(r.total_debit)}</td>
                 <td className="py-1 pr-3 text-right font-medium">
-                  {formatPnL(r.realized_pnl ?? 0, 0)}
+                  {formatPnL((r.realized_pnl ?? 0) - (r.commissions ?? 0), 0)}
+                  {r.commissions ? (
+                    <span className="text-text-dim font-normal">
+                      {" "}
+                      ({formatPnL(r.realized_pnl ?? 0, 0)} − {money(r.commissions)})
+                    </span>
+                  ) : null}
                 </td>
                 <td className="py-1 pr-3 text-right text-text-secondary">
-                  {pct(r.pnl_pct_of_debit)}
+                  {r.total_debit
+                    ? pct(
+                        (((r.realized_pnl ?? 0) - (r.commissions ?? 0)) /
+                          r.total_debit) *
+                          100,
+                      )
+                    : pct(r.pnl_pct_of_debit)}
                 </td>
                 <td className="py-1 pr-3 text-right text-text-dim">
                   {r.minutes_held?.toFixed(0) ?? "—"}m

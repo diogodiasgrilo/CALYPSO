@@ -229,11 +229,55 @@ class TestASessionInProgressIsNotASettlement:
     def test_the_page_renders_a_DIFFERENT_sentence_for_each_case(self):
         """The flag has to reach the copy. Both branches must exist, and the
         open-session one must carry the intrinsic-only caveat — otherwise the
-        page states a settlement that has not happened."""
+        page states a settlement that has not happened.
+
+        Strings updated 2026-09-29 when the single verdict sentence became a
+        two-row comparison (peak vs close). The INTENT is unchanged and is
+        what is asserted: a settled session and an open one must not read the
+        same, and an open one must still say the value is intrinsic-only.
+        """
         src = PAGE.read_text()
-        assert "val.settled ? (" in src
-        assert "Settled at" in src
+        # the branch still exists and is driven by the same flag
+        assert "settled ?" in src
+        # settled and open produce DIFFERENT labels
+        assert "At the close" in src
+        assert "Latest print" in src
+        # and the open-session caveat survives verbatim
         assert "intrinsic only — the session is still open" in src
+
+    def test_a_settled_session_is_not_described_as_the_outcome(self):
+        """2026-09-29. The panel used to show ONLY the settlement value for a
+        declined entry, which scores the veto as if H held to expiry. It does
+        not — both real trades exited on profit targets (19m, 175m), and the
+        table below scores those at their ACTUAL exits. Two yardsticks on one
+        screen, and the veto always looked better for it.
+
+        So a settled session must show the session PEAK as well, and must say
+        the close is a floor rather than the result.
+        """
+        src = PAGE.read_text()
+        assert "const peakBeatsClose" in src, "the session peak is not computed"
+        # RENDERED, not merely computed. Gating the row off (`{false && (`)
+        # left every grep for the identifier intact and the first version of
+        # this test passed against it.
+        assert "value={peak.intrinsic}" in src and "pnl={peak.pnl}" in src, (
+            "the peak is computed but never passed to a row")
+        assert "{peakBeatsClose && (" in src, (
+            "the peak row is not gated on peakBeatsClose — it is either always "
+            "on or switched off")
+        assert "At its best" in src, "the peak row carries no label"
+        assert "profit targets" in src and "floor" in src, (
+            "the page does not tell the reader that H exits on targets, so "
+            "the close is a floor rather than the outcome")
+
+    def test_the_peak_is_labelled_intrinsic_only(self):
+        """The peak uses intrinsic, but the real position also held time
+        value — so it is a FLOOR on what it was worth, and overstating it
+        would be the same error in the other direction."""
+        src = PAGE.read_text()
+        i = src.index("At its best")
+        assert "intrinsic only" in src[i:i + 600], (
+            "the peak row does not say it is intrinsic-only")
 
     def test_todayInNewYork_returns_an_iso_date(self):
         """The API's dates are YYYY-MM-DD and the comparison is a string
@@ -305,3 +349,63 @@ class TestThePageDescribesTheVariantItActuallyIs:
         src = PAGE.read_text()
         assert "is not installed on the" not in src
         assert "`available: false` is the expected response today" not in src
+
+
+class TestNetMeansNet:
+    """2026-09-29. The running-record cards read `realized_pnl` — which is
+    GROSS — and labelled the total "Net". On a strategy risking $83-$102, a
+    $4.60 round trip is ~5% of the debit, so the headline and every per-trade
+    return were overstated. A card labelled Net must not be a gross number.
+    """
+
+    def test_the_reader_selects_commissions(self):
+        """A frontend cannot subtract a field the API never sends."""
+        import pathlib
+        src = (pathlib.Path(__file__).resolve().parents[1]
+               / "dashboard" / "backend" / "services" / "ls_reader.py").read_text()
+        i = src.index("def read_ls_recent")
+        assert "x.commissions" in src[i:i + 2000], (
+            "read_ls_recent does not select commissions, so Net cannot be net")
+
+    def test_the_page_subtracts_them(self):
+        """Pins the BINDING, not the helper.
+
+        The first version asserted only that a `netOf` helper existed and
+        subtracted fees. Reverting the `net` total to `realized_pnl` left
+        `netOf` in place (it is still used for the win count), so the test
+        passed against the restored bug — the exact blind-grep failure this
+        repo has hit before. Assert what the Net card is actually summing.
+        """
+        src = PAGE.read_text()
+        assert "const netOf" in src, "no net helper on the page"
+        i = src.index("const netOf")
+        assert "commissions" in src[i:i + 200] or "commOf" in src[i:i + 200], (
+            "netOf does not subtract commissions")
+        assert "const net = scored.reduce((a, r) => a + netOf(r), 0)" in src, (
+            "the Net total is not summed through netOf — it is reading the "
+            "gross column again")
+        assert "const wins = scored.filter((r) => netOf(r) > 0)" in src, (
+            "the win count is computed on gross, so a trade whose fees "
+            "exceed its gain would still count as a win")
+
+    def test_the_net_card_shows_its_decomposition(self):
+        """Showing the gross and the fees beside the net is what makes the
+        correction visible rather than silent."""
+        src = PAGE.read_text()
+        i = src.index('label="Net"')
+        assert "gross" in src[i:i + 300] and "fees" in src[i:i + 300]
+
+    def test_return_on_debit_is_recomputed_not_read_from_the_gross_column(self):
+        """`pnl_pct_of_debit` is stored gross for the same reason. Reading it
+        would reintroduce the bug in the percentage while fixing the dollars.
+        """
+        src = PAGE.read_text()
+        i = src.index("const avgPct")
+        window = src[i:i + 400]
+        assert "netOf" in window, "avg return still reads the gross column"
+
+    def test_a_thin_sample_says_so(self):
+        """'100% — 2 of 2 — source claims ~80%' invites a comparison that two
+        trades cannot support."""
+        src = PAGE.read_text()
+        assert "thin" in src and "too few to compare" in src
