@@ -41,6 +41,20 @@ The settlement RECONCILE fired at exactly **−$5,995**, confirming A1's diagnos
 ⚠️ BROKER-RECONCILE showed a SEPARATE unexplained gap: IBKR realized $4,108.43 vs ours $3,565.00
 (**−$543.43**), matching the ~$558 measured intraday. Not A1 — worth chasing.
 
+### 📋 PRE-REGISTERED 2026-09-29 — does the GEX gate earn its keep?
+
+[`docs/PREREG_GEX_GATE_2026_09_29.md`](PREREG_GEX_GATE_2026_09_29.md). **Nothing disabled.**
+Two narrower hypotheses died first: SHIFT-instead-of-SKIP was refuted by its own shadow on day
+one (5/5 agreement — the zone needed 330pt of shift against a 25pt cap), and the sign-convention
+fix scored **−$782.90, t = −0.26** against what actually happened — it blocks a *different* set,
+not a smaller one, disagreeing on 44% of decisions.
+
+What replaced them: at **matched OTM distance** (median 43.5pt vetoed vs 41.1pt allowed), vetoed
+strikes breached **0 of 23** while allowed strikes breached **26 of 131 (20%)** — **p = 0.0062**.
+The gate's vetoes are significantly *safer* than its approvals. Registered: 25 out-of-sample
+vetoes from **2026-09-30**, scored on **breach rate, not P&L**; disable SKIP only if the vetoed
+rate stays ≤ the distance-matched benchmark at p < 0.01.
+
 ### 📋 PRE-REGISTERED 2026-09-29 — slot pruning on B (cut-off date already set)
 
 [`docs/PREREG_SLOT_PRUNE_2026_09_29.md`](PREREG_SLOT_PRUNE_2026_09_29.md). **Nothing pruned; the
