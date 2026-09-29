@@ -4,6 +4,15 @@ export interface DaySummary {
   date: string;
   net_pnl: number;
   gross_pnl: number;
+  /** P&L belonging to the DAY but to no entry — the round-trip price P&L of a
+   *  failed entry attempt's unwound legs (ORDER-010). It is real money and
+   *  correctly inside `net_pnl`, but it is NOT a trading result.
+   *
+   *  2026-09-24 is why this is surfaced: +$5,995 of it against a −$2,663
+   *  trading day. The headline read +$3,331.55 and the calendar painted it the
+   *  second-best day of the month. The column has always been served (the
+   *  reader does `SELECT *`); nothing read it. */
+  unattributed_overlay_pnl?: number;
   entries_placed: number;
   entries_stopped: number;
   /** Authoritative stop-loss event count (trade_stops). entries_stopped

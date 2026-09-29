@@ -107,6 +107,18 @@ export function MonthCalendar({
   // single outsized day elsewhere shouldn't wash every other day toward flat.
   const monthMax = Math.max(1, ...days.map((d) => Math.abs(d.net_pnl || 0)));
 
+  /* Does any cell this month carry the corner mark? Same predicate as the
+     cell itself — a marker with no legend is just a mystery, and a legend
+     shown on a month with no marks is noise. */
+  const anyMisleading = days.some((d) => {
+    const u = d.unattributed_overlay_pnl || 0;
+    const t = (d.net_pnl || 0) - u;
+    return (
+      Math.abs(u) >= 0.01 &&
+      (Math.sign(t) !== Math.sign(d.net_pnl || 0) || Math.abs(u) > Math.abs(t))
+    );
+  });
+
   return (
     <div className="bg-card rounded-lg border border-border-dim p-3">
       <div className="text-xs font-semibold text-text-primary mb-2">
@@ -153,6 +165,22 @@ export function MonthCalendar({
 
               // Trading day with data
               const pnl = summary.net_pnl || 0;
+              /* A day's headline can be dominated by P&L that was never a
+                 trade (DaySummary.unattributed_overlay_pnl). 2026-09-24 is the
+                 case: a +$5,995 failed-entry unwind against a −$2,663 trading
+                 day, so the heat map painted the month's second-best cell on a
+                 day the strategy lost money.
+                 The cell keeps the headline — it IS what the account made —
+                 but earns a corner mark when the two disagree in SIGN or when
+                 the non-trading part dominates, so a scanning eye knows to
+                 open it. Marking every non-zero residue would flag half the
+                 month for amounts that change nothing. */
+              const unattr = summary.unattributed_overlay_pnl || 0;
+              const traded = pnl - unattr;
+              const misleading =
+                Math.abs(unattr) >= 0.01 &&
+                (Math.sign(traded) !== Math.sign(pnl) ||
+                  Math.abs(unattr) > Math.abs(traded));
               const intensity = Math.min(Math.abs(pnl) / monthMax, 1);
               const bgColor =
                 pnl > 0
@@ -166,10 +194,18 @@ export function MonthCalendar({
                   key={di}
                   role="button"
                   tabIndex={0}
-                  aria-label={`${date}: ${formatPnL(pnl)}`}
-                  className="flex-1 h-8 rounded-sm flex items-center justify-center text-3xs font-mono cursor-pointer hover:ring-1 hover:ring-text-dim/50 hover:brightness-125 transition-all focus-visible:ring-2 focus-visible:ring-info focus-visible:outline-none"
+                  aria-label={
+                    misleading
+                      ? `${date}: ${formatPnL(pnl)} headline, ${formatPnL(traded)} traded`
+                      : `${date}: ${formatPnL(pnl)}`
+                  }
+                  className="relative flex-1 h-8 rounded-sm flex items-center justify-center text-3xs font-mono cursor-pointer hover:ring-1 hover:ring-text-dim/50 hover:brightness-125 transition-all focus-visible:ring-2 focus-visible:ring-info focus-visible:outline-none"
                   style={{ backgroundColor: bgColor }}
-                  title={`${date}: ${formatPnL(pnl)} | ${summary.entries_placed} entries, ${summary.actual_stops ?? summary.entries_stopped ?? 0} stops`}
+                  title={
+                    misleading
+                      ? `${date}: ${formatPnL(pnl)} headline — but ${formatPnL(traded)} traded, ${formatPnL(unattr)} was a failed-entry unwind | ${summary.entries_placed} entries, ${summary.actual_stops ?? summary.entries_stopped ?? 0} stops`
+                      : `${date}: ${formatPnL(pnl)} | ${summary.entries_placed} entries, ${summary.actual_stops ?? summary.entries_stopped ?? 0} stops`
+                  }
                   onClick={() => onDayClick(date)}
                   onKeyDown={(e) => {
                     // Both keys: Space alone scrolls the page, Enter alone
@@ -181,6 +217,12 @@ export function MonthCalendar({
                   }}
                 >
                   {dayNum}
+                  {misleading && (
+                    <span
+                      aria-hidden
+                      className="absolute top-0.5 right-0.5 w-1 h-1 rounded-full bg-text-primary/70"
+                    />
+                  )}
                 </div>
               );
             })}
@@ -205,6 +247,16 @@ export function MonthCalendar({
           <span className="text-text-dim">L</span>
         </span>
       </div>
-    </div>
+    
+      {anyMisleading && (
+        <div className="mt-2 flex items-start gap-1.5 text-3xs text-text-dim">
+          <span className="mt-1 w-1 h-1 rounded-full bg-text-primary/70 shrink-0" />
+          <span>
+            headline driven by a failed-entry unwind, not by trading — open the
+            day for the split
+          </span>
+        </div>
+      )}
+</div>
   );
 }
