@@ -76,17 +76,28 @@ def audit(root: Path, vid: str, today: str):
         "SELECT date, gross_pnl, net_pnl, commission, entries_placed"
         + (", unattributed_overlay_pnl" if have_unattr else "")
         + " FROM daily_summaries ORDER BY date").fetchall()
-    ent_by_day, cnt_by_day = {}, {}
-    for d, s, c in con.execute(
-            "SELECT date, SUM(realized_pnl), COUNT(*) FROM trade_entries GROUP BY date"):
+    # `realized_pnl` was only populated from 2026-07-01; before that it is
+    # NULL on every row. SUM() would read those as 0.00 and make I1 fail on
+    # every historical day — ~131 rows across A/B/C on the first run, which is
+    # ONE schema fact wearing a hundred hats, not a hundred breaks. Days whose
+    # entries carry no per-entry P&L are reported as UNSCORABLE instead.
+    ent_by_day, cnt_by_day, null_days = {}, {}, set()
+    for d, s, c, nulls in con.execute(
+            "SELECT date, SUM(realized_pnl), COUNT(*), "
+            "SUM(CASE WHEN realized_pnl IS NULL THEN 1 ELSE 0 END) "
+            "FROM trade_entries GROUP BY date"):
         ent_by_day[d] = s or 0.0
         cnt_by_day[d] = c
+        if nulls:
+            null_days.add(d)
 
     i1 = i2 = i3 = 0
     for row in days:
         d, g, n, cm, ep = row[0], row[1] or 0, row[2] or 0, row[3] or 0, row[4] or 0
         unattr = (row[5] or 0) if have_unattr else 0.0
-        if d in ent_by_day and abs((ent_by_day[d] + unattr) - g) > TOL:
+        if d in null_days:
+            pass  # pre-backfill: no per-entry P&L exists, so I1 cannot be tested
+        elif d in ent_by_day and abs((ent_by_day[d] + unattr) - g) > TOL:
             i1 += 1
             out.append((name, "I1", f"{d}: entries {ent_by_day[d]:,.2f} + unattr "
                                     f"{unattr:,.2f} != gross {g:,.2f}"))
@@ -96,6 +107,23 @@ def audit(root: Path, vid: str, today: str):
         if d in cnt_by_day and ep != cnt_by_day[d]:
             i3 += 1
             out.append((name, "I3", f"{d}: summary says {ep} entries, table has {cnt_by_day[d]}"))
+
+    # A day with real gross and NO trade_entries rows at all is a different
+    # animal from a pre-backfill NULL: the detail is genuinely missing, so any
+    # per-entry analysis of that day is silently incomplete.
+    for d, g in con.execute(
+            "SELECT date, gross_pnl FROM daily_summaries ds WHERE gross_pnl IS NOT NULL "
+            "AND gross_pnl != 0 AND NOT EXISTS "
+            "(SELECT 1 FROM trade_entries te WHERE te.date = ds.date)"):
+        unattr_d = 0.0
+        if have_unattr:
+            row = con.execute("SELECT unattributed_overlay_pnl FROM daily_summaries "
+                              "WHERE date=?", (d,)).fetchone()
+            unattr_d = (row[0] or 0.0) if row else 0.0
+        if abs(g - unattr_d) <= TOL:
+            continue  # gross IS the day-level residue — correct, not missing
+        out.append((name, "I5", f"{d}: gross {g:,.2f} but ZERO trade_entries rows "
+                                "— per-entry detail lost"))
 
     # days with entries but no summary row
     summary_dates = {r[0] for r in days}
@@ -118,6 +146,10 @@ def audit(root: Path, vid: str, today: str):
         except Exception as e:  # noqa: BLE001
             out.append((name, "I4", f"metrics unreadable: {e}"))
 
+    if null_days:
+        out.append((name, "NOTE", f"{len(null_days)} day(s) pre-2026-07-01 carry no "
+                                  "per-entry realized_pnl — I1 not testable there"))
+
     if not any(t in ("I1", "I2", "I3", "I4") for _n, t, _m in out):
         out.append((name, "OK", f"{len(days)} summary days, {sum(cnt_by_day.values())} entries "
                                 f"— all identities hold"))
@@ -135,9 +167,10 @@ def main():
     worst = 0
     for vid in VARIANTS:
         for name, tag, msg in audit(root, vid, today):
-            marker = {"OK": "  ok ", "PENDING": "  .. ", "SKIP": "  -- "}.get(tag, "  !! ")
+            marker = {"OK": "  ok ", "PENDING": "  .. ", "SKIP": "  -- ",
+                      "NOTE": "  -- "}.get(tag, "  !! ")
             print(f"{marker}{name:<3} {tag:<8} {msg}")
-            if tag in ("I1", "I2", "I3", "I4"):
+            if tag in ("I1", "I2", "I3", "I4", "I5"):
                 worst = 1
     print("\nVERDICT:", "BREAKS FOUND — see !! rows" if worst else "all identities hold")
     return worst
