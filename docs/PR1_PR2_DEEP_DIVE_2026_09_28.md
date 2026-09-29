@@ -1,7 +1,18 @@
 # PR-1 and PR-2 — deep dive, 2026-09-28
 
 Follows [`SOURCE_FIDELITY_AUDIT_B_C_2026_09_28.md`](SOURCE_FIDELITY_AUDIT_B_C_2026_09_28.md).
-Both items were pre-registered there rather than built. This is the evidence for deciding them.
+
+> ## STATUS — updated 2026-09-29 04:40 ET
+>
+> | item | state |
+> |---|---|
+> | **Skip counterfactual** — score what we declined to place | ✅ **BUILT + DB POPULATED** (`scripts/score_skipped_entries.py`; 31 rows) |
+> | **PR-1 SHIFT-FIRST shadow** | ✅ **BUILT + DEPLOYED** — schema **v18**, `gex_decisions.shift_first_json`, live since 04:35 ET. **Records only; the live path is unchanged and still SKIPs.** |
+> | **Overlay arming telemetry** | ✅ **FIXED + DEPLOYED** — it had been recording into a dead branch for 23 days |
+> | **PR-1 flip (SKIP → SHIFT in production)** | ⏳ **NOT DONE — awaiting shadow data.** Registered rule below. |
+> | **PR-2 hedges** | ⛔ **deliberately NOT re-enabled** — see the recommendation below |
+>
+> Nothing else from this analysis is pending deployment.
 
 ---
 
@@ -59,10 +70,11 @@ Not marginal, either:
 from the credit gate). Estimated forfeited credit, optimistic bound: **$5,197.50 gross** —
 comparable to B's entire live P&L of $6,476.60.
 
-⚠️ **The counterfactual column exists and is never populated.** `skipped_entries` has
-`would_have_stopped` and `theoretical_pnl`; **0 of 115 rows have them filled.** We have been
-recording every skip without ever scoring it. That is the cheapest missing measurement in the
-project and it should be fixed regardless of what is decided about SKIP.
+~~⚠️ The counterfactual column exists and is never populated.~~ **CLOSED 2026-09-29.** It was
+true when written — `skipped_entries` carried `would_have_stopped` and `theoretical_pnl` with
+**0 of 115 rows filled**, so every skip was recorded and none scored. `scripts/score_skipped_entries.py`
+now scores them and 31 rows are populated (the rest predate strike capture, which began
+2026-09-11 in `ec71967`, and can never be scored).
 
 ## Finding 5 — the counterfactual, now scored (`scripts/score_skipped_entries.py`)
 
