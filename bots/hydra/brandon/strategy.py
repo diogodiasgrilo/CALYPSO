@@ -868,6 +868,8 @@ class BrandonHydraStrategy(HydraStrategy):
                 live_action=r.action.name,
                 live_adjuster_predicate=(r.action == gex_strike_adjuster.AdjustAction.SKIP),
                 live_overlay_predicate=False, profile=profile,
+                cluster=self._brandon_accel_cluster_for(
+                    profile, entry.short_call_strike, cfg),
             )
             if r.action == gex_strike_adjuster.AdjustAction.SHIFT and r.new_strike is not None:
                 width = entry.long_call_strike - entry.short_call_strike
@@ -923,6 +925,8 @@ class BrandonHydraStrategy(HydraStrategy):
                 live_action=r.action.name,
                 live_adjuster_predicate=(r.action == gex_strike_adjuster.AdjustAction.SKIP),
                 live_overlay_predicate=False, profile=profile,
+                cluster=self._brandon_accel_cluster_for(
+                    profile, entry.short_put_strike, cfg),
             )
             if r.action == gex_strike_adjuster.AdjustAction.SHIFT and r.new_strike is not None:
                 if already_aborted:
@@ -3171,6 +3175,34 @@ class BrandonHydraStrategy(HydraStrategy):
             })
         except Exception as exc:
             logger.debug("GEX snapshot record failed (non-fatal): %s", exc)
+
+    def _brandon_accel_cluster_for(self, profile, proposed_short, cfg):
+        """The acceleration cluster covering `proposed_short`, for TELEMETRY.
+
+        `gex_decisions` has carried cluster_low / cluster_high / cluster_peak /
+        cluster_n_strikes / cluster_strength_pct since v16, and **the adjuster
+        call sites never passed a cluster**, so all five wrote NULL on every
+        row. The detail survived only because it happens to be embedded in
+        `shadow_json` — which is how 2026-09-29's investigation had to read it
+        back out of a JSON blob instead of the columns built for it.
+
+        Re-derived here rather than threaded through `AdjustResult`, because
+        that would change the shape of a value the live decision path returns.
+        This is a pure read over the SAME cluster set the adjuster judged
+        (`negative_clusters` at the same `accel_min_pct`), so it reports what
+        was decided rather than a second opinion.
+
+        Never raises: telemetry must not be able to break entry selection.
+        """
+        try:
+            from . import gex_strike_adjuster as _adj
+            if profile is None or proposed_short is None:
+                return None
+            zones = profile.negative_clusters(min_strength_pct=cfg.accel_min_pct)
+            return _adj._cluster_covering(zones, proposed_short)
+        except Exception as exc:  # noqa: BLE001 — telemetry only
+            logger.debug("BRANDON: accel-cluster telemetry lookup failed: %s", exc)
+            return None
 
     def _brandon_record_gex_decision(
         self, *, consumer: str, entry_number, side: str, spot: float,
