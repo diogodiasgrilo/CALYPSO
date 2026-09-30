@@ -8,16 +8,24 @@ User=calypso
 Group=calypso
 WorkingDirectory=/opt/calypso
 
-# 1. Correctness. GATING: exits non-zero on any I1-I5 identity break, so the
-#    unit shows in `systemctl --failed`, and --alert pushes it to Telegram
-#    because a failed unit nobody looks at is not a detection.
-ExecStart=/opt/calypso/.venv/bin/python -m scripts.audit_fleet_correctness --alert
-
-# 2. Governance. Reporting only — `-` prefix so a clock failure can never be
-#    mistaken for a correctness break. Prints BOTH the strict streak and the
-#    streak that honours self-granted exemption trailers; when they disagree,
-#    someone exempted their own change and the report says which commit.
+# ORDER MATTERS, and the first version of this file had it wrong. A Type=oneshot
+# unit stops at the first ExecStart that fails, so with the GATING audit first
+# the clock report never ran on exactly the days the audit found something —
+# i.e. it went silent precisely when the most was going on. Verified by running
+# it: the audit exited 1, the unit failed, and the clock never printed.
+#
+# 1. Governance FIRST, and non-gating (`-`). It always runs, and a clock
+#    failure can never be mistaken for a correctness break. Prints BOTH the
+#    strict streak and the streak that honours self-granted exemption trailers;
+#    when they disagree, someone exempted their own change and the report names
+#    the commit.
 ExecStart=-/opt/calypso/.venv/bin/python -m scripts.measurement_clock
+
+# 2. Correctness LAST, and GATING: exits non-zero on any I1-I5 identity break,
+#    so the unit shows in `systemctl --failed`, and --alert pushes it out,
+#    because a failed unit nobody runs `systemctl --failed` against is not a
+#    detection. Being last means its exit code is still the unit's exit code.
+ExecStart=/opt/calypso/.venv/bin/python -m scripts.audit_fleet_correctness --alert
 
 StandardOutput=journal
 StandardError=journal
