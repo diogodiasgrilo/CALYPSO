@@ -168,13 +168,13 @@ more aggressive rule would have stopped — made money.
 
 ---
 
-## 2-ter. The thresholds as drafted (superseded in part — see 2-bis and the breach note above)
+## 2-ter. The thresholds — H1 RESOLVED 2026-09-30 (Option A, operator's Gate-9 choice)
 
 | # | Trigger | Threshold (1 contract) | Why this number |
 |---|---|---|---|
-| H1 | Realized loss in one session | **≤ −$400** | 1.6× the worst of 25 paper sessions (−$256) |
+| H1 | Realized loss in one session | **≤ −$600** | **STRUCTURAL (chosen 2026-09-30):** `max_sides_tolerated × $200` = 3 × $200. H3 (≥3 stops) is the real trigger; H1 is its dollar shadow. Replaces "1.6× the worst of 25 paper sessions (−$256)", which was breached on 2026-09-21 at −$441.17 and was **guaranteed** to break again — a "worst observed" rule moves every time the sample grows a tail. This number does not move. |
 | H2 | Cumulative realized loss, week 1 | **≤ −$600** | 2.1× the worst paper drawdown (−$280) |
-| H3 | Stop-losses in one session | **≥ 3** | paper max was 2 |
+| H3 | Stop-losses in one session | **≥ 3** | paper max was 2. **Now consistent with H1 by construction** — 3 stops × $200/side is exactly H1's −$600, so a 3-stop session trips both together instead of being simultaneously inside H3 and past H1 (the inconsistency flagged 2026-09-22). |
 | H4 | Consecutive sessions with ≥1 stop | **≥ 4** | paper max was 3 |
 | H5 | `CRITICAL_INTERVENTION` alert | **any** | by definition operator-required |
 | H6 | Naked short detected | **any** | undefined risk — see [RUNBOOKS RB-6](RUNBOOKS.md) |
@@ -182,6 +182,29 @@ more aggressive rule would have stopped — made money.
 | H8 | Broker session down during RTH | **> 15 min** | positions unmanaged; restart `calypso-broker`, and if it will not hold a session, flatten |
 | H9 | ARGUS `FAIL` | **3 consecutive cycles (~45 min)** | health monitor says the bot is not well |
 | H10 | Position count disagrees with broker | **any unreconciled** | never trade through a reconciliation gap |
+
+### Operator decision, 2026-09-30 (Gate 9)
+
+**H1 → Option A, structural: −$600/contract.** Chosen over the distributional alternative
+because it does not move as the sample grows, and over "re-derive 1.6× the new worst (≈ −$700)"
+because that repeats the definition that had just failed.
+
+**Enforcement: MANUAL, and deliberately NOT automated.** The hook exists
+(`_is_daily_loss_limit_reached()` in `bots/hydra/strategy.py`, wired at `base_strategy.py`
+MULTI-005) and remains stubbed to `return False` **on purpose**. §2-bis measured it: across B's
+entire 32-day live era a same-day halt at −$600/≥3 stops would have fired on **0 of 32 days**,
+and at −$400 it would have blocked exactly one entry — 2026-09-24 e#7, which collected **+$280
+and never stopped**. Automating it would have cost money and bought nothing, because the binding
+constraint is the *schedule*: B places every entry by 12:45, so a same-day halt has almost
+nothing left in the day to block.
+
+These criteria are therefore an **operator tripwire, not an automated control**. They tell a
+person when to stop and look; they do not stop the bot.
+
+**Revisit automation if** the entry schedule extends later into the session, sizing rises enough
+that one session can breach before the last entry, or real money shows a different distribution
+from paper. The §2-bis counterfactual was measured on 7-contract paper and may not transfer to
+week-1 real money at 1 contract.
 
 **Scaling rule:** every dollar threshold is *per contract*. At 2 contracts, double H1/H2. Do not
 carry week-1 dollar limits forward unchanged after scaling up — that would silently tighten them.
