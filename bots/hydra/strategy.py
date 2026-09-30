@@ -7188,6 +7188,18 @@ class HydraStrategy(MEICStrategy):
             old_stops = int(cm.get("total_stops", 0) or 0)
             old_double_stops = int(cm.get("double_stops", 0) or 0)
             stops_drift = (db_total_stops != old_stops) or (db_double_stops != old_double_stops)
+            if not (corrected or abs(drift) > 0.01 or stops_drift):
+                # SAY SO WHEN IT IS CLEAN. Until 2026-09-30 this branch was
+                # silent, so an absence of METRICS-RECONCILE lines meant either
+                # "ran, nothing to do" or "never ran at all" — and those are
+                # opposite facts. A/B/C drifted for weeks while producing no
+                # line, and the ambiguity is why nobody could tell. One INFO
+                # line per variant per settlement is a cheap price for making
+                # silence mean something.
+                logger.info(
+                    "METRICS-RECONCILE %s: clean — metrics agree with the DB "
+                    "(cumulative_pnl $%.2f, %d daily_returns rows, %d summary days).",
+                    date_str, db_cum, len(dr), len(db))
             if corrected or abs(drift) > 0.01 or stops_drift:
                 logger.warning(
                     "METRICS-RECONCILE %s: self-healed from daily_summaries/trade_stops — "
@@ -7211,7 +7223,21 @@ class HydraStrategy(MEICStrategy):
                 cm["losing_days"] = sum(1 for r in dr if float(r.get("net_pnl", 0)) < 0)
                 self._save_cumulative_metrics(trading_date=date_str)
         except Exception as e:
-            logger.debug("METRICS-RECONCILE %s failed (non-fatal): %s", date_str, e)
+            # WAS logger.debug until 2026-09-30, which is why this never
+            # surfaced. The bot runs at INFO, so a self-heal that threw was
+            # completely silent — and it HAS been silent: zero METRICS-RECONCILE
+            # lines across 3 weeks of journald on A, B and C, while all three
+            # drift from their databases (B by $2,091.40, understating the live
+            # seat's lifetime on the dashboard and the iOS widget).
+            #
+            # A guard whose failure is invisible is not a guard. The drift it
+            # exists to prevent is exactly what accumulated. WARNING, with the
+            # traceback, so the next settlement says what is actually wrong
+            # instead of leaving it to be inferred.
+            logger.warning(
+                "METRICS-RECONCILE %s FAILED (non-fatal, but the drift guard "
+                "did NOT run): %s: %s", date_str, type(e).__name__, e,
+                exc_info=True)
 
     def _get_spx_price_minutes_ago(self, minutes: int) -> float:
         """Get SPX price from approximately N minutes ago using heartbeat price history."""
