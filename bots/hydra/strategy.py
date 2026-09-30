@@ -7223,17 +7223,24 @@ class HydraStrategy(MEICStrategy):
                 cm["losing_days"] = sum(1 for r in dr if float(r.get("net_pnl", 0)) < 0)
                 self._save_cumulative_metrics(trading_date=date_str)
         except Exception as e:
-            # WAS logger.debug until 2026-09-30, which is why this never
-            # surfaced. The bot runs at INFO, so a self-heal that threw was
-            # completely silent — and it HAS been silent: zero METRICS-RECONCILE
-            # lines across 3 weeks of journald on A, B and C, while all three
-            # drift from their databases (B by $2,091.40, understating the live
-            # seat's lifetime on the dashboard and the iOS widget).
+            # WAS logger.debug until 2026-09-30. The bot runs at INFO, so a
+            # self-heal that threw would be completely silent.
             #
-            # A guard whose failure is invisible is not a guard. The drift it
-            # exists to prevent is exactly what accumulated. WARNING, with the
-            # traceback, so the next settlement says what is actually wrong
-            # instead of leaving it to be inferred.
+            # ⚠️ CORRECTION, same day: I first claimed the guard "has been
+            # failing silently for three weeks". THAT WAS WRONG. It works. At
+            # 16:00:35 that very afternoon it self-healed A, B and C — B's
+            # cumulative_pnl 22,012.32 -> 24,103.72 — exactly as designed.
+            #
+            # What actually happened: I created the drift MYSELF that morning
+            # (identity repairs on A and C, the 05-29 phantom backfill on B),
+            # measured it at 14:00, saw no METRICS-RECONCILE lines, and inferred
+            # a broken guard. It had simply not reached the close yet, and it
+            # only logged when it corrected something — so a quiet run and a run
+            # that never happened looked identical.
+            #
+            # That ambiguity is the real defect, and it is what the two changes
+            # here fix: a failure is now loud, and a CLEAN run says so. The
+            # premise was wrong; the fix is still right.
             logger.warning(
                 "METRICS-RECONCILE %s FAILED (non-fatal, but the drift guard "
                 "did NOT run): %s: %s", date_str, type(e).__name__, e,
