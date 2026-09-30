@@ -91,40 +91,6 @@ def audit(root: Path, vid: str, today: str):
         if nulls:
             null_days.add(d)
 
-    i1 = i2 = i3 = 0
-    for row in days:
-        d, g, n, cm, ep = row[0], row[1] or 0, row[2] or 0, row[3] or 0, row[4] or 0
-        unattr = (row[5] or 0) if have_unattr else 0.0
-        if d in null_days:
-            pass  # pre-backfill: no per-entry P&L exists, so I1 cannot be tested
-        elif d in ent_by_day and abs((ent_by_day[d] + unattr) - g) > TOL:
-            i1 += 1
-            out.append((name, "I1", f"{d}: entries {ent_by_day[d]:,.2f} + unattr "
-                                    f"{unattr:,.2f} != gross {g:,.2f}"))
-        if abs((g - cm) - n) > TOL:
-            if d in cal_adjusted:
-                out.append((name, "ADJUSTED", f"{d}: net carries a recovered calendar "
-                                              "(dc_metrics_adjustments) — gross/comm "
-                                              "untouched by design"))
-            elif d in cal_opened:
-                out.append((name, "MULTIDAY", f"{d}: calendar OPENED, nothing closed — "
-                                              f"commission {cm:,.2f} belongs to the "
-                                              "position, realised at close"))
-            else:
-                i2 += 1
-                out.append((name, "I2", f"{d}: gross {g:,.2f} - comm {cm:,.2f} != net {n:,.2f}"))
-        if d in cnt_by_day and ep != cnt_by_day[d]:
-            i3 += 1
-            out.append((name, "I3", f"{d}: summary says {ep} entries, table has {cnt_by_day[d]}"))
-
-    # I5 DOES NOT APPLY TO VARIANTS THAT DO NOT USE trade_entries. D and E
-    # are calendars and keep their entries in dc_calendar.db; H is the long
-    # strangle and keeps its in long_strangle.db. For them "gross with no
-    # trade_entries rows" is CORRECT, not missing — the first run of this
-    # audit flagged 16 such days and every one was a false positive of an
-    # IC-shaped assumption.
-    uses_trade_entries = vid not in ("d", "e", "h")
-
     # ── I2 ON A MULTI-DAY STRATEGY ──────────────────────────────────────────
     # `gross - commission == net` is an IRON-CONDOR identity. It assumes a
     # position opens and closes the same day, so the day that pays the
@@ -162,6 +128,41 @@ def audit(root: Path, vid: str, today: str):
             except sqlite3.Error:
                 pass
             cal.close()
+
+    i1 = i2 = i3 = 0
+    for row in days:
+        d, g, n, cm, ep = row[0], row[1] or 0, row[2] or 0, row[3] or 0, row[4] or 0
+        unattr = (row[5] or 0) if have_unattr else 0.0
+        if d in null_days:
+            pass  # pre-backfill: no per-entry P&L exists, so I1 cannot be tested
+        elif d in ent_by_day and abs((ent_by_day[d] + unattr) - g) > TOL:
+            i1 += 1
+            out.append((name, "I1", f"{d}: entries {ent_by_day[d]:,.2f} + unattr "
+                                    f"{unattr:,.2f} != gross {g:,.2f}"))
+        if abs((g - cm) - n) > TOL:
+            if d in cal_adjusted:
+                out.append((name, "ADJUSTED", f"{d}: net carries a recovered calendar "
+                                              "(dc_metrics_adjustments) — gross/comm "
+                                              "untouched by design"))
+            elif d in cal_opened:
+                out.append((name, "MULTIDAY", f"{d}: calendar OPENED, nothing closed — "
+                                              f"commission {cm:,.2f} belongs to the "
+                                              "position, realised at close"))
+            else:
+                i2 += 1
+                out.append((name, "I2", f"{d}: gross {g:,.2f} - comm {cm:,.2f} != net {n:,.2f}"))
+        if d in cnt_by_day and ep != cnt_by_day[d]:
+            i3 += 1
+            out.append((name, "I3", f"{d}: summary says {ep} entries, table has {cnt_by_day[d]}"))
+
+    # I5 DOES NOT APPLY TO VARIANTS THAT DO NOT USE trade_entries. D and E
+    # are calendars and keep their entries in dc_calendar.db; H is the long
+    # strangle and keeps its in long_strangle.db. For them "gross with no
+    # trade_entries rows" is CORRECT, not missing — the first run of this
+    # audit flagged 16 such days and every one was a false positive of an
+    # IC-shaped assumption.
+    uses_trade_entries = vid not in ("d", "e", "h")
+
 
     # A day with real gross and NO trade_entries rows at all is a different
     # animal from a pre-backfill NULL: the detail is genuinely missing, so any

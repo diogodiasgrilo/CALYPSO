@@ -90,3 +90,64 @@ class TestTheICAssumptionsAreScoped:
         assert "pass" in src[i:i + 200], (
             "days with no per-entry realized_pnl are being tested for I1 "
             "anyway, which reads NULL as zero")
+
+
+class TestTheAuditACTUALLYRUNS:
+    """Every other test in this file reads the SOURCE. None of them executes it.
+
+    That gap shipped a crash: the calendar lookup was inserted BELOW the loop
+    that consumes it, so `audit()` died with
+
+        UnboundLocalError: cannot access local variable 'cal_adjusted'
+
+    on the first real database — while all six source-grep tests passed. A test
+    that never calls the function cannot tell working code from a NameError.
+    """
+
+    def _db(self, tmp, with_calendar: bool):
+        import sqlite3
+        from pathlib import Path
+        data = Path(tmp) / "data" / "variant_d"
+        data.mkdir(parents=True)
+        con = sqlite3.connect(data / "backtesting.db")
+        con.executescript("""
+            CREATE TABLE daily_summaries (date TEXT, gross_pnl REAL, net_pnl REAL,
+                commission REAL, entries_placed INT, unattributed_overlay_pnl REAL);
+            CREATE TABLE trade_entries (date TEXT, entry_number INT, realized_pnl REAL);
+            INSERT INTO daily_summaries VALUES ('2026-08-17',0.0,-323.75,0.0,0,0.0);
+        """)
+        con.commit(); con.close()
+        if with_calendar:
+            cal = sqlite3.connect(data / "dc_calendar.db")
+            cal.executescript("""
+                CREATE TABLE dc_metrics_adjustments (strategy_id TEXT, close_date TEXT,
+                    amount REAL, applied_at TEXT);
+                CREATE TABLE dc_outcomes (entry_date TEXT, close_date TEXT,
+                    realized_pnl REAL);
+                INSERT INTO dc_metrics_adjustments VALUES ('x','2026-08-17',-323.75,'z');
+            """)
+            cal.commit(); cal.close()
+        return Path(tmp)
+
+    def test_it_runs_without_raising(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = self._db(td, with_calendar=True)
+            afc.audit(root, "d", "2026-09-30")   # must not raise
+
+    def test_a_logged_adjustment_is_classified_not_flagged(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = self._db(td, with_calendar=True)
+            tags = {t for _n, t, _m in afc.audit(root, "d", "2026-09-30")}
+            assert "ADJUSTED" in tags, tags
+            assert "I2" not in tags, f"a logged adjustment was called a break: {tags}"
+
+    def test_the_SAME_row_IS_flagged_without_the_ledger(self):
+        """The negative control, executed rather than grepped: with no
+        dc_calendar.db the discrepancy is unexplained and must report I2."""
+        import tempfile
+        with tempfile.TemporaryDirectory() as td:
+            root = self._db(td, with_calendar=False)
+            tags = {t for _n, t, _m in afc.audit(root, "d", "2026-09-30")}
+            assert "I2" in tags, f"an unexplained discrepancy was not flagged: {tags}"
