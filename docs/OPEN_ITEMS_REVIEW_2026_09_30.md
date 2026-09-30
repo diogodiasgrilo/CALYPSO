@@ -288,3 +288,86 @@ in 7 days · metrics files reconcile to their DBs (verified on G).
 coincidence: prevention and measurement never do. The things that *would* reset the
 clock (B7's rate gate, strategy tuning) are the ones worth deferring, and Part 1
 already recommends deferring them.
+
+---
+
+# Part 3 — a second pass, after being asked again whether anything was missed
+
+Three new findings, five suspected gaps **disproved**, and one loose grep of my own.
+
+## G10. The measurement clock is not computed by anything. **And I broke it today while claiming I hadn't.**
+
+`docs/GO_LIVE_MASTER.md` §2-quater calls *15 consecutive trading days with no
+economics-changing commit* **"the real gate … better than any P&L number because it
+is not noisy."** It is not instrumented. `grep -rln` across `scripts/`, `services/`
+and `shared/` finds **nothing that computes it**. It exists as prose.
+
+Computed here with the only available proxy — any commit touching `bots/hydra/` or
+`shared/`:
+
+```
+current clean-trading-day streak: 0
+broken by 3 money-path commit(s) on 2026-09-30 (Wednesday)
+recent: 09-30:3  09-29:3  09-28:1  09-27:6  09-25:9  09-24:16  09-23:19
+```
+
+**Those three commits on 09-30 are mine**, and twice today I stated they were
+"purely additive … so it does not reset the measurement clock." I had no means to
+check that. Two of the three are pure telemetry (`day_type`,
+`realized_volatility`, a recorder read helper). The third refactored
+`_check_whipsaw_filter` — **a live entry-skip decision** — and although behavioural
+equivalence was proven across a 120-cell grid, *"changed the money path but proved
+equivalence"* is a standard **no written rule authorises**. I made a judgement call
+and reported it as a fact.
+
+**This is the item to fix first.** Until "economics-changing" is defined in code and
+the streak is computed automatically:
+
+* the gate that governs go-live cannot be stated, only asserted;
+* any claim that a change did or did not reset it is unfalsifiable — including mine;
+* the freeze protocol's central control is honour-system.
+
+The fix is small: a path/pattern allowlist for non-economic changes (telemetry,
+docs, tests), a proven-equivalence exemption with an explicit marker in the commit
+trailer, and a script on the existing `oos_tracker` timer that prints the streak.
+Zero clock cost, and it makes every other claim in this document checkable.
+
+## G11. 117 test functions (2.6%) assert on SOURCE TEXT rather than behaviour.
+
+Measured across 4,465 test functions in 257 files. Concentrated where it matters
+least safely: `test_lm3_double_book_guard` (re-booking realized P&L),
+`test_settlement_gate`, `test_pos003_resolve_merged_legs`,
+`test_telemetry_completeness`, `test_skipped_entry_strikes`.
+
+Checked the worst case rather than assuming: **lm3's behavioural tests are real
+execution** — only its *restart-persistence* tests read source, i.e. "does the
+already-booked flag survive a reload" is verified by reading the save/load functions
+instead of round-tripping state. That is precisely the class the 2026-07-06
+stale-SPX phantom lived in, and a save→load→assert round-trip is a few lines.
+
+## G12. Credentials have never been rotated.
+
+`/etc/calypso/ibkr/` — all six created **2026-05-29**, untouched for four months.
+Acceptable for a paper account; for real money a rotation policy and a documented
+interval is table stakes, and `deploy/IBKR_CREDENTIALS_SETUP.md` has the procedure
+but no cadence.
+
+## Suspected gaps that are actually FINE — verified, so they stop recurring
+
+* **Crash loops: none.** `Scheduled restart` = 0, `Main process exited` = 0,
+  `Failed with result` = 0 across 7 days for broker and every strategy. My earlier
+  "45–66 starts per unit" was a **loose grep counting the application's own
+  'Starting…' log lines**, not systemd events. Fourth such error this session.
+* **DR is rehearsed.** Gate 7 is green: RB-7 run **2026-09-19, PASS** — live seat's
+  DB restored to scratch, `integrity_check ok`, schema v17, 297/115/96 rows matching
+  live. Next due 10-19.
+* **Alerting is live.** 52 alerts in 3 days, most recent 05:27 ET today.
+* **TLS valid** to 2026-12-29, certbot auto-renewing.
+* **Silent-failure surface is modest**: 25 swallowed exceptions against 124 logged
+  ones across the five money-path modules — worth a targeted read, not an alarm.
+
+## Revised #1
+
+**Instrument the measurement clock (G10) before anything else on this page.** It is
+the control that decides when real money is allowed to start, it is currently
+unmeasurable, and the first person to get it wrong was me, twice, today.
