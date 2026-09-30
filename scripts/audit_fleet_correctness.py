@@ -102,8 +102,17 @@ def audit(root: Path, vid: str, today: str):
             out.append((name, "I1", f"{d}: entries {ent_by_day[d]:,.2f} + unattr "
                                     f"{unattr:,.2f} != gross {g:,.2f}"))
         if abs((g - cm) - n) > TOL:
-            i2 += 1
-            out.append((name, "I2", f"{d}: gross {g:,.2f} - comm {cm:,.2f} != net {n:,.2f}"))
+            if d in cal_adjusted:
+                out.append((name, "ADJUSTED", f"{d}: net carries a recovered calendar "
+                                              "(dc_metrics_adjustments) — gross/comm "
+                                              "untouched by design"))
+            elif d in cal_opened:
+                out.append((name, "MULTIDAY", f"{d}: calendar OPENED, nothing closed — "
+                                              f"commission {cm:,.2f} belongs to the "
+                                              "position, realised at close"))
+            else:
+                i2 += 1
+                out.append((name, "I2", f"{d}: gross {g:,.2f} - comm {cm:,.2f} != net {n:,.2f}"))
         if d in cnt_by_day and ep != cnt_by_day[d]:
             i3 += 1
             out.append((name, "I3", f"{d}: summary says {ep} entries, table has {cnt_by_day[d]}"))
@@ -115,6 +124,44 @@ def audit(root: Path, vid: str, today: str):
     # audit flagged 16 such days and every one was a false positive of an
     # IC-shaped assumption.
     uses_trade_entries = vid not in ("d", "e", "h")
+
+    # ── I2 ON A MULTI-DAY STRATEGY ──────────────────────────────────────────
+    # `gross - commission == net` is an IRON-CONDOR identity. It assumes a
+    # position opens and closes the same day, so the day that pays the
+    # commission is the day that realises the P&L. A calendar breaks that
+    # assumption honestly:
+    #
+    #   OPENING DAY   commission is paid, nothing is realised. The cost belongs
+    #                 to the position and is booked at close, so net = 0 while
+    #                 commission > 0 is CORRECT, not a break.
+    #   ADJUSTED DAY  scripts/backfill_lost_calendars.py (2026-09-09) recovered
+    #                 five calendars that fell out of the sidecar and were never
+    #                 booked, via `UPDATE daily_summaries SET net_pnl = net_pnl
+    #                 + ?` — net ONLY. Deliberately: gross and commission in an
+    #                 IC-shaped row are meaningless for a calendar (E's own code
+    #                 calls that table "vestigial"; dc_calendar.db is
+    #                 authoritative), and fabricating a gross to satisfy an
+    #                 identity that does not apply would have been worse. Every
+    #                 adjustment is recorded in dc_metrics_adjustments.
+    #
+    # So rather than skipping I2 for calendars — which would throw away a real
+    # check — each discrepancy is looked up and CLASSIFIED. Only a discrepancy
+    # that is neither an opening day nor a logged adjustment is a break.
+    cal_adjusted, cal_opened = set(), set()
+    if vid in ("d", "e"):
+        cal = _ro(data / "dc_calendar.db")
+        if cal is not None:
+            try:
+                cal_adjusted = {r[0] for r in cal.execute(
+                    "SELECT close_date FROM dc_metrics_adjustments")}
+            except sqlite3.Error:
+                pass
+            try:
+                cal_opened = {r[0] for r in cal.execute(
+                    "SELECT DISTINCT entry_date FROM dc_outcomes")}
+            except sqlite3.Error:
+                pass
+            cal.close()
 
     # A day with real gross and NO trade_entries rows at all is a different
     # animal from a pre-backfill NULL: the detail is genuinely missing, so any
@@ -177,7 +224,8 @@ def main():
     for vid in VARIANTS:
         for name, tag, msg in audit(root, vid, today):
             marker = {"OK": "  ok ", "PENDING": "  .. ", "SKIP": "  -- ",
-                      "NOTE": "  -- "}.get(tag, "  !! ")
+                      "NOTE": "  -- ", "ADJUSTED": "  -- ",
+                      "MULTIDAY": "  -- "}.get(tag, "  !! ")
             print(f"{marker}{name:<3} {tag:<8} {msg}")
             if tag in ("I1", "I2", "I3", "I4", "I5"):
                 worst = 1
