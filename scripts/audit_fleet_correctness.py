@@ -108,13 +108,22 @@ def audit(root: Path, vid: str, today: str):
             i3 += 1
             out.append((name, "I3", f"{d}: summary says {ep} entries, table has {cnt_by_day[d]}"))
 
+    # I5 DOES NOT APPLY TO VARIANTS THAT DO NOT USE trade_entries. D and E
+    # are calendars and keep their entries in dc_calendar.db; H is the long
+    # strangle and keeps its in long_strangle.db. For them "gross with no
+    # trade_entries rows" is CORRECT, not missing — the first run of this
+    # audit flagged 16 such days and every one was a false positive of an
+    # IC-shaped assumption.
+    uses_trade_entries = vid not in ("d", "e", "h")
+
     # A day with real gross and NO trade_entries rows at all is a different
     # animal from a pre-backfill NULL: the detail is genuinely missing, so any
     # per-entry analysis of that day is silently incomplete.
-    for d, g in con.execute(
+    for d, g in (con.execute(
             "SELECT date, gross_pnl FROM daily_summaries ds WHERE gross_pnl IS NOT NULL "
             "AND gross_pnl != 0 AND NOT EXISTS "
-            "(SELECT 1 FROM trade_entries te WHERE te.date = ds.date)"):
+            "(SELECT 1 FROM trade_entries te WHERE te.date = ds.date)")
+            if uses_trade_entries else []):
         unattr_d = 0.0
         if have_unattr:
             row = con.execute("SELECT unattributed_overlay_pnl FROM daily_summaries "
