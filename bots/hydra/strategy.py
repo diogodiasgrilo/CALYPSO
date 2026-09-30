@@ -4005,6 +4005,29 @@ class HydraStrategy(MEICStrategy):
     # ANTI-WHIPSAW FILTER
     # =========================================================================
 
+    def _expected_daily_move(self) -> Optional[float]:
+        """The VIX-implied one-day move in points, off the session's open.
+
+        Computed on demand rather than read back from a `_last_expected_move`
+        attribute. That attribute is what `trade_entries.expected_move` used
+        to read, and **nothing ever assigned it** — so the column wrote NULL
+        on all 315 rows while the whipsaw filter computed the very same
+        quantity a few lines away and discarded it. An on-demand read has no
+        ordering dependency on a side effect having already happened, which is
+        the failure mode that produced the NULLs.
+
+        Returns None when the inputs are not yet known, so "not computable"
+        stays distinguishable from "computed, and small".
+        """
+        md = getattr(self, "market_data", None)
+        if md is None:
+            return None
+        spx_open = getattr(md, "spx_open", None)
+        vix_open = getattr(md, "vix_open", None)
+        if not spx_open or spx_open <= 0 or not vix_open or vix_open <= 0:
+            return None
+        return spx_open * (vix_open / 100) / (252 ** 0.5)
+
     def _check_whipsaw_filter(self) -> Optional[str]:
         """
         Anti-whipsaw: skip entry if SPX intraday range (high - low) exceeds
@@ -4017,18 +4040,16 @@ class HydraStrategy(MEICStrategy):
         if self.whipsaw_range_skip_mult is None:
             return None
 
-        spx_open = self.market_data.spx_open
         vix_open = self.market_data.vix_open
         spx_high = self.market_data.spx_high
         spx_low = self.market_data.spx_low
 
-        if not spx_open or spx_open <= 0 or not vix_open or vix_open <= 0:
+        expected_move = self._expected_daily_move()
+        if expected_move is None:
             return None  # No data, don't block
 
         if spx_low == float('inf') or spx_low <= 0 or spx_high <= 0:
             return None  # No range data yet
-
-        expected_move = spx_open * (vix_open / 100) / (252 ** 0.5)
         intraday_range = spx_high - spx_low
         threshold = self.whipsaw_range_skip_mult * expected_move
 
@@ -6295,7 +6316,7 @@ class HydraStrategy(MEICStrategy):
                 "entry_time": entry.entry_time.strftime('%Y-%m-%d %H:%M:%S') if entry.entry_time else None,
                 "spx_at_entry": self.current_price,
                 "vix_at_entry": self.current_vix,
-                "expected_move": getattr(self, '_last_expected_move', None),
+                "expected_move": self._expected_daily_move(),
                 "trend_signal": entry.trend_signal.value if entry.trend_signal else None,
                 # Item 6: a structure discriminator distinguishes a naked
                 # strangle from the IC population so analytics (HERMES/HOMER)
