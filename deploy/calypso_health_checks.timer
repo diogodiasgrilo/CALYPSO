@@ -1,0 +1,13 @@
+[Unit]
+Description=Run the CALYPSO correctness + governance checks nightly, after settlement and BEFORE HERMES/HOMER.
+
+[Timer]
+# 22:45 ET. Settlement completes ~21:45-22:37 ET, HERMES runs 23:00 and HOMER
+# 23:30 — so this lands in the gap on purpose: if a P&L identity is broken, it
+# is known BEFORE HOMER commits a journal built on those numbers to git.
+OnCalendar=Mon..Fri *-*-* 22:45:00 America/New_York
+Persistent=true
+RandomizedDelaySec=60
+
+[Install]
+WantedBy=timers.target

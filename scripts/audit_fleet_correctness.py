@@ -214,14 +214,43 @@ def audit(root: Path, vid: str, today: str):
     return out
 
 
+def _alert_breaks(rows, today):
+    """Push the breaks somewhere a person will see them.
+
+    A correctness audit nobody reads is not a control. This script existed
+    since 2026-09-29 and was scheduled by no timer, which is why three columns
+    sat empty for weeks and were found by hand. Scheduling it fixes half of
+    that; the other half is that a failed systemd unit is invisible unless
+    someone runs `systemctl --failed`.
+
+    Never raises: an alerting failure must not mask the audit's own exit code,
+    which is what systemd and the operator actually gate on.
+    """
+    try:
+        from shared.alert_service import AlertService, AlertType
+        body = "\n".join(f"{n} {tag}: {msg}" for n, tag, msg in rows[:12])
+        if len(rows) > 12:
+            body += f"\n… and {len(rows) - 12} more"
+        AlertService({"alerts": {"enabled": True}}, "AUDIT").send_alert(
+            alert_type=AlertType.DATA_QUALITY,
+            title=f"Fleet correctness: {len(rows)} break(s)",
+            message=f"{today} (ET)\n{body}",
+            details={"break_count": len(rows), "date": today})
+    except Exception as exc:  # noqa: BLE001 — never mask the exit code
+        print(f"  (alert failed: {exc})")
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="/opt/calypso")
+    ap.add_argument("--alert", action="store_true",
+                    help="publish a DATA_QUALITY alert when breaks are found")
     a = ap.parse_args()
     root = Path(a.root)
     today = os.popen("TZ=America/New_York date +%Y-%m-%d").read().strip()
     print(f"FLEET CORRECTNESS AUDIT — {today} (ET)\n")
     worst = 0
+    breaks = []
     for vid in VARIANTS:
         for name, tag, msg in audit(root, vid, today):
             marker = {"OK": "  ok ", "PENDING": "  .. ", "SKIP": "  -- ",
@@ -230,7 +259,10 @@ def main():
             print(f"{marker}{name:<3} {tag:<8} {msg}")
             if tag in ("I1", "I2", "I3", "I4", "I5"):
                 worst = 1
+                breaks.append((name, tag, msg))
     print("\nVERDICT:", "BREAKS FOUND — see !! rows" if worst else "all identities hold")
+    if worst and a.alert:
+        _alert_breaks(breaks, today)
     return worst
 
 

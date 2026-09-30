@@ -1,0 +1,31 @@
+[Unit]
+Description=CALYPSO daily correctness + governance checks. Runs the fleet correctness audit (GATING — a P&L identity break fails this unit and publishes a DATA_QUALITY alert) and reports the measurement clock, the 15-clean-trading-day gate that decides when real money may start. Read-only: it opens every database mode=ro, writes nothing, and imports neither IBClient nor BrokerClient, so it cannot place, cancel or modify an order. It exists because both checks previously depended on someone remembering to run a script — which is how three telemetry columns sat empty for ten weeks and were found by hand on 2026-09-30, and how the go-live gate stayed prose that nobody could compute.
+After=network-online.target
+
+[Service]
+Type=oneshot
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+
+# 1. Correctness. GATING: exits non-zero on any I1-I5 identity break, so the
+#    unit shows in `systemctl --failed`, and --alert pushes it to Telegram
+#    because a failed unit nobody looks at is not a detection.
+ExecStart=/opt/calypso/.venv/bin/python -m scripts.audit_fleet_correctness --alert
+
+# 2. Governance. Reporting only — `-` prefix so a clock failure can never be
+#    mistaken for a correctness break. Prints BOTH the strict streak and the
+#    streak that honours self-granted exemption trailers; when they disagree,
+#    someone exempted their own change and the report says which commit.
+ExecStart=-/opt/calypso/.venv/bin/python -m scripts.measurement_clock
+
+StandardOutput=journal
+StandardError=journal
+
+# Read-only sandbox. No ReadWritePaths: neither check writes anything.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateDevices=true
+RestrictSUIDSGID=true
