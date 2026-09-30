@@ -6572,6 +6572,18 @@ class HydraStrategy(MEICStrategy):
             return True
         return False
 
+    def _classification_moment(self):
+        """The moment `_classify_day_type` is describing.
+
+        An overridable method rather than a parameter. The parameter version
+        of exactly this is what produced the settlement NameError, and the
+        classifier's signature is now pinned by test. Backfill overrides this
+        so it can re-run the LIVE classifier over a historical row instead of
+        reimplementing the rules — a reimplementation is how a backfilled
+        column and a live column come to quietly disagree.
+        """
+        return get_us_market_time()
+
     def _classify_day_type(self, events) -> str:
         """Label the session from the event calendar and its own range.
 
@@ -6598,7 +6610,7 @@ class HydraStrategy(MEICStrategy):
             if getattr(self, "fomc_announcement_today", False) or (
                     events and any("fomc" in str(e).lower() for e in events)):
                 return "fomc"
-            if is_early_close_day():
+            if is_early_close_day(self._classification_moment()):
                 return "early_close"
             md = getattr(self, "market_data", None)
             o = float(getattr(md, "spx_open", 0) or 0)
@@ -6628,7 +6640,7 @@ class HydraStrategy(MEICStrategy):
             rec = getattr(self, "_data_recorder", None)
             if rec is None:
                 return None
-            date_str = get_us_market_time().strftime("%Y-%m-%d")
+            date_str = self._classification_moment().strftime("%Y-%m-%d")
             prices = rec.get_spx_price_series_for_date(date_str) \
                 if hasattr(rec, "get_spx_price_series_for_date") else None
             if not prices or len(prices) < 30:
