@@ -1249,6 +1249,25 @@ class DataRecorder:
         except Exception:
             return None
 
+    def get_spx_price_series_for_date(self, date_str: str) -> list:
+        """The day's underlying price path, in order, for realised-vol work.
+
+        Returned as a bare list rather than an OHLC tuple because a high-low
+        range cannot tell a day that trended to its extremes from one that
+        whipsawed there — which is the distinction realised vol exists to
+        measure. Zero/NULL ticks are dropped: a 0.0 price is a missing read,
+        and treating it as a real observation manufactures a -100% return.
+        """
+        try:
+            with self._connect() as conn:
+                rows = conn.execute(
+                    "SELECT spx_price FROM market_ticks WHERE timestamp LIKE ? "
+                    "ORDER BY timestamp", (f"{date_str}%",)).fetchall()
+            return [r[0] for r in rows if r[0]]
+        except Exception as exc:  # noqa: BLE001 — a read helper must not raise
+            logger.debug("get_spx_price_series_for_date failed: %s", exc)
+            return []
+
     def get_spx_ohlc_for_date(self, date_str: str):
         """``(open, high, low, close)`` of the recorded intraday ``spx_price`` for
         ``date_str`` from ``market_ticks`` — open = first positive tick, close =

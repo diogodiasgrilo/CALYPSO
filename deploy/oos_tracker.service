@@ -8,6 +8,12 @@ User=calypso
 Group=calypso
 WorkingDirectory=/opt/calypso
 ExecStart=/opt/calypso/.venv/bin/python -m scripts.one_entry_counterfactual --variant b --oos --append
+# Score the day's skipped entries while we are here. The columns exist and
+# were populated ONCE, by hand, on 2026-09-29 — 31 of 53 post-09-11 rows.
+# A counterfactual that depends on someone remembering to run a script is a
+# counterfactual that drifts, which is how it sat empty for 115 rows before.
+# `-` prefix: a scorer failure must not fail the tracker unit.
+ExecStart=-/opt/calypso/.venv/bin/python -m scripts.score_skipped_entries --variant b --write
 # Never let a tracker failure look like a trading failure.
 SuccessExitStatus=0 1
 StandardOutput=journal

@@ -6572,6 +6572,80 @@ class HydraStrategy(MEICStrategy):
             return True
         return False
 
+    def _classify_day_type(self, events) -> str:
+        """Label the session from the event calendar and its own range.
+
+        Replaces HOMER's Sheets-derived version, which has produced NULL since
+        Sheets was retired (2026-07-17). Deliberately ordered most- to
+        least-specific, and every branch is derived from data already resolved
+        for this row — no new lookups, no broker calls.
+
+        "trend" vs "chop" is the pair the analyses actually needed: a 0DTE
+        condor's losing days are trend days, and without this column every
+        per-slot and per-entry result this week had to pool them together.
+        The 0.60 close-location threshold is the standard definition (|close −
+        open| as a fraction of the day's range), not a fitted number.
+
+        Opex is deliberately NOT a value here. It already has its own
+        `opex_week` column, populated on all 103 rows, and it is orthogonal to
+        how the session traded — an opex Friday is still either a trend day or
+        a chop day. Collapsing it into this column would destroy the one
+        distinction the column exists to make. The first draft had an `opex`
+        branch sitting unreachable below trend/chop, taking a parameter that
+        caused a NameError; both are gone.
+        """
+        try:
+            if getattr(self, "fomc_announcement_today", False) or (
+                    events and any("fomc" in str(e).lower() for e in events)):
+                return "fomc"
+            if is_early_close_day():
+                return "early_close"
+            md = getattr(self, "market_data", None)
+            o = float(getattr(md, "spx_open", 0) or 0)
+            h = float(getattr(md, "spx_high", 0) or 0)
+            lo = float(getattr(md, "spx_low", 0) or 0)
+            c = float(self._resolve_spx_close() or 0)
+            rng = h - lo
+            if o and c and rng > 0:
+                if abs(c - o) / rng >= 0.60:
+                    return "trend"
+                return "chop"
+            return "normal"
+        except Exception as exc:  # noqa: BLE001 — enrichment must never block settlement
+            logger.debug("day_type classification failed: %s", exc)
+            return "normal"
+
+    def _realized_volatility(self) -> Optional[float]:
+        """The session's realised vol, annualised, from its own 1-minute path.
+
+        Computed from `market_ticks` rather than from OHLC, because a
+        high-low range cannot distinguish a day that trended there from one
+        that whipsawed there — which is the whole distinction this column is
+        for. Returns None rather than 0.0 when the path is too short: a NULL
+        reads as "not measured", a 0.0 reads as "measured, and flat".
+        """
+        try:
+            rec = getattr(self, "_data_recorder", None)
+            if rec is None:
+                return None
+            date_str = get_us_market_time().strftime("%Y-%m-%d")
+            prices = rec.get_spx_price_series_for_date(date_str) \
+                if hasattr(rec, "get_spx_price_series_for_date") else None
+            if not prices or len(prices) < 30:
+                return None
+            import math
+            rets = [math.log(b / a) for a, b in zip(prices, prices[1:]) if a and b]
+            if len(rets) < 20:
+                return None
+            m = sum(rets) / len(rets)
+            var = sum((r - m) ** 2 for r in rets) / (len(rets) - 1)
+            # per-tick stdev -> annualised, using the observed tick count as
+            # the session's sample rate rather than assuming a cadence.
+            return round(math.sqrt(var) * math.sqrt(len(rets) * 252) * 100, 2)
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("realized_volatility failed: %s", exc)
+            return None
+
     def _record_daily_summary_to_db(self):
         """Record daily summary to SQLite with economic events and overnight gap."""
         if not self._data_recorder:
@@ -6667,6 +6741,24 @@ class HydraStrategy(MEICStrategy):
                     summary.get("total_pnl", 0) - summary.get("total_commission", 0),
                 ),
                 "commission": summary.get("total_commission", 0),
+                # DAY_TYPE / REALIZED_VOLATILITY were NULL on all 48 live-era
+                # days (2026-09-30 audit). Not the INSERT-OR-IGNORE gap the
+                # recorder's docstring describes — HOMER's writer was already
+                # upgraded to ON CONFLICT DO UPDATE. The real cause is that
+                # HOMER derives day_type from a Google Sheets "Notes" column,
+                # and Sheets was retired 2026-07-17, so it has been reading a
+                # source that no longer exists.
+                #
+                # Computed here instead, from data this method already has in
+                # scope (`events`, the opex flag, and the day's own OHLC). Purely
+                # additive: it fills columns that were NULL and touches no
+                # trading decision, so it does not reset the measurement clock.
+                #
+                # day_type matters analytically — "does slot e#4 lose on TREND
+                # days or CHOP days?" was unanswerable in every analysis this
+                # week because there was nothing to condition on.
+                "day_type": self._classify_day_type(events),
+                "realized_volatility": self._realized_volatility(),
                 "long_salvage_revenue": summary.get("long_salvage_revenue", 0.0),
                 "day_of_week": now.strftime('%A'),
                 "overnight_gap": overnight_gap,
