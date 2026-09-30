@@ -36,6 +36,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import re
 import json
 import os
 import sqlite3
@@ -240,12 +241,40 @@ def _alert_breaks(rows, today):
         print(f"  (alert failed: {exc})")
 
 
-def main():
+# An identity break dated BEFORE a variant's accounting was fixed is history,
+# not a live defect — the rows were written by code that no longer exists. They
+# still deserve to be visible, so they are reported as PRE-FIX rather than
+# hidden, but they must not gate: a check that is permanently red is not a
+# control, it is a thing people learn to scroll past.
+#
+# f: 2026-09-18 — F booked every take-profit TWICE, counted no entries at all,
+#    and never charged the opening commission; lifetime read $177.90 against a
+#    true $45.80. Fixed and documented in bots/hydra/__init__.py (2026-09-18),
+#    and the residue re-confirmed as pre-fix history in cbb3e60 / e6bb3bc.
+#
+# Add an entry ONLY with a dated, committed explanation of what was fixed.
+# Anything here is an assertion that the data before the date cannot be
+# repaired and is understood — not that it is unimportant.
+ACCOUNTING_FIXED_ON = {
+    "f": "2026-09-18",
+}
+
+
+def _is_pre_fix(vid: str, msg: str) -> bool:
+    """True when this row predates the variant's accounting fix."""
+    cutoff = ACCOUNTING_FIXED_ON.get(vid)
+    if not cutoff:
+        return False
+    m = re.match(r"\s*(\d{4}-\d{2}-\d{2})", msg)
+    return bool(m and m.group(1) < cutoff)
+
+
+def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--root", default="/opt/calypso")
     ap.add_argument("--alert", action="store_true",
                     help="publish a DATA_QUALITY alert when breaks are found")
-    a = ap.parse_args()
+    a = ap.parse_args(argv)
     root = Path(a.root)
     today = os.popen("TZ=America/New_York date +%Y-%m-%d").read().strip()
     print(f"FLEET CORRECTNESS AUDIT — {today} (ET)\n")
@@ -253,9 +282,11 @@ def main():
     breaks = []
     for vid in VARIANTS:
         for name, tag, msg in audit(root, vid, today):
+            if tag.startswith("I") and _is_pre_fix(vid, msg):
+                tag = "PRE-FIX"
             marker = {"OK": "  ok ", "PENDING": "  .. ", "SKIP": "  -- ",
                       "NOTE": "  -- ", "ADJUSTED": "  -- ",
-                      "MULTIDAY": "  -- "}.get(tag, "  !! ")
+                      "MULTIDAY": "  -- ", "PRE-FIX": "  -- "}.get(tag, "  !! ")
             print(f"{marker}{name:<3} {tag:<8} {msg}")
             if tag in ("I1", "I2", "I3", "I4", "I5"):
                 worst = 1
