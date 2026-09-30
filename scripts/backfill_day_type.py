@@ -131,25 +131,33 @@ def backfill(db_path: str, write: bool, label: str):
 
     conn = sqlite3.connect(db_path)
     try:
-        conn.execute("""CREATE TABLE IF NOT EXISTS data_corrections (
-            id INTEGER PRIMARY KEY AUTOINCREMENT, corrected_at TEXT, target_date TEXT,
-            field TEXT, old_value TEXT, new_value TEXT, reason TEXT)""")
-        now = datetime.utcnow().isoformat()
-        reason = ("backfill_day_type.py — column NULL since schema creation; "
-                  "HOMER derived it from a Google Sheets column retired 2026-07-17. "
-                  "Computed with the live classifier over recorded market_ticks.")
+        # Reuse the audit table's ONE definition. A local CREATE TABLE IF NOT
+        # EXISTS with a second column list is how this failed the first time:
+        # the table already existed with different columns, the CREATE was a
+        # silent no-op, and the INSERT then referenced columns that were not
+        # there. IF NOT EXISTS does not reconcile schemas, it just declines.
+        from scripts.backfill_phantom_settlements import CORRECTIONS_DDL
+        conn.execute(CORRECTIONS_DDL)
+        now = datetime.utcnow().isoformat(timespec="seconds")
+        reason = ("day_type/realized_volatility were NULL since schema creation; "
+                  "HOMER derived day_type from a Google Sheets column retired "
+                  "2026-07-17. Recomputed with the live classifier.")
         n = 0
         for d, old_dt, dt, old_rv, rv in plan:
+            ohlc = rec.get_spx_ohlc_for_date(d)
+            evidence = (f"market_ticks OHLC {ohlc}; classified by "
+                        f"HydraStrategy._classify_day_type at {label}")
             conn.execute(
                 "UPDATE daily_summaries SET day_type=COALESCE(day_type, ?), "
                 "realized_volatility=COALESCE(realized_volatility, ?) WHERE date=?",
                 (dt, rv, d))
-            conn.execute(
-                "INSERT INTO data_corrections (corrected_at,target_date,field,old_value,new_value,reason) "
-                "VALUES (?,?,?,?,?,?)", (now, d, "day_type", str(old_dt), str(dt), reason))
-            conn.execute(
-                "INSERT INTO data_corrections (corrected_at,target_date,field,old_value,new_value,reason) "
-                "VALUES (?,?,?,?,?,?)", (now, d, "realized_volatility", str(old_rv), str(rv), reason))
+            for field, ov, nv in (("day_type", old_dt, dt),
+                                  ("realized_volatility", old_rv, rv)):
+                conn.execute(
+                    "INSERT INTO data_corrections "
+                    "(applied_at,date,field,old_value,new_value,reason,evidence) "
+                    "VALUES (?,?,?,?,?,?,?)",
+                    (now, d, field, str(ov), str(nv), reason, evidence))
             n += 1
         conn.commit()
         print(f"  WROTE {n} rows (+{n*2} audit entries)")

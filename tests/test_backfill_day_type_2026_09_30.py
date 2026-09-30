@@ -117,3 +117,82 @@ class TestItReusesTheLiveCodeRatherThanACopy:
             "the backfill no longer calls the live classifier — if it grew its "
             "own copy of the rules, backfilled rows and live rows will diverge")
         assert "HydraStrategy._realized_volatility" in src
+
+
+class TestTheWritePathActuallyWrites:
+    """The bug the first run hit, and my tests did not.
+
+    `data_corrections` already existed — created by
+    `backfill_phantom_settlements.py` with columns (applied_at, date, field,
+    old_value, new_value, reason, evidence). This script declared its own
+    `CREATE TABLE IF NOT EXISTS` with a DIFFERENT column list. IF NOT EXISTS
+    does not reconcile schemas, it declines: the CREATE was a silent no-op and
+    the INSERT then referenced `corrected_at`, which is not a column. The run
+    died after taking its backup, having written nothing.
+
+    Everything above tested classification and never touched the write. So the
+    fixture here does the one thing that reproduces it: pre-create the audit
+    table with the CANONICAL schema, exactly as a real VM database has it.
+    """
+
+    def _db(self, tmp_path, date_str="2026-09-21"):
+        import math
+        db = str(tmp_path / "backtesting.db")
+        rec = DataRecorder(db)
+        rec.ensure_schema()
+        conn = sqlite3.connect(db)
+        for i in range(160):
+            conn.execute(
+                "INSERT INTO market_ticks (timestamp, spx_price, vix_level) VALUES (?,?,?)",
+                (f"{date_str} {9 + i // 60:02d}:{i % 60:02d}:00",
+                 7700 + i * 0.5 + 3.0 * math.sin(i * 1.7), 16.0))
+        conn.execute("INSERT INTO daily_summaries (date) VALUES (?)", (date_str,))
+        # The table as it exists on every real VM database.
+        from scripts.backfill_phantom_settlements import CORRECTIONS_DDL
+        conn.execute(CORRECTIONS_DDL)
+        conn.commit()
+        conn.close()
+        return db, date_str
+
+    def test_write_fills_the_columns_and_logs_the_audit(self, tmp_path):
+        from scripts.backfill_day_type import backfill
+        db, date_str = self._db(tmp_path)
+
+        filled = backfill(db, write=True, label="test")
+        assert filled == 1, f"expected 1 row planned, got {filled}"
+
+        conn = sqlite3.connect(db)
+        row = conn.execute(
+            "SELECT day_type, realized_volatility FROM daily_summaries WHERE date=?",
+            (date_str,)).fetchone()
+        audit = conn.execute(
+            "SELECT field, new_value FROM data_corrections ORDER BY field").fetchall()
+        conn.close()
+
+        assert row[0] == "trend", (
+            f"day_type is {row[0]!r} after a --write run — the write path did "
+            f"not land, which is precisely what the first real run did while "
+            f"reporting a backup and exiting 1")
+        assert row[1] is not None, "realized_volatility still NULL after --write"
+        assert len(audit) == 2, f"expected 2 audit rows, got {audit}"
+        assert {a[0] for a in audit} == {"day_type", "realized_volatility"}
+
+    def test_it_does_not_overwrite_a_value_that_is_already_there(self, tmp_path):
+        """COALESCE, not assignment. A backfill that clobbers real recorded
+        values is a data-loss bug wearing a repair's clothing."""
+        from scripts.backfill_day_type import backfill
+        db, date_str = self._db(tmp_path)
+        conn = sqlite3.connect(db)
+        conn.execute("UPDATE daily_summaries SET day_type='fomc' WHERE date=?", (date_str,))
+        conn.commit()
+        conn.close()
+
+        backfill(db, write=True, label="test")
+
+        conn = sqlite3.connect(db)
+        dt = conn.execute("SELECT day_type FROM daily_summaries WHERE date=?",
+                          (date_str,)).fetchone()[0]
+        conn.close()
+        assert dt == "fomc", (
+            f"backfill overwrote an existing day_type with {dt!r} — recorded "
+            f"values must win over recomputed ones")
