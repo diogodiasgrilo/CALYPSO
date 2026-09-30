@@ -143,3 +143,35 @@ class TestItIsIdempotent:
         con.close()
         assert v == 1195.0
         assert n == 1, f"{n} audit rows for one repair"
+
+
+class TestVariantAIsActuallyMatched:
+    """The bug this class exists for.
+
+    `VARIANTS` uses "" for variant A, not "a" — the audit builds A's path as
+    `data/` rather than `data/variant_a/`. The register was keyed on "a", so
+    every A entry missed silently and the gate stayed red on three rows that
+    were supposed to be registered. Nothing failed; the rows just kept
+    printing as breaks.
+
+    Unit-testing the register's contents could never catch that. Only asking
+    the lookup the question the audit asks it can.
+    """
+
+    def test_the_empty_vid_resolves_to_variant_a(self):
+        from scripts.audit_fleet_correctness import _is_known_irreparable
+        assert _is_known_irreparable("", "2026-03-20: summary says 5 entries"), (
+            "variant A's rows are not matched — the audit passes '' as its vid "
+            "and the register is keyed on 'a'")
+
+    def test_every_registered_variant_a_row_is_reachable(self):
+        from scripts.audit_fleet_correctness import _is_known_irreparable, KNOWN_IRREPARABLE
+        for (vid, date) in KNOWN_IRREPARABLE:
+            probe = "" if vid == "a" else vid
+            assert _is_known_irreparable(probe, f"{date}: whatever the message says"), (
+                f"({vid}, {date}) is in the register but unreachable with the "
+                f"vid the audit actually passes ({probe!r})")
+
+    def test_an_unregistered_row_is_still_a_break(self):
+        from scripts.audit_fleet_correctness import _is_known_irreparable
+        assert _is_known_irreparable("", "2026-05-05: some other day") is None

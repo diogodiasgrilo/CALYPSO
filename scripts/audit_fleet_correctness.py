@@ -292,14 +292,21 @@ KNOWN_IRREPARABLE = {
 
 
 def _is_known_irreparable(vid: str, msg: str):
-    """The register entry for this row, or None."""
+    """The register entry for this row, or None.
+
+    `vid` is "" for variant A (see VARIANTS), not "a" — keying the register on
+    "a" made every A entry silently miss, and the gate stayed red on three rows
+    that were supposed to be registered. Normalised here rather than in the
+    register, so the register reads the way a person would write it.
+    """
+    vid = vid or "a"
     m = re.match(r"\s*(\d{4}-\d{2}-\d{2})", msg)
     return KNOWN_IRREPARABLE.get((vid, m.group(1))) if m else None
 
 
 def _is_pre_fix(vid: str, msg: str) -> bool:
     """True when this row predates the variant's accounting fix."""
-    cutoff = ACCOUNTING_FIXED_ON.get(vid)
+    cutoff = ACCOUNTING_FIXED_ON.get(vid or "a")
     if not cutoff:
         return False
     m = re.match(r"\s*(\d{4}-\d{2}-\d{2})", msg)
