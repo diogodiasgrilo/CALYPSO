@@ -129,14 +129,56 @@ def main(argv=None):
     print(f"     actual (live rule)  breached {_rate(ab, an)}"
           + (f"   median distance {sorted(ad)[len(ad)//2]:5.1f}pt" if ad else ""))
     if sn and an:
-        if sb == ab:
-            print("     -> identical breach counts; no separation on this statistic.")
+        raw_note = ("shadow" if sb < ab else "actual") + " breached less"
+        print(f"     -> raw: {raw_note}  ({sb}/{sn} vs {ab}/{an})")
+        if sd and ad:
+            ms, ma = sorted(sd)[len(sd) // 2], sorted(ad)[len(ad) // 2]
+            if abs(ms - ma) > 2.0:
+                print(f"        ⚠️  BUT the rules sat at DIFFERENT distances "
+                      f"({ms:.1f}pt vs {ma:.1f}pt). A strike further out breaches")
+                print("            less by construction, so the raw comparison says")
+                print("            nothing about rule quality. Matched view below.")
+
+    # DISTANCE-MATCHED. The raw comparison above is confounded: the fixed-OTM
+    # rule sits further out, so of course it breaches less. What a rule can be
+    # judged on is whether, AT THE SAME DISTANCE, its picks survive better —
+    # the same correction PREREG_GEX_GATE applies by restricting to
+    # vetoed-distance +/-10pt. Without it, "safer" just means "wider".
+    msb = msn = mab = man = 0
+    for r in placed:
+        hi, lo, spx = r["spx_high"], r["spx_low"], r["spx_at_entry"]
+        if not spx:
+            continue
+        for sk, ak, is_call in (
+                (r["shadow_short_call_strike"], r["actual_short_call_strike"], True),
+                (r["shadow_short_put_strike"], r["actual_short_put_strike"], False)):
+            if not sk or not ak:
+                continue
+            if abs(abs(sk - spx) - abs(ak - spx)) > 10.0:
+                continue           # not comparable at this distance
+            msb += bool((hi >= sk) if is_call else (lo <= sk)); msn += 1
+            mab += bool((hi >= ak) if is_call else (lo <= ak)); man += 1
+    print()
+    print(f"   DISTANCE-MATCHED (within 10pt of each other)  n={msn} sides")
+    if msn < 20:
+        print(f"     too few comparable sides ({msn}) to say anything.")
+    else:
+        print(f"     shadow breached {_rate(msb, msn)}")
+        print(f"     actual breached {_rate(mab, man)}")
+        if msb == mab:
+            print("     -> identical at matched distance: the rules are not")
+            print("        distinguishable on safety, only on how wide they sit.")
         else:
-            better = "shadow" if sb < ab else "actual"
-            p = _binom_p(min(sb, ab), sn, max(sb, ab) / an) if an else 1.0
-            print(f"     -> {better} breached less; one-sided binomial p = {p:.3f}")
-            if p >= 0.05:
-                print("        NOT significant — this is a difference, not a finding.")
+            better = "shadow" if msb < mab else "actual"
+            pv = _binom_p(min(msb, mab), msn, max(msb, mab) / man)
+            print(f"     -> {better} breached less; one-sided binomial p = {pv:.3f}")
+            if pv >= 0.05:
+                print("        NOT significant — a difference, not a finding.")
+
+    print()
+    print("   ⚠️  Neither view can settle the choice. Sitting further out is not")
+    print("       free — it collects less premium — and the shadow's credit was")
+    print("       never recorded, so the trade-off is unmeasurable from this table.")
 
     # ---- B. what the skips avoided, or cost --------------------------------
     print()

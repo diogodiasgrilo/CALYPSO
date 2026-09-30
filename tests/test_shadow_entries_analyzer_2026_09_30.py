@@ -115,3 +115,64 @@ class TestItRunsAndKeepsItsWarnings:
 
     def test_a_missing_database_exits_cleanly(self, tmp_path, capsys):
         assert ase.main(["--variant", "zz", "--root", str(tmp_path)]) == 2
+
+
+class TestTheDistanceConfoundIsHandled:
+    """A strike further out breaches less by construction.
+
+    The first run of this analyzer reported the shadow breaching 12.3% against
+    live's 17.6% at p = 0.023 — and the shadow sat at 47.9pt against 41.2pt.
+    That is not a finding about rule quality, it is arithmetic about width, and
+    reported without the caveat it would have read as "fixed-OTM is safer".
+
+    So the analyzer must warn when the rules sat at different distances, and
+    must also report the matched-distance view — the same correction
+    PREREG_GEX_GATE applies by restricting to vetoed-distance +/-10pt.
+    """
+
+    def test_it_warns_when_the_two_rules_sat_at_different_distances(self, tmp_path, capsys):
+        rows = [dict(date=f"2026-08-{d:02d}", en=1, hi=7700, lo=7600, spx=7650,
+                     ssc=7750, ssp=7550,     # shadow: 100pt out
+                     asc=7680, asp=7620)     # actual:  30pt out
+                for d in range(1, 12)]
+        root = _db(tmp_path, rows)
+        ase.main(["--variant", "t", "--root", str(root), "--since", "2026-01-01"])
+        out = capsys.readouterr().out
+        assert "DIFFERENT distances" in out, (
+            "no confound warning: a wider rule breaching less would be "
+            "reported as if it were safer")
+        assert "says" in out and "nothing about rule quality" in out
+
+    def test_matched_view_excludes_incomparable_sides(self, tmp_path, capsys):
+        """All sides here are 70pt apart, so none is comparable — the matched
+        section must say it has too few, not silently compare them anyway."""
+        rows = [dict(date=f"2026-08-{d:02d}", en=1, hi=7700, lo=7600, spx=7650,
+                     ssc=7750, ssp=7550, asc=7680, asp=7620)
+                for d in range(1, 12)]
+        root = _db(tmp_path, rows)
+        ase.main(["--variant", "t", "--root", str(root), "--since", "2026-01-01"])
+        out = capsys.readouterr().out
+        assert "DISTANCE-MATCHED" in out
+        assert "too few comparable sides (0)" in out, out[-400:]
+
+    def test_matched_view_compares_when_distances_line_up(self, tmp_path, capsys):
+        """Same distance, different side of the spot: comparable, so it must
+        actually run rather than bail."""
+        rows = [dict(date=f"2026-08-{d:02d}", en=1, hi=7700, lo=7600, spx=7650,
+                     ssc=7700, ssp=7600, asc=7702, asp=7598)
+                for d in range(1, 16)]
+        root = _db(tmp_path, rows)
+        ase.main(["--variant", "t", "--root", str(root), "--since", "2026-01-01"])
+        out = capsys.readouterr().out
+        assert "too few comparable sides" not in out, out[-500:]
+        assert "shadow breached" in out
+
+    def test_it_always_states_that_wider_is_not_free(self, tmp_path, capsys):
+        rows = [dict(date="2026-08-01", en=1, hi=7700, lo=7600, spx=7650,
+                     ssc=7750, ssp=7550, asc=7680, asp=7620)]
+        root = _db(tmp_path, rows)
+        ase.main(["--variant", "t", "--root", str(root), "--since", "2026-01-01"])
+        out = capsys.readouterr().out
+        assert "collects less premium" in out, (
+            "the analyzer stopped saying that sitting further out costs "
+            "premium — without it, 'safer' reads as 'better'")
