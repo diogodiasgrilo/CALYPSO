@@ -314,6 +314,60 @@ A test now pins bm to B on the frozen safety knobs.
 
 ---
 
+
+### 2-quinquies. THE DEPLOY GATE — asymmetric, because the costs are asymmetric
+
+**Added 2026-09-30**, after measuring both directions instead of guessing. A
+single uniform rule gets one of two opposite cost profiles wrong.
+
+**What was measured** (330 money-path commits, 120 days):
+
+* **59%** of money-path commits are fixes; **44%** were followed by a same-file
+  fix within three days. Shipping new behaviour straight to the live seat
+  demonstrably produces rework.
+* Delay is not free either. **MKT-011B cost B $137.20** while it sat unfixed;
+  the Brandon overlay put **$6,230** of hedge debit against **$315** of real
+  damage before being disabled. A fix to a bug that is actively losing money
+  gets more expensive every session it waits.
+* The queue is normally **empty** (0 unpushed, 0 uncommitted when this was
+  written), so a wait on new behaviour usually delays nothing at all.
+
+**The rule — two independent questions, WHEN and HOW VERIFIED:**
+
+| change | WHEN | HOW VERIFIED |
+|---|---|---|
+| Fix to an active, costing bug | **immediate** | as below |
+| New behaviour / refactor / telemetry | **after one full canary session** | as below |
+| Touches the order path | *(unchanged by this row)* | **next session's real fills** |
+| Everything else | *(unchanged)* | **a canary variant, one full session** |
+
+A batch takes the most restrictive WHEN: one new-behaviour commit pulls the
+whole batch onto the canary path.
+
+**🔴 The canary has a hard structural limit, and it is the expensive class.**
+`_place_option_order` returns at **SAFETY-DRY-01** in dry mode — *no dry-run
+variant ever places an order*. Placement, rung pricing, fills, cancel/replace,
+over-fill correction and partial unwinds therefore **cannot be canaried at
+all**. Recommending a canary for them would be recommending a verification that
+is structurally incapable of verifying anything. They get deployed after the
+close and checked against the next session's real fills — which is what rung
+pricing actually got.
+
+**Check it before deploying:**
+
+```bash
+python -m scripts.deploy_gate            # classifies unpushed commits
+python -m scripts.deploy_gate --ref A..B # an explicit range
+```
+
+Advisory, not enforcement. A gate that blocks a genuine hotfix at 15:58 ET
+would be worse than the problem it solves.
+
+**Worth recording:** run against 2026-09-30's own batch (`fb3e4ec..786a5ef`) it
+returns **AFTER ONE CANARY SESSION** — i.e. that day's changes, which included a
+refactor of `_check_whipsaw_filter`, a live entry-skip decision, should not have
+gone straight to the live seat. They did.
+
 ## 3. Level I — dry-run → live-PAPER (the flip that actually happens here)
 
 **Canonical procedures:** [`RUNBOOKS.md` RB-8](migration/RUNBOOKS.md) ("Flip a variant from dry-run to LIVE
