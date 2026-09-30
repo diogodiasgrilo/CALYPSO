@@ -260,6 +260,43 @@ ACCOUNTING_FIXED_ON = {
 }
 
 
+# Individual rows that are understood and CANNOT be repaired. A per-row
+# register rather than a date cutoff, deliberately: a cutoff silences
+# everything before it, including breaks nobody has looked at yet. Each entry
+# below is a specific dated incident that was diagnosed on 2026-09-30 and found
+# unrepairable — not unimportant, unrepairable.
+#
+# Repairing these would mean INVENTING trade detail: strikes and credits for
+# entries whose rows are gone, from days whose logs rotated away (retention is
+# 7 days). That is the same fabrication this project corrected HOMER for.
+#
+# EVERY entry here is pre-2026-07-24, i.e. before B took the live seat. None of
+# them touches the live-seat record, and a test pins that.
+KNOWN_IRREPARABLE = {
+    ("a", "2026-03-20"): "2 entry rows lost; gross -1,590 reconciles to 3 stops "
+                         "+ 2 expired worth +165 by identity, but their strikes "
+                         "and credits are unrecoverable (logs rotated)",
+    ("a", "2026-04-09"): "e#1 row lost; its credit was ~435 by identity, strikes "
+                         "unrecoverable (logs rotated)",
+    ("a", "2026-07-01"): "MKT-047 pre-fix: two early_close flattens (-300, -405) "
+                         "were never booked into gross. Fixed for good in August "
+                         "(B's early_close went -37,500 in July to +255 in August)",
+    ("b", "2026-06-05"): "the entire session is absent — 0 trade_entries, 0 stops, "
+                         "0 market_ticks, 0 spread_snapshots. Only a summary row "
+                         "exists, so there is nothing to reconcile it against",
+    ("b", "2026-07-01"): "MKT-047 pre-fix: an early_close flatten (-1,850) was "
+                         "never booked into gross, which equals the 4 entry "
+                         "credits exactly. B was still DRY-RUN here (live from "
+                         "2026-07-24), so no real paper money is affected",
+}
+
+
+def _is_known_irreparable(vid: str, msg: str):
+    """The register entry for this row, or None."""
+    m = re.match(r"\s*(\d{4}-\d{2}-\d{2})", msg)
+    return KNOWN_IRREPARABLE.get((vid, m.group(1))) if m else None
+
+
 def _is_pre_fix(vid: str, msg: str) -> bool:
     """True when this row predates the variant's accounting fix."""
     cutoff = ACCOUNTING_FIXED_ON.get(vid)
@@ -284,9 +321,13 @@ def main(argv=None):
         for name, tag, msg in audit(root, vid, today):
             if tag.startswith("I") and _is_pre_fix(vid, msg):
                 tag = "PRE-FIX"
+            elif tag.startswith("I") and _is_known_irreparable(vid, msg):
+                tag = "KNOWN"
+                msg = f"{msg}  [{_is_known_irreparable(vid, msg)}]"
             marker = {"OK": "  ok ", "PENDING": "  .. ", "SKIP": "  -- ",
                       "NOTE": "  -- ", "ADJUSTED": "  -- ",
-                      "MULTIDAY": "  -- ", "PRE-FIX": "  -- "}.get(tag, "  !! ")
+                      "MULTIDAY": "  -- ", "PRE-FIX": "  -- ",
+                      "KNOWN": "  -- "}.get(tag, "  !! ")
             print(f"{marker}{name:<3} {tag:<8} {msg}")
             if tag in ("I1", "I2", "I3", "I4", "I5"):
                 worst = 1
