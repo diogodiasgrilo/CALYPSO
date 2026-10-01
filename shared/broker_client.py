@@ -51,6 +51,16 @@ class BrokerError(RuntimeError):
     the broker has Restart=always and the units depend on it softly (Wants=)."""
 
 
+# Reads whose cost scales with the number of strikes requested, so one RPC is
+# tens of IBKR calls through the broker's rate gate. 75s covers the broker's own
+# documented worst case for a single call (~63s: ib_retry's 31s backoff plus up
+# to 36s of snapshot warmup) with margin for gate contention, and is still short
+# enough that a stuck entry decision fails inside its own slot rather than
+# drifting into the next one.
+MULTI_CALL_READ_METHODS = frozenset({"qualify_option_strikes", "get_option_chain"})
+MULTI_CALL_READ_TIMEOUT_S = 75.0
+
+
 class BrokerClient:
     """Loopback RPC stub. Exposes exactly the allowlisted broker surface via
     ``__getattr__``; any other attribute access raises AttributeError as normal."""
@@ -133,11 +143,33 @@ class BrokerClient:
         # (the exact false-abort the size-scaled timeout exists to prevent). Give
         # the fill call its server budget + a 10s transport buffer; every other
         # method keeps the snappy default (a hung quote must NOT wait that long).
+        #
+        # MULTI-CALL SETUP READS need a bigger budget than the snappy default,
+        # and the default is what cost variant F an entire trading day on
+        # 2026-10-01. `qualify_option_strikes` makes ONE IBKR secdef_info call
+        # PER STRIKE; F asks for 61 of them (±150pt at 5pt spacing). Those 61
+        # calls each take a slot in the broker's 5 rps gate, so the floor is
+        # 12.2s even with the gate entirely to itself — and the gate was
+        # measured 77% saturated with 141 competing calls during F's window.
+        # Measured client-side throughput is ~0.48 RPC/s, which puts 61 slots
+        # far past 35s. The call was structurally unable to finish; it had been
+        # succeeding on luck of contention.
+        #
+        # These two are deliberately the ONLY exceptions. They are entry-path
+        # SETUP calls, made once before an entry, not loop calls — so waiting
+        # longer delays one entry decision. A quote read is the opposite: it
+        # runs inside the monitoring loop where the stop checks live, and
+        # blocking that for a minute would be far worse than failing fast. That
+        # is why the default stays snappy, and it is also why variant E's VIX
+        # ReadTimeout the same morning needed no fix: failing fast on a loop
+        # read, logging, and continuing is the behaviour we want.
         http_timeout = self._timeout
         if method == "place_and_wait_for_fill":
             server_timeout = kwargs.get("timeout_seconds")
             if server_timeout:
                 http_timeout = max(self._timeout, float(server_timeout) + 10.0)
+        elif method in MULTI_CALL_READ_METHODS:
+            http_timeout = max(self._timeout, MULTI_CALL_READ_TIMEOUT_S)
         try:
             # Serialize the request body with the SAME _json_default the broker's
             # return path (broker_service.to_jsonable) uses, so JSON-incompatible
