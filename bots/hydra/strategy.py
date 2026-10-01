@@ -7027,6 +7027,19 @@ class HydraStrategy(MEICStrategy):
             # (qty-0) ones. Never fatal: this is a diagnostic inside a
             # diagnostic.
             try:
+                import re as _re
+                # OCC symbol: YYMMDD + C/P + strike x 1000, 8 digits.
+                _re_occ = _re.compile(r"(\d{6})([CP])(\d{8})")
+                con_strikes = []
+                try:
+                    with self._data_recorder._connect() as _c:
+                        con_strikes = _c.execute(
+                            "SELECT short_call_strike, long_call_strike, "
+                            "short_put_strike, long_put_strike "
+                            "FROM trade_entries WHERE date = ?", (date_str,)
+                        ).fetchall()
+                except Exception:  # noqa: BLE001 — diagnostic inside a diagnostic
+                    con_strikes = []
                 raw = self.broker.get_positions() or []
                 legs = []
                 for r in raw:
@@ -7039,15 +7052,90 @@ class HydraStrategy(MEICStrategy):
                     ))
                 if legs:
                     legs.sort(key=lambda x: -abs(x[1]))
+
+                    # DECOMPOSE THE DRIFT (2026-10-01). The aggregate above has
+                    # been "unexplained" since 2026-09-24 and it flips sign —
+                    # +$622 on 09-23, -$543 on 09-24, +$4,598 on 09-25 — which
+                    # no commission convention explains. A sign flip is the
+                    # signature of a POPULATION difference, not a convention:
+                    # rows one side has and the other does not.
+                    #
+                    # On 2026-09-25 IBKR's per-leg list carried five strikes B
+                    # never recorded as entries (7780C, 7760C, 7765C, 7660P,
+                    # 7685P, summing -$840.19) — legs from partially-filled
+                    # entries that were then UNWOUND. They realize money at the
+                    # broker and appear in neither trade_entries nor
+                    # trade_stops, so our books cannot see them. Days with an
+                    # unwind showed large drift; days without showed small.
+                    #
+                    # So split the legs by whether their strike is one we
+                    # recorded. The drift should then decompose into
+                    # (our entries) + (orphans), which is checkable, instead of
+                    # a single number that is merely unexplained.
+                    #
+                    # Matched on STRIKE because trade_entries stores strikes,
+                    # not conids — parsed from the OCC symbol inside
+                    # contractDesc (`...260925C07750000...` -> 7750), which is
+                    # unambiguous, rather than from the free-text prefix.
+                    ours_strikes = set()
+                    try:
+                        for _row in con_strikes or []:
+                            for _v in _row:
+                                if _v:
+                                    ours_strikes.add(round(float(_v), 2))
+                    except Exception:  # noqa: BLE001
+                        ours_strikes = set()
+
+                    def _leg_strike(desc: str):
+                        """Strike from the OCC symbol, or None."""
+                        m = _re_occ.search(str(desc))
+                        if not m:
+                            return None
+                        try:
+                            return round(int(m.group(3)) / 1000.0, 2)
+                        except (TypeError, ValueError):
+                            return None
+
+                    ours_total = orphan_total = 0.0
+                    n_orphan = 0
+                    tagged = []
+                    for d, v, q in legs:
+                        k = _leg_strike(d)
+                        is_ours = (k is not None and k in ours_strikes) if ours_strikes else None
+                        if is_ours:
+                            ours_total += v
+                        elif is_ours is False:
+                            orphan_total += v
+                            n_orphan += 1
+                        tagged.append((d, v, q, k, is_ours))
+
                     out["broker_realized_by_leg"] = [
-                        {"leg": str(d), "realized": round(v, 2), "qty": q}
-                        for d, v, q in legs
+                        {"leg": str(d), "realized": round(v, 2), "qty": q,
+                         "strike": k, "in_trade_entries": is_ours}
+                        for d, v, q, k, is_ours in tagged
                     ]
+                    out["broker_realized_ours"] = round(ours_total, 2)
+                    out["broker_realized_orphan"] = round(orphan_total, 2)
+                    out["broker_realized_orphan_legs"] = n_orphan
+
                     logger.warning(
                         "BROKER-RECONCILE %s per-leg (sums to $%.2f): %s",
                         date_str, sum(v for _, v, _ in legs),
-                        " | ".join(f"{d}={v:+.2f}" for d, v, _ in legs[:12]),
+                        " | ".join(
+                            f"{d}[q={q}{'' if o is None else (' OURS' if o else ' ORPHAN')}]"
+                            f"={v:+.2f}"
+                            for d, v, q, _k, o in tagged[:12]),
                     )
+                    if ours_strikes:
+                        logger.warning(
+                            "BROKER-RECONCILE %s DECOMPOSED: our recorded "
+                            "entries $%+.2f | ORPHAN legs $%+.2f across %d leg(s) "
+                            "— orphans are partial fills that were unwound; they "
+                            "realize at the broker and appear in neither "
+                            "trade_entries nor trade_stops, so our gross cannot "
+                            "see them. This is the drift.",
+                            date_str, ours_total, orphan_total, n_orphan,
+                        )
             except Exception as _be:  # noqa: BLE001 — diagnostic only
                 logger.info(
                     "BROKER-RECONCILE %s: per-leg breakdown unavailable (%s)",
