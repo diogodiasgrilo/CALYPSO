@@ -371,3 +371,63 @@ but no cadence.
 **Instrument the measurement clock (G10) before anything else on this page.** It is
 the control that decides when real money is allowed to start, it is currently
 unmeasurable, and the first person to get it wrong was me, twice, today.
+
+---
+
+# Part 4 — F's 150pt strike search: measured, and deliberately NOT narrowed
+
+**2026-10-01.** Deferred on 10-01 as "a judgement call needing data rather than
+my opinion". Here is the data, and it closes the question with a *no change*.
+
+## What F's selected strikes actually do
+
+Every short strike F has ever selected (n=7):
+
+| date | VIX | spot | short | dist |
+|---|---|---|---|---|
+| 09-15 | 17.8 | 7574.26 | 7550 put | 24.3pt |
+| 09-21 | 14.7 | 7729.24 | 7750 call | 20.8pt |
+| 09-23 | 14.7 | 7722.74 | 7700 put | 22.7pt |
+| 09-24 | 15.7 | 7702.66 | 7730 call | 27.3pt |
+| 09-25 | 15.0 | 7742.42 | 7765 call | 22.6pt |
+| 09-28 | 16.4 | 7675.75 | 7650 put | 25.8pt |
+| 09-29 | 16.2 | 7661.87 | 7635 put | 26.9pt |
+
+**min 21pt · median 24pt · max 27pt**, against a configured search half-width of
+**150pt** — 5.5× the worst observed. On that alone, narrowing looks obviously
+right.
+
+## Why it would be wrong anyway
+
+**Zero observations at VIX ≥ 20.** F has only ever traded 14.7–17.8. A 15-delta
+0DTE strike's distance scales with vol, so extrapolating the observed ~24pt at
+VIX 15:
+
+| VIX | implied distance | needed half-width |
+|---|---|---|
+| 30 | ~48pt | 50pt |
+| 45 | ~72pt | 75pt |
+| 60 | ~96pt | 100pt |
+| 80 | ~128pt | 130pt |
+
+150pt covers roughly **VIX 94**. Narrowing to 75pt would cover only ~VIX 47 —
+and VIX has exceeded that in real crises. The range does not have to be tight;
+it only has to CONTAIN the delta-band strike, and being too narrow in an
+unobserved regime means F finds nothing and skips, which is the failure we just
+spent a day diagnosing.
+
+## And the reason it no longer needs to be narrow
+
+**`5f2f279` raised the multi-call read budget to 75s.** 61 calls has a 12.2s
+floor at the gate ceiling, so the cost now fits with large margin. Narrowing
+would have been a *workaround* for the timeout; the timeout is fixed.
+
+**DECISION: leave `strike_search_pts = 150`.** It buys unobserved-regime
+coverage, and the only cost it imposed — blowing the transport timeout — is
+gone.
+
+**What the 61 calls still cost is GATE PRESSURE**, and that is the right place to
+address it: raising the 5 rps gate (B7) helps all eight variants, where
+narrowing F helps only F. Part 1 recommended against B7 on exit-slippage
+grounds; this is the second, independent argument for it, and the stronger one —
+gate saturation makes event-triggered strategies lose entries outright.
