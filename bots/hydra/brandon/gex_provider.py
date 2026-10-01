@@ -106,6 +106,17 @@ GEX_HYDRATE_WORKERS = 12
 # from "how big is the cap" -- see fetch_polygon_chain_with_greeks.
 GEX_HYDRATE_DEADLINE_S = 15.0
 
+# Set by _fetch_chain when it stops with next_url still pending. Module-level
+# rather than threaded through six signatures: the flag exists so a truncated
+# chain is OBSERVABLE, and a return-shape change would reach the live strike
+# path for a diagnostic.
+_CHAIN_TRUNCATED: dict = {"value": False}
+
+
+def chain_was_truncated() -> bool:
+    """True if the most recent chain fetch stopped at its page cap."""
+    return bool(_CHAIN_TRUNCATED.get("value"))
+
 # Minimum contiguous strikes for a same-sign run to count as a gamma "wall".
 # LIVE DEFAULT since 2026-09-06 (was an opt-in parameter defaulting to 1 for
 # one day). A run of ONE strike has strike_low == strike_high == peak_strike,
@@ -717,7 +728,12 @@ def fetch_polygon_chain_with_greeks(
     expiry: date,
     api_key: str,
     http_fetch: Optional[HttpFetcher] = None,
-    max_pages: int = 4,
+    # 4 -> 20 (2026-10-01). 4 pages x limit=250 capped the chain at exactly
+    # 1000 contracts, and SPX exceeded that on 2 of 15 recorded days — both of
+    # which B spent placing nothing. 20 matches the inner fetcher's own default
+    # (5000 contracts), which is headroom rather than a new guess: the observed
+    # untruncated range is 484-652.
+    max_pages: int = 20,
     oi_threshold: int = 50,
     spot: Optional[float] = None,
     spot_window_pct: float = 0.05,
@@ -899,7 +915,36 @@ def fetch_polygon_chain(
 
     out: list[dict] = []
     pages = 0
-    while url and pages < max_pages:
+    truncated = False
+    while url:
+        if pages >= max_pages:
+            # TRUNCATION WAS SILENT UNTIL 2026-10-01, and it cost whole trading
+            # days. `limit=250` x the caller's `max_pages=4` capped the chain at
+            # exactly 1000 contracts; on the two days (of 15 recorded) that SPX
+            # listed more than that — 2026-09-18 and 2026-09-30 — the remainder
+            # was dropped with no log line at all.
+            #
+            # The damage is not a slightly smaller profile. A dropped tail
+            # leaves a HOLE in the delta ladder, and find_strike_at_delta picks
+            # the strike closest to 8d from whatever survived: on 09-30 the
+            # nearest put with delta data was 1.3d, ~120pt OTM, while the call
+            # side was unaffected at ~48pt. The caller's 4.0d floor then aborted
+            # every entry as "degraded data". B placed ZERO trades on both
+            # truncated days and traded on all thirteen others.
+            #
+            # So this must never be silent again. The guard that caught it
+            # blamed "chain under-hydrated", which sent the investigation after
+            # a hydration timeout that misses only 4.8% of the time.
+            truncated = True
+            logger.warning(
+                "Brandon GEX chain TRUNCATED: hit the %d-page cap with "
+                "next_url still set — %d contracts fetched and MORE REMAIN. A "
+                "dropped tail leaves a hole in the delta ladder, which reads "
+                "downstream as 'under-hydrated' and aborts entries on the "
+                "delta floor. Raise max_pages.",
+                max_pages, len(out),
+            )
+            break
         body = fetch(url)
         if body.get("status") not in (None, "OK", "DELAYED"):
             raise ValueError(f"polygon error: {body.get('error') or body}")
@@ -911,4 +956,5 @@ def fetch_polygon_chain(
         sep = "&" if "?" in next_url else "?"
         url = f"{next_url}{sep}apiKey={api_key}"
         pages += 1
+    _CHAIN_TRUNCATED["value"] = truncated
     return out
