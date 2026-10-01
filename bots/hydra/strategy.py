@@ -2347,17 +2347,61 @@ class HydraStrategy(MEICStrategy):
         ``{}`` on failure.
 
         Maps ``IBClient.get_balance()['tradable']`` to
-        ``MarginAvailableForTrading``. IBKR's balance does not surface
-        per-position margin-used / utilization — ``_check_buying_power``
-        ``.get()``s those with a 0 default, so omitting them merely
-        zeroes a diagnostic log line.
+        ``MarginAvailableForTrading``.
+
+        ⚠️ CORRECTION (2026-10-01). This docstring, and the comment in
+        ``_check_buying_power``, both claimed "IBKR's balance does not surface
+        per-position margin-used / utilization". **It does.** The
+        ``account/summary`` payload already returned here under ``_raw`` carries
+        ``fullinitmarginreq`` (margin committed), ``netliquidation``,
+        ``fullexcessliquidity`` and ``buyingpower`` — verified live against the
+        paper account. What IBKR does not surface is a pre-computed
+        *percentage*, which is not the same thing, and the difference left
+        ``trade_entries.margin_utilization_pct`` NULL on every IBKR-era row
+        while the inputs sat unread in this very dict.
+
+        So the percentage is derived here. Utilization is
+        ``fullinitmarginreq / netliquidation`` — margin committed against total
+        account value — which answers "how much of the account is working",
+        the question capital-efficiency work needs.
+
+        **Only diagnostic fields are added.** ``MarginUsedByCurrentPositions``
+        and ``MarginUtilizationPct`` are read by ``_check_buying_power`` via
+        ``.get()`` and feed a log line plus ``_last_margin_snapshot``; the BP
+        GATE decides on ``MarginAvailableForTrading`` alone. Deliberately NOT
+        adding ``NetEquityForMargin``: it sits in that method's field-priority
+        list, so introducing it could change which field the gate reads and
+        therefore whether a trade is allowed. A telemetry fix must not move a
+        trading decision.
+
+        ``{}`` on failure; ``None`` (never 0.0) when a field is genuinely
+        absent, so the column stays honestly NULL rather than reading as a
+        misleading "0% used".
         """
         try:
             bal = self.broker.get_balance() or {}
-            return {
+            out = {
                 "MarginAvailableForTrading": bal.get("tradable"),
                 "_raw": bal,
             }
+            summary = bal.get("raw_summary") or {}
+
+            def _amt(key):
+                v = summary.get(key)
+                if isinstance(v, dict):
+                    v = v.get("amount")
+                try:
+                    return float(v) if v is not None else None
+                except (TypeError, ValueError):
+                    return None
+
+            used = _amt("fullinitmarginreq")
+            total = _amt("netliquidation")
+            if used is not None:
+                out["MarginUsedByCurrentPositions"] = used
+            if used is not None and total is not None and total > 0:
+                out["MarginUtilizationPct"] = round(100.0 * used / total, 4)
+            return out
         except Exception as e:
             logger.warning(
                 f"_read_account_balance failed ({type(e).__name__}: {e})"

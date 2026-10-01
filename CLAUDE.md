@@ -906,6 +906,37 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u h
 
 **Cause 3:** No real-time entitlement for the conid (or stale conid). The `_snapshot_with_preflight` warmup-exhaustion WARNING logs distinguish: "metadata-only" = entitlement/conid issue, "empty list" = service outage (P7-audit M17).
 
+### B (or C) places NO entries all day — "chain under-hydrated" on every slot
+
+**Symptom:** every slot skipped with `delta-target put short NNNN is 1.3δ < 4.0δ
+floor (target 8.0δ) — chain under-hydrated, picked near-worthless far-OTM
+strikes`. One side (usually the call) looks sane at ~45–50pt OTM while the other
+is absurdly far at ~120pt.
+
+**The message is misleading — do NOT start with hydration.** Hydration misses
+its 15s deadline in only 8 of 167 refreshes (4.8%) and has never produced a thin
+chain (median 147 strikes contributed, minimum 111).
+
+**Check this first:**
+
+```sql
+SELECT substr(timestamp,1,10) d, MAX(chain_total) FROM gex_profile_snapshots
+GROUP BY d ORDER BY d DESC LIMIT 10;
+```
+
+`chain_total == 1000` means the Polygon chain was **TRUNCATED** — `limit=250`
+× the old `max_pages=4`. A dropped tail leaves a hole in the delta ladder, and
+the strike search picks the closest-to-8δ from whatever survived, which is why
+the failure is **one-sided**. On 2026-09-18 and 2026-09-30 this was the only
+cause, and B placed zero trades on both days while trading on all thirteen
+untruncated days.
+
+**Fixed 2026-10-01 (`1ab9222`):** cap raised to 20 pages (5000 contracts) and
+hitting it now logs `Brandon GEX chain TRUNCATED`, with
+`gex_provider.chain_was_truncated()` queryable. If that warning appears, raise
+`max_pages` again — do not loosen the 4.0δ floor, which is the guard that
+stopped bad trades being placed.
+
 ### Stop loss closed at wrong amount
 
 **Cause:** Probably NOT the C1 bug anymore (action paths gate on `*_uic`, not `*_position_id`). Check: was the entry merged with another at the same strike? IBKR (like Saxo) merges positions at the same (conid, side); the older order_id gets deleted, the newer one keeps its ID with increased Amount. Look for `_get_position_amount` / `_is_position_shared` log lines around the stop time.

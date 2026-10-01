@@ -7598,10 +7598,17 @@ class MEICStrategy(abc.ABC):
                 return True, "Balance check skipped (no margin field)"
 
             # Log margin snapshot for diagnostics + store for DataRecorder.
-            # On the IBKR path these fields are absent (IBKR doesn't surface
-            # used-margin / utilization / total value). utilization_pct is stored
-            # as None (not 0) so the DB column is honestly NULL rather than a
-            # misleading "0% used" — the gate itself uses `available`.
+            # CORRECTED 2026-10-01: this said "IBKR doesn't surface
+            # used-margin / utilization / total value". It does —
+            # `fullinitmarginreq`, `netliquidation`, `fullexcessliquidity` and
+            # `buyingpower` are all in the account/summary payload. What it does
+            # not surface is a pre-computed PERCENTAGE, and conflating the two
+            # left margin_utilization_pct NULL on every IBKR-era row while the
+            # inputs sat unread. `_read_account_balance` now derives it.
+            #
+            # Still None (never 0.0) when genuinely absent, so the column stays
+            # honestly NULL rather than reading as a misleading "0% used" — and
+            # the gate itself still decides on `available` alone.
             margin_used = balance.get("MarginUsedByCurrentPositions", 0)
             margin_pct = balance.get("MarginUtilizationPct")  # None if not surfaced (IBKR)
             total_value = balance.get("TotalValue", 0)
