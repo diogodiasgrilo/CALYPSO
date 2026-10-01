@@ -2151,9 +2151,16 @@ class HydraStrategy(MEICStrategy):
                 try:
                     norm = _normalize_position_dict(raw)
                 except ValueError as e:
-                    logger.debug(
-                        f"_read_open_positions: skipping unparseable "
-                        f"IB position ({e})"
+                    # WAS logger.debug until 2026-10-01. A skipped position is
+                    # not routine: this list feeds reconciliation and
+                    # naked-short detection, so a leg we cannot parse is a leg
+                    # the bot believes it does not hold. Being unable to see a
+                    # position is the premise of RB-6, not a parsing nicety.
+                    logger.warning(
+                        "_read_open_positions: SKIPPING an unparseable IB "
+                        "position — it is invisible to reconciliation and "
+                        "naked-short detection (%s). Raw: %.200s",
+                        e, raw,
                     )
                     continue
                 if norm.get("asset_type") != "OPT":

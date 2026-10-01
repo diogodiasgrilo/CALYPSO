@@ -1001,7 +1001,22 @@ class BrandonHydraStrategy(HydraStrategy):
         try:
             self._batch_update_entry_prices()
         except Exception as exc:
-            logger.debug("BRANDON: price refresh failed (non-fatal): %s", exc)
+            # NOT "non-fatal", and WAS logger.debug until 2026-10-01. Every
+            # decision below this line reads entry.{call,put}_spread_value —
+            # take-profit, the GEX breach exit, and the credit+buffer stop. If
+            # the refresh failed, they all evaluate on a STALE value, and right
+            # after placement the dataclass default is 0.0, which take-profit
+            # reads as 100% captured.
+            #
+            # So a silent failure here means TP and stop-loss deciding on
+            # prices that are not current — the same class as the 2026-07-06
+            # stale-SPX settlement phantom. It should be rare, which is exactly
+            # why it is worth a WARNING: if it starts happening, the decisions
+            # above are no longer trustworthy and nobody would have known.
+            logger.warning(
+                "BRANDON: price refresh FAILED — take-profit and stop checks "
+                "this tick evaluate on STALE spread values: %s: %s",
+                type(exc).__name__, exc, exc_info=True)
 
         # 1. Take-profit (LIVE)
         if self.brandon_take_profit_enabled:

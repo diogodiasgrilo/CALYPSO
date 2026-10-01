@@ -5083,7 +5083,15 @@ class MEICStrategy(abc.ABC):
                     )
             except Exception as _e:
                 # Never let the time check block a close — fall through to LMT.
-                logger.debug(f"  MKT-047 escalation check skipped: {_e}")
+                # That fallback is correct, but it is not free and WAS logged at
+                # debug until 2026-10-01: MKT-047 exists to force a MARKET close
+                # near the expiry, so a silently-skipped check means we attempt
+                # a LIMIT instead and can carry a position into settlement —
+                # the outcome the escalation was added to prevent.
+                logger.warning(
+                    "  MKT-047 escalation check FAILED — falling back to LIMIT "
+                    "near the close, so this leg may not flatten: %s: %s",
+                    type(_e).__name__, _e, exc_info=True)
         quote = self._read_option_quote(uic)
         limit_price = None
         if quote:
