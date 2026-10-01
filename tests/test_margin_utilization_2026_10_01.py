@@ -125,3 +125,32 @@ class TestAbsentMeansNullNotZero:
             raise RuntimeError("broker down")
         s.broker = SimpleNamespace(get_balance=boom)
         assert s._read_account_balance() == {}
+
+
+class TestNonFiniteValuesAreNotMeasurements:
+    """`float("nan")` SUCCEEDS — which is how NaN reached the column.
+
+    Found by fuzzing this function after it shipped, in a post-hoc audit of the
+    day's changes. Every other guard here passed it: `used is not None` is True
+    for NaN, `total > 0` is True, and `round(nan, 4)` is nan. NaN then lands in
+    `margin_utilization_pct`, where it is not a measurement of anything.
+    """
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf"), float("-inf")])
+    def test_a_non_finite_used_margin_yields_no_percentage(self, bad):
+        out = _strategy(_ibkr(used=bad, netliq=1_000_000.0))._read_account_balance()
+        assert "MarginUtilizationPct" not in out, (
+            f"used={bad} produced {out.get('MarginUtilizationPct')!r}")
+        assert "MarginUsedByCurrentPositions" not in out
+        assert out.get("MarginAvailableForTrading") is not None, (
+            "the balance came back empty — the gate would lose its field")
+
+    @pytest.mark.parametrize("bad", [float("nan"), float("inf")])
+    def test_a_non_finite_netliquidation_yields_no_percentage(self, bad):
+        out = _strategy(_ibkr(used=50_000.0, netliq=bad))._read_account_balance()
+        assert "MarginUtilizationPct" not in out, out.get("MarginUtilizationPct")
+
+    def test_the_percentage_is_always_finite_when_present(self):
+        out = _strategy(_ibkr(used=50_000.0, netliq=1_000_000.0))._read_account_balance()
+        import math as _m
+        assert _m.isfinite(out["MarginUtilizationPct"])

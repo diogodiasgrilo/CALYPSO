@@ -35,6 +35,7 @@ See docs/MEIC_STRATEGY_SPECIFICATION.md for base MEIC details.
 
 import json
 import logging
+import math
 import os
 import time
 import threading
@@ -2387,13 +2388,25 @@ class HydraStrategy(MEICStrategy):
             summary = bal.get("raw_summary") or {}
 
             def _amt(key):
+                """A finite float, or None.
+
+                The finite check is not decoration: `float("nan")` SUCCEEDS, so
+                a NaN from the broker passed both guards below and wrote NaN
+                into margin_utilization_pct. Found by fuzzing this function
+                after the fact (2026-10-01) — it is the one defect the
+                post-hoc audit of the day's changes turned up. NaN is not a
+                measurement, so it must read as absent.
+                """
                 v = summary.get(key)
                 if isinstance(v, dict):
                     v = v.get("amount")
+                if v is None:
+                    return None
                 try:
-                    return float(v) if v is not None else None
+                    f = float(v)
                 except (TypeError, ValueError):
                     return None
+                return f if math.isfinite(f) else None
 
             used = _amt("fullinitmarginreq")
             total = _amt("netliquidation")
