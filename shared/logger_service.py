@@ -21,6 +21,16 @@ from datetime import datetime
 from typing import Optional, Dict, List, Any
 from pathlib import Path
 import time
+
+# How many days of rotated bot logs to keep. 7 until 2026-10-01, which was
+# shorter than the questions asked of them — see the note at the handler.
+# Overridable per host without a code change: a VM that is tight on disk can
+# lower it, and a forensic push can raise it, without touching this file.
+# Floored at 7 so a malformed value cannot silently shrink retention to zero.
+try:
+    LOG_RETENTION_DAYS = max(7, int(os.environ.get("CALYPSO_LOG_RETENTION_DAYS", "90")))
+except (TypeError, ValueError):
+    LOG_RETENTION_DAYS = 90
 import threading
 from queue import Queue
 from email.mime.text import MIMEText
@@ -3465,7 +3475,8 @@ class LocalFileLogger:
             datefmt="%Y-%m-%d %H:%M:%S"
         )
 
-        # File handler (TimedRotatingFileHandler: rotate at midnight ET, keep 7 days)
+        # File handler (TimedRotatingFileHandler: rotate at midnight ET, keep
+        # LOG_RETENTION_DAYS days)
         # Rotated files: bot.log.2026-03-16, bot.log.2026-03-15, etc.
         #
         # Rotation is aligned to Eastern Time (the same zone every in-line
@@ -3514,8 +3525,27 @@ class LocalFileLogger:
                 off = self._et_offset_seconds()
                 return super().computeRollover(currentTime + off) - off
 
+        # RETENTION: 7 -> 90 days (2026-10-01). Seven days is shorter than the
+        # questions asked of these logs. On 2026-09-30 an investigation into
+        # unwound partial-fill legs could see only five sessions, and the one
+        # piece of evidence that mattered survived purely because the incident
+        # happened that week; a drift investigation the same day hit the same
+        # wall. A log that cannot answer "did this happen before?" is not much
+        # of a record.
+        #
+        # Affordable, and measured rather than assumed: these files run ~1 MB
+        # per variant per day, so 90 days across the fleet is roughly +850 MB
+        # against 7.0 GB free (2026-10-01: 20 GB disk, 63% used). The databases
+        # grow into the same space, which is why this is 90 and not 365.
+        #
+        # journald is deliberately NOT raised to match. It is already at its
+        # 10%-of-disk default (2.0 GB, about three weeks); 90 days there would
+        # need ~6 GB and take most of the remaining headroom. These files carry
+        # the ET-stamped detail that forensics actually use, so the depth
+        # belongs here.
         file_handler = ETMidnightRotatingFileHandler(
-            self.log_file, when="midnight", backupCount=7, encoding="utf-8"
+            self.log_file, when="midnight",
+            backupCount=LOG_RETENTION_DAYS, encoding="utf-8"
         )
         file_handler.setLevel(getattr(logging, self.log_level))
         file_handler.setFormatter(formatter)
