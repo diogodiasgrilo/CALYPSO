@@ -6866,25 +6866,75 @@ class HydraStrategy(MEICStrategy):
             # Per-entry realized P&L: reconcile the per-entry attribution against
             # the authoritative day total, then persist each entry's realized_pnl
             # to trade_entries (the number slot_edge.py reads).
-            self._record_entry_realized_pnl(date_str)
+            # EACH STAGE IS ISOLATED (2026-10-01). Ordering is preserved and
+            # unchanged; what changed is that one failing stage no longer
+            # silences the rest. See _settlement_stage.
+            self._settlement_stage(
+                "per_entry_realized_pnl", self._record_entry_realized_pnl, date_str)
 
             # Compute MAE/MFE from spread_snapshots
-            self._data_recorder.compute_mae_mfe(date_str)
+            self._settlement_stage(
+                "mae_mfe", self._data_recorder.compute_mae_mfe, date_str)
 
             # WAL checkpoint (prevent unbounded WAL growth)
-            self._data_recorder.wal_checkpoint()
+            self._settlement_stage(
+                "wal_checkpoint", self._data_recorder.wal_checkpoint)
 
             # SELF-HEAL the cumulative metrics from the just-written DB (root-cause
             # fix for metrics-vs-DB drift, 2026-07-20) — runs AFTER the daily_summary
             # row is durable so the DB is complete for today.
-            self._archive_pre_epoch_metrics()
-            self._reconcile_cumulative_metrics_from_db(date_str)
+            self._settlement_stage(
+                "archive_pre_epoch", self._archive_pre_epoch_metrics)
+            self._settlement_stage(
+                "metrics_self_heal", self._reconcile_cumulative_metrics_from_db, date_str)
 
             # The only check in this codebase that is NOT circular.
-            self._reconcile_pnl_against_broker(date_str)
+            self._settlement_stage(
+                "broker_reconcile", self._reconcile_pnl_against_broker, date_str)
 
         except Exception as e:
-            logger.debug(f"DataRecorder daily summary failed: {e}")
+            # WAS logger.debug until 2026-10-01 — the bot runs at INFO, so a
+            # settlement that failed outright was completely silent, the same
+            # defect found in the metrics self-heal the day before. With the
+            # stages now isolated, reaching HERE means something upstream of
+            # them broke: the payload, the staleness guard, or the DB write
+            # itself. That is the loudest thing in this method, not the
+            # quietest.
+            logger.warning(
+                "SETTLEMENT FAILED before the per-stage work — no daily_summary "
+                "row was written for %s: %s: %s",
+                date_str, type(e).__name__, e, exc_info=True)
+
+    def _settlement_stage(self, name: str, fn, *args):
+        """Run one post-write settlement stage in isolation.
+
+        Until 2026-10-01 every stage after the daily-summary write lived in the
+        SAME try/except, so the first one to raise silenced all the rest. The
+        chain is: per-entry realized P&L, MAE/MFE, **the WAL checkpoint**, the
+        metrics self-heal, and the broker reconcile — which is the only
+        non-circular P&L check in the codebase.
+
+        Three of those are load-bearing beyond telemetry. The WAL checkpoint
+        prevents unbounded WAL growth, so skipping it has an operational cost
+        that compounds. The self-heal is the drift guard. The broker reconcile
+        is the independent arm. None of them should be hostage to an unrelated
+        failure upstream.
+
+        This is the same shape as the health-check unit on 2026-09-30, where a
+        gating first step stopped the second from ever running and the report
+        went quiet precisely on the days something was wrong.
+
+        Never raises, and logs at WARNING with a traceback — a settlement stage
+        that fails quietly is how a whole day's telemetry goes missing without
+        anyone noticing.
+        """
+        try:
+            return fn(*args)
+        except Exception as exc:  # noqa: BLE001 — isolation is the point
+            logger.warning(
+                "SETTLEMENT-STAGE %s FAILED (continuing with the remaining "
+                "stages): %s: %s", name, type(exc).__name__, exc, exc_info=True)
+            return None
 
     def _record_entry_realized_pnl(self, date_str: str) -> None:
         """Reconcile per-entry realized P&L to the day total, then persist it to
