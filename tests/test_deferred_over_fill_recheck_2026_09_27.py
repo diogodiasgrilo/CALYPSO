@@ -65,9 +65,19 @@ def _rig(fill_ok=True):
     return s
 
 
-def _age(s, seconds):
-    """Backdate every parked check so its settle delay has elapsed."""
+def _age(s, seconds=None):
+    """Backdate every parked check so its settle delay has elapsed.
+
+    `seconds=None` means "just past the window, whatever the window is". The
+    call sites used to hardcode 60, which silently stopped being 'due' when the
+    settle window was raised 45 -> 120 on 2026-10-02: the sweeps would no-op and
+    every assertion that something WAS corrected would fail for the wrong
+    reason. Deriving it from the live window keeps these tests about behaviour
+    (due after the window elapses) rather than about a constant.
+    """
     import time
+    if seconds is None:
+        seconds = s._deferred_fill_settle_s() + 15
     for rec in s._pending_fill_checks().values():
         rec["at"] = time.monotonic() - seconds
 
@@ -104,7 +114,7 @@ class TestTheLagDefeatedTheImmediateCheck:
         assert s.orders == []
 
         s.book = +7                      # the lag resolves: 14 were bought
-        _age(s, 60)
+        _age(s)
         s._sweep_deferred_fill_checks()
 
         assert len(s.orders) == 1, "settled re-check did not correct the over-fill"
@@ -131,7 +141,7 @@ class TestTheSweepIsDisciplined:
         s.book = -7
         s._correct_over_fill(111, "BUY", qty_before=-7, intended_qty=7,
                              leg_name="short_call")
-        _age(s, 60)
+        _age(s)
         s._sweep_deferred_fill_checks()          # still lagging -> declines
         assert s._pending_fill_checks() == {}, (
             "the deferred re-check must be final, not self-renewing")
@@ -161,7 +171,7 @@ class TestTheSweepIsDisciplined:
         s.book = -7
         s._correct_over_fill(111, "BUY", qty_before=-7, intended_qty=7,
                              leg_name="short_call")
-        _age(s, 60)
+        _age(s)
         s._correct_over_fill = MagicMock(side_effect=RuntimeError("boom"))
         s._sweep_deferred_fill_checks()          # must not propagate
         assert s._pending_fill_checks() == {}, (
@@ -211,7 +221,7 @@ class TestSupersedingAndSafety:
         s._correct_over_fill(111, "BUY", qty_before=-7, intended_qty=7,
                              leg_name="short_call")
         s.book = -3                      # settled: only 4 of 7 bought back
-        _age(s, 60)
+        _age(s)
         s._sweep_deferred_fill_checks()
         assert s.orders == [], "traded on an under-fill"
 
@@ -240,7 +250,7 @@ class TestSupersedingAndSafety:
         # merge at the conid, say). Correcting toward the -3 expectation means
         # SELLING 3 from flat: opening a short to satisfy bookkeeping.
         s.book = 0
-        _age(s, 60)
+        _age(s)
         s._sweep_deferred_fill_checks()
         assert s.orders == [], (
             "a safety correction SOLD from a flat book — it opened a short")
@@ -252,7 +262,7 @@ class TestSupersedingAndSafety:
         s._correct_over_fill(111, "BUY", qty_before=-7, intended_qty=7,
                              leg_name="short_call")
         s.book = 0                       # flat: the close simply worked
-        _age(s, 60)
+        _age(s)
         s._sweep_deferred_fill_checks()
         assert s.orders == [], "a flat book must never trigger a trade"
 
@@ -264,7 +274,7 @@ class TestUncorrectedIsEscalated:
         s._correct_over_fill(111, "BUY", qty_before=-7, intended_qty=7,
                              leg_name="short_call")
         s.book = +7
-        _age(s, 60)
+        _age(s)
         s._sweep_deferred_fill_checks()
         assert len(s.orders) == 1, "no correction attempted"
         assert s.orphans, "an uncorrected over-fill must be orphan-flagged"

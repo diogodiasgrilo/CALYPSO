@@ -5201,17 +5201,52 @@ class MEICStrategy(abc.ABC):
 
     _DEFERRED_FILL_MAX_AGE_S = 600.0
 
+    # 120s against a measured lag whose observed maximum is 48s — a 2.5x margin.
+    #
+    # RAISED FROM 45s on 2026-10-02, and the reason is the original derivation's
+    # own rule. 45s was chosen as "2.25x against the ~20s measured lag, so the
+    # threshold is not sitting on its own sample maximum" (2026-09-27). On
+    # 2026-10-01 the lag was STILL PRESENT at 48s: B stopped E#5 and E#6 on the
+    # same shared conid, and the re-check read -7 when the truth was 0. That put
+    # 45s BELOW its own sample maximum — exactly the failure the rule exists to
+    # prevent, and the same shape as H1's "1.6x the worst of 25 sessions", which
+    # was likewise guaranteed to break the moment the sample grew a tail.
+    #
+    # WHY NOT A SMARTER TEST INSTEAD OF A BIGGER NUMBER. Two candidates were
+    # worked through and both are wrong:
+    #   * Compute `expected` from OUR OWN book rather than `qty_before + delta`.
+    #     Dangerous: both legs closed, true position 0, broker still reads -7,
+    #     so excess = -7 - 0 = -7 -> BUY 7 against a flat account, OPENING a +7
+    #     long. The reduce-only invariant below is what blocks that today.
+    #   * Take two reads a few seconds apart and require them to AGREE before
+    #     acting. Agreement proves stability, not settlement: the lag is a
+    #     PLATEAU, so two reads inside it agree on the same stale value.
+    # At read time "the broker disagrees with us" is identical for "over-filled"
+    # and "lagging". Time is the only discriminator there is, which is why this
+    # is a constant and not a predicate.
+    #
+    # KNOWN LIMIT, widened slightly by this change. The sweep is hooked into
+    # `_run_strategy_check_internal`; after the close `main.py` branches to the
+    # after-hours path instead, so a check parked in the final ~2 minutes is
+    # never swept. Not closed deliberately: for B — the only variant placing
+    # real orders — a post-close over-fill is on an EXPIRED 0DTE contract, so
+    # there is nothing left to correct, and adding an order-placing path that
+    # runs after the close buys no present benefit. POS-003 (hourly,
+    # ALERT-ONLY, untracked conids) remains the net, as it was at 45s.
+    _DEFERRED_FILL_SETTLE_DEFAULT_S = 120.0
+
     def _deferred_fill_settle_s(self) -> float:
         """How long to let the broker's book settle before re-checking.
 
-        45s by default against a ~20s measured lag — a 2.25x margin, chosen
-        so the threshold is not sitting on its own sample maximum.
+        Config-overridable via `fill_verify_settle_s`; see the derivation on
+        `_DEFERRED_FILL_SETTLE_DEFAULT_S` for why the default is what it is.
         """
         cfg = getattr(self, "strategy_config", None) or {}
+        default = self._DEFERRED_FILL_SETTLE_DEFAULT_S
         try:
-            return float(cfg.get("fill_verify_settle_s", 45.0))
+            return float(cfg.get("fill_verify_settle_s", default))
         except (TypeError, ValueError, AttributeError):
-            return 45.0
+            return default
 
     def _pending_fill_checks(self) -> dict:
         """The park bay, created lazily so no __init__ change is required."""
