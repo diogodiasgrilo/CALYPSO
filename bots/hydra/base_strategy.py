@@ -6373,6 +6373,23 @@ class MEICStrategy(abc.ABC):
             "capital_deployed": self._calculate_capital_deployed(),
         }
 
+    def _confirm_window_seconds(self) -> float:
+        """The breach-confirmation window that is ACTUALLY governing, in seconds.
+
+        Mirrors the decision site (`strategy.py` ~10346): MKT-036's window only
+        applies when MKT-036 is enabled; otherwise MKT-046's is the live one.
+
+        The status line used to print `stop_confirmation_seconds` (75s)
+        unconditionally, so on the live seat — where MKT-036 is DISABLED and
+        `mkt046_confirm_seconds` is 0 — it showed "CONF 49s/75s" while the stop
+        could in fact fire on the very next poll. That is misleading at exactly
+        the moment an operator is reading the line. Verified against B's
+        2026-10-01 stops, which logged "threshold 0.0s" and displayed 75s.
+        """
+        if getattr(self, "stop_confirmation_enabled", False):
+            return float(getattr(self, "stop_confirmation_seconds", 75))
+        return float(getattr(self, "mkt046_confirm_seconds", 10.0))
+
     def get_detailed_position_status(self) -> List[str]:
         """
         Get detailed status lines for each active position.
@@ -6431,8 +6448,8 @@ class MEICStrategy(abc.ABC):
             elif getattr(entry, 'call_breach_time', None) is not None:
                 # MKT-036: Stop confirmation in progress
                 elapsed = (datetime.now() - entry.call_breach_time).total_seconds()
-                conf_window = getattr(self, 'stop_confirmation_seconds', 75)
-                call_status = f"CONF {elapsed:.0f}s/{conf_window}s"
+                conf_window = self._confirm_window_seconds()
+                call_status = f"CONF {elapsed:.0f}s/{conf_window:.0f}s"
             else:
                 call_status = f"{call_pct:.0f}% cushion"
 
@@ -6448,8 +6465,8 @@ class MEICStrategy(abc.ABC):
             elif getattr(entry, 'put_breach_time', None) is not None:
                 # MKT-036: Stop confirmation in progress
                 elapsed = (datetime.now() - entry.put_breach_time).total_seconds()
-                conf_window = getattr(self, 'stop_confirmation_seconds', 75)
-                put_status = f"CONF {elapsed:.0f}s/{conf_window}s"
+                conf_window = self._confirm_window_seconds()
+                put_status = f"CONF {elapsed:.0f}s/{conf_window:.0f}s"
             else:
                 put_status = f"{put_pct:.0f}% cushion"
 

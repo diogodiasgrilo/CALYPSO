@@ -249,7 +249,33 @@ One-sided stops:
 **Correction (2026-08-20, found stale by a full execution audit): B's ACTUAL acting stop is no longer credit+buffer.** Since commit `fd53cef` (2026-07-24, the B↔C swap audit), variant B's live config has `strategy.narrow_spread_stop.enabled=true, pct_of_width=0.4`. `strategy.py`'s **A2 %-of-width override** (~line 8230, logged as `A2: Entry #N {side} %-of-width stop = ...`) runs AFTER the credit+buffer branches above and REPLACES each placed side's `{side}_side_stop` with `pct_of_width × spread_width × 100 × contracts` — e.g. B, 5pt-wide spread, 7c, 40%: `0.40 × 5 × 100 × 7 = $1,400`, not whatever credit+buffer would have produced. This is config-gated (default off) so **A and un-migrated C are unaffected** and still run the credit+buffer formula described above — the paragraph above remains accurate for them. `_get_effective_stop_level` also bypasses MKT-042 buffer decay for A2-mode stops (the % trigger doesn't widen early-day the way credit+buffer does). Check `narrow_spread_stop.enabled` in the live variant config before assuming credit+buffer is what will actually fire on a given variant. (The separate `hydra_stop_shadow`/A2-SHADOW mechanism mentioned elsewhere in this file is a parallel, non-acting shadow comparison on C — do not confuse the two.)
 
 ### Stop Anti-Spike Filter (MKT-046)
-10-second persistence requirement on breach. Filters momentary bid/ask spikes from MM widening. On first breach, logs full bid/ask detail (`STOP-DETAIL`). If spread recovers within 10s → `MKT-046_FALSE_STOP_AVOIDED`. (MKT-036 75-second confirmation timer is `stop_confirmation_enabled: false`.)
+Persistence requirement on breach — the breached side must still be breached on a
+later check before the stop fires. Filters momentary bid/ask spikes from MM
+widening. On first breach, logs full bid/ask detail (`STOP-DETAIL`); if the spread
+recovers within the window → `MKT-046_FALSE_STOP_AVOIDED`. (MKT-036's 75-second
+timer is `stop_confirmation_enabled: false`; when it is off, `mkt046_confirm_seconds`
+is the governing window — mirrored by `base_strategy._confirm_window_seconds()`.)
+
+> ⚠️ **Corrected 2026-10-02: this said "10-second persistence requirement" as though
+> it were a system-wide constant. It is `mkt046_confirm_seconds` (code default 10.0)
+> and **the live seat B runs it at `0`.** On B the persistence requirement is
+> therefore the *poll interval*, not a timer: the side must simply still be breached
+> at the next evaluation. That still filters single-tick spikes — 6 of 17 live-era
+> stops recorded ≥1 `breach_recoveries` — but there is no fixed grace period, and a
+> reader of the old line would have assumed 10s of protection B does not have.
+> Check `mkt046_confirm_seconds` in the variant config before assuming any window.
+
+**Stop-close slippage is the real cost at the stop, not the filter (measured 2026-10-02).**
+`trade_stops.slippage_on_close` over the live era: **n=17, mean +$195/stop, total
+$3,310** — roughly a third of B's lifetime net. It is **not** caused by confirmation
+delay (12s→$860, 66s→$890, 62s→**−$280**: no relationship). It is leg sequencing:
+`EMERGENCY-001` closes the short first (deliberately — never naked short), then the
+long 10–19s later, so a spike-then-revert pays the adverse side of both. On
+2026-10-01 the short legs filled at or better than their ask while the long legs sold
+**$0.80 and $1.50/share below their bid**. Most of that window is IBKR paper's own
+13–16s fill latency, so a meaningful share of the $3,310 may be a **paper artefact
+that a live account would not pay** — re-measure on live fills before re-engineering
+the exit path. Combos cannot fix it (not operable on IBKR paper; ICs must leg in).
 
 ### Buffer Decay (MKT-042)
 Starts at `buffer_decay_start_mult` (default 2.50) × normal buffer, linearly decays to 1× over `buffer_decay_hours` (default 4.0h). Wider stops early when premium is rich; normal stops later as theta decays.

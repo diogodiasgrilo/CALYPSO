@@ -172,6 +172,40 @@ more aggressive rule would have stopped — made money.
 
 | # | Trigger | Threshold (1 contract) | Why this number |
 |---|---|---|---|
+> ## ⚠️ H1 BINDS BEFORE H3 — the 2026-09-30 "H1 is H3's dollar shadow" ordering is INVERTED (found 2026-10-02)
+>
+> The Option-A derivation is **structural**: `pct_of_width × width × 100` = `0.40 × 5 × 100`
+> = **$200 per contract per stopped side**, so 3 sides = $600 = H1, which made H3 (≥3 stops)
+> look like the binding trigger. **That holds only at zero slippage, and slippage is
+> measured and material.**
+>
+> **2026-10-01, B, 7 contracts, TWO stops** — structural exposure $400/contract:
+>
+> | | per contract | vs H1 (−$600) |
+> |---|---|---|
+> | structural (2 × $200) | −$400.00 | 67% |
+> | **actual gross** (−$3,475.00) | **−$496.43** | **83%** |
+> | **actual net** (−$3,700.40) | **−$528.63** | **88%** |
+>
+> Two stops consumed **88% of a threshold calibrated for three.** Extrapolating that
+> same ratio to a third stop gives **−$793/contract (net) or −$745 (gross)** — both
+> through H1 — so **H1 trips at ≈2.3 stops (net) / ≈2.4 (gross), while H3 still needs 3.**
+> H1 is now the *earlier* tripwire, not the shadow of a later one.
+>
+> **The gross-vs-net ambiguity in "Realized loss in one session" does NOT change this**
+> — both readings land between 2 and 3 stops. For the record the intended reading is
+> **net** (what hits the books, commission included); yesterday that was −$528.63/contract
+> against a gross −$496.43, and the $32.20/contract difference is commission.
+>
+> **Why it matters:** the Gate-9 note says H3 is the real trigger and H1 its dollar
+> shadow, so an operator watching the stop COUNT would expect to halt on the third.
+> They will in fact breach the dollar limit partway through it. That is a safer
+> direction to be wrong in (the dollar rule fires early, not late), so this is a
+> **documentation correction, not a threshold change** — H1 stays at −$600/contract and
+> enforcement stays manual. Driver: stop-close slippage, mean **+$195/stop** over n=17
+> (`trade_stops.slippage_on_close`), with 2026-10-01's two stops the worst ever at
+> $860/$890. See CLAUDE.md § Stop Anti-Spike Filter.
+
 | H1 | Realized loss in one session | **≤ −$600** | **STRUCTURAL (chosen 2026-09-30):** `max_sides_tolerated × $200` = 3 × $200. H3 (≥3 stops) is the real trigger; H1 is its dollar shadow. Replaces "1.6× the worst of 25 paper sessions (−$256)", which was breached on 2026-09-21 at −$441.17 and was **guaranteed** to break again — a "worst observed" rule moves every time the sample grows a tail. This number does not move. |
 | H2 | Cumulative realized loss, week 1 | **≤ −$600** | 2.1× the worst paper drawdown (−$280) |
 | H3 | Stop-losses in one session | **≥ 3** | paper max was 2. **Now consistent with H1 by construction** — 3 stops × $200/side is exactly H1's −$600, so a 3-stop session trips both together instead of being simultaneously inside H3 and past H1 (the inconsistency flagged 2026-09-22). |
