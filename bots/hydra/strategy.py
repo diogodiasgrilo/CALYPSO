@@ -6534,15 +6534,34 @@ class HydraStrategy(MEICStrategy):
             self._last_stop_time = now
 
             # Quoted mid at stop (from current prices on entry)
-            if side == "call":
-                quoted_mid = entry.call_spread_value if entry.call_spread_value else None
-                credit = entry.call_spread_credit
-            else:
-                quoted_mid = entry.put_spread_value if entry.put_spread_value else None
-                credit = entry.put_spread_credit
+            #
+            # 2026-10-04: `X if X else None` conflated a spread value of 0.0
+            # with a MISSING one — and 0.0 is the single most common value at an
+            # MKT-047 EOD flatten, because a deep-OTM side really is worthless
+            # there. Result: `quoted_mid` and therefore `slippage_on_close` came
+            # back NULL on 8 of 27 live-era `early_close` rows (30%) while
+            # `stop_loss` was 0 of 17 complete — a stop never fires at a spread
+            # value of 0. Verified on 2026-10-02, where both NULL rows were the
+            # deep-OTM call sides (SPX 7721 against C7780).
+            #
+            # This is the SAME falsy-zero bug the `net_pnl` block below records
+            # fixing on 2026-07-14; it was simply never applied to these two
+            # lines. MKT-047 is the DOMINANT exit path (27 rows vs 17 stops) and
+            # exit slippage is an open money question, so a 30% hole in it was
+            # the measurement, not a cosmetic gap.
+            raw_mid = entry.call_spread_value if side == "call" else entry.put_spread_value
+            credit = entry.call_spread_credit if side == "call" else entry.put_spread_credit
+            quoted_mid = None
+            if raw_mid is not None:
+                try:
+                    quoted_mid = float(raw_mid)
+                except (TypeError, ValueError):
+                    quoted_mid = None
 
+            # Same distinction on both operands: a 0.0 close cost against a 0.0
+            # mid is zero slippage, which is a RESULT, not an absence of one.
             slippage = None
-            if actual_close_cost and quoted_mid:
+            if actual_close_cost is not None and quoted_mid is not None:
                 slippage = actual_close_cost - quoted_mid
 
             # I-M2 (fixed 2026-07-14): net_pnl = credit - actual_close_cost whenever

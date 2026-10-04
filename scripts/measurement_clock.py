@@ -75,23 +75,67 @@ def economic_paths(paths):
     return out
 
 
-def trading_days_back(n_days: int):
-    """Most recent trading days, newest first — weekends AND market holidays out."""
+def _market_holidays():
+    """Set of market-holiday `date`s, shared by every date helper here.
+
+    🔴 FIXED 2026-10-04. `get_us_market_holidays(year)` returns
+    ``{holiday NAME: datetime}``, and the original code did
+    ``{d: True for d in get_us_market_holidays(yr)}`` — iterating a dict yields
+    its KEYS, so this set was filled with strings like "Christmas Day" and the
+    membership test `d not in hol` **never matched a single holiday**. The
+    exclusion was a no-op from the day it was written (2026-09-30), so market
+    holidays counted as clean trading days and inflated the very streak the
+    go-live gate reads. Same silent-miss class as the weekend blind spot below,
+    found in the same pass.
+    """
     try:
         from shared.market_hours import get_us_market_holidays
     except Exception:
-        get_us_market_holidays = None
-    hol = {}
+        return set()
+    out = set()
     today = date.today()
-    for yr in {today.year, today.year - 1}:
-        if get_us_market_holidays:
-            try:
-                hol.update({d: True for d in get_us_market_holidays(yr)})
-            except Exception:
-                pass
-    days, d = [], today
+    for yr in {today.year - 1, today.year, today.year + 1}:
+        try:
+            for v in get_us_market_holidays(yr).values():
+                out.add(v.date() if hasattr(v, "date") else v)
+        except Exception:
+            pass
+    return out
+
+
+def _is_trading_day(d, hol=None):
+    hol = _market_holidays() if hol is None else hol
+    return d.weekday() < 5 and d not in hol
+
+
+def next_trading_day_on_or_after(d, hol=None):
+    """The trading day a commit made on `d` actually affects.
+
+    WHY THIS EXISTS. Until 2026-10-04 commits were keyed on their raw calendar
+    date and the streak only ever looked up TRADING-day keys — so a commit made
+    on a Saturday or Sunday matched nothing and was **never counted**. The gate
+    is "15 consecutive trading days with no economics-changing commit", and its
+    whole point is that the measured days ran UNCHANGED code. A weekend
+    money-path commit breaks that intent while passing the check, which made the
+    weekend a silent blind spot big enough to drive any change through.
+
+    Found while checking whether a Sunday deploy was "free on the clock". It
+    was — and that was the bug, not a feature.
+    """
+    hol = _market_holidays() if hol is None else hol
+    guard = 0
+    while not _is_trading_day(d, hol) and guard < 30:
+        d += timedelta(days=1)
+        guard += 1
+    return d
+
+
+def trading_days_back(n_days: int):
+    """Most recent trading days, newest first — weekends AND market holidays out."""
+    hol = _market_holidays()
+    days, d = [], date.today()
     while len(days) < n_days:
-        if d.weekday() < 5 and d not in hol and d.isoformat() not in hol:
+        if _is_trading_day(d, hol):
             days.append(d)
         d -= timedelta(days=1)
     return days
@@ -126,6 +170,35 @@ def commits(window_days: int):
     return out
 
 
+def attribute_to_trading_days(cs, hol=None):
+    """Group commits by the TRADING day each one affects.
+
+    Extracted from main() on 2026-10-04. It had lived inline, which is exactly
+    why the weekend blind spot survived: the tests re-implemented this keying
+    themselves instead of calling it, so they could not catch a bug in it — and
+    being date-dependent, they also failed outright on any weekend. Now there is
+    one implementation and the tests exercise it.
+
+    Returns (by_date, deferred) where `deferred` lists the commits that were
+    attributed FORWARD off a non-trading day.
+    """
+    hol = _market_holidays() if hol is None else hol
+    by_date, deferred = {}, []
+    for c in cs:
+        try:
+            raw = date.fromisoformat(c["date"])
+        except (TypeError, ValueError):
+            by_date.setdefault(c["date"], []).append(c)
+            continue
+        eff = next_trading_day_on_or_after(raw, hol)
+        c["effective_date"] = eff.isoformat()
+        c["deferred"] = (eff != raw)
+        if c["deferred"]:
+            deferred.append(c)
+        by_date.setdefault(eff.isoformat(), []).append(c)
+    return by_date, deferred
+
+
 def streak(days, by_date, honour_exemptions: bool):
     n = 0
     for d in days:
@@ -145,10 +218,15 @@ def main(argv=None):
     a = ap.parse_args(argv)
 
     cs = commits(a.days)
-    by_date = {}
-    for c in cs:
-        by_date.setdefault(c["date"], []).append(c)
+    by_date, _deferred = attribute_to_trading_days(cs)
     days = trading_days_back(a.days)
+    # Commits attributed to a trading day that has not happened yet (i.e. made
+    # over a weekend or holiday). They are NOT in `days`, so they cannot break
+    # the streak today — but they will the moment that day arrives, and saying
+    # so is the difference between a blind spot and a known pending cost.
+    newest = days[0] if days else None
+    pending = [c for c in cs if c.get("deferred")
+               and newest and c.get("effective_date", "") > newest.isoformat()]
 
     s_strict, d_strict, h_strict = streak(days, by_date, False)
     s_claim, d_claim, h_claim = streak(days, by_date, True)
@@ -160,6 +238,10 @@ def main(argv=None):
             "broken_on_strict": d_strict.isoformat() if d_strict else None,
             "exemptions_in_play": s_claim != s_strict,
             "met": s_strict >= TARGET_DAYS,
+            "pending_next_trading_day": [
+                {"sha": c["sha"], "date": c["date"],
+                 "effective_date": c.get("effective_date"),
+                 "subject": c["subject"]} for c in pending],
         }, indent=2))
         return 0
 
@@ -182,6 +264,12 @@ def main(argv=None):
         print("  ⚠️  The two numbers disagree, so a self-granted exemption is holding")
         print("      the claimed streak up. Quote the STRICT number unless those")
         print("      exemptions have been reviewed by someone other than their author.")
+    if pending:
+        print()
+        print(f"  ⏳ {len(pending)} money-path commit(s) made on a NON-trading day are")
+        print(f"     attributed forward to {pending[0].get('effective_date')} and will break it:")
+        for c in pending:
+            print(f"      {c['sha']}  {c['date']} -> {c.get('effective_date')}  {c['subject']}")
     print()
     print("  recent money-path commits by trading day:")
     for d in days[:12]:

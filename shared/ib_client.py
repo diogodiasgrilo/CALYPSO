@@ -504,6 +504,24 @@ class _RateGate:
         self._min_interval = 1.0 / max_rps
         self._lock = threading.Lock()
         self._next_allowed = 0.0
+        # Telemetry (2026-10-04). The gate computed `wait` and slept on it while
+        # recording NOTHING — no counter, no log line, no metric. A full trading
+        # day of the live seat's log yields only a startup "pacing multiplier"
+        # banner, so gate-induced delay was completely invisible.
+        #
+        # That made a real question unanswerable: B7 (raising the gate 5 -> 7)
+        # is justified only if queuing measurably delays work — in particular
+        # the gap between closing leg 1 and leg 2 of a stop, where exit
+        # slippage averages +$195/stop. With no measurement the argument could
+        # only be asserted. These four numbers turn it into a reading.
+        #
+        # Accumulated under the EXISTING reservation lock, which is held for a
+        # few microseconds: `wait` is already determined there, so no second
+        # lock and no added contention.
+        self._acquisitions = 0
+        self._waited = 0
+        self._total_wait_s = 0.0
+        self._max_wait_s = 0.0
 
     def acquire(self) -> None:
         with self._lock:
@@ -511,8 +529,30 @@ class _RateGate:
             slot = self._next_allowed if self._next_allowed > now else now
             self._next_allowed = slot + self._min_interval
             wait = slot - now
+            self._acquisitions += 1
+            if wait > 0:
+                self._waited += 1
+                self._total_wait_s += wait
+                if wait > self._max_wait_s:
+                    self._max_wait_s = wait
         if wait > 0:
             time.sleep(wait)
+
+    def stats(self) -> dict:
+        """Cumulative gate pressure. Never reset — a caller that wants a rate
+        takes two readings and differences them, the way
+        `snapshot_warmup_exhausted_count` is used."""
+        with self._lock:
+            acq = self._acquisitions
+            return {
+                "max_rps": round(1.0 / self._min_interval, 3),
+                "acquisitions": acq,
+                "waited": self._waited,
+                "waited_pct": round(100.0 * self._waited / acq, 1) if acq else 0.0,
+                "total_wait_s": round(self._total_wait_s, 3),
+                "mean_wait_ms": round(1000.0 * self._total_wait_s / acq, 2) if acq else 0.0,
+                "max_wait_ms": round(1000.0 * self._max_wait_s, 2),
+            }
 
 # Default answers for IBKR's order-reply prompts. Caller can override per-call.
 #
@@ -1612,6 +1652,21 @@ class IBClient:
         future calls.
         """
         return dict(self._breakers)
+
+    @property
+    def rate_gate_stats(self) -> dict:
+        """Cumulative request-rate-gate pressure, or {} when the gate is off.
+
+        Exposed so the broker can publish it on /health — the gate lives inside
+        calypso-broker, so a strategy-side reading would always be empty.
+        """
+        gate = getattr(self, "_rate_gate", None)
+        if gate is None:
+            return {}
+        try:
+            return gate.stats()
+        except Exception:  # noqa: BLE001 - telemetry must never break a call path
+            return {}
 
     @property
     def snapshot_warmup_exhausted_count(self) -> int:

@@ -63,11 +63,25 @@ class TestWhatCountsAsEconomic:
         assert mc.economic_paths(["bots/hydra/some_new_strategy.py"])
 
 
-def _repo(tmp_path, commits):
-    """A real git repo. `commits` = list of (path, message)."""
+def _repo(tmp_path, commits, on=None):
+    """A real git repo. `commits` = list of (path, message).
+
+    `on` pins the commit date to a TRADING day (default: the most recent one).
+    Without it, git stamps "now" — so on a Saturday or Sunday every commit in
+    the fixture landed on a non-trading date, matched no trading day, and the
+    streak assertions below silently inverted. These tests passed Mon-Fri and
+    failed at weekends for reasons that had nothing to do with what they test.
+    Pinning the date makes them deterministic whenever the suite runs.
+    """
+    import os
+    if on is None:
+        on = mc.trading_days_back(1)[0]
+    stamp = "%sT12:00:00" % on.isoformat()
+    env = dict(os.environ, GIT_AUTHOR_DATE=stamp, GIT_COMMITTER_DATE=stamp)
     r = tmp_path / "r"
     r.mkdir()
-    run = lambda *a: subprocess.run(a, cwd=r, capture_output=True, text=True, check=True)
+    run = lambda *a: subprocess.run(a, cwd=r, capture_output=True, text=True,
+                                    check=True, env=env)
     run("git", "init", "-q")
     run("git", "config", "user.email", "t@t")
     run("git", "config", "user.name", "t")
@@ -93,9 +107,12 @@ class TestTheStrictNumberCannotBeTalkedDown:
         assert len(econ) == 1, econ
         assert econ[0]["exempt"], "the trailer was not detected at all"
 
-        by = {}
-        for c in econ:
-            by.setdefault(c["date"], []).append(c)
+        # Call the REAL attribution rather than re-implementing it. These two
+        # tests used to key on c["date"] themselves, which (a) meant they could
+        # not catch a bug in main()'s keying — and the weekend blind spot was
+        # exactly such a bug — and (b) made them fail on any weekend, because a
+        # Saturday/Sunday commit date matched no trading day.
+        by, _ = mc.attribute_to_trading_days(econ)
         days = mc.trading_days_back(30)
         s_strict, _, _ = mc.streak(days, by, honour_exemptions=False)
         s_claim, _, _ = mc.streak(days, by, honour_exemptions=True)
@@ -114,9 +131,7 @@ class TestTheStrictNumberCannotBeTalkedDown:
         ])
         monkeypatch.chdir(r)
         cs = [c for c in mc.commits(30) if c["paths"]]
-        by = {}
-        for c in cs:
-            by.setdefault(c["date"], []).append(c)
+        by, _ = mc.attribute_to_trading_days(cs)
         days = mc.trading_days_back(30)
         assert mc.streak(days, by, False)[0] == mc.streak(days, by, True)[0] == 0
 

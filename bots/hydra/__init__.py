@@ -36,6 +36,51 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-04 STALE SESSION-OPEN PRINT — a single tick corrupted a LIVE skip path.
+  IBKR can serve the PRIOR DAY'S CLOSE as the first regular-session print, flagged
+  6509='R' (real-time), so the existing Z/Y/N freshness gate does not catch it. Because
+  that tick is both the FIRST and an extreme, it set spx_open AND an extreme in one go.
+  Measured on 3 of 24 trading days: G 2026-10-02 took 7666.45 at 09:30:03 with the next
+  tick 10s later at 7735.76 (+69pt); A 2026-09-10 took a +41.6pt one; D 2026-09-11
+  recorded spx_open = 0.00. G's day became day_range 53 -> 88, day_type chop -> TREND,
+  realized_volatility 8.5 -> 16.4.
+  NOT just an analytics problem: `_check_whipsaw_filter` is a live entry-skip path on B
+  and reads spx_high-spx_low, while `_expected_daily_move()` is built from spx_open. For
+  a stale-LOW open both errors push the same way — toward falsely SKIPPING entries,
+  roughly 1 day in 8 by lottery (whichever variant polls first at 09:30:0x).
+  THE FIX. The value cannot be screened on arrival — it IS the prior close, so there is
+  nothing to compare it against. A second independent read is the only discriminator, so
+  the first regular-session tick is held as a CANDIDATE and promoted only once the next
+  tick agrees within tolerance; otherwise the newer tick becomes the open and the
+  candidate is discarded from OHLC ENTIRELY (it never reaches spx_open, high or low).
+  TOLERANCE IS MEASURED, not guessed: n=138 variant-days, |2nd-1st|/1st is p50 0.020%,
+  p90 0.056%, p99 0.131% on legitimate days against 0.528% and 0.904% for the two known
+  stale prints — a 4x gap, so any tolerance in 0.20%-0.50% rejects exactly those 2 of 138.
+  Default 0.30% (`session_open_corroboration_pct`). Cost of a false reject is one poll of
+  open-capture latency; no variant enters before 09:45. 17 tests + a behaviourally-verified
+  control that reproduces the exact 2026-10-02 corruption. Six existing tests pinned the
+  old single-tick capture and were updated (one had fed a 0.43% jump between consecutive
+  ticks, which the p99 of 0.131% shows is not a realistic sequence).
+- 2026-10-04 MKT-047 LOST ITS OWN SLIPPAGE — `quoted_mid = X if X else None` conflated a
+  spread value of 0.0 with a MISSING one, and 0.0 is the most common value at an EOD
+  flatten because a deep-OTM side really is worthless there. So `quoted_mid_at_stop` and
+  `slippage_on_close` were NULL on 8 of 27 live-era `early_close` rows (30%) while
+  `stop_loss` was 0 of 17 complete — a stop never fires at a spread value of 0. MKT-047
+  is the DOMINANT exit path (27 rows vs 17) and exit slippage is an open money question,
+  so the hole was in the measurement itself. Same falsy-zero bug the `net_pnl` block two
+  lines below records fixing on 2026-07-14; it was simply never applied to these lines.
+  Both operands now test `is not None`: 0.0 close against 0.0 mid is zero slippage, which
+  is a RESULT. 5 execution tests against a real DB + a verified control.
+- 2026-10-04 RATE GATE RECORDED NOTHING — `_RateGate.acquire()` computed its wait and
+  slept on it with no counter, log or metric, so gate-induced delay was invisible (a full
+  day of the live seat's log yields only a startup "pacing multiplier" banner). That made
+  B7 (gate 5 -> 7) undecidable: its justification is that queuing measurably delays work,
+  especially between closing leg 1 and leg 2 of a stop where slippage averages +$195.
+  Now accumulates acquisitions / waited / total_wait_s / max_wait_s under the EXISTING
+  reservation lock (held microseconds; no new lock), exposed as
+  `IBClient.rate_gate_stats` and published on the broker's /health — the gate lives in
+  calypso-broker, so a strategy-side reading would always be empty. Purely additive
+  (68 insertions, 0 deletions), so no P7 finding is reopened. 13 tests.
 - 2026-09-27 EOD flatten cushion settled at 20pt (was briefly 25pt the same day; 10pt before).
   25pt was deployed and REVERTED within hours because the argument for it was wrong, and the
   error is worth recording: "insure a tail the sample does not contain" does not apply here,

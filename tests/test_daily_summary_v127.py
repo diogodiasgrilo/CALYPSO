@@ -55,10 +55,18 @@ class TestMarketDataOHLC:
     """Test MarketData open/high/low/close tracking for SPX and VIX."""
 
     def test_spx_open_set_on_first_update(self):
-        """SPX open should capture the first valid price."""
+        """SPX open captures the first valid price, once corroborated."""
+        # 2026-10-04: the session's first regular-hours tick is now held as a
+        # CANDIDATE until a second tick corroborates it, because IBKR can serve
+        # the prior close flagged real-time at 09:30 (3 of 24 days). So a single
+        # update no longer sets the open — a corroborating tick is required.
+        # Deltas here are kept realistic: the measured p99 first-to-second move
+        # is 0.131%, and anything over 0.30% is treated as a stale print.
         md = MarketData()
         assert md.spx_open == 0.0
         md.update_spx(6950.0)
+        assert md.spx_open == 0.0, "an uncorroborated first tick must not set the open"
+        md.update_spx(6950.5)            # 0.007% — corroborates
         assert md.spx_open == 6950.0
 
     def test_spx_open_not_overwritten_by_later_updates(self):
@@ -75,6 +83,7 @@ class TestMarketDataOHLC:
         md.update_spx(0.0)
         assert md.spx_open == 0.0  # Still unset
         md.update_spx(6950.0)
+        md.update_spx(6950.5)            # corroborate
         assert md.spx_open == 6950.0
 
     def test_spx_high_tracks_maximum(self):
@@ -156,6 +165,7 @@ class TestMarketDataOHLC:
         md = MarketData()
         # Populate all fields
         md.update_spx(6950.0)
+        md.update_spx(6950.5)            # corroborates the open
         md.update_spx(6980.0)
         md.update_spx(6920.0)
         md.update_vix(17.5)
@@ -186,6 +196,9 @@ class TestMarketDataOHLC:
         """After one SPX update, open=high=low=that price."""
         md = MarketData()
         md.update_spx(6950.0)
+        assert md.spx_open == 0.0, "uncorroborated — nothing should be set yet"
+        assert md.spx_low == float('inf')
+        md.update_spx(6950.0)            # identical second tick corroborates
         assert md.spx_open == 6950.0
         assert md.spx_high == 6950.0
         assert md.spx_low == 6950.0
@@ -300,6 +313,7 @@ class TestMarketDataOHLC:
             MarketData, "_is_regular_session_or_later", staticmethod(lambda: True)
         )
         md.update_spx(6950.0)
+        md.update_spx(6950.0)          # corroborate (see note in this file)
         md.update_vix(17.5)
         assert md.spx_open == 6950.0   # open is the first RTH tick, not 6900
         assert md.spx_high == 6950.0
@@ -1140,6 +1154,7 @@ class TestSheetsSummaryConstruction:
         """Normal spx_low/vix_low values pass through unchanged."""
         md = MarketData()
         md.update_spx(6950.0)
+        md.update_spx(6950.0)            # corroborate the open
         md.update_vix(17.5)
 
         spx_low = md.spx_low if md.spx_low != float('inf') else 0.0

@@ -815,6 +815,11 @@ class MarketData:
     spx_open: float = 0.0
     spx_high: float = 0.0
     spx_low: float = float('inf')
+    # Stale-open guard (2026-10-04): the session's first regular-hours tick is
+    # held here until a second tick corroborates it, because IBKR can serve the
+    # PRIOR CLOSE flagged real-time at 09:30 and that single print would
+    # otherwise set spx_open and an extreme. See update_spx.
+    _pending_open_price: Optional[float] = None
     vix_open: float = 0.0
     vix_high: float = 0.0
     vix_low: float = float('inf')
@@ -895,10 +900,66 @@ class MarketData:
             if not self._is_regular_session_or_later():
                 return
 
-            # Track opening price (first valid update of the regular session)
+            # Track opening price — but CORROBORATE the first tick first.
+            #
+            # 🔴 2026-10-04. IBKR can serve a STALE print at the open, flagged
+            # 6509='R' (real-time), so the Z/Y/N freshness gate above does not
+            # catch it. Measured on 3 of 24 trading days: variant G on
+            # 2026-10-02 took 7666.45 at 09:30:03 (≈ the PRIOR day's close) and
+            # the very next tick 10s later was 7735.76 — a 69pt jump. A on
+            # 2026-09-10 took a +41.6pt one.
+            #
+            # Because that single tick was BOTH the first and an extreme, it set
+            # spx_open AND spx_low. Consequences: day_range 53 -> 88, day_type
+            # flipped chop -> trend, realized_volatility 8.5 -> 16.4. And it
+            # reaches a LIVE path — _check_whipsaw_filter reads spx_high-spx_low
+            # and _expected_daily_move() is built from spx_open, so a stale-low
+            # open pushes BOTH inputs toward falsely SKIPPING entries.
+            #
+            # The value cannot be screened on its own: it IS the prior close, so
+            # there is nothing to compare it against at the moment it arrives.
+            # The only discriminator is a SECOND independent read. So the first
+            # regular-session tick is held as a CANDIDATE and promoted only once
+            # the next tick agrees with it; if the next tick disagrees by more
+            # than the tolerance, the candidate was stale and the newer tick
+            # becomes the open. Cost of a false reject is ~one poll of latency
+            # on open capture (no variant enters before 09:45), which is why
+            # this errs toward rejecting.
+            #
+            # A rejected candidate NEVER touches spx_open, spx_high or spx_low.
             if self.spx_open == 0.0:
-                self.spx_open = price
-                logger.info(f"SPX session open captured: {price:.2f} at {self.last_spx_update.strftime('%H:%M:%S')} ET")
+                if self._pending_open_price is None:
+                    self._pending_open_price = price
+                    logger.info(
+                        "SPX session-open CANDIDATE %.2f at %s ET — held until the "
+                        "next tick corroborates it (stale-open guard)",
+                        price, self.last_spx_update.strftime('%H:%M:%S'),
+                    )
+                    return
+                candidate = self._pending_open_price
+                self._pending_open_price = None
+                drift = abs(price - candidate) / candidate if candidate else 0.0
+                if drift > self._open_corroboration_tol():
+                    logger.warning(
+                        "SPX session-open candidate %.2f REJECTED — the next tick "
+                        "%.2f disagrees by %.2f%% (> %.2f%%), which is the stale "
+                        "open-print signature. Using %.2f as the open; the "
+                        "candidate is discarded from OHLC entirely.",
+                        candidate, price, drift * 100.0,
+                        self._open_corroboration_tol() * 100.0, price,
+                    )
+                    self.spx_open = price
+                else:
+                    self.spx_open = candidate
+                    # Corroborated, so it is a real print — fold it into the
+                    # extremes it was withheld from.
+                    if candidate > self.spx_high:
+                        self.spx_high = candidate
+                    if candidate < self.spx_low:
+                        self.spx_low = candidate
+                    logger.info(
+                        "SPX session open captured: %.2f (corroborated by %.2f, "
+                        "%.3f%% apart)", candidate, price, drift * 100.0)
 
             # Track intraday high/low (regular session only)
             if price > self.spx_high:
@@ -1021,8 +1082,40 @@ class MarketData:
 
         return False, "", pct_change
 
+    # Tolerance for corroborating the session's first tick, as a FRACTION.
+    #
+    # MEASURED, not guessed (2026-10-04, n=138 variant-days since 2026-09-01).
+    # The quantity is |second tick - first tick| / first tick, i.e. exactly what
+    # the check below computes. The two populations separate cleanly:
+    #
+    #     legitimate days   p50 0.020%   p90 0.056%   p99 0.131%   max 0.131%
+    #     known stale opens            0.528% (A 09-10)   0.904% (G 10-02)
+    #
+    # A 4x gap sits between the worst legitimate first-tick move and the
+    # smallest stale print, so ANY tolerance in 0.20%-0.50% rejects exactly
+    # those 2 of 138 and nothing else. 0.30% is the middle of that gap.
+    #
+    # Real consecutive ticks ~10s apart simply do not move 0.3% — the p99 is
+    # 0.131%. And a false reject costs only one poll of open-capture latency
+    # (no variant enters before 09:45), so this errs toward rejecting.
+    _OPEN_CORROBORATION_TOL = 0.0030
+
+    def _open_corroboration_tol(self) -> float:
+        """Config-overridable via `session_open_corroboration_pct` (percent)."""
+        cfg = getattr(self, "strategy_config", None) or {}
+        try:
+            v = cfg.get("session_open_corroboration_pct")
+            if v is not None:
+                f = float(v) / 100.0
+                if f > 0:
+                    return f
+        except (TypeError, ValueError, AttributeError):
+            pass
+        return self._OPEN_CORROBORATION_TOL
+
     def reset_daily_tracking(self):
         """Reset intraday tracking for new day."""
+        self._pending_open_price = None
         self.spx_open = 0.0
         self.spx_high = 0.0
         self.spx_low = float('inf')

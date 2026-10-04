@@ -277,6 +277,33 @@ long 10–19s later, so a spike-then-revert pays the adverse side of both. On
 that a live account would not pay** — re-measure on live fills before re-engineering
 the exit path. Combos cannot fix it (not operable on IBKR paper; ICs must leg in).
 
+### Session-Open Corroboration (stale-print guard, 2026-10-04)
+
+The session's **first** regular-hours SPX tick is held as a *candidate* and only
+becomes `spx_open` once the next tick agrees within
+`session_open_corroboration_pct` (default **0.30%**). A candidate that is
+contradicted is discarded from OHLC **entirely** — it never reaches `spx_open`,
+`spx_high` or `spx_low`.
+
+**Why:** IBKR can serve the prior day's close as the 09:30 print *flagged
+`6509='R'` (real-time)*, so the Z/Y/N freshness gate does not catch it. Measured
+on **3 of 24 trading days**. Because that tick is both first and an extreme it
+set the open *and* an extreme: variant G on 2026-10-02 opened at 7666.45 against
+a fleet 7730.91, turning `day_range` 53→88, `day_type` chop→**trend** and
+`realized_volatility` 8.5→16.4.
+
+This is **not** only an analytics problem — `_check_whipsaw_filter` is a live
+entry-skip path on B and reads `spx_high - spx_low`, while
+`_expected_daily_move()` is built from `spx_open`. A stale-low open pushes both
+inputs toward **falsely skipping entries**.
+
+The tolerance is measured, not guessed: over n=138 variant-days the
+first-to-second tick move is p99 **0.131%** on legitimate days against
+**0.528%** and **0.904%** for the two stale prints — a 4× gap, so anything in
+0.20–0.50% separates them exactly. Expect
+`SPX session-open CANDIDATE …` then either `session open captured … (corroborated
+by …)` or `candidate … REJECTED` in the log each morning.
+
 ### Buffer Decay (MKT-042)
 Starts at `buffer_decay_start_mult` (default 2.50) × normal buffer, linearly decays to 1× over `buffer_decay_hours` (default 4.0h). Wider stops early when premium is rich; normal stops later as theta decays.
 

@@ -294,6 +294,19 @@ class BrokerDispatcher:
         when two are running, and it is knowable even when the session is not usable.
         """
         base = self._identity()
+        # Rate-gate pressure, merged into EVERY return path for the same reason
+        # identity is: it is knowable even when the session is degraded, and a
+        # saturated gate is one of the things that makes it degraded. The gate
+        # lives in this process (it belongs to the one IBClient), so a
+        # strategy-side reading would always be empty — /health is the only
+        # place it can surface. Added 2026-10-04; before this the gate recorded
+        # nothing at all and queuing delay was unmeasurable.
+        try:
+            gate = getattr(self._ib, "rate_gate_stats", None)
+            if gate:
+                base = {**base, "rate_gate": gate}
+        except Exception:  # noqa: BLE001 — telemetry must never fail a health probe
+            pass
         check = getattr(self._ib, "check_auth_status", None)
         try:
             status = check() if callable(check) else None
