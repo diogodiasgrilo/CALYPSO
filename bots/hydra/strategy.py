@@ -6805,6 +6805,24 @@ class HydraStrategy(MEICStrategy):
             if spx_low is not None:
                 day_range = self.market_data.spx_high - spx_low
 
+            # 2026-10-04: spx_open / spx_high / vix_open were written RAW, so a
+            # session that never captured one recorded its 0.0 SENTINEL as if it
+            # were a price. That is exactly D's 2026-09-11 row (spx_open = 0.00),
+            # which makes day_range and every "% from open" derived from it
+            # nonsense — and the dashboard and history charts read these columns.
+            #
+            # `spx_low` already had this discipline (inf -> None) and `day_range`
+            # already guarded on it; the other three were simply missed.
+            #
+            # It matters more as of today: the stale-open corroboration guard
+            # added in this same pass deliberately leaves `spx_open` at 0.0 when
+            # the session's first tick is never corroborated (a one-tick
+            # session), so the number of days that CAN hit this went up. Absence
+            # must record as NULL, never as a price of zero.
+            spx_open = self.market_data.spx_open or None
+            spx_high = self.market_data.spx_high or None
+            vix_open = self.market_data.vix_open or None
+
             # AUDIT #76: daily_summaries.entries_stopped / entries_expired are
             # displayed per-DAY (i.e. per-ENTRY) by the dashboard. Compute them
             # per-entry directly from daily_state.entries instead of summing the
@@ -6829,12 +6847,12 @@ class HydraStrategy(MEICStrategy):
 
             self._data_recorder.record_daily_summary({
                 "date": date_str,
-                "spx_open": self.market_data.spx_open,
+                "spx_open": spx_open,
                 "spx_close": spx_close,
-                "spx_high": self.market_data.spx_high,
+                "spx_high": spx_high,
                 "spx_low": spx_low,
                 "day_range": day_range,
-                "vix_open": self.market_data.vix_open,
+                "vix_open": vix_open,
                 "vix_close": self.current_vix,
                 "entries_placed": summary.get("entries_completed", 0),
                 "entries_stopped": entries_stopped_per_entry,
