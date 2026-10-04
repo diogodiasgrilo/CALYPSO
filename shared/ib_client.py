@@ -495,9 +495,18 @@ class _RateGate:
     Design: each caller atomically RESERVES the next time-slot under a short
     lock, then sleeps until that slot OUTSIDE the lock. Successive reservations
     are spaced ``1/max_rps`` apart, so starts are rate-capped while the lock is
-    only ever held for a few microseconds — it cannot deadlock and the wait is
-    bounded. At low rates (slot already in the past) the wait is zero, so it
-    only throttles genuine bursts.
+    only ever held for a few microseconds — it cannot deadlock. At low rates
+    (slot already in the past) the wait is zero, so it only throttles genuine
+    bursts.
+
+    ⚠️ The per-caller wait is bounded by QUEUE DEPTH, not by one interval. With
+    N concurrent reservers a caller lands N intervals back, and because all
+    eight strategies funnel through this one gate via the broker's threadpool N
+    is not small: the first live reading (2026-10-04, a CLOSED market) showed
+    ``waited_pct`` 74.3 and ``max_wait_ms`` 934 against a 200ms interval — ~4.7
+    intervals deep. An earlier version of this docstring said simply "the wait
+    is bounded", which read as one interval and is wrong under concurrency.
+    ``stats()`` exists to make this measurable rather than arguable.
     """
 
     def __init__(self, max_rps: float) -> None:

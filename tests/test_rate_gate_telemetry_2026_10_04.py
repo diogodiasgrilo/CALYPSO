@@ -43,13 +43,39 @@ class TestItCountsAndTimes:
         # The recorded wait should account for most of the wall clock.
         assert s["total_wait_s"] <= elapsed + 0.05
 
-    def test_max_wait_cannot_exceed_the_interval(self):
-        """Successive reservations are spaced 1/rps apart, so no single caller
-        waits longer than one interval."""
-        g = _RateGate(20.0)            # 50ms
+    def test_max_wait_is_one_interval_for_a_SERIAL_caller_only(self):
+        """A single thread reserving in sequence is always exactly one interval
+        behind, so its max wait is one interval.
+
+        ⚠️ This bound does NOT generalise, and the first live reading proved it:
+        the broker's /health reported max_wait_ms=934 at max_rps=5 (200ms
+        interval) — ~4.7 intervals — because 8 strategies funnel through one
+        gate via FastAPI's threadpool and N concurrent reservers put a caller N
+        intervals back. The wait is bounded by QUEUE DEPTH, not by the interval.
+        An earlier version of this docstring claimed otherwise; keeping the
+        serial case explicit stops that claim coming back.
+        """
+        g = _RateGate(20.0)            # 50ms, single-threaded
         for _ in range(6):
             g.acquire()
         assert g.stats()["max_wait_ms"] <= 50.0 + 1.0
+
+    def test_concurrent_callers_can_wait_several_intervals(self):
+        """The property the live reading showed: queue depth, not interval."""
+        import threading
+        g = _RateGate(50.0)            # 20ms interval
+        def worker():
+            g.acquire()
+        ts = [threading.Thread(target=worker) for _ in range(8)]
+        for x in ts:
+            x.start()
+        for x in ts:
+            x.join()
+        s = g.stats()
+        assert s["acquisitions"] == 8
+        assert s["max_wait_ms"] > 20.0, (
+            "with 8 concurrent reservers at a 20ms interval some caller must "
+            "wait more than one interval; got %r" % s["max_wait_ms"])
 
     def test_an_unhurried_caller_records_no_wait(self):
         g = _RateGate(1000.0)
