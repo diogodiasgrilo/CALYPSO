@@ -5131,6 +5131,71 @@ class MEICStrategy(abc.ABC):
             self._recent_close_conids = {}
         self._recent_close_conids[conid] = get_us_market_time()
 
+    def close_cost_context(self, *, entry_number=None, entry_side=None,
+                           reason=None):
+        """Tag the close legs that follow with WHICH entry and WHY.
+
+        A context manager rather than plumbing through seven call sites. The
+        chokepoint that records each leg (`_place_marketable_close`) does not
+        know the entry — but every caller does, and the whole point of the
+        telemetry is to compare STOP closes against EOD-flatten closes, which
+        needs `close_reason`. Absent context simply records NULLs rather than
+        refusing, so an un-tagged path still contributes timing and spread data.
+        """
+        from contextlib import contextmanager
+
+        @contextmanager
+        def _ctx():
+            prev = getattr(self, "_close_ctx", None)
+            self._close_ctx = {
+                "entry_number": entry_number,
+                "entry_side": entry_side,
+                "reason": reason,
+                "t_trigger": time.monotonic(),
+            }
+            try:
+                yield
+            finally:
+                self._close_ctx = prev
+        return _ctx()
+
+    def _record_close_leg_execution(self, *, uic, side, quantity, attempt_num,
+                                    order_type, limit_price, bid, ask, res,
+                                    place_to_fill_ms) -> None:
+        """Write one close-leg row. Never raises, never adds a broker call."""
+        rec = getattr(self, "_data_recorder", None)
+        if not rec:
+            return
+        ctx = getattr(self, "_close_ctx", None) or {}
+        t_trig = ctx.get("t_trigger")
+        trigger_to_place_ms = None
+        if t_trig is not None:
+            # The whole close is measured from the trigger, so subtracting this
+            # leg's own place->fill leaves the time BEFORE its order went out.
+            elapsed = int((time.monotonic() - t_trig) * 1000.0)
+            trigger_to_place_ms = max(0, elapsed - int(place_to_fill_ms or 0))
+        now = get_us_market_time()
+        rec.record_close_leg({
+            "date": now.strftime("%Y-%m-%d"),
+            "ts_place": now.strftime("%H:%M:%S.%f")[:-3],
+            "conid": uic,
+            "leg_name": ctx.get("leg_name"),
+            "entry_number": ctx.get("entry_number"),
+            "entry_side": ctx.get("entry_side"),
+            "close_reason": ctx.get("reason"),
+            "order_side": side,
+            "quantity": int(quantity) if quantity is not None else None,
+            "attempt": int(attempt_num) if attempt_num is not None else None,
+            "order_type": order_type,
+            "bid_at_place": bid,
+            "ask_at_place": ask,
+            "limit_price": limit_price,
+            "fill_price": (res or {}).get("fill_price"),
+            "filled_qty": (res or {}).get("filled_quantity"),
+            "place_to_fill_ms": int(place_to_fill_ms) if place_to_fill_ms is not None else None,
+            "trigger_to_place_ms": trigger_to_place_ms,
+        })
+
     def _place_marketable_close(self, *, uic: int, side: str, quantity: int,
                                 attempt_num: int) -> dict:
         """Place ONE close order, preferring an AGGRESSIVE MARKETABLE LIMIT that
@@ -5158,6 +5223,32 @@ class MEICStrategy(abc.ABC):
         close we escalate straight to a true MARKET order — take whatever fill is
         available rather than miss entirely. 0 / unset disables the escalation.
         """
+        # CLOSE-COST TELEMETRY (2026-10-05). A stop-loss close leaks a measured
+        # -$197 (n=20, t=2.73) — nearly 2x variant B's entire live net profit —
+        # while the EOD flatten leaks about nothing (-$5, t=0.17). So the cost is
+        # specific to closing under STOP conditions, and `trade_stops` records
+        # only the total. These three values are what split it:
+        #   * trigger -> place   = our own latency (bot + the 96%-saturated gate)
+        #   * place -> fill      = the broker's fill time (NOT ours to fix)
+        #   * fill vs the quote we priced against = the spread we actually paid
+        # The quote below is one this method ALREADY fetches to price its limit,
+        # so none of this adds broker traffic.
+        _t_start = time.monotonic()
+        _seen = {"bid": None, "ask": None}
+
+        def _done(res, order_type, limit_price):
+            try:
+                self._record_close_leg_execution(
+                    uic=uic, side=side, quantity=quantity,
+                    attempt_num=attempt_num, order_type=order_type,
+                    limit_price=limit_price, bid=_seen["bid"], ask=_seen["ask"],
+                    res=res,
+                    place_to_fill_ms=int((time.monotonic() - _t_start) * 1000.0),
+                )
+            except Exception:  # noqa: BLE001 - telemetry must never fail a close
+                pass
+            return res
+
         mkt_min = getattr(self, "eod_flatten_market_minutes", 0.0) or 0.0
         if mkt_min > 0:
             try:
@@ -5171,9 +5262,9 @@ class MEICStrategy(abc.ABC):
                         f"to {close_t.strftime('%H:%M')} close ≤{mkt_min:.0f}min "
                         f"({side} x{quantity}, attempt {attempt_num})"
                     )
-                    return self._close_leg_order(
+                    return _done(self._close_leg_order(
                         instrument_id=uic, side=side, quantity=quantity,
-                    )
+                    ), "MKT_MKT047", None)
             except Exception as _e:
                 # Never let the time check block a close — fall through to LMT.
                 # That fallback is correct, but it is not free and WAS logged at
@@ -5190,6 +5281,7 @@ class MEICStrategy(abc.ABC):
         if quote:
             bid = quote.get("bid")
             ask = quote.get("ask")
+            _seen["bid"], _seen["ask"] = bid, ask
             cross = min(CLOSE_LIMIT_CROSS_STEP * max(1, attempt_num),
                         CLOSE_LIMIT_CROSS_CAP)
             if side == "BUY" and ask and ask > 0:
@@ -5204,18 +5296,18 @@ class MEICStrategy(abc.ABC):
                 f"  Close via MARKETABLE LIMIT @ ${limit_price:.2f} "
                 f"({side} x{quantity}, cross attempt {attempt_num})"
             )
-            return self._place_leg_order(
+            return _done(self._place_leg_order(
                 instrument_id=uic, side=side, quantity=quantity,
                 order_type="LMT", limit_price=limit_price,
                 is_exit=True,  # B3: THE site that cost $560 on 2026-09-24
-            )
+            ), "LMT", limit_price)
         logger.info(
             f"  Close via MARKET — no usable quote to price a marketable limit "
             f"({side} x{quantity})"
         )
-        return self._close_leg_order(
+        return _done(self._close_leg_order(
             instrument_id=uic, side=side, quantity=quantity,
-        )
+        ), "MKT_NOQUOTE", None)
 
     def _emergency_close_alert_once(self, uic, *, alert_type, title, message,
                                     priority) -> None:
@@ -5615,6 +5707,23 @@ class MEICStrategy(abc.ABC):
         Returns ``(success, fill_price, order_id)`` — the same contract
         as the Saxo path.
         """
+        # Tag every close leg below with the entry it belongs to, so the v19
+        # close-cost telemetry can be attributed. Set HERE rather than plumbed
+        # through the seven call sites: this method already receives both
+        # `entry_number` and `leg_name`, and it is the one place every IBKR
+        # close passes through. The close REASON is deliberately not carried —
+        # it is recoverable by joining close_leg_executions to trade_stops on
+        # (date, entry_number, side), and inventing a parameter for it would
+        # mean touching callers for data the database already holds.
+        self._close_ctx = {
+            "entry_number": entry_number,
+            "entry_side": ("call" if "call" in (leg_name or "").lower()
+                           else "put" if "put" in (leg_name or "").lower() else None),
+            "leg_name": leg_name,
+            "reason": None,
+            "t_trigger": time.monotonic(),
+        }
+
         if self.dry_run:
             logger.warning(
                 f"[DRY RUN] SAFETY-DRY-04b: _close_position_with_retry_ib "

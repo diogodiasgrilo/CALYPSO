@@ -34,7 +34,7 @@ Schema v10 (2026-06-12) adds: a first-class `date` column on spread_snapshots
 backfilled from the timestamp prefix, with an index — so per-day queries and
 per-day maintenance match every other table (date, entry_number).
 
-Current SCHEMA_VERSION = 18 (see the module constant; this docstring intro
+Current SCHEMA_VERSION = 19 (see the module constant; this docstring intro
 describes v10 as an example of the migration pattern, not the current version —
 see the dated comment blocks above each MIGRATION_V{N}_SQL for the full history).
 """
@@ -60,7 +60,7 @@ def _describe_exception(e: Exception) -> str:
 
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 18
+SCHEMA_VERSION = 19
 
 # ============================================================================
 # Schema Migration SQL
@@ -490,6 +490,37 @@ class DataRecorder:
                 # already filtered by the error handler below.
                 conn.executescript("""
                     CREATE TABLE IF NOT EXISTS schema_info (key TEXT PRIMARY KEY, value TEXT);
+                    -- v19 (2026-10-05): decompose what a CLOSE actually costs.
+                    -- Stop-loss closes leak a measured -$197 each (n=20, t=2.73),
+                    -- nearly 2x variant B's entire live net profit, while the EOD
+                    -- flatten leaks ~0 (-$5, t=0.17). So the cost is specific to
+                    -- closing under stop conditions, and the open question is WHICH
+                    -- part: our own latency, the broker's fill time, the market
+                    -- moving, or the spread we cross. One row per leg per attempt,
+                    -- written from the single chokepoint every close passes through.
+                    -- Quote fields come from the quote that call ALREADY fetches to
+                    -- price its limit, so this adds no broker traffic (the rate gate
+                    -- runs at 96% of capacity — see IBClient.rate_gate_stats).
+                    CREATE TABLE IF NOT EXISTS close_leg_executions (
+                        date TEXT NOT NULL,
+                        ts_place TEXT NOT NULL,
+                        conid INTEGER,
+                        leg_name TEXT,
+                        entry_number INTEGER,
+                        entry_side TEXT,
+                        close_reason TEXT,
+                        order_side TEXT,
+                        quantity INTEGER,
+                        attempt INTEGER,
+                        order_type TEXT,
+                        bid_at_place REAL,
+                        ask_at_place REAL,
+                        limit_price REAL,
+                        fill_price REAL,
+                        filled_qty INTEGER,
+                        place_to_fill_ms INTEGER,
+                        trigger_to_place_ms INTEGER,
+                        PRIMARY KEY (date, ts_place, conid, attempt));
                     CREATE TABLE IF NOT EXISTS market_ticks (
                         timestamp TEXT PRIMARY KEY, spx_price REAL NOT NULL, vix_level REAL,
                         trend_signal TEXT, bot_state TEXT, entry_count INTEGER, active_count INTEGER);
@@ -797,6 +828,35 @@ class DataRecorder:
     # ========================================================================
     # Stop Loss Writes (after position closed, 0-5 per day)
     # ========================================================================
+
+    def record_close_leg(self, data: Dict[str, Any]) -> bool:
+        """One row per close leg per attempt — what the close actually cost.
+
+        Added 2026-10-05 to answer a question that could not be settled from the
+        existing tables: a stop-loss close leaks a measured -$197 (n=20,
+        t=2.73), nearly 2x variant B's whole live net, while the EOD flatten
+        leaks about nothing (-$5, t=0.17). Something about closing under STOP
+        conditions is expensive, and `trade_stops` only records the total — not
+        whether it went to our own latency, the broker's fill time, the market
+        moving while we worked, or the spread we deliberately cross.
+
+        Unlike the strategy's edge (t=0.24, ~2500 days to measure) this needs
+        only ~29 observations, so it is a question that can actually be finished.
+
+        Never raises: telemetry must not be able to break a close.
+        """
+        def _write():
+            cols = ["date", "ts_place", "conid", "leg_name", "entry_number",
+                    "entry_side", "close_reason", "order_side", "quantity",
+                    "attempt", "order_type", "bid_at_place", "ask_at_place",
+                    "limit_price", "fill_price", "filled_qty",
+                    "place_to_fill_ms", "trigger_to_place_ms"]
+            with self._connect() as conn:
+                conn.execute(
+                    "INSERT OR REPLACE INTO close_leg_executions (%s) VALUES (%s)"
+                    % (", ".join(cols), ", ".join(["?"] * len(cols))),
+                    tuple(data.get(c) for c in cols))
+        return self._safe_write("record_close_leg", _write)
 
     def record_stop(self, stop_data: Dict[str, Any]) -> bool:
         """Write a single trade_stops row with all fields (existing + new).
