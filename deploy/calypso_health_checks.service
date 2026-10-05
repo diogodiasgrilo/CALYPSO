@@ -25,6 +25,7 @@ ExecStart=-/opt/calypso/.venv/bin/python -m scripts.measurement_clock
 #    so the unit shows in `systemctl --failed`, and --alert pushes it out,
 #    because a failed unit nobody runs `systemctl --failed` against is not a
 #    detection. Being last means its exit code is still the unit's exit code.
+ExecStart=-/opt/calypso/.venv/bin/python -m scripts.audit_telemetry_health --alert
 ExecStart=/opt/calypso/.venv/bin/python -m scripts.audit_fleet_correctness --alert
 
 StandardOutput=journal
