@@ -118,14 +118,26 @@ class TestTheTriageWasNarrow:
     noise from telemetry that is correctly quiet."""
 
     def test_routine_telemetry_is_still_debug(self):
+        """These must not be raised above DEBUG — losing one costs a row, not a
+        decision, and WARNING here is noise that trains people to ignore the
+        real ones.
+
+        2026-10-06: this asserted `"logger.debug" in src`, which broke when the
+        handlers moved to `_swallow.note(site, exc, logger, msg)` — a helper
+        that counts the swallow AND still logs at debug. Behaviour unchanged,
+        grep broken: the test was pinning the spelling rather than the level.
+        Now it asserts what actually matters — that nothing here logs ABOVE
+        debug — so a future refactor of the call shape cannot fail it falsely,
+        while raising one to WARNING still does.
+        """
         from bots.hydra.strategy import HydraStrategy as H
-        for fn, marker in ((H._record_heartbeat_to_db, "heartbeat"),
-                           (H._record_shadow_entry, "Shadow entry")):
+        for fn in (H._record_heartbeat_to_db, H._record_shadow_entry):
             src = inspect.getsource(fn)
-            assert "logger.debug" in src, (
-                f"{fn.__name__} was raised above debug — losing one of these "
-                f"costs a row, not a decision, and WARNING here is noise that "
-                f"trains people to ignore the real ones")
+            assert ("logger.debug" in src or "_swallow.note" in src), (
+                f"{fn.__name__} no longer logs its swallow at all")
+            for loud in ("logger.warning", "logger.error", "logger.critical"):
+                assert loud not in src, (
+                    f"{fn.__name__} was raised to {loud} — see the docstring")
 
     def test_the_order_poll_was_deliberately_left(self):
         """Documented decision, not an oversight: it degrades to a defined path

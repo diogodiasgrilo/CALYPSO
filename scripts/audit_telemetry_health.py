@@ -170,6 +170,19 @@ def audit_variant(root: Path, vid: str, days: int):
                             f"latest day ({last}) is clean; {n - nn}/{n} NULL "
                             f"earlier in the window — historical, no action"))
 
+        # v20 swallowed-exception tallies. 33 `except ...: logger.debug(...)`
+        # handlers sit in the trading path and every bug found in the
+        # 2026-09-30..10-06 review was hiding behind one. Reported, not alerted:
+        # a swallow is usually correct (analytics must not break trading) — what
+        # was missing is any way to SEE it.
+        if "swallowed_exceptions" in have:
+            for site, cnt, et, last in con.execute(
+                    "SELECT site, count, exc_type, last_message FROM swallowed_exceptions "
+                    "WHERE date >= date('now','-%d day') ORDER BY count DESC LIMIT 6"
+                    % days):
+                out.append(("SWALLOWED", site,
+                            f"{cnt}x in {days}d ({et}) — last: {str(last)[:90]}"))
+
         # TWO SURFACES, ONE NUMBER. The dashboard rebases the lifetime card to
         # the variant's `baseline_date`; the bot's metrics file rebases to
         # `strategy.metrics_epoch_date`. E's own config states the invariant in

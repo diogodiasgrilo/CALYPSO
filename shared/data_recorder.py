@@ -34,7 +34,7 @@ Schema v10 (2026-06-12) adds: a first-class `date` column on spread_snapshots
 backfilled from the timestamp prefix, with an index — so per-day queries and
 per-day maintenance match every other table (date, entry_number).
 
-Current SCHEMA_VERSION = 19 (see the module constant; this docstring intro
+Current SCHEMA_VERSION = 20 (see the module constant; this docstring intro
 describes v10 as an example of the migration pattern, not the current version —
 see the dated comment blocks above each MIGRATION_V{N}_SQL for the full history).
 """
@@ -60,7 +60,7 @@ def _describe_exception(e: Exception) -> str:
 
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 19
+SCHEMA_VERSION = 20
 
 # ============================================================================
 # Schema Migration SQL
@@ -490,6 +490,20 @@ class DataRecorder:
                 # already filtered by the error handler below.
                 conn.executescript("""
                     CREATE TABLE IF NOT EXISTS schema_info (key TEXT PRIMARY KEY, value TEXT);
+                    -- v20 (2026-10-06): deliberately-swallowed exceptions, counted.
+                    -- 33 `except ...: logger.debug(...)` handlers sit in the trading
+                    -- path, and every bug found in the 2026-09-30..10-06 review was
+                    -- hiding behind one. Raising them all to WARNING would bury the
+                    -- signal (some fire every ~11s); counting makes a handler that
+                    -- never fires cost nothing and one that fires 47 times a single
+                    -- line in the nightly report.
+                    CREATE TABLE IF NOT EXISTS swallowed_exceptions (
+                        date TEXT NOT NULL,
+                        site TEXT NOT NULL,
+                        count INTEGER NOT NULL,
+                        exc_type TEXT,
+                        last_message TEXT,
+                        PRIMARY KEY (date, site));
                     -- v19 (2026-10-05): decompose what a CLOSE actually costs.
                     -- Stop-loss closes leak a measured -$197 each (n=20, t=2.73),
                     -- nearly 2x variant B's entire live net profit, while the EOD
@@ -857,6 +871,22 @@ class DataRecorder:
                     % (", ".join(cols), ", ".join(["?"] * len(cols))),
                     tuple(data.get(c) for c in cols))
         return self._safe_write("record_close_leg", _write)
+
+    def record_swallowed(self, date: str, snapshot: dict) -> bool:
+        """Persist one day's swallowed-exception tallies. Never raises.
+
+        Called once at settlement — not per swallow — so a handler firing every
+        ~11s costs one row, not thousands of writes.
+        """
+        def _write():
+            with self._connect() as conn:
+                for site, v in (snapshot or {}).items():
+                    conn.execute(
+                        "INSERT OR REPLACE INTO swallowed_exceptions "
+                        "(date, site, count, exc_type, last_message) VALUES (?,?,?,?,?)",
+                        (date, str(site)[:80], int(v.get("n") or 0),
+                         str(v.get("type") or "")[:40], str(v.get("last") or "")[:200]))
+        return self._safe_write("record_swallowed", _write)
 
     def record_stop(self, stop_data: Dict[str, Any]) -> bool:
         """Write a single trade_stops row with all fields (existing + new).

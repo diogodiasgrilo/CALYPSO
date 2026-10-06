@@ -38,6 +38,8 @@ import logging
 import math
 import os
 import time
+
+from shared import swallow_counter as _swallow
 import threading
 from datetime import datetime, timedelta, time as dt_time
 from typing import Optional, Dict, Any, List, Tuple
@@ -6278,7 +6280,7 @@ class HydraStrategy(MEICStrategy):
                     timestamp=timestamp, snapshots=snapshots
                 )
         except Exception as e:
-            logger.debug(f"DataRecorder heartbeat failed: {e}")
+            _swallow.note("recorder.heartbeat", e, logger, "DataRecorder heartbeat failed")
 
     # ========================================================================
     # Shadow Logging (v7) — records what OTM-based selection WOULD have chosen
@@ -6397,7 +6399,7 @@ class HydraStrategy(MEICStrategy):
                 **actual_data,
             })
         except Exception as e:
-            logger.debug(f"Shadow entry logging failed (non-critical): {e}")
+            _swallow.note("recorder.shadow_entry", e, logger, "Shadow entry logging failed")
 
     def _record_entry_to_db(self, entry):
         """Record entry data to SQLite with execution quality metrics.
@@ -6543,13 +6545,13 @@ class HydraStrategy(MEICStrategy):
                                     )
                             conn.commit()
                 except Exception as e:
-                    logger.debug(f"Greeks fetch failed (non-critical): {e}")
+                    _swallow.note("greeks.fetch_thread", e, logger, "Greeks fetch thread failed")
 
             thread = threading.Thread(target=_fetch_and_update_greeks, daemon=True)
             thread.start()
 
         except Exception as e:
-            logger.debug(f"DataRecorder entry write failed: {e}")
+            _swallow.note("recorder.entry_write", e, logger, "DataRecorder entry write failed")
 
         # Shadow logging (v7): record what OTM-based selection would have chosen.
         # MUST be OUTSIDE the outer try/except above — if record_entry() or the Greeks
@@ -6679,7 +6681,7 @@ class HydraStrategy(MEICStrategy):
                 "contracts": entry.contracts,
             })
         except Exception as e:
-            logger.debug(f"DataRecorder stop write failed: {e}")
+            _swallow.note("recorder.stop_write", e, logger, "DataRecorder stop write failed")
 
     def _resolve_spx_close(self) -> float:
         """The SPX close to use for the daily summary.
@@ -6803,7 +6805,7 @@ class HydraStrategy(MEICStrategy):
                 return "chop"
             return "normal"
         except Exception as exc:  # noqa: BLE001 — enrichment must never block settlement
-            logger.debug("day_type classification failed: %s", exc)
+            _swallow.note("enrich.day_type", exc, logger, "day_type classification failed")
             return "normal"
 
     def _realized_volatility(self) -> Optional[float]:
@@ -6834,7 +6836,7 @@ class HydraStrategy(MEICStrategy):
             # the session's sample rate rather than assuming a cadence.
             return round(math.sqrt(var) * math.sqrt(len(rets) * 252) * 100, 2)
         except Exception as exc:  # noqa: BLE001
-            logger.debug("realized_volatility failed: %s", exc)
+            _swallow.note("enrich.realized_volatility", exc, logger, "realized_volatility failed")
             return None
 
     def _record_daily_summary_to_db(self):
@@ -6982,6 +6984,24 @@ class HydraStrategy(MEICStrategy):
                 "unattributed_overlay_pnl": summary.get("unattributed_overlay_pnl", 0.0),
             })
 
+            # v20: persist the day's swallowed-exception tallies. Once per day,
+            # here — not per swallow — so a handler firing every ~11s costs one
+            # row rather than thousands of writes. Deliberately NOT reset here:
+            # settlement can run more than once (a post-close restart re-runs
+            # the sweep) and INSERT OR REPLACE then rewrites the same larger
+            # counts correctly, whereas resetting would silently shrink them.
+            try:
+                snap = _swallow.snapshot()
+                if snap:
+                    self._data_recorder.record_swallowed(date_str, snap)
+                    logger.info(
+                        "SWALLOWED: %d exception(s) across %d site(s) today — %s",
+                        sum(v["n"] for v in snap.values()), len(snap),
+                        ", ".join(f"{k}x{v['n']}" for k, v in
+                                  sorted(snap.items(), key=lambda kv: -kv[1]["n"])[:4]))
+            except Exception as exc:  # noqa: BLE001
+                logger.warning("could not persist swallowed-exception counts: %s", exc)
+
             # Per-entry realized P&L: reconcile the per-entry attribution against
             # the authoritative day total, then persist each entry's realized_pnl
             # to trade_entries (the number slot_edge.py reads).
@@ -7110,7 +7130,7 @@ class HydraStrategy(MEICStrategy):
                     date_str, e.entry_number, round(getattr(e, "realized_pnl", 0.0), 2),
                 )
         except Exception as ex:
-            logger.debug(f"per-entry realized_pnl record/reconcile failed: {ex}")
+            _swallow.note("recorder.per_entry_pnl", ex, logger, "per-entry realized_pnl record/reconcile failed")
 
     def _reconcile_pnl_against_broker(self, date_str: str) -> Optional[dict]:
         """INDEPENDENT P&L check — the only one here that is not circular.
@@ -7694,7 +7714,7 @@ class HydraStrategy(MEICStrategy):
                         f"proceeding"
                     )
         except Exception as exc:
-            logger.debug(f"L-M8: VIX staleness check failed (non-fatal): {exc}")
+            _swallow.note("market.vix_staleness", exc, logger, "L-M8 VIX staleness check failed")
 
         # Directional pivot pre-entry gate (directional_pivot, introduced 2026-05-01).
         # Before any other filters run (including the calm-entry delay), check
@@ -14444,6 +14464,16 @@ class HydraStrategy(MEICStrategy):
         from bots.hydra.base_strategy import MEICDailyState
 
         logger.info("Resetting for new trading day")
+
+        # v20: start the day's swallowed-exception tallies clean. Reset HERE and
+        # not after the settlement flush, because settlement can run more than
+        # once (a post-close restart re-runs the sweep) — INSERT OR REPLACE then
+        # rewrites the same larger counts correctly, whereas resetting at flush
+        # time would make the second write silently shrink them.
+        try:
+            _swallow.reset()
+        except Exception:  # noqa: BLE001
+            pass
 
         # Per-day alert dedup: clear the emergency-close once-per-conid set so a
         # fresh day starts clean (conids differ day-to-day, so this is hygiene
