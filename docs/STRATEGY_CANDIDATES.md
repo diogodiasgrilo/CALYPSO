@@ -25,6 +25,17 @@
 > (2026-09-06) for reachable fail-opens, so treat "just scope STATE-004" as unsolved and non-trivial in its
 > own right, rather than as a small prerequisite.
 
+> 🔴 **READ WITH [`STRATEGY_MEASURABILITY_SCORING_2026_10_06.md`](STRATEGY_MEASURABILITY_SCORING_2026_10_06.md).**
+> The five scores below rate whether a strategy is attractive. **None of them
+> rates whether you could ever tell if it worked** — and on 2026-10-06 that was
+> measured and it inverts this table's top pick. *21 DTE Put Broken Wing
+> Butterfly*, the only entry here to reach "worth considering", trades ~18 times
+> a year and would need a per-trade edge-to-noise ratio of **0.471** to be
+> confirmed within two years. The best ratio anywhere in the live fleet is
+> **0.326**, and the independent Monte Carlo of the BWB itself found "a very low
+> EV". Below ~50 trades/year no plausible edge resolves in useful time, which
+> rules out five candidates on structure alone.
+
 ## How to use this doc
 
 Each candidate gets 5 scores, **0–10, higher is always better/more attractive** (no dimension is inverted, so you never have to remember "low is good" for any column). There's no blessed formula for combining them into one number — different scores matter more or less depending on what you're optimizing for at the time (fast to ship vs. genuinely diversifying vs. don't want a 6th thing to babysit). The summary table includes a simple unweighted average purely for rough sorting; treat it as a tiebreaker, not a verdict.
