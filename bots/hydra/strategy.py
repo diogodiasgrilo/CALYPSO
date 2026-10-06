@@ -5479,6 +5479,7 @@ class HydraStrategy(MEICStrategy):
             cw = abs(float(entry.long_call_strike) - float(entry.short_call_strike))
             pw = abs(float(entry.short_put_strike) - float(entry.long_put_strike))
         except (TypeError, ValueError, AttributeError) as e:
+            _swallow.note("strike.wing_symmetry", e)
             logger.debug("wing-symmetry check skipped: %s", e)
             return False
         if not (cw > 0 and pw > 0) or abs(cw - pw) <= 0.01:
@@ -9633,6 +9634,7 @@ class HydraStrategy(MEICStrategy):
             try:
                 self.registry.unregister(long_pos_id)
             except Exception as e:
+                _swallow.note("salvage.registry_unregister", e)
                 logger.debug(f"MKT-033: Registry unregister for {long_pos_id}: {e}")
 
             net_profit = revenue - close_commission
@@ -9663,6 +9665,7 @@ class HydraStrategy(MEICStrategy):
                     trade_reason=f"Long Salvage | Open=${long_open_price:.2f} Close=${actual_fill:.2f} Rev=${revenue:.2f}"
                 )
             except Exception as e:
+                _swallow.note("salvage.sheets_log", e)
                 logger.debug(f"MKT-033: Failed to log salvage to Sheets: {e}")
 
             # Send Telegram alert (MEDIUM priority — same as position closed)
@@ -9801,6 +9804,7 @@ class HydraStrategy(MEICStrategy):
             return total_pnl
 
         except Exception as e:
+            _swallow.note("pnl.broker_entry", e)
             logger.debug(f"Error getting broker P&L for Entry #{entry.entry_number}: {e}")
             return entry.unrealized_pnl
 
@@ -10103,6 +10107,7 @@ class HydraStrategy(MEICStrategy):
                 if uic:
                     setattr(entry, f"{leg}_uic", uic)
             except Exception as e:
+                _swallow.note("dryrun.conid_reresolve", e)
                 logger.debug(f"[DRY RUN] conid re-resolve failed for {leg} @ {strike}: {e}")
 
     def _batch_update_entry_prices(self):

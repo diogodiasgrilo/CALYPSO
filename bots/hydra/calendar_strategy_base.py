@@ -47,6 +47,7 @@ from bots.hydra.calendar_entry import CalendarEntry, DCPhase  # noqa: F401
 from bots.hydra.strategy import HydraStrategy
 from shared.alert_service import AlertPriority, AlertType
 from shared.market_hours import get_us_market_time
+from shared import swallow_counter as _swallow
 
 logger = logging.getLogger(__name__)
 
@@ -807,6 +808,7 @@ class CalendarStrategyBase(HydraStrategy):
             entry._dc_mark_fill_agg = float(getattr(self, "_dc_fill_agg", 1.0))
             entry._dc_mark_fill_slip = float(getattr(self, "_dc_fill_slippage", 0.0))
         except Exception as e:  # pragma: no cover - defensive
+            _swallow.note("cal.mark_detail", e)
             logger.debug("[CAL] mid/touch mark detail unavailable: %s", e)
             entry._dc_mark_mid_value = None
             entry._dc_mark_touch_value = None
@@ -1075,6 +1077,7 @@ class CalendarStrategyBase(HydraStrategy):
                 )
             }
         except Exception as exc:
+            _swallow.note("cal.watchdog_db", exc)
             logger.debug("[CAL-WATCHDOG] could not read the DB: %s", exc)
             return []
 
@@ -1102,6 +1105,7 @@ class CalendarStrategyBase(HydraStrategy):
                 details={"lost": lost, "count": len(lost)},
             )
         except Exception as exc:
+            _swallow.note("cal.watchdog_alert", exc)
             logger.debug("[CAL-WATCHDOG] alert failed: %s", exc)
         return lost
 
@@ -1167,6 +1171,7 @@ class CalendarStrategyBase(HydraStrategy):
         try:
             self._dc_detect_lost_positions()
         except Exception as exc:  # pragma: no cover - never break startup
+            _swallow.note("cal.watchdog_skipped", exc)
             logger.debug("[CAL-WATCHDOG] skipped: %s", exc)
         return base or adopted
 
@@ -1229,6 +1234,7 @@ class CalendarStrategyBase(HydraStrategy):
                     active_count=len(self.daily_state.active_entries),
                 )
             except Exception as e:
+                _swallow.note("cal.heartbeat_tick", e)
                 logger.debug("CAL heartbeat tick failed: %s", e)
         if getattr(self, "_dc_recorder", None):
             for entry in self.daily_state.active_entries:
@@ -1236,4 +1242,5 @@ class CalendarStrategyBase(HydraStrategy):
                     try:
                         self._dc_recorder.record_snapshot(entry, timestamp)
                     except Exception as e:
+                        _swallow.note("cal.snapshot", e)
                         logger.debug("CAL snapshot failed: %s", e)

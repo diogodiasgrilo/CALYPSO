@@ -57,6 +57,7 @@ from shared.alert_service import AlertService, AlertType, AlertPriority, describ
 from shared.market_hours import get_us_market_time, is_market_open, is_early_close_day, get_market_close_time
 from shared.event_calendar import is_fomc_meeting_day, is_fomc_announcement_day
 from shared.position_registry import PositionRegistry
+from shared import swallow_counter as _swallow
 
 # Configure module logger
 logger = logging.getLogger(__name__)
@@ -6760,6 +6761,7 @@ class MEICStrategy(abc.ABC):
                 for entry in self.daily_state.active_entries
             )
         except Exception as e:
+            _swallow.note("pnl.broker_total", e)
             logger.debug(f"Error getting total broker P&L: {e}")
             # Fall back to mid-price calculation
             return sum(e.unrealized_pnl for e in self.daily_state.active_entries)
@@ -7798,6 +7800,7 @@ class MEICStrategy(abc.ABC):
                 )
             return max(configured, derived)
         except Exception as e:  # pragma: no cover - defensive
+            _swallow.note("order004.width_floor", e)
             logger.debug("ORDER-004 width-aware floor unavailable (%s)", e)
             return configured
 

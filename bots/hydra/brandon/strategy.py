@@ -84,6 +84,7 @@ from . import (
 )
 from .gex_provider import GEXProfile
 from .hedge_position import HedgeLeg, HedgeSettlement
+from shared import swallow_counter as _swallow
 
 logger = logging.getLogger(__name__)
 
@@ -721,6 +722,7 @@ class BrandonHydraStrategy(HydraStrategy):
                 est_call, est_put = self._estimate_entry_credit(entry)
             except Exception as exc:
                 est_call, est_put = 0.0, 0.0
+                _swallow.note("brandon.gex_profile", exc)
                 logger.debug(
                     "BRANDON-DELTA-TARGET E#%s: price-veto estimate failed (%s) — not vetoing",
                     getattr(entry, "entry_number", "?"), exc,
@@ -1096,6 +1098,7 @@ class BrandonHydraStrategy(HydraStrategy):
                 try:
                     self._brandon_check_pctwidth_shadow_stop(entry)
                 except Exception as exc:
+                    _swallow.note("brandon.a2_shadow", exc)
                     logger.debug("A2-SHADOW check failed (non-fatal): %s", exc)
 
         # 4. Defensive overlay (LIVE) — places hedge orders when triggered
@@ -1458,6 +1461,7 @@ class BrandonHydraStrategy(HydraStrategy):
             # A quote-fetch / data error during a TP decision must never crash the
             # monitoring loop — return None so the caller FAILS CLOSED (holds the
             # winner) rather than closing on the unverified mid.
+            _swallow.note("brandon.mkt049_capture", exc)
             logger.debug("MKT-049 E#%s: real-capture check errored (%s) — holding (fail closed)",
                          getattr(entry, "entry_number", "?"), exc)
             return None
@@ -2015,6 +2019,7 @@ class BrandonHydraStrategy(HydraStrategy):
                             profile=profile,
                         )
                     except Exception as _exc:  # noqa: BLE001 — telemetry must never break the loop
+                        _swallow.note("brandon.overlay_telemetry", _exc)
                         logger.debug("BRANDON: overlay telemetry record failed: %s", _exc)
 
                     if not structure_enabled:
@@ -3189,6 +3194,7 @@ class BrandonHydraStrategy(HydraStrategy):
                 "clusters_json": _json.dumps({"positive": _cl(pos), "negative": _cl(neg)}),
             })
         except Exception as exc:
+            _swallow.note("brandon.gex_snapshot_record", exc)
             logger.debug("GEX snapshot record failed (non-fatal): %s", exc)
 
     def _brandon_accel_cluster_for(self, profile, proposed_short, cfg):
@@ -3216,6 +3222,7 @@ class BrandonHydraStrategy(HydraStrategy):
             zones = profile.negative_clusters(min_strength_pct=cfg.accel_min_pct)
             return _adj._cluster_covering(zones, proposed_short)
         except Exception as exc:  # noqa: BLE001 — telemetry only
+            _swallow.note("brandon.accel_cluster_lookup", exc)
             logger.debug("BRANDON: accel-cluster telemetry lookup failed: %s", exc)
             return None
 
@@ -3339,6 +3346,7 @@ class BrandonHydraStrategy(HydraStrategy):
                     _json.dumps(shift_first) if shift_first else None),
             })
         except Exception as exc:
+            _swallow.note("brandon.gex_decision_record", exc)
             logger.debug("GEX decision record failed (non-fatal): %s", exc)
 
     def _brandon_resolve_hedge_state_path(self) -> str:
@@ -3412,6 +3420,7 @@ class BrandonHydraStrategy(HydraStrategy):
                 severity_bypassed=severity_bypassed,
             )
         except Exception as exc:
+            _swallow.note("brandon.hedge_place_record", exc)
             logger.debug("BRANDON: hedge placement recording failed (non-critical): %s", exc)
 
     def _brandon_record_hedge_settlement(self, settlement) -> None:
@@ -3431,6 +3440,7 @@ class BrandonHydraStrategy(HydraStrategy):
                 settled_at=self._brandon_now_et().isoformat(),
             )
         except Exception as exc:
+            _swallow.note("brandon.hedge_settle_record", exc)
             logger.debug("BRANDON: hedge settlement recording failed (non-critical): %s", exc)
 
     def _brandon_load_hedge_state(self) -> None:
@@ -3725,4 +3735,5 @@ class BrandonHydraStrategy(HydraStrategy):
             if path and os.path.exists(path):
                 os.remove(path)
         except Exception as exc:
+            _swallow.note("brandon.hedge_sidecar_cleanup", exc)
             logger.debug("BRANDON: hedge sidecar cleanup failed (non-fatal): %s", exc)
