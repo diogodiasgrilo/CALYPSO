@@ -937,6 +937,37 @@ class AlertService:
         AlertType.EMERGENCY_EXIT,
     }
 
+    # Types exempt from the per-type TOKEN BUCKET (layer 2) only — still fully
+    # subject to content-dedup (layer 1) and the email ceiling (layer 3).
+    #
+    # 🔴 2026-10-06. Measured across B's retained logs: the bucket had dropped
+    # **3 "Stop Loss Hit" alerts**, alongside 40 Position Snapshots (correctly)
+    # and 4 Position Opened. The bucket is capacity 3, refilling 1 per 10 min —
+    # and on 2026-10-05 B stopped twice inside 73 seconds, then a third time.
+    # So the operator was NOT told about a realized loss, by design, on the days
+    # it mattered most.
+    #
+    # THE PRINCIPLE, so this set can be reasoned about later: a type whose every
+    # occurrence is a DISCRETE COMPLETED ACTION with money attached must never
+    # be dropped for being frequent — each one is a different real event, and
+    # there is no later alert that carries the same information. A type that
+    # reports a PERSISTING CONDITION (delta_breach, wing_breach, api_error) may
+    # be bucketed, because the condition is still true at the next evaluation
+    # and the next alert carries the same news. That is exactly the storm
+    # layer 2 was built for, so those stay in.
+    #
+    # Bounded by construction: B can stop at most 7 slots x 2 sides = 14 times
+    # a day, and the other four types here are rare. Layer 1 still collapses
+    # byte-identical repeats — the 84x/hr stuck-close flood of 2026-06-12 fired
+    # IDENTICAL alerts, so dedup catches it without the bucket.
+    _NEVER_RATE_LIMIT = {
+        AlertType.STOP_LOSS,
+        AlertType.MAX_LOSS,
+        AlertType.EMERGENCY_CLOSE,
+        AlertType.ENTRY_EXECUTION_FAILED,
+        AlertType.ROLL_FAILED,
+    }
+
     # Identical-alert suppression window per priority. The FIRST alert of a
     # given fingerprint always sends; repeats inside the window are collapsed
     # (counted, then rolled up on the next send). A genuinely new event
@@ -1084,8 +1115,12 @@ class AlertService:
             suppressed_rollup = self._dedup_suppressed.pop(fp, 0)
             self._dedup_last[fp] = now
 
-            # ── Layer 2: per-type token bucket (skipped for never-suppress) ──
-            if not never and not self._take_type_token(alert_type, now):
+            # ── Layer 2: per-type token bucket ──────────────────────────────
+            # Skipped for never-suppress AND for discrete completed actions
+            # (_NEVER_RATE_LIMIT) — see that set for why dropping a stop-loss
+            # for being frequent is never correct.
+            bucketed = not never and alert_type not in self._NEVER_RATE_LIMIT
+            if bucketed and not self._take_type_token(alert_type, now):
                 return (False, send_email,
                         f"type {alert_type.value} over burst rate")
 
