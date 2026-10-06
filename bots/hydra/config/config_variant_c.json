@@ -209,7 +209,9 @@
     "eod_flatten": {
       "_comment_skip_otm_pts": "2026-08-18: skip_otm_pts lowered 20 -> 10 after a 19-event MKT-047 historical audit (all variants, back to the mechanism's 2026-06-17 birth) found a 0/19 win rate flattening vs just holding to expiry (net cost ~$805 in the recoverable window) and a real-money 0-for-2 on 2026-08-17 (B lost $175 flattening two puts that both settled OTM). A 15/10/5pt sensitivity re-check on the same 19 events found 10pt recovers ~52% of the historical gap while still protecting the one 2026-08-17 trade that came within 0.36pt of the strike at settlement (E4) -- 15pt changes nothing on that trade, 5pt would have let it ride. See bots/hydra/__init__.py version history.",
       "skip_otm_pts": 20.0
-    }
+    },
+    "_comment_metrics_epoch_date": "THE LIFETIME RECORD RESTARTS HERE (2026-06-11). C's lifetime card baseline. C held the live seat until the 2026-07-24 swap and is dry-run-shadow after it, so its file and its dashboard were reporting different eras of a strategy that changed what it was. Set 2026-10-06 after the nightly telemetry audit found the metrics file and the dashboard reporting different eras of the same number -- the dashboard already rebased to variant_c_baseline_date, the file did not, and nothing enforced the invariant that the two must move together. Everything before this date is ARCHIVED, NOT DELETED: it stays in backtesting.db and moves to a 'pre_epoch' block in hydra_metrics.json. Applied inside _reconcile_cumulative_metrics_from_db, which re-derives cumulative_pnl from the FULL daily_summaries table every settlement -- so a hand-edited metrics file would be silently undone at the next close. Remove this key to count the whole history again.",
+    "metrics_epoch_date": "2026-06-11"
   },
   "trend_filter": {
     "enabled": true,
