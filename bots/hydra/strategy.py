@@ -296,6 +296,14 @@ class HydraIronCondorEntry(IronCondorEntry):
 # HYDRA STRATEGY
 # =============================================================================
 
+# Greeks are analytics-only, so retrying them is free — and the first attempt
+# lands inside the snapshot warmup window, which is why ~1 entry in 4 on the
+# dry-run variants recorded a NULL delta for weeks. 3 attempts at 5s then 10s
+# comfortably clears the ~6s warmup budget.
+GREEKS_FETCH_ATTEMPTS = 3
+GREEKS_RETRY_DELAY_S = 5.0
+
+
 class HydraStrategy(MEICStrategy):
     """
     HYDRA (Trend Following Hybrid) Strategy Implementation.
@@ -1982,6 +1990,47 @@ class HydraStrategy(MEICStrategy):
             )
             return {}
 
+    def _fetch_entry_greeks(self, entry) -> dict:
+        """Greeks for an entry's two short legs, retrying the EMPTY sides.
+
+        Extracted from the analytics daemon thread on 2026-10-06 so the retry
+        is reachable by a test — it had been a closure inside a thread, which is
+        how a one-shot fetch silently lost ~1 entry in 4 on variants G and F for
+        weeks without anyone being able to exercise it.
+
+        The cause is a warmup race: the fetch fires the instant the entry
+        completes, straight into the snapshot-warmup window where a fresh conid
+        answers with a row carrying no greek fields at all. Analytics-only and
+        off the trading path, so waiting is free. Only sides that came back
+        empty are retried, so the cost to the (96%-saturated) rate gate is
+        bounded at a few calls per entry, and zero when the first attempt works.
+
+        Never raises.
+        """
+        out: dict = {}
+        pending = {s: u for s, u in
+                   (("call", getattr(entry, "short_call_uic", None)),
+                    ("put", getattr(entry, "short_put_uic", None))) if u}
+        for attempt in range(1, GREEKS_FETCH_ATTEMPTS + 1):
+            for side in list(pending):
+                try:
+                    g = self._read_option_greeks(pending[side])
+                except Exception:  # noqa: BLE001 - analytics must not escalate
+                    g = None
+                if g:
+                    out[side] = g
+                    pending.pop(side)
+            if not pending or attempt == GREEKS_FETCH_ATTEMPTS:
+                break
+            time.sleep(GREEKS_RETRY_DELAY_S * attempt)
+        if pending:
+            logger.warning(
+                "Greeks still empty after %d attempt(s) for entry #%s side(s) %s "
+                "— those delta/theta/vega columns stay NULL",
+                GREEKS_FETCH_ATTEMPTS, getattr(entry, "entry_number", "?"),
+                sorted(pending))
+        return out
+
     def _read_option_greeks(self, instrument_id) -> Optional[Dict[str, Any]]:
         """Fetch an option's greeks from the active broker, normalized.
 
@@ -2010,8 +2059,10 @@ class HydraStrategy(MEICStrategy):
         try:
             raw = self.broker.get_option_greeks(int(instrument_id))
             if not raw:
+                logger.warning(
+                    "_read_option_greeks(%s): broker returned nothing", instrument_id)
                 return None
-            return {
+            vals = {
                 "delta": _f(raw.get("delta")),
                 "gamma": _f(raw.get("gamma")),
                 "theta": _f(raw.get("theta")),
@@ -2019,6 +2070,26 @@ class HydraStrategy(MEICStrategy):
                 "iv": _f(raw.get("iv")),
                 "open_interest": _f(raw.get("open_interest")),
             }
+            # 2026-10-06: an EMPTY greeks row is truthy. IBKR answers a
+            # not-yet-warm conid with a row carrying no greek fields at all
+            # (observed: {'55','conidEx','_updated','conid','6119','31'}), so
+            # every value parsed to None, the dict was still truthy, the caller
+            # treated it as success and wrote delta=NULL — with no log line
+            # anywhere. That is why variant G's delta_call was NULL on both of
+            # 2026-10-05's entries and on ~1 in 4 entries for weeks, while B
+            # (which quotes the same conids repeatedly across 7 slots, so they
+            # are warm) never missed once in 29.
+            #
+            # Returning None here makes the caller's `if g:` mean what it reads
+            # as, and lets it RETRY — the whole point, since the cause is a
+            # warmup race and the data is analytics-only.
+            if vals["delta"] is None and vals["theta"] is None and vals["vega"] is None:
+                logger.warning(
+                    "_read_option_greeks(%s): row carried no greeks (keys=%s) — "
+                    "conid likely not warm yet", instrument_id,
+                    sorted(raw.keys())[:8] if hasattr(raw, "keys") else "?")
+                return None
+            return vals
         except Exception as e:
             logger.warning(
                 f"_read_option_greeks({instrument_id}) failed "
@@ -6447,12 +6518,16 @@ class HydraStrategy(MEICStrategy):
             import threading
             def _fetch_and_update_greeks():
                 try:
-                    greeks_data = {}
-                    for side, uic in [("call", entry.short_call_uic), ("put", entry.short_put_uic)]:
-                        if uic:
-                            g = self._read_option_greeks(uic)
-                            if g:
-                                greeks_data[side] = g
+                    # RETRY (2026-10-06). This runs the instant the entry
+                    # completes, straight into the snapshot warmup window — a
+                    # fresh conid answers with a row carrying no greeks for the
+                    # first poll or two (CLAUDE.md "Snapshot warmup", H10). One
+                    # shot therefore lost ~1 entry in 4 on G and F, silently.
+                    # Analytics-only and off the trading path, so waiting is
+                    # free; only the sides that came back empty are retried, so
+                    # the cost to the (96%-saturated) rate gate is bounded at a
+                    # few calls per entry and zero when the first attempt works.
+                    greeks_data = self._fetch_entry_greeks(entry)
                     if greeks_data:
                         # Update the DB row with Greeks
                         with self._data_recorder._connect() as conn:
