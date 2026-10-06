@@ -594,7 +594,27 @@ Only HYDRA's credit+buffer stop runs in `hydra_stop_shadow` on B/C — parallel 
 
 **Adding a new variant:** (1) add a `StrategyMeta` row (and a `GroupMeta` if it's a new cohort) to `shared/strategy_taxonomy.py` AND a registry row to `bots/hydra/registry.py` (`name → "module.path:ClassName"`) — this is the single source of truth that retires the old hardcoded `_VARIANT_IDS`; (2) create `bots/hydra/config/config_variant_<id>.json` on the VM; (3) create `deploy/hydra_variant_<id>.service`; (4) dashboard wiring (the `/api/strategies` endpoints + group renderers are taxonomy-driven; add a group renderer only if you introduced a new `pnl_shape`/structure family). Full recipe: `docs/NEW_STRATEGY_PLAYBOOK.md` + design rationale in `docs/STRATEGY_GROUPING_REDESIGN.md` (legacy detail still in `docs/HYDRA_VARIANT_TESTING_PLAN.md`).
 
-**API pacing:** Each variant's config can set `strategy.api_pacing_multiplier` (default 1.0 = A; B=1.5, C=2.0 recommended) to scale monitoring + heartbeat intervals — keeps combined IBKR request rate under the rate-limit ceiling. Vigilant-mode stop checks are NOT scaled (safety-critical).
+**API pacing:** Each variant's config sets `strategy.api_pacing_multiplier` to scale the **heartbeat cadence** (10s × multiplier) — which drives `spread_snapshots`, the account-summary call, the state-file write and the cushion bars. Vigilant-mode stop checks are NOT scaled (safety-critical), and it touches no entry or stop decision.
+
+> ⚠️ **Corrected 2026-10-06: this said "default 1.0 = A", and that default was
+> actively harmful.** A is a **1-contract dry-run shadow that places no orders**,
+> yet it was the only variant left at the full 10s heartbeat — measured at
+> **~24% of the shared IBKR rate gate**, while the **LIVE seat B (at 2.5) got
+> ~10%**. The live seat was being starved by a shadow.
+>
+> The gate itself was measured for the first time on 2026-10-05 (it had recorded
+> nothing until `IBClient.rate_gate_stats` shipped): during RTH it ran at
+> **4.82 req/s against a 5/s cap — 96% of capacity — with 99.2% of calls
+> queueing and 564 ms of mean added delay on every IBKR request**. Read it any
+> time with `curl -s http://127.0.0.1:8788/health` → `rate_gate`.
+>
+> **A is now 2.5**, matching the slowest dry-run tier. Current fleet: A 2.5 ·
+> **B 2.5 (live)** · C 2.0 · D 2.5 · E 2.5 · F 2.0 · G 2.0 · H 2.5.
+>
+> ⚠️ Raising the gate cap itself (5 → 7, "B7") is NOT the obvious next step: it
+> was **8 and was lowered to 5** on 2026-06-01 after a 429, and IBKR
+> penalty-boxes the IP for ~10 min on repeat. Reduce demand before raising the
+> ceiling.
 
 **Polygon:** Variants B/C require `POLYGON_API_KEY` (Options Starter tier — `EnvironmentFile=-/etc/calypso/polygon.env` per `deploy/polygon.env.example`). If absent, GEX features silently disable; TP and narrow widths continue.
 
