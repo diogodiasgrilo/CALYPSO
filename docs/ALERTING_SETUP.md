@@ -67,8 +67,62 @@ gcloud pubsub topics create calypso-alerts-dlq \
 # Create subscription for dead-letter monitoring
 gcloud pubsub subscriptions create calypso-alerts-dlq-sub \
     --topic=calypso-alerts-dlq \
+    --message-retention-duration=7d \
     --project=calypso-trading-bot
 ```
+
+> ⚠️ **The three commands above are NOT sufficient, and were not until 2026-10-07.**
+> They create a dead-letter topic and a monitoring subscription but **never tell
+> Pub/Sub to route anything there** — so for the project's whole history the DLQ
+> was aspirational: the topic received nothing, `calypso-alerts-dlq-sub` had never
+> actually been created, and four documents (this one, `CLAUDE.md`,
+> `VM_COMMANDS.md`, `VM_COMMAND_REFERENCE.md`) told operators to pull a
+> subscription that returned `NOT_FOUND`. A persistently-failing alert retried for
+> the 24h message-retention window and was then **dropped with no record**.
+>
+> The routing is a policy on the **delivery** subscription, which is created and
+> owned by the **eventarc trigger** (`process-trading-alert-*`), not by the
+> commands above — which is why it was missed. Wire it:
+
+```bash
+PN=$(gcloud projects describe calypso-trading-bot --format="value(projectNumber)")
+SA="service-${PN}@gcp-sa-pubsub.iam.gserviceaccount.com"
+SUB=$(gcloud pubsub subscriptions list --project=calypso-trading-bot \
+        --format="value(name.basename())" | grep '^eventarc-.*process-trading-alert')
+
+# The Pub/Sub service agent must be able to PUBLISH to the DLQ and SUBSCRIBE to
+# the source, or messages past the attempt limit get STUCK instead of dead-lettered.
+gcloud pubsub topics add-iam-policy-binding calypso-alerts-dlq \
+    --member="serviceAccount:$SA" --role="roles/pubsub.publisher" \
+    --project=calypso-trading-bot
+gcloud pubsub subscriptions add-iam-policy-binding "$SUB" \
+    --member="serviceAccount:$SA" --role="roles/pubsub.subscriber" \
+    --project=calypso-trading-bot
+
+# maxDeliveryAttempts is deliberately HIGH (50). Alerts are time-sensitive, so
+# retrying hard is worth more than dead-lettering early: a low value would send a
+# CRITICAL alert to a queue nobody watches in real time instead of to Telegram.
+# The DLQ's job here is FORENSIC — "which alerts never made it" — not fast failover.
+gcloud pubsub subscriptions update "$SUB" \
+    --dead-letter-topic=calypso-alerts-dlq \
+    --dead-letter-topic-project=calypso-trading-bot \
+    --max-delivery-attempts=50 \
+    --project=calypso-trading-bot
+```
+
+Rollback is one command: `gcloud pubsub subscriptions update "$SUB"
+--clear-dead-letter-policy`. ⚠️ The subscription is **eventarc-managed**, so a
+trigger rebuild can revert the policy — **re-check it after any eventarc or
+Cloud Function redeploy** with:
+
+```bash
+gcloud pubsub subscriptions describe "$SUB" --project=calypso-trading-bot \
+    --format="yaml(deadLetterPolicy)"     # must NOT be empty
+```
+
+**An empty DLQ means "nothing has failed 50 times", which is the healthy state —
+it does NOT by itself prove the routing is wired.** Verify the policy with the
+command above, not by observing an empty queue.
 
 ---
 

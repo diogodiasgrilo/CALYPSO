@@ -678,7 +678,21 @@ gcloud functions logs read process-trading-alert --region=us-east1 --project=cal
 
 # Dead-letter queue (failed alerts)
 gcloud pubsub subscriptions pull calypso-alerts-dlq-sub --project=calypso-trading-bot --limit=10 --auto-ack
+
+# Confirm the DLQ is actually WIRED (an empty queue does NOT prove this)
+SUB=$(gcloud pubsub subscriptions list --project=calypso-trading-bot --format="value(name.basename())" | grep '^eventarc-.*process-trading-alert')
+gcloud pubsub subscriptions describe "$SUB" --project=calypso-trading-bot --format="yaml(deadLetterPolicy)"
 ```
+
+> ⚠️ **The DLQ was NOT functional until 2026-10-07.** `calypso-alerts-dlq-sub` had
+> never been created (the pull command above returned `NOT_FOUND`) and no
+> dead-letter policy routed anything to the topic — `docs/ALERTING_SETUP.md`
+> created a dead-letter topic and never wired it, so a persistently-failing alert
+> retried for the 24h retention window and was then **dropped with no record**.
+> Now wired with `maxDeliveryAttempts=50` (deliberately high — alerts are
+> time-sensitive, so retrying hard beats dead-lettering early into a queue nobody
+> watches; the DLQ is FORENSIC). The delivery subscription is **eventarc-managed**,
+> so **re-check `deadLetterPolicy` after any eventarc / Cloud Function redeploy.**
 
 Full deployment guide: [`docs/ALERTING_SETUP.md`](docs/ALERTING_SETUP.md).
 

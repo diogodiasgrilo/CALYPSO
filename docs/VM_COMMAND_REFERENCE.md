@@ -291,6 +291,8 @@ gcloud functions logs read process-trading-alert --region=us-east1 --project=cal
 
 # Dead letter queue (failed alerts)
 gcloud pubsub subscriptions pull calypso-alerts-dlq-sub --project=calypso-trading-bot --limit=10 --auto-ack
+# NOTE: an EMPTY result is the healthy state, but does not prove the DLQ is wired.
+# Verify the routing itself — see CLAUDE.md > Alert System, or docs/ALERTING_SETUP.md Step 1.
 ```
 
 ---
