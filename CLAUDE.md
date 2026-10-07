@@ -188,16 +188,23 @@ credit scales roughly with spread width (the config says so in `_comment_min_cre
 |------|------|-----------------|----------------|---------------------------|-----------------|
 | 0 | < 18 | **$0.10** | **$0.15** | **7** | 2 |
 | 1 | 18 – 22 | **$0.05** | **$0.10** | **7** | 2 |
-| 2 | 22 – 28 | **$0.05** | **$0.05** | **7** | 2 |
-| 3 | ≥ 28 | **$0.05** | **$0.05** | **7** | 1 |
+| 2 | 22 – 28 | **$0.05** | **$0.05** | **3** | 2 |
+| 3 | ≥ 28 | **$0.05** | **$0.05** | **1** | 1 |
 
-🔴 **The entry cap does not exist on B or BM.** `max_entries = [7, 7, 7, 7]` — the full grid in
-every regime, including VIX ≥ 28. A reader of the old table would reasonably conclude the system
-self-limits to a single entry in a crisis regime; **the live seat does not, and neither will the
-real-money seat**, which inherits this config shape. At BM's week-1 single contract that is up to
-7 entries × 2 sides × $200 structural = **$2,800/contract of exposure in the regime the
-documentation implied was capped at one entry.** Whether to cap B/BM at high VIX is an open
-question for Gate 9 — this note records the fact, not a recommendation.
+✅ **The entry cap EXISTS on B — `max_entries = [7, 7, 3, 1]`** (read from the live VM config
+2026-10-07). The full 7-slot grid runs only below VIX 22; it drops to **3** entries in zone 2
+(VIX 22–28) and **1** in zone 3 (VIX ≥ 28). C is `[2, 2, 2, 1]`.
+
+> ⚠️ **Corrected 2026-10-07: this said in bold "the entry cap does not exist on B or BM —
+> `max_entries = [7, 7, 7, 7]`", called it "$2,800/contract of exposure", and left capping as
+> "an open question for Gate 9".** All of that is stale. The cap was applied as a **Tier-1
+> mechanism decision** (`docs/DECISION_FRAMEWORK.md` §2 lists `[7,7,3,1]` explicitly: an entry
+> cap that lets exposure double when spread width doubles, in a regime never traded, fails the
+> "would I make this change if the P&L had come out the other way?" test), and this callout was
+> never updated — so the operator reference carried a **red warning about a risk that had
+> already been closed**, which is worse than carrying none. Found while grounding an unrelated
+> question against the live config. The lesson is the file's own: **read the VM config, never
+> this table.**
 
 ℹ️ B's zone-0 put minimum ($0.15/sh) is also the boundary in the **MKT-029 put-fallback** finding
 — the fallback admits entries below it, and those 43 entries average −$3.20/contract against
