@@ -41,8 +41,13 @@ EPOCH = "2026-09-24"
 def _strat(epoch=EPOCH, metrics=None):
     s = HydraStrategy.__new__(HydraStrategy)
     s.strategy_config = {"metrics_epoch_date": epoch} if epoch else {}
+    # cumulative_pnl MUST equal prior(-50-59) + post(+30) = -79.0. It used to
+    # be -109.0 — the prior sum — which made "archive the lifetime" and
+    # "archive the retired era" produce the same number, so the assertions
+    # below could not tell them apart. A fixture whose totals do not add up
+    # cannot catch an accounting bug (2026-10-06).
     s.cumulative_metrics = metrics if metrics is not None else {
-        "cumulative_pnl": -109.0, "total_entries": 12, "total_stops": 3,
+        "cumulative_pnl": -79.0, "total_entries": 12, "total_stops": 3,
         "total_credit_collected": 0.0, "double_stops": 0,
         "winning_days": 5, "losing_days": 7,
         "daily_returns": [
@@ -84,9 +89,27 @@ class TestTheArchivePreservesTheEarlierEra:
         """A record that simply vanishes invites the question of what else did."""
         s = _strat(); s._archive_pre_epoch_metrics()
         pe = s.cumulative_metrics["pre_epoch"]
+        # The RETIRED ERA's own total: -50 + -59. NOT the pre-rebase lifetime
+        # (-79), which also contains the post-epoch +30 day. Schema 1 stored
+        # the latter here, so "$X over N days" gave a wrong per-day average.
         assert pe["cumulative_pnl"] == -109.0
+        assert pe["lifetime_pnl_at_archive"] == -79.0
+        assert pe["schema"] == 2
         assert pe["days"] == 2 and pe["retired_on"] == EPOCH
         assert [r["date"] for r in pe["daily_returns"]] == ["2026-09-20", "2026-09-23"]
+
+    def test_the_retired_era_total_is_NOT_the_prerebase_lifetime(self):
+        """The negative control for the schema-1 defect.
+
+        Reintroducing the old behaviour (store the lifetime under
+        `cumulative_pnl`) must make this fail. It writes -79.0 where the
+        retired era actually made -109.0.
+        """
+        s = _strat(); s._archive_pre_epoch_metrics()
+        pe = s.cumulative_metrics["pre_epoch"]
+        assert pe["cumulative_pnl"] != pe["lifetime_pnl_at_archive"], (
+            "fixture must make the two figures DIFFER or this proves nothing")
+        assert pe["cumulative_pnl"] == sum(r["net_pnl"] for r in pe["daily_returns"])
 
     def test_only_post_epoch_days_remain_live(self):
         s = _strat(); s._archive_pre_epoch_metrics()
@@ -105,7 +128,7 @@ class TestTheArchivePreservesTheEarlierEra:
     def test_no_epoch_archives_nothing(self):
         s = _strat(epoch=None); s._archive_pre_epoch_metrics()
         assert "pre_epoch" not in s.cumulative_metrics
-        assert s.cumulative_metrics["cumulative_pnl"] == -109.0
+        assert s.cumulative_metrics["cumulative_pnl"] == -79.0
 
     def test_a_fresh_variant_with_no_history_is_left_alone(self):
         s = _strat(metrics={"cumulative_pnl": 0.0, "daily_returns": []})

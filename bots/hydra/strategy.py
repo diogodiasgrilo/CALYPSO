@@ -7393,6 +7393,11 @@ class HydraStrategy(MEICStrategy):
 
         Idempotent: once ``pre_epoch`` exists it is never rewritten, so a restart
         cannot archive an already-zeroed set of counters over the real one.
+
+        ``pre_epoch.cumulative_pnl`` is the retired era's OWN total (schema 2);
+        the pre-rebase lifetime, which also contains post-epoch days, is kept
+        separately as ``lifetime_pnl_at_archive``. Blocks without ``schema``
+        were written by schema 1, where ``cumulative_pnl`` held the lifetime.
         """
         epoch = self._metrics_epoch_date()
         cm = self.cumulative_metrics
@@ -7400,16 +7405,31 @@ class HydraStrategy(MEICStrategy):
             return
         prior = [r for r in cm.get("daily_returns", [])
                  if str(r.get("date", "")) < epoch]
-        if not prior and not float(cm.get("cumulative_pnl", 0.0) or 0.0):
+        lifetime_at_archive = round(float(cm.get("cumulative_pnl", 0.0) or 0.0), 2)
+        if not prior and not lifetime_at_archive:
             return                      # nothing to archive; a fresh variant
+        # `cumulative_pnl` here is the RETIRED ERA's own P&L — the sum of the
+        # days being archived. It is NOT the pre-rebase lifetime: that figure
+        # includes post-epoch days too, and storing it under this key (which is
+        # what schema 1 did) overstated or understated the retired era by
+        # exactly the post-epoch total, while `days` counted only prior days.
+        # On variant B that read "+$17,609.37 over 46 days" for an era that
+        # actually made +$19,429.47 — a wrong number AND a wrong per-day
+        # average. The old value is kept under `lifetime_pnl_at_archive` so
+        # nothing is lost, and `schema` lets a reader tell the two apart.
+        prior_sum = round(sum(float(r.get("net_pnl", 0.0) or 0.0) for r in prior), 2)
         cm["pre_epoch"] = {
+            "schema": 2,
             "retired_on": epoch,
             "reason": "strategy rules changed; earlier days are a different strategy",
-            "cumulative_pnl": round(float(cm.get("cumulative_pnl", 0.0) or 0.0), 2),
+            "cumulative_pnl": prior_sum,
+            "lifetime_pnl_at_archive": lifetime_at_archive,
             "total_entries": int(cm.get("total_entries", 0) or 0),
             "total_stops": int(cm.get("total_stops", 0) or 0),
             "winning_days": int(cm.get("winning_days", 0) or 0),
             "losing_days": int(cm.get("losing_days", 0) or 0),
+            # rows ARCHIVED, which can undercount actual trading days: a
+            # no-trade day may be absent from daily_returns entirely.
             "days": len(prior),
             "daily_returns": prior,
         }
@@ -7421,8 +7441,10 @@ class HydraStrategy(MEICStrategy):
                                if str(r.get("date", "")) >= epoch]
         logger.warning(
             "METRICS-EPOCH: lifetime record restarted at %s. Prior era archived "
-            "under 'pre_epoch' ($%.2f over %d days) — preserved, not deleted.",
-            epoch, cm["pre_epoch"]["cumulative_pnl"], cm["pre_epoch"]["days"])
+            "under 'pre_epoch' ($%.2f over %d recorded days; lifetime at archive "
+            "was $%.2f) — preserved, not deleted.",
+            epoch, cm["pre_epoch"]["cumulative_pnl"], cm["pre_epoch"]["days"],
+            cm["pre_epoch"]["lifetime_pnl_at_archive"])
         self._save_cumulative_metrics(trading_date=epoch)
 
     def _reconcile_cumulative_metrics_from_db(self, date_str: str) -> None:

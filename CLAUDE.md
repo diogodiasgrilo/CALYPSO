@@ -579,12 +579,37 @@ D and E both subclass `bots/hydra/calendar_strategy_base.py` (`CalendarStrategyB
 > and **hedging** as the adverse-move response. B has **no VIX floor, 7 entry slots, a fixed 40%-of-width
 > stop, and both hedges disabled.**
 >
-> 🔴 **B has traded 0 of 45 live days at VIX ≥ 19** (max seen: 18.97). Its entire **+$6,476.60**
-> was earned in a regime the source explicitly excludes — so **his 22.5%/"40% in a quarter"
-> results are NOT evidence for B** and must not be cited at any go-live gate. Applying his VIX
-> filter retroactively yields **zero trades in 45 days**, so "make B faithful" would delete the
-> strategy, not fix it. B is HYDRA's IC engine using three of his ideas (8δ strikes, GEX adjuster,
-> 80% TP) on a MEIC grid he never proposed. Judge it on our own record (**t = 0.83**), not his.
+> 🔴 **B has traded 0 of 53 live days at VIX ≥ 19.** It has now *seen* his regime once
+> (max VIX **20.25**, one day ≥ 19) and did **not** trade it, so his 22.5%/"40% in a
+> quarter" results are **NOT evidence for B** and must not be cited at any go-live gate.
+> Applying his VIX filter retroactively still yields **zero trades**, so "make B faithful"
+> would delete the strategy, not fix it. B is HYDRA's IC engine using three of his ideas
+> (8δ strikes, GEX adjuster, 80% TP) on a MEIC grid he never proposed.
+>
+> ⚠️ **Corrected 2026-10-06: this said "0 of 45 days (max seen 18.97). Its entire
+> +$6,476.60 … Judge it on our own record (t = 0.83)". All three figures are now wrong,
+> and the P&L one has CHANGED SIGN.** Re-measured against `daily_summaries` the same
+> evening B's epoch rebase landed:
+>
+> | B, live era (since the 2026-07-24 swap) | |
+> |---|---|
+> | net P&L | **−$1,820.10** (not +$6,476.60) |
+> | days / days with entries | 53 / 38 |
+> | mean per day | **−$34.34**, SD $1,342.95 |
+> | **t** | **−0.19** (was quoted as +0.83) |
+> | win rate | 47.2% of all days, 65.8% of traded days |
+>
+> **t = −0.19 does NOT mean "B loses money" — it means the edge is indistinguishable
+> from zero**, and the point estimate has merely crossed over. Neither the old
+> +$6,476.60 nor this −$1,820.10 is a usable estimate of B's true edge; the noise
+> dwarfs both. At this mean/SD it would take **~6,100 trading days (~24 years)** to
+> reach |t| = 2, which is the measurability finding, not a performance claim.
+>
+> 🔴 **The whole positive record is one month.** August alone **+$5,373.20**;
+> everything else in the live era **−$7,193.30**. October is −$6,494.35 in 4 days
+> (10-01 −$3,700.40, 10-05 −$4,034.90). Excluding October the era is +$4,674.25,
+> t = +0.59 — i.e. the sign of B's record depends on which weeks you include, which
+> is exactly what a 25:1 noise-to-edge ratio looks like. Do not tune on it.
 
 **Brandon Trojan Horse features (LIVE on B/C):** take-profit at 80% credit captured, GEX-aware strike adjuster (skips sides inside accel zones, shifts toward decel walls), GEX breach exit (closes IC after sustained 90s breach of decel wall), defensive overlay (debit spread / butterfly hedge), delta-target strike selection anchored to 8δ from the live Polygon chain (replaces HYDRA's OTM-multiplier).
 

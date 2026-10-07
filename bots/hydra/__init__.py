@@ -36,6 +36,48 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-06 METRICS-EPOCH `pre_epoch` ARCHIVED THE WRONG NUMBER (schema 1 -> 2).
+  `_archive_pre_epoch_metrics` stored the PRE-REBASE LIFETIME under
+  `pre_epoch.cumulative_pnl` while `pre_epoch.days` counted only the PRIOR days,
+  so the archived block described the retired era with a total that also
+  contained every post-epoch day. Measured on all four epoch variants the same
+  evening B/C/D rebased, and it reconciles exactly (era + live = headline):
+      variant  archived headline        TRUE retired era
+      B        +$17,609.37 / 46 days    +$19,429.47 / 55 days
+      C         -$6,879.03 / 19 days     +$2,899.30 / 23 days   <- SIGN ERROR
+      D        -$10,221.30 /  1 day      -$3,827.00 / 18 days   <- "1 day"
+      E           -$185.90 / 67 days       -$185.90 / 72 days   <- coincidence
+  C's block says the retired era LOST $6,879 when it MADE $2,899; D's invites a
+  -$10,221-per-day reading of an era that lost $3,827 over 18 days.
+  WHY IT SHIPPED UNNOTICED: E was the only user until today and E's post-epoch
+  total is exactly $0.00, so lifetime == era by accident. The unit test was blind
+  for the same reason — its fixture set `cumulative_pnl` to the PRIOR sum (-109)
+  instead of prior+post (-79), so both behaviours produced the same -109 and the
+  assertion could not tell them apart. A fixture whose totals do not add up
+  cannot catch an accounting bug.
+  FIX: `cumulative_pnl` is now the retired era's OWN sum; the old value is kept
+  as `lifetime_pnl_at_archive`; `schema: 2` distinguishes the two meanings; the
+  METRICS-EPOCH log line prints both and says "recorded days". Fixture made
+  internally consistent + a dedicated negative control (reintroducing the defect
+  fails 3 tests on `-79.0 == -109.0`).
+  SCOPE: this field has NO READER — not the dashboard, not the backend, not the
+  agents — so nothing computed on it; the harm was to a human reading the block.
+  The fix is INERT for every current variant because the archive is idempotent:
+  B/C/D/E will never re-archive, so it only applies the next time an epoch is
+  set. The four blocks already on disk remain schema 1 and are NOT repaired in
+  place: each bot holds its block in memory and would overwrite any file edit at
+  the next settlement, so the true era sums are recorded here and in CLAUDE.md
+  instead, which is where they are actually read.
+- 2026-10-06 VARIANT B's LIVE RECORD CHANGED SIGN (measurement, no code change).
+  Re-measured against `daily_summaries` after the epoch rebase: live era (since
+  the 2026-07-24 swap) is **-$1,820.10** over 53 days, mean -$34.34, SD
+  $1,342.95, **t = -0.19**, win 47.2% all days / 65.8% traded. CLAUDE.md had
+  **+$6,476.60 and t = +0.83**. t = -0.19 means the edge is indistinguishable
+  from zero, NOT that B loses money; ~6,100 days (~24 yr) would be needed for
+  |t| = 2. The entire positive record is ONE MONTH: August +$5,373.20 against
+  -$7,193.30 for everything else; October -$6,494.35 in 4 days. Excluding
+  October the era is +$4,674.25, t = +0.59 — the sign depends on which weeks are
+  included. Do not tune on it.
 - 2026-10-04 STALE SESSION-OPEN PRINT — a single tick corrupted a LIVE skip path.
   IBKR can serve the PRIOR DAY'S CLOSE as the first regular-session print, flagged
   6509='R' (real-time), so the existing Z/Y/N freshness gate does not catch it. Because
