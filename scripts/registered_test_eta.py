@@ -23,17 +23,170 @@ from __future__ import annotations
 
 import argparse
 import os
+import re
 import sqlite3
+import subprocess
 import sys
+
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+
+from scripts.measurement_clock import economic_paths  # noqa: E402
 
 LIVE_ERA = "2026-07-24"      # the B/C live-seat swap
 PREREG_CUTOFF = "2026-09-29"  # PREREG_GEX_GATE / PREREG_SLOT_PRUNE: later only
+
+# ---------------------------------------------------------------------------
+# Which code paths each registered test's CONCLUSION depends on.
+#
+# Counting out-of-sample observations says how MUCH data has accrued. It says
+# nothing about whether the system generating it stayed still — so this file
+# would happily report "25/25, go read the result" on a sample collected across
+# a change to the very behaviour under test. The 2026-10-01 chain-truncation
+# fix (`1ab92221`, max_pages 4 -> 20) is the live example: it altered the delta
+# ladder the GEX adjuster picks strikes from, INSIDE the GEX test's
+# out-of-sample window. It was caught by hand. The next one might not be.
+#
+# `direct`  — paths whose behaviour the test is literally measuring.
+# `shared`  — paths that could matter but are touched by nearly every commit;
+#             reported separately so a real signal is not buried in them.
+#
+# This flags commits for REVIEW. It deliberately does NOT rule on whether a
+# flagged commit invalidates a test: that needs a data check (for 1ab92221,
+# whether truncated-chain days contributed any vetoes — they contributed 2
+# decisions and 0 vetoes, so it was clean). Automating detection is the value;
+# automating the verdict would be false precision.
+# ---------------------------------------------------------------------------
+TEST_DEPS = {
+    "GEX gate": {
+        "direct": [re.compile(r"^bots/hydra/brandon/"), re.compile(r"gex")],
+        "shared": [re.compile(r"^bots/hydra/(strategy|base_strategy)\.py$")],
+        "measures": "veto decisions + delta-target strike selection",
+    },
+    "e#4 slot prune": {
+        "direct": [re.compile(r"^bots/hydra/strategy\.py$"),
+                   re.compile(r"^bots/hydra/config/config.*\.json$")],
+        "shared": [re.compile(r"^bots/hydra/(base_strategy)\.py$"),
+                   re.compile(r"^bots/hydra/brandon/")],
+        "measures": "which slots fire, and the per-slot P&L",
+    },
+    "one-entry-a-day": {
+        "direct": [re.compile(r"^bots/hydra/strategy\.py$"),
+                   re.compile(r"^bots/hydra/config/config.*\.json$")],
+        "shared": [re.compile(r"^bots/hydra/(base_strategy)\.py$"),
+                   re.compile(r"^bots/hydra/brandon/")],
+        "measures": "entry count per day",
+    },
+}
+
+
+def commits_since(cutoff: str, root: str):
+    """Economic commits strictly AFTER `cutoff` (YYYY-MM-DD), newest first.
+
+    Own git call rather than `measurement_clock.commits()` because that one
+    takes a rolling day-window and runs in the process CWD; a pre-registration
+    needs an absolute cut-off DATE and an explicit repo root. The CLASSIFICATION
+    is shared — `economic_paths` stays the single source of truth for what can
+    change a trading decision, so the two tools cannot drift apart.
+    """
+    fmt = "%x00%H%x1f%ad%x1f%s"
+    try:
+        proc = subprocess.run(
+            ["git", "log", f"--since={cutoff}", "--date=short", f"--format={fmt}",
+             "--numstat"],
+            capture_output=True, text=True, cwd=root, timeout=30)
+    except Exception:
+        return None                      # git binary missing / timeout
+    if proc.returncode != 0:
+        # git ran and REFUSED (not a repo, bad revision, ...). It does not raise,
+        # so without this the empty stdout parsed to [] and the caller printed
+        # "all tests clean" for a check that never ran. A check that cannot run
+        # must never read as clean.
+        return None
+    raw = proc.stdout
+    out = []
+    for chunk in raw.split("\x00"):
+        if not chunk.strip():
+            continue
+        head, _, files = chunk.partition("\n\n") if "\n\n" in chunk else (chunk, "", "")
+        parts = head.split("\x1f")
+        if len(parts) < 3:
+            continue
+        sha, ad, subj = parts[0][:7], parts[1], parts[2]
+        if ad <= cutoff:                 # --since is inclusive-ish; be strict
+            continue
+        # numstat rows are "added<TAB>deleted<TAB>path"; binary files give "-".
+        churn = {}
+        for line in (files or "").splitlines():
+            bits = line.split("\t")
+            if len(bits) != 3:
+                continue
+            add, dele, path = bits
+            try:
+                churn[path.strip()] = int(add) + int(dele)
+            except ValueError:
+                churn[path.strip()] = 0          # binary
+        econ = economic_paths(list(churn))
+        if econ:
+            out.append({"sha": sha, "date": ad, "subject": subj[:52],
+                        "paths": econ, "churn": churn})
+    return out
+
+
+def integrity_report(tests, cutoff: str, root: str, show_all: bool = False):
+    """Per test: did anything touch what it measures, since its cut-off?"""
+    cs = commits_since(cutoff, root)
+    print(f"PRE-REGISTRATION INTEGRITY — did the system move while the data accrued?")
+    if cs is None:
+        print(f"  git unavailable at {root} — integrity NOT checked (treat as UNKNOWN,")
+        print("  not as clean).")
+        return
+    if not cs:
+        print(f"  no economic commits since {cutoff} — all tests clean.")
+        return
+    SHOW = 10**6 if show_all else 5
+    for name, *_rest in tests:
+        dep = TEST_DEPS.get(name)
+        if not dep:
+            continue
+        direct, shared = [], []
+        for c in cs:
+            hit = [p for p in c["paths"] if any(r.search(p) for r in dep["direct"])]
+            if hit:
+                # Rank by LINES CHANGED in the dependency files only. A 3-line
+                # logging tweak and a strike-selection rewrite both "touch
+                # strategy.py"; without this the real one is buried among the
+                # trivial ones and the whole report gets ignored — the failure
+                # mode this tool exists to prevent.
+                direct.append((sum(c["churn"].get(p, 0) for p in hit), hit, c))
+            elif any(r.search(p) for p in c["paths"] for r in dep["shared"]):
+                shared.append(c)
+        direct.sort(key=lambda t: -t[0])
+        churn_total = sum(t[0] for t in direct)
+        verdict = "REVIEW" if direct else ("look" if shared else "clean")
+        print(f"  {name}  — measures {dep['measures']}")
+        print(f"      direct: {len(direct):<3} commits / {churn_total:>5} lines in dep files"
+              f"   shared-file: {len(shared):<3}   -> {verdict}")
+        for lines, hit, c in direct[:SHOW]:
+            where = ", ".join(os.path.basename(p) for p in hit[:2])
+            print(f"        {lines:>5}L  {c['sha']}  {c['date']}  {c['subject'][:44]}  [{where}]")
+        if len(direct) > SHOW:
+            rest = sum(t[0] for t in direct[SHOW:])
+            print(f"        ... +{len(direct)-SHOW} more, {rest} lines "
+                  f"(smaller than the above; listed by --all)")
+        if direct:
+            print("        ^ ranked by churn, NOT by importance. A flag is not a")
+            print("          verdict: assess against the DATA before reading the")
+            print("          result, the way 1ab9222 was cleared (truncated-chain")
+            print("          days contributed 2 decisions and 0 vetoes).")
+    print()
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
     ap.add_argument("--variant", default="b")
     ap.add_argument("--root", default="/opt/calypso")
+    ap.add_argument("--all", action="store_true",
+                    help="list every flagged commit, not just the 5 largest")
     a = ap.parse_args(argv)
 
     db = (os.path.join(a.root, "data", "backtesting.db") if a.variant in ("", "a")
@@ -110,6 +263,8 @@ def main(argv=None):
     print("  The accrual rate is the binding constraint, not the thresholds: every")
     print("  skipped entry is a day added to all three. Anything that raises B's")
     print("  placement rate shortens all of them at once.")
+    print()
+    integrity_report(tests, PREREG_CUTOFF, a.root, show_all=a.all)
     con.close()
     return 0
 
