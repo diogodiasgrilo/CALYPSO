@@ -48,7 +48,28 @@ def _git_ok():
         return False
 
 
+def _history_rich():
+    """CI checks out with `fetch-depth: 1`, so `git log --since=` sees ONE
+    squashed commit (observed: a single entry of 17,794 lines). Assertions
+    about ranking and capping need real history, so they are skipped there and
+    covered deterministically by the synthetic-repo tests below instead."""
+    if not _git_ok():
+        return False
+    try:
+        shallow = subprocess.run(["git", "rev-parse", "--is-shallow-repository"],
+                                 cwd=str(ROOT), capture_output=True, text=True,
+                                 timeout=10).stdout.strip()
+        if shallow == "true":
+            return False
+    except Exception:
+        return False
+    cs = commits_since("2026-09-29", str(ROOT))
+    return bool(cs) and len(cs) >= 6
+
+
 needs_git = pytest.mark.skipif(not _git_ok(), reason="not a git checkout")
+needs_history = pytest.mark.skipif(
+    not _history_rich(), reason="shallow/insufficient git history (CI fetch-depth=1)")
 
 
 class TestItSharesOneDefinitionOfEconomic:
@@ -110,6 +131,7 @@ class TestItReadsRealHistory:
         out = " ".join(_run().split())        # the note wraps across lines
         assert "a flag is not a verdict" in out.lower()
 
+    @needs_history
     def test_ranking_is_by_churn_descending(self):
         """Without this a 3-line logging tweak outranks a strike-selection
         rewrite and the real signal is buried, which is how a report like this
@@ -120,6 +142,7 @@ class TestItReadsRealHistory:
         assert len(nums) > 2
         assert nums == sorted(nums, reverse=True), nums
 
+    @needs_history
     def test_the_listing_is_capped_unless_all_is_passed(self):
         few = _run([("e#4 slot prune", 2, 27, 0.40, "")], show_all=False)
         many = _run([("e#4 slot prune", 2, 27, 0.40, "")], show_all=True)
@@ -145,3 +168,71 @@ class TestItFailsLoudRatherThanQuiet:
     def test_an_unknown_test_name_is_skipped_not_crashed(self):
         out = _run([("not a registered test", 1, 2, 0.5, "")])
         assert "not a registered test" not in out
+
+
+def _make_repo(tmp_path, commits):
+    """A throwaway git repo with controlled commits, so ranking and capping are
+    tested against KNOWN churn rather than whatever history the environment
+    happens to have. `commits` is [(date, subject, path, n_lines)]."""
+    r = tmp_path / "repo"
+    r.mkdir()
+    env = {"GIT_AUTHOR_NAME": "t", "GIT_AUTHOR_EMAIL": "t@t",
+           "GIT_COMMITTER_NAME": "t", "GIT_COMMITTER_EMAIL": "t@t"}
+    def git(*a, **kw):
+        e = dict(**env, **kw.pop("extra", {}))
+        subprocess.run(["git", *a], cwd=str(r), check=True,
+                       capture_output=True, env={**__import__("os").environ, **e})
+    git("init", "-q")
+    git("commit", "-q", "--allow-empty", "-m", "base",
+        extra={"GIT_AUTHOR_DATE": "2026-09-01T12:00:00", "GIT_COMMITTER_DATE": "2026-09-01T12:00:00"})
+    for date, subj, path, n in commits:
+        f = r / path
+        f.parent.mkdir(parents=True, exist_ok=True)
+        f.write_text("\n".join(f"line {i}" for i in range(n)) + "\n")
+        git("add", "-A")
+        git("commit", "-q", "-m", subj,
+            extra={"GIT_AUTHOR_DATE": f"{date}T12:00:00", "GIT_COMMITTER_DATE": f"{date}T12:00:00"})
+    return str(r)
+
+
+class TestTheLogicOnASyntheticRepo:
+    """Deterministic in every environment, including CI's shallow checkout."""
+
+    CUT = "2026-09-29"
+
+    def _repo(self, tmp_path, n=8):
+        # descending sizes so the expected ranking is unambiguous
+        return _make_repo(tmp_path, [
+            (f"2026-10-{(i % 28) + 1:02d}", f"change number {i}",
+             "bots/hydra/strategy.py", 100 - i * 5)
+            for i in range(n)
+        ])
+
+    def test_ranking_is_by_churn_descending(self, tmp_path):
+        out = _run([("e#4 slot prune", 2, 27, 0.4, "")],
+                   cutoff=self.CUT, root=self._repo(tmp_path), show_all=True)
+        nums = [int(l.strip().split("L")[0]) for l in out.splitlines()
+                if l.strip() and l.strip()[0].isdigit() and "L  " in l]
+        assert len(nums) >= 6, nums
+        assert nums == sorted(nums, reverse=True), nums
+
+    def test_the_listing_caps_at_five(self, tmp_path):
+        root = self._repo(tmp_path)
+        few = _run([("e#4 slot prune", 2, 27, 0.4, "")], cutoff=self.CUT, root=root)
+        many = _run([("e#4 slot prune", 2, 27, 0.4, "")], cutoff=self.CUT,
+                    root=root, show_all=True)
+        count = lambda t: sum(1 for l in t.splitlines() if "L  " in l)
+        assert count(few) == 5
+        assert count(many) == 8
+        assert "+3 more" in few
+
+    def test_a_commit_ON_the_cutoff_is_excluded(self, tmp_path):
+        root = _make_repo(tmp_path, [("2026-09-29", "on the cutoff",
+                                      "bots/hydra/strategy.py", 40)])
+        out = _run([("e#4 slot prune", 2, 27, 0.4, "")], cutoff=self.CUT, root=root)
+        assert "clean" in out.lower(), "a commit dated ON the cut-off must not count"
+
+    def test_a_non_economic_commit_is_ignored(self, tmp_path):
+        root = _make_repo(tmp_path, [("2026-10-02", "docs only", "docs/README.md", 50)])
+        out = _run([("e#4 slot prune", 2, 27, 0.4, "")], cutoff=self.CUT, root=root)
+        assert "clean" in out.lower()
