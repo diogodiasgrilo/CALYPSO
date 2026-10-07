@@ -8,6 +8,7 @@
     "_comment_commission": "IBKR all-in SPX cost ~$1.15/leg/contract \u2014 see config_variant_c.json's comment for the full breakdown.",
     "commission_per_leg": 1.15,
     "underlying_symbol": "SPY",
+    "underlying_sec_type": "STK",
     "trading_class": "SPY",
     "exchange": "SMART",
     "target_dte": 0,

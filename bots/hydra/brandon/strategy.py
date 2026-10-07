@@ -152,6 +152,11 @@ class BrandonHydraStrategy(HydraStrategy):
         # grids, so "the previous read" is inherently a per-variant concept).
         self._brandon_prior_gex_profile: Optional[GEXProfile] = None
         self._brandon_breach_states: dict[tuple[int, str], gex_breach_exit.BreachState] = {}
+        # Advisory-log dedupe (2026-10-07). The advisory fired a WARNING on
+        # EVERY ~11s tick for as long as a breach persisted — 825 lines on
+        # 2026-10-05 and 1,214 on 09-24 — which buried every other warning in
+        # the file. One line per breach episode now, then a periodic roll-up.
+        self._brandon_advisory_log: dict[tuple[int, str], dict] = {}
         self._brandon_overlay_placed: set[tuple[int, str]] = set()
         # Throttle for BRANDON-OVERLAY-WATCH (2026-08-19): monotonic
         # timestamp of the last watch-zone log per (entry_number, side), so
@@ -1470,6 +1475,68 @@ class BrandonHydraStrategy(HydraStrategy):
     # GEX breach exit (LIVE) — Brandon's stop
     # ------------------------------------------------------------------
 
+    # Roll-up cadence for a persisting advisory breach. 5 minutes keeps a long
+    # episode visible without one line per ~11s tick.
+    ADVISORY_REPEAT_SECONDS = 300.0
+
+    def _advisory_log_store(self) -> dict:
+        """The advisory dedupe store, lazily created.
+
+        NEVER raises on a missing attribute. These helpers run inside the
+        stop-loss monitoring loop, and an AttributeError from a *logging*
+        helper is the "bot frozen, stop loss not firing" failure mode — so the
+        store is resolved defensively rather than assumed to exist (found by
+        two pre-existing tests that build the strategy via ``__new__``, which
+        is also how a partially-initialised object would reach here).
+        """
+        store = getattr(self, "_brandon_advisory_log", None)
+        if store is None:
+            store = {}
+            self._brandon_advisory_log = store
+        return store
+
+    def _log_breach_advisory(self, entry, side: str, decision, now) -> None:
+        """Log the advisory would-close ONCE per breach episode, then roll up.
+
+        Also names the stop that will actually fire via ``acting_stop_label()``
+        instead of asserting "credit+buffer" — which was wrong on variant B
+        (``narrow_spread_stop.enabled=true`` → the A2 %-of-width trigger acts)
+        and right only on un-migrated C.
+        """
+        store = self._advisory_log_store()
+        key = (entry.entry_number, side)
+        rec = store.get(key)
+        if rec is None:
+            store[key] = {"first": now, "last": now, "ticks": 1}
+            logger.warning(
+                "BRANDON-BREACH E#%s %s: ADVISORY would-close (breach confirmed) "
+                "— NOT acting; %s is the acting stop. %s",
+                entry.entry_number, side, self.acting_stop_label(), decision.reason,
+            )
+            return
+        rec["ticks"] += 1
+        try:
+            elapsed = (now - rec["last"]).total_seconds()
+        except Exception:  # noqa: BLE001 — a clock/tz oddity must not kill monitoring
+            elapsed = 0.0
+        if elapsed >= self.ADVISORY_REPEAT_SECONDS:
+            rec["last"] = now
+            logger.warning(
+                "BRANDON-BREACH E#%s %s: ADVISORY still would-close after %d ticks "
+                "— NOT acting; %s is the acting stop.",
+                entry.entry_number, side, rec["ticks"], self.acting_stop_label(),
+            )
+
+    def _close_breach_advisory(self, entry, side: str) -> None:
+        """End an advisory episode; emit one summary if it was ever logged."""
+        rec = self._advisory_log_store().pop((entry.entry_number, side), None)
+        if rec and rec.get("ticks", 0) > 1:
+            logger.info(
+                "BRANDON-BREACH E#%s %s: ADVISORY episode ended after %d ticks "
+                "(no action was taken; %s remained the acting stop).",
+                entry.entry_number, side, rec["ticks"], self.acting_stop_label(),
+            )
+
     def _brandon_check_breach_exit(self, entry) -> Optional[str]:
         profile = self._brandon_get_gex_profile(self._brandon_today_date())
         if profile is None:
@@ -1547,17 +1614,17 @@ class BrandonHydraStrategy(HydraStrategy):
             self._brandon_breach_states[key] = new_state
             if decision.is_first_breach:
                 logger.info("BRANDON-BREACH E#%s %s: first breach — %s", entry.entry_number, side, decision.reason)
+            if not decision.would_close:
+                # Episode over (or never started): close out any advisory
+                # roll-up so the NEXT episode logs its first line at WARNING.
+                self._close_breach_advisory(entry, side)
             if decision.would_close:
                 # A1: advisory mode — log the would-close for the head-to-head
                 # record but do NOT act; the credit+buffer (L-C2 backstop) is the
                 # acting primary. Skip to the next side so this returns no action
                 # and _check_stop_losses falls through to super()._check_stop_losses().
                 if getattr(self, "brandon_breach_exit_advisory", False):
-                    logger.warning(
-                        "BRANDON-BREACH E#%s %s: ADVISORY would-close (breach confirmed) "
-                        "— NOT acting; credit+buffer stop is primary. %s",
-                        entry.entry_number, side, decision.reason,
-                    )
+                    self._log_breach_advisory(entry, side, decision, now)
                     continue
                 # Cooldown: a recent 0-leg close on this breached side means we
                 # already tried and it didn't transact — don't re-fire (and
@@ -3709,6 +3776,7 @@ class BrandonHydraStrategy(HydraStrategy):
         self._brandon_gex_failure_at = None
         self._brandon_prior_gex_profile = None
         self._brandon_breach_states.clear()
+        self._advisory_log_store().clear()
         self._brandon_overlay_placed.clear()
         self._brandon_overlay_watch_logged_at.clear()
         self._brandon_overlay_trigger_first_seen_at.clear()

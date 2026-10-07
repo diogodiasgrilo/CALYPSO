@@ -36,6 +36,48 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-07 TWO LOG/CONFIG DEFECTS FROM THE PRE-MARKET SWEEP (no behaviour change
+  to any SPX variant).
+  (1) THE BREACH ADVISORY NAMED THE WRONG STOP, ~2,200 TIMES. The Brandon
+      advisory logged "NOT acting; credit+buffer stop is primary" — hardcoded.
+      That is RIGHT on un-migrated C (narrow_spread_stop.enabled=false,
+      shadow=true: a shadow never acts) and WRONG on the live seat B, which has
+      had enabled=true/pct_of_width=0.4 since the 2026-07-24 swap, making the A2
+      40%-of-width trigger the acting stop. It also fired on EVERY ~11s tick for
+      as long as a breach persisted: 825 lines on 2026-10-05, 1,214 on 09-24,
+      2,221 in all — which buried every other WARNING in the file (it is why a
+      WARNING histogram was needed to find anything else at all).
+      FIX: `HydraStrategy.acting_stop_label()` mirrors the A2 decision site and
+      is what the message now prints, so B reads "A2 %-of-width (40% of width)"
+      and C still reads "credit+buffer". The advisory logs ONCE per breach
+      episode, rolls up every ADVISORY_REPEAT_SECONDS=300 with the suppressed
+      tick count, emits one INFO summary when the episode ends, and re-arms for
+      the next episode. Per-(entry, side), so both wings stay visible.
+      The dedupe store is resolved LAZILY and DEFENSIVELY: these helpers run
+      inside the stop-loss monitoring loop and an AttributeError from a logging
+      helper is the "bot frozen, stop loss not firing" mode. Two PRE-EXISTING
+      tests caught that by building the strategy via `__new__` — the fix went
+      into the production code, not the tests.
+  (2) THE SPY VARIANTS ASKED IBKR FOR A "SPY INDEX". `_read_index_price`
+      hardcoded `sec_type="IND"` for BOTH the underlying and the volatility
+      symbol. E and H trade SPY (an ETF), so the spot read resolved only by
+      falling through to the first search candidate, logging
+      `qualify_contract(SPY, IND): 3 underlying candidates ... picking first`
+      (13 times since 10-01). E's own docstring says that read "never resolves a
+      SPY spot" and E carries an OHLC-backfill workaround built around it.
+      FIX: the sec_type is resolved PER SYMBOL — the underlying uses
+      `underlying_sec_type`, everything else (VIX) stays IND. That distinction is
+      the point: VIX is a real cash index on every variant, so one blanket config
+      key would have fixed the spot read and broken the VIX read.
+      `sec_type` is accepted as a LEGACY ALIAS because variant E has carried
+      `"sec_type": "STK"` since it was written and NOTHING read it — a key that
+      looked meaningful and was inert — so E is now correct with no config edit.
+      H gets `underlying_sec_type: "STK"`. Default is IND, so A/B/C/D/F/G are
+      byte-identical; a test asserts the resolution for all seven shipped configs
+      and that no variant trades SPY as an index.
+  Five negative controls, each verified present on disk before running: the
+  hardcoded stop claim (3 tests fail), no-dedupe (4), hardcoded IND (2), H's
+  config flipped back to IND (1), and the non-lazy store (2). 5,737 tests pass.
 - 2026-10-06 METRICS-EPOCH `pre_epoch` ARCHIVED THE WRONG NUMBER (schema 1 -> 2).
   `_archive_pre_epoch_metrics` stored the PRE-REBASE LIFETIME under
   `pre_epoch.cumulative_pnl` while `pre_epoch.days` counted only the PRIOR days,

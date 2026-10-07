@@ -8210,6 +8210,18 @@ class MEICStrategy(abc.ABC):
         """
         cfg = self.strategy_config
         self.underlying_symbol = cfg.get("underlying_symbol", "SPX")
+        # The underlying's IBKR security type. Defaults to IND because the fleet
+        # was built around SPX; variants whose underlying is an ETF (E and H
+        # trade SPY) must set "STK" or the spot read asks IBKR for a
+        # NON-EXISTENT "SPY index" (2026-10-07). Deliberately a SEPARATE key
+        # from volatility_symbol's type: VIX is a real cash index on every
+        # variant, so the VIX read stays IND even when the underlying is STK.
+        # ``sec_type`` is accepted as a legacy alias: variant E has carried
+        # ``"sec_type": "STK"`` since it was written, intending exactly this,
+        # and NOTHING read it — a config key that looked meaningful and was
+        # inert. Honouring it means E is correct without a config edit.
+        self.underlying_sec_type = str(
+            cfg.get("underlying_sec_type") or cfg.get("sec_type") or "IND").upper()
         self.volatility_symbol = cfg.get("volatility_symbol", "VIX")
         self.trading_class = cfg.get("trading_class", "SPXW")
         self.exchange = cfg.get("exchange", "CBOE")

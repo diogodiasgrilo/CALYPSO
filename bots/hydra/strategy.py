@@ -2402,7 +2402,16 @@ class HydraStrategy(MEICStrategy):
         Used by GAP-C ``_update_market_data`` and GAP-E ``_check_market_halt``.
         """
         try:
-            conid = self.broker.qualify_contract(symbol, sec_type="IND", exchange=self.exchange)
+            # Per-symbol sec_type: the UNDERLYING may be an ETF (E/H trade SPY),
+            # while the volatility symbol is a cash index on every variant. A
+            # single hardcoded "IND" asked IBKR for a "SPY index" — it resolved
+            # the ETF only by falling through to the first search candidate,
+            # which is why E carries an OHLC-backfill workaround for a spot read
+            # its own docstring says "never resolves". Default is IND, so SPX
+            # variants (A/B/C/G and D) are byte-identical.
+            sec_type = ("IND" if symbol != getattr(self, "underlying_symbol", None)
+                        else getattr(self, "underlying_sec_type", "IND"))
+            conid = self.broker.qualify_contract(symbol, sec_type=sec_type, exchange=self.exchange)
             q = self.broker.get_quote(conid)
             if not q:
                 return (None, None)
@@ -10303,6 +10312,26 @@ class HydraStrategy(MEICStrategy):
     # =========================================================================
     # MKT-042: Effective stop level with buffer decay
     # =========================================================================
+
+    def acting_stop_label(self) -> str:
+        """Name the stop that will ACTUALLY fire, for log lines and status text.
+
+        MIRRORS the decision site in ``_calculate_stop_levels_hydra`` (the A2
+        %-of-width override) and ``_get_effective_stop_level`` (which bypasses
+        MKT-042 decay in that mode). Anything that tells an operator which stop
+        is primary must call this rather than hardcode a name — the Brandon
+        breach advisory hardcoded "credit+buffer stop is primary" and was
+        therefore WRONG on variant B from the 2026-07-24 swap onward, where
+        ``narrow_spread_stop.enabled=true`` makes the 40%-of-width trigger the
+        acting stop. It stayed wrong in ~2,200 WARNING lines.
+
+        ``shadow`` is deliberately NOT consulted: the shadow variants are used
+        with ``enabled=false`` and never act, so they cannot be the acting stop.
+        """
+        if getattr(self, "narrow_spread_stop_enabled", False):
+            return "A2 %%-of-width (%.0f%% of width)" % (
+                100.0 * float(getattr(self, "narrow_spread_stop_pct", 0.40)))
+        return "credit+buffer"
 
     def _get_effective_stop_level(self, entry, side: str) -> float:
         """Return effective stop level with MKT-042 buffer decay applied.
