@@ -5,11 +5,96 @@
 > [`docs/migration/PROJECT_STATUS.md`](migration/PROJECT_STATUS.md) (project-wide state) and the per-effort
 > design docs.
 >
-> **Last updated: 2026-09-19 (Sat, 03:40 ET).** **Read §A0 first — it is the whole current state on
-> one screen.** §A–§D are current. **§0–§10 are the older backlog (2026-07-14 / 07-24 era)** — much of
+> **Last updated: 2026-10-08 (Thu, 11:20 ET).** **Read §A-pent first — it is the whole current state
+> on one screen.** (§A0 below is the 2026-09-19 snapshot, kept for history.) §A–§D are current. **§0–§10 are the older backlog (2026-07-14 / 07-24 era)** — much of
 > it is done or superseded; **verify against the code before acting on anything there.** Real live
 > items still live in §5 (entry-schedule lock, E calendar-stop analyzer) and §6 (Brandon fill-quality
 > confirmations), which is why those sections are kept rather than deleted.
+
+---
+
+# §A-pent. WHERE WE ARE — 2026-10-08 (Thu)
+
+> ⚠️ **This file went 9 days without an update (2026-09-29 → 10-08) while a lot shipped**, and
+> `migration/PROJECT_STATUS.md` went 19. Everything below was recorded in commit messages, the
+> `bots/hydra/__init__.py` version history and CLAUDE.md at the time — but the doc CLAUDE.md tells
+> you to read FIRST was stale, which is the same defect we spent the week fixing elsewhere.
+
+## The number that changed everything
+
+**Variant B's live record changed SIGN.** Re-measured against `daily_summaries` on 2026-10-06 over
+the full live era (53 days since the 07-24 swap):
+
+| | was documented | measured |
+|---|---|---|
+| net P&L | +$6,476.60 | **−$1,820.10** |
+| mean/day · SD | — | **−$34.34** · $1,342.95 |
+| **t** | +0.83 | **−0.19** |
+| win rate | 71% traded | 65.8% traded / 47.2% all days |
+
+**t = −0.19 means indistinguishable from zero, NOT that B loses money.** Neither figure estimates
+B's edge — noise is 39× the mean, and |t| = 2 needs **~6,118 trading days (~24 yr)**. The whole
+positive record is one month: **August +$5,373.20 vs −$7,193.30 for everything else.** Do not tune
+on it. See `b_is_not_measurable_structural_finding`.
+
+## Deployed and verified since 2026-09-29
+
+| what | commit | verified |
+|---|---|---|
+| Metrics epoch rebase (B/C/D) — lifetime = live era only | `9a88fd1` | ✅ metrics == DB sum to the cent on all three |
+| `pre_epoch` archived the LIFETIME, not the retired era (schema 1→2) | `5f8182f` | ✅ 4 variants reconcile; C's block had a **sign error** |
+| Alert dead-letter queue — **was never wired** (topic existed, no subscription, no policy) | `3549c0e` | ✅ test alert delivered, DLQ empty, operator cmd works |
+| Breach advisory named the wrong stop (said credit+buffer; B runs A2 40%-of-width) + 2,221 lines of spam | `8d4102c` | ✅ live config → correct label per variant |
+| SPY qualified as an INDEX by E/H | `8d4102c` | ✅ ambiguity warning 14×/mo → **0** |
+| Pre-registration integrity check (did the system move under a registered test?) | `4d40fb2`,`f578a6e` | ✅ flags `1ab9222`; CI-safe via synthetic repo |
+| **Broker underlying-quote cache** (2s TTL, option legs never cached) | `b98dfd2` | ✅ 31.3% hit rate, sim says 30.0% |
+| Observability: swallowed-exception counter · greeks empty-row · stale 09:30 tick · alert burst-limiter dropping stop alerts | various | ✅ |
+
+## Measured, NOT yet acted on
+
+**The IBKR rate gate is saturated.** Two independent 180s RTH samples on 10-07 both returned
+**1,023 ms** mean added delay to the millisecond — a queue at steady state, ~5 requests permanently
+waiting, 98% of the 5/s cap. That latency sits on **every** broker call including the vigilant stop
+reads that are exempt from pacing *because* they are safety-critical.
+
+After the cache (10-08): **857 ms, 93% of cap, 3.99 waiters, and 0 broker timeouts** (vs 70 on
+10-06, 17 on 10-07) — but only ~1.5h of RTH observed, so not yet conclusive.
+
+⚠️ **The 10-07 projection of 65.7% saving was WRONG and the error is instructive:** it counted HTTP
+GETs, but each `get_quote` fires an **unconditional priming GET plus warmup polls**, so one logical
+index read costs **3.13 GETs** (SPX 3.1, VIX 4.0, max 12 = `_SNAPSHOT_MAX_WARMUP_POLLS`). 72% of
+index GETs are warmup polls *below* `get_quote`, invisible to a cache above it. Addressable demand
+was **0.60 logical calls/s, not 2.11 GETs/s**.
+
+⚠️ **The 10-06 pacing change (A 1.0 → 2.5) did NOT reduce demand** — verified negative. Pacing was
+already correct fleet-wide (A 2.5 · B 2.5 · C 2.0 · D 2.5 · E 2.5 · F 2.0 · G 2.0 · H 2.5).
+`api_pacing_multiplier` falls back to the **config ROOT**; reading only the `strategy` block says
+"unset" and is wrong (the L-M11 trap, documented in `strategy.py`, which I re-walked into).
+
+## THE PLAN — in order
+
+| # | what | when | needs |
+|---|---|---|---|
+| 1 | **Quote cache TTL 2.0 → 5.0s** — 31% → 50.2% hits, index 1.68 → 1.11 GETs/s | next after-close window | broker restart; env knob, reversible |
+| 2 | **GEX gate registered test** — **14/25** out-of-sample vetoes | **~5 trading days (~1 wk)** | nothing; it accrues |
+| 3 | e#4 slot prune — **3/27** · one-entry-a-day — **5/40** | ~12 / ~10 weeks | nothing; they accrue |
+| 4 | Snapshot **priming call** (the 3.13× amplification) | needs design, not a quick edit | ⚠️ P7-audit **H10**: warmup is calibrated, "less is brittle", it caused the 2026-05-18 failure |
+| 5 | **FUND THE ACCOUNT** + the Gate-9 approval commit | blocked on operator | — |
+
+**Decision rule for #2 is pre-registered and must not be renegotiated:** disable SKIP only if the
+vetoed breach rate stays ≤ the distance-matched benchmark at **p < 0.01**. Current evidence says
+the gate's vetoes are *safer* than its approvals (0/23 vs 26/131 breached, p = 0.0062).
+
+## Standing constraints
+
+* **Config freeze in force** (2026-09-27). Fix-vs-tune test: *would I make this change if the P&L
+  had come out the other way?*
+* **No restarts during RTH** with open positions — a broker restart blinds stop monitoring ~27s.
+* **Broker restart only for `shared/` code the broker imports**; strategy-only changes do not need it
+  (in broker mode strategies never instantiate `IBClient`).
+* **Measurement clock is 0 and will stay there** — that is fine. 15 clean days cannot measure a
+  6,118-day question; what matters is #2–#3 accruing uncontaminated, which the new integrity check
+  now watches.
 
 ---
 

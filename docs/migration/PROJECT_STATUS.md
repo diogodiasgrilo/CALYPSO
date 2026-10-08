@@ -2,11 +2,11 @@
 
 **This file is the single-source-of-truth for the current state of the `hydra-ibkr-standalone` branch.** Any Claude session arriving at this repo should read this file first, before CLAUDE.md. CLAUDE.md is the operator reference (what the bot does, how to deploy, troubleshoot); this file is the *project state* (what's been done, what's in flight, what's blocked).
 
-**Last updated:** 2026-09-19. ⚠️ **The header facts below are current; the dated narrative further down still stops in June/July and is HISTORY, not state.** For the live one-screen picture read [`docs/NEXT_STEPS.md`](../NEXT_STEPS.md) §A0 — it is refreshed per session and this file is not.
+**Last updated:** 2026-10-08. ⚠️ **The header facts below are current; the dated narrative further down still stops in June/July and is HISTORY, not state.** For the live one-screen picture read [`docs/NEXT_STEPS.md`](../NEXT_STEPS.md) **§A-pent** — it is refreshed per session and this file is not.
 **Base branch:** `hydra-ibkr-standalone` @ `8890686` (2026-09-19 — verify with `git rev-parse HEAD`; this line goes stale by design, so treat a mismatch as normal rather than as a finding).
 **Feature branches:** none outstanding. `feat/strategy-grouping-spy-calendar` (taxonomy/grouping + Strategy D go-live + Strategy E) is **MERGED** — the "NOT merged" line that stood here until 2026-09-18 was two months stale.
 **Commits ahead of `main`:** 137 (`main` @ `59a1fc7`, merged forward 2026-09-15 with 613 commits, `--no-ff`).
-**Test suite:** **4294 passed / 16 skipped** (2026-09-19). CI runs it on every push (`.github/workflows/ci.yml`) along with a typecheck, a lint ratchet, a 42-surface visual audit, a responsive sweep, and five accessibility/degraded-data browser probes.
+**Test suite:** **5776 passed / 17 skipped** (2026-10-08). CI runs it on every push (`.github/workflows/ci.yml`) along with a typecheck, a lint ratchet, a 42-surface visual audit, a responsive sweep, and five accessibility/degraded-data browser probes.
 
 > ### ⚠️ THE MOST IMPORTANT CORRECTION TO THIS FILE (2026-09-18)
 > Everything below about go-live sequencing describes **June 2026** and is
@@ -15,8 +15,10 @@
 >   been since the **2026-07-24 B↔C swap**. The narrative below still says
 >   "B/C stay dry-run" and "variant A will auto-flip" — both long dead.
 > - **A and C are dry-run shadows.** D, E, F, G are dry-run-locked.
-> - **Seven variants run**, not three: A/B/C (0DTE IC), D/E (multi-day calendars),
->   F (Ghauri mean-reversion), G (naked strangle).
+> - **EIGHT variants run**, not three: A/B/C (0DTE IC), D/E (multi-day calendars),
+>   F (Ghauri mean-reversion), G (naked strangle), **H (long strangle — trades SPY,
+>   not SPX)**. H was missing from this list until 2026-10-08, the same omission
+>   CLAUDE.md carried until 09-28.
 > - **The critical path is FUNDING THE LIVE ACCOUNT** — created, not funded.
 >   Then permissions → market data → a new OAuth keypair (~2wk activation).
 >   4–6 weeks, all calendar, no engineering. Everything else queues behind it.
@@ -30,6 +32,30 @@
 >   credentials exist, `bm` ships `dry_run=true`, and neither unit is installed —
 >   verified on the VM 2026-09-19. See
 >   [`LIVE_MONEY_ARCHITECTURE.md`](LIVE_MONEY_ARCHITECTURE.md).
+
+> ### ⚠️ WHAT MOVED SINCE 2026-09-19 (added 2026-10-08)
+> This file went **19 days** without an update while a lot shipped. Full detail is
+> in [`docs/NEXT_STEPS.md`](../NEXT_STEPS.md) **§A-pent**; the state-changing items:
+> - 🔴 **B's live record CHANGED SIGN.** Re-measured over the full live era (53
+>   days): **−$1,820.10, mean −$34.34/day, t = −0.19** — not +$6,476.60 / t = 0.83.
+>   t = −0.19 means **indistinguishable from zero**, not "loses money"; noise is
+>   39× the mean and |t| = 2 needs **~6,118 trading days**. The entire positive
+>   record is August. **Gate decisions must not cite the old figure.**
+> - **Lifetime P&L is now epoch-rebased** on B/C/D — it means *live era*, not
+>   all-history. Verified against the DB to the cent.
+> - **The alert dead-letter queue was never functional** (topic existed; no
+>   subscription, no routing policy) and four docs said to check it. Wired
+>   2026-10-08 and verified end-to-end.
+> - **The IBKR rate gate is saturated** — ~1s of added latency on every broker
+>   call, including safety-critical stop reads. A broker-side quote cache took it
+>   to 857 ms / 93% of cap; the larger lever (an unconditional snapshot priming
+>   call, 3.13× amplification) is **open and needs design** — see P7-audit H10.
+> - **Registered tests now self-check for contamination** (`registered_test_eta`),
+>   after a code change landed inside the GEX test's out-of-sample window.
+> - **Gate 4 (clean-streak) is 0 and that is no longer the binding constraint** —
+>   15 clean days cannot measure a 6,118-day question. What matters is the
+>   registered tests accruing uncontaminated: GEX gate **14/25 (~1 wk)**, e#4
+>   **3/27**, one-entry-a-day **5/40**.
 
 **Branch is pushed to `origin`** (github.com/diogodiasgrilo/CALYPSO) as of 2026-05-29 — no longer laptop-only.
 
