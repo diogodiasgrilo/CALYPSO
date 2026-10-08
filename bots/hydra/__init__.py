@@ -36,6 +36,41 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-08 BROKER-SIDE UNDERLYING-QUOTE CACHE — the rate gate was saturated by
+  eight strategies re-reading two numbers.
+  MEASURED, over 30 minutes of RTH: SPX (416904) and VIX (13455763) were
+  **74.2% of ALL snapshot traffic** (2,426 + 2,644 of 7,132 requests across just
+  24 distinct conids) — VIX alone at 1.47 req/s for a single quote. That held
+  the shared IBKR rate gate at **~98% of its 5/s cap** with ~5 requests
+  permanently queued, putting **~1s of added delay on EVERY broker call**,
+  including the vigilant stop reads that are deliberately exempt from pacing
+  BECAUSE they are safety-critical. Two independent 180s RTH samples agreed at
+  1,023 ms to the millisecond — the signature of a queue at steady state, not a
+  burst. It is the most likely source of the 71 broker timeouts on 2026-10-06.
+  FIX: a short-TTL per-conid cache in `IBClient.get_quote`, TTL from
+  `CALYPSO_BROKER_QUOTE_CACHE_S` (default 2.0s; **0 disables**, and the broker
+  unit sets it explicitly so it can be turned off with a restart and no deploy).
+  Simulated on the real traffic: 2s removes **65.7%** of snapshot calls
+  (3.96/s -> 1.36/s), taking the gate to ~48% of cap and collapsing the queue.
+  ONLY conids resolved as a NON-OPTION are eligible, recorded in
+  `_underlying_conids` at both `qualify_contract` return sites. **Option legs are
+  never cached** — `get_quote` also serves the traded legs (`_read_option_quote`,
+  which gates on the 6509 realtime flag) and the credit gate, where staleness
+  changes a decision. Underlying reads feed the ~10s x pacing heartbeat, so a
+  2s-old price is far fresher than the consumer already tolerates.
+  SAFETY PROPERTIES, each pinned by a test with a negative control: an option
+  leg is never served from cache; a DATALESS row is never stored (one transient
+  metadata-only snapshot must not be amplified across the fleet for the TTL —
+  that is what the warmup poller exists to ride out); the cache is cleared on
+  disconnect IN LOCKSTEP with `_conid_cache`/`_underlying_conids` so a dead
+  session's prices cannot outlive it; both the store and the hit path hand out
+  COPIES; `fresh=True` always bypasses; an unparseable TTL fails to OFF rather
+  than guessing. Hit rate + TTL + eligible-conid count publish on broker
+  `/health` as `quote_cache`, beside `rate_gate`.
+  ⚠️ The copy-on-HIT control did NOT bite at first — mutating the MISS result
+  proves nothing, because the STORE already copies. It took two consecutive
+  HITS with a mutation between them to exercise the hit path. A control that
+  passes is not evidence until you have seen it fail.
 - 2026-10-07 TWO LOG/CONFIG DEFECTS FROM THE PRE-MARKET SWEEP (no behaviour change
   to any SPX variant).
   (1) THE BREACH ADVISORY NAMED THE WRONG STOP, ~2,200 TIMES. The Brandon

@@ -30,6 +30,13 @@ Environment="CALYPSO_BROKER_PORT=8788"
 # chain-concurrency semaphore (CALYPSO_IBKR_CHAIN_CONCURRENCY) that caps the
 # cross-bot secdef fan-out. Read by shared.ib_client._RateGate.
 Environment="CALYPSO_IBKR_MAX_RPS=5"
+# Underlying-quote cache TTL, seconds (2026-10-08). SPX+VIX were 74.2% of all
+# snapshot traffic — eight strategies re-reading two numbers every heartbeat —
+# which held the rate gate at ~98% of the cap above and put ~1s of queueing on
+# every call. 2s removes ~66% of snapshot calls. ONLY underlying conids are
+# cached; option legs (credit gate, stop monitor) never are.
+# SAFETY VALVE: set to 0 and restart the broker to disable, no deploy needed.
+Environment="CALYPSO_BROKER_QUOTE_CACHE_S=2.0"
 Environment="CALYPSO_IBKR_CHAIN_CONCURRENCY=4"
 
 # ─── IBKR OAuth 1.0a credentials ────────────────────────────────────────────

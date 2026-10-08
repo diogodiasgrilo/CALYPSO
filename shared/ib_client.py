@@ -840,6 +840,32 @@ class IBClient:
         # Cleared on disconnect IN LOCKSTEP with _conid_cache so a cached conid
         # never outlives its priming.
         self._secdef_search_primed: set[tuple] = set()
+        # ── Underlying-quote cache (2026-10-08) ──────────────────────────────
+        # 74.2% of ALL snapshot traffic was two conids: SPX (416904) and VIX
+        # (13455763), re-fetched by eight strategies every heartbeat — VIX alone
+        # at 1.47 req/s for a single number. That pinned the shared IBKR rate
+        # gate at ~98% of its 5/s cap, which put ~1s of queueing delay on EVERY
+        # broker call including the safety-critical vigilant stop reads, and is
+        # the most likely source of the 71 broker timeouts on 2026-10-06.
+        #
+        # Measured over 30min of RTH: a 2s per-conid TTL removes 65.7% of
+        # snapshot calls (3.96/s -> 1.36/s), taking the gate to ~48% of cap.
+        #
+        # ONLY conids resolved as a NON-OPTION (the underlying/index/stock) are
+        # eligible. Option legs are NEVER cached: `get_quote` also serves the
+        # traded legs (strategy.py `_read_option_quote`, which gates on the 6509
+        # realtime flag) and the credit gate, where staleness changes a decision.
+        # Underlying reads feed the ~10s x pacing heartbeat, so a 2s-old price
+        # is far fresher than the consumer already tolerates.
+        self._underlying_conids: set[int] = set()
+        self._quote_cache: dict[tuple, tuple[float, dict]] = {}
+        self._quote_cache_lock = threading.Lock()
+        try:
+            self._quote_cache_ttl = float(
+                os.environ.get("CALYPSO_BROKER_QUOTE_CACHE_S", "2.0") or "0")
+        except (TypeError, ValueError):
+            self._quote_cache_ttl = 0.0          # unparseable -> OFF, never guess
+        self._quote_cache_stats = {"hits": 0, "misses": 0, "stored": 0, "dataless": 0}
         # Phase A.8 — retry + per-family circuit breakers. RetryPolicy
         # defaults: 6 attempts (initial + 5 retries), 1s base, 30s cap,
         # 0.5 jitter, retryable on HTTP 429/5xx + transient network errors.
@@ -1390,7 +1416,13 @@ class IBClient:
             self._connected = False
             self._conid_cache.clear()
             self._secdef_search_primed.clear()  # lockstep with _conid_cache
+            self._underlying_conids.clear()     # lockstep: conid -> cacheability
             self._iserver_primed = False
+        with self._quote_cache_lock:
+            # Prices from a dead session must never survive it. Cleared OUTSIDE
+            # the call lock (its own lock, taken nowhere else while holding
+            # _call_lock) so disconnect's critical section stays one block.
+            self._quote_cache.clear()
         if unclean:
             logger.error(
                 "IBClient disconnect completed with %d unclean step(s); "
@@ -1663,6 +1695,23 @@ class IBClient:
         return dict(self._breakers)
 
     @property
+    def quote_cache_stats(self) -> dict:
+        """Underlying-quote cache counters, or {} when the cache is off.
+
+        Published on /health for the same reason as rate_gate_stats: the cache
+        lives inside calypso-broker, so a strategy-side read is always empty.
+        """
+        if not getattr(self, "_quote_cache_ttl", 0.0):
+            return {}
+        st = dict(self._quote_cache_stats)
+        served = st["hits"] + st["misses"]
+        st["ttl_s"] = self._quote_cache_ttl
+        st["hit_pct"] = round(100.0 * st["hits"] / served, 1) if served else 0.0
+        st["eligible_conids"] = len(getattr(self, "_underlying_conids", ()))
+        st["entries"] = len(getattr(self, "_quote_cache", {}))
+        return st
+
+    @property
     def rate_gate_stats(self) -> dict:
         """Cumulative request-rate-gate pressure, or {} when the gate is off.
 
@@ -1787,6 +1836,7 @@ class IBClient:
                     # Underlying quote: the pinned conid IS the answer.
                     conid = int(pinned)
                     self._conid_cache[cache_key] = conid
+                    self._underlying_conids.add(conid)   # quote-cache eligible
                     return conid
                 # Option: feed the pinned underlying through as the sole search
                 # candidate so the filter/extract logic below resolves
@@ -1967,6 +2017,11 @@ class IBClient:
 
             conid = int(conid)
             self._conid_cache[cache_key] = conid
+            if sec_type != "OPT" and expiry is None and strike is None:
+                # An UNDERLYING (index/stock), not a traded leg -> its quote may
+                # be served from the short-TTL cache. The expiry/strike guard is
+                # belt-and-braces: an option always carries both.
+                self._underlying_conids.add(conid)
             return conid
 
     def qualify_option_strikes(
@@ -2428,6 +2483,7 @@ class IBClient:
         self,
         conid: int,
         fields: Optional[Iterable[str]] = None,
+        fresh: bool = False,
     ) -> dict:
         """Fetch a single snapshot quote for a conid.
 
@@ -2444,6 +2500,24 @@ class IBClient:
         """
         self._require_connected()
         fields = list(fields) if fields else DEFAULT_QUOTE_FIELDS
+
+        # Short-TTL cache — UNDERLYING conids only (see __init__). An option leg
+        # is never eligible, so the credit gate and the stop monitor are
+        # untouched. `fresh=True` bypasses unconditionally.
+        ckey = (int(conid), tuple(fields))
+        ttl = getattr(self, "_quote_cache_ttl", 0.0)
+        cacheable = (
+            ttl > 0 and not fresh
+            and int(conid) in getattr(self, "_underlying_conids", ())
+        )
+        if cacheable:
+            with self._quote_cache_lock:
+                hit = self._quote_cache.get(ckey)
+                if hit is not None and (time.time() - hit[0]) < ttl:
+                    self._quote_cache_stats["hits"] += 1
+                    return dict(hit[1])          # copy: callers must not mutate
+                self._quote_cache_stats["misses"] += 1
+
         # Risk-critical: this is the stop-loss monitor's price source. It must
         # stay alive (via the slow penalty gate) if the rate-penalty box is
         # active, so a held 0DTE position is never left unmonitored. New entries
@@ -2456,7 +2530,20 @@ class IBClient:
             row = data
         else:
             return {"conid": conid, "raw": data}
-        return self._parse_quote_row(row, conid)
+        parsed = self._parse_quote_row(row, conid)
+        if cacheable:
+            # NEVER cache a dataless row. A metadata-only / all-None snapshot is
+            # exactly what the warmup poller exists to ride out; storing one
+            # would amplify a single transient miss across every strategy for
+            # the whole TTL instead of letting the next caller retry.
+            if any(parsed.get(k) is not None
+                   for k in ("mid", "last", "mark", "bid", "ask")):
+                with self._quote_cache_lock:
+                    self._quote_cache[ckey] = (time.time(), dict(parsed))
+                    self._quote_cache_stats["stored"] += 1
+            else:
+                self._quote_cache_stats["dataless"] += 1
+        return parsed
 
     def get_quotes_batch(
         self,

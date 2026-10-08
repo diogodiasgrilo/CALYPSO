@@ -307,6 +307,15 @@ class BrokerDispatcher:
                 base = {**base, "rate_gate": gate}
         except Exception:  # noqa: BLE001 — telemetry must never fail a health probe
             pass
+        # Same reasoning for the underlying-quote cache (2026-10-08): it is the
+        # lever that takes the gate OUT of saturation, so its hit rate and the
+        # gate's pressure have to be readable side by side.
+        try:
+            qc = getattr(self._ib, "quote_cache_stats", None)
+            if qc:
+                base = {**base, "quote_cache": qc}
+        except Exception:  # noqa: BLE001
+            pass
         check = getattr(self._ib, "check_auth_status", None)
         try:
             status = check() if callable(check) else None
