@@ -33,10 +33,18 @@ Environment="CALYPSO_IBKR_MAX_RPS=5"
 # Underlying-quote cache TTL, seconds (2026-10-08). SPX+VIX were 74.2% of all
 # snapshot traffic — eight strategies re-reading two numbers every heartbeat —
 # which held the rate gate at ~98% of the cap above and put ~1s of queueing on
-# every call. 2s removes ~66% of snapshot calls. ONLY underlying conids are
-# cached; option legs (credit gate, stop monitor) never are.
+# every call.
+# RAISED 2.0 -> 5.0 on 2026-10-09. At 2s the LIVE hit rate was 31.3%, matching a
+# corrected simulation (30.0%) — the original 65.7% projection counted HTTP GETs,
+# but each get_quote fires an unconditional priming GET plus warmup polls, so one
+# logical index read costs ~3.13 GETs and 72% of them happen BELOW get_quote where
+# a cache above it cannot see them. Measured on the real traffic, 5s lifts the hit
+# rate to 50.2% and index traffic from 1.68 to 1.11 GETs/s; each hit now avoids
+# ~3.1 IBKR calls, not 1. Fastest consumer is the heartbeat at 10s x pacing
+# (20-25s), so 5s stays several times fresher than its reader.
+# ONLY underlying conids are cached; option legs (credit gate, stop monitor) never are.
 # SAFETY VALVE: set to 0 and restart the broker to disable, no deploy needed.
-Environment="CALYPSO_BROKER_QUOTE_CACHE_S=2.0"
+Environment="CALYPSO_BROKER_QUOTE_CACHE_S=5.0"
 Environment="CALYPSO_IBKR_CHAIN_CONCURRENCY=4"
 
 # ─── IBKR OAuth 1.0a credentials ────────────────────────────────────────────

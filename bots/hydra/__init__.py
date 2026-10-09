@@ -36,6 +36,44 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-09 CRITICAL #7b — NEVER sell the hedge whose short you could not buy back.
+  2026-10-08, variant B (the LIVE paper seat), entry #6 put side: the stop fired,
+  EMERGENCY-001 failed to buy back the short put (conid 926792465) after 5
+  attempts and raised CRITICAL — **and the close loop then sold the protective
+  long at $8.20 anyway**. That converted a defined-risk 7735/7730 vertical into
+  a **NAKED short 7735 put** for the ~2.5h to expiry while SPX fell through
+  7746. POS-003 then showed the broker at **-4 against an expected -7**, so B sat
+  short ~3 contracts with no hedge at all, and raised Position Mismatch at
+  13:32 / 14:33 / 15:33. It settled clean at 21:46 (+$52.30 on the day, account
+  flat) — but only because expiry arrived, not because anything caught it.
+  FIRST `CRITICAL #7` in the project's history (EMERGENCY_CLOSE_FAILED itself
+  has fired on 2026-09-24 and 2026-10-08 in the IBKR era; the naked outcome had
+  never happened before).
+  FIX: in `_execute_stop_loss`'s close loop, a `long_*` leg is NOT closed when
+  its side's SHORT close failed. The long is the only thing capping the loss
+  while the short is live, so its premium is not ours to take.
+  `positions_to_close` is always `[short, long]` for ONE side, so by the long's
+  turn `short_close_succeeded` already reflects the real outcome; it starts
+  False whenever a short leg exists, so a short that was never even attempted
+  (no conid) also holds the hedge — fail closed. Dry-run and naked-by-design
+  sides (no short leg, e.g. the strangle) are unaffected.
+  ⚠️ The fix had to go in `base_strategy`, NOT `strategy.py`: HydraStrategy
+  OVERRIDES `_execute_stop_loss`, but with `short_only_stop=False` (B's live
+  setting) it **delegates to super()**, so the base loop is the one that runs.
+  The `short_only_stop=True` branch has its own loop that closes only the short
+  and therefore has no hedge to wrongly sell. 8 tests + a negative control that
+  restores the 10-08 behaviour and fails 3 of them.
+- 2026-10-09 QUOTE CACHE TTL 2.0 -> 5.0s. At 2s the live hit rate was 31.3%,
+  against a corrected simulation of 30.0% — so the cache was behaving exactly as
+  built and the original **65.7% projection was the thing that was wrong**: it
+  counted HTTP GETs, but each `get_quote` fires an unconditional priming GET
+  plus warmup polls, so one logical index read costs **3.13 GETs** and 72% of
+  them happen BELOW `get_quote` where no cache above it can see them.
+  Re-measured on logical calls, 5s lifts the hit rate to **50.2%** and index
+  traffic from 1.68 to **1.11 GETs/s**; each hit now avoids ~3.1 IBKR calls, not
+  1. Fastest consumer is the heartbeat at 10s x pacing (20-25s), so 5s stays
+  several times fresher than its reader. Still a restart-only env knob; 0
+  disables.
 - 2026-10-08 BROKER-SIDE UNDERLYING-QUOTE CACHE — the rate gate was saturated by
   eight strategies re-reading two numbers.
   MEASURED, over 30 minutes of RTH: SPX (416904) and VIX (13455763) were

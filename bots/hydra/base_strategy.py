@@ -4818,6 +4818,43 @@ class MEICStrategy(abc.ABC):
                 # leaving the breached short open AND booking the stop
                 # as a profit. `_close_position_with_retry` keys on `uic`.
                 if uic:
+                    # ── CRITICAL #7b (2026-10-09): NEVER sell the hedge whose
+                    # short we could not buy back. ──────────────────────────
+                    # On 2026-10-08 B's E#6 put stop failed to close the short
+                    # after 5 attempts (CRITICAL), and the loop then sold the
+                    # protective long at $8.20 anyway — turning a defined-risk
+                    # 7735/7730 vertical into a NAKED short 7735 put for the
+                    # ~2.5h to expiry, with SPX falling through 7746. The long
+                    # is the only thing capping the loss while the short is
+                    # still live, so its premium is not ours to take.
+                    #
+                    # `positions_to_close` is always [short, long] for ONE side
+                    # (built per-side above), so by the time a long is reached
+                    # `short_close_succeeded` already reflects the real outcome.
+                    # It starts False whenever a short leg exists, so a short
+                    # that was never even attempted (no conid) also holds the
+                    # hedge — fail closed.
+                    #
+                    # Dry-run and naked-by-design sides (no short leg, e.g. the
+                    # strangle) set it True/vacuously-true, so they are
+                    # unaffected.
+                    if (leg_name.startswith("long")
+                            and short_leg_present and not short_close_succeeded):
+                        logger.critical(
+                            "CRITICAL #7b: NOT closing %s for Entry #%s — the %s "
+                            "SHORT close failed, so this long is the only thing "
+                            "capping the loss. Selling it would convert a "
+                            "defined-risk spread into a NAKED short. Holding the "
+                            "hedge; the short stays tracked and retryable.",
+                            leg_name, entry.entry_number, side,
+                        )
+                        self._log_safety_event(
+                            "HEDGE_RETAINED_SHORT_CLOSE_FAILED",
+                            f"Entry #{entry.entry_number} {side}: short close failed; "
+                            f"{leg_name} deliberately NOT sold so max loss stays capped",
+                        )
+                        continue
+
                     # Fix #83a: Skip closing worthless long legs (bid=$0) on 0DTE
                     # Deep OTM longs often have no market — Saxo rejects market orders
                     # with "only limit orders allowed" and limit orders at $0.05 fail too.
