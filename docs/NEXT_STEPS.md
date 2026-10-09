@@ -5,11 +5,87 @@
 > [`docs/migration/PROJECT_STATUS.md`](migration/PROJECT_STATUS.md) (project-wide state) and the per-effort
 > design docs.
 >
-> **Last updated: 2026-10-09 (Fri, 06:30 ET).** **Read §A-pent first — it is the whole current state
-> on one screen.** (§A0 below is the 2026-09-19 snapshot, kept for history.) §A–§D are current. **§0–§10 are the older backlog (2026-07-14 / 07-24 era)** — much of
+> **Last updated: 2026-10-09 (Fri, 09:50 ET).** **Read §A-sept first (the live seat changed today),
+> then §A-pent for the rest of the current state.** (§A0 below is the 2026-09-19 snapshot, kept for history.) §A–§D are current. **§0–§10 are the older backlog (2026-07-14 / 07-24 era)** — much of
 > it is done or superseded; **verify against the code before acting on anything there.** Real live
 > items still live in §5 (entry-schedule lock, E calendar-stop analyzer) and §6 (Brandon fill-quality
 > confirmations), which is why those sections are kept rather than deleted.
+
+---
+
+# §A-sept. ⭐ NEW LIVE SEAT `bl` — 2026-10-09 (Fri), deployed 09:11 ET
+
+**The live paper seat is now `bl`: the same `BrandonHydraStrategy` code B runs, on a grid shifted
+to start at old-B's slot #6 — 12:15 / 12:45 / 13:15 / 13:45 / 14:15 / 14:45 / 15:15.** B keeps its
+id (`b`), is displayed as **B-A**, and keeps running dry-run on its original 09:45–12:45 clock, so
+it is the **control**, not a retired variant. Deployed with the account flat, 3h before `bl`'s
+first slot. Commits `c5ec45b` (the seat) + `f914a55` (two copied keys) + `e7a03ca` (the journal).
+
+### ⚠️ Read this before quoting anything about the shift
+
+**It is NOT validated. It is an out-of-sample experiment.** In-sample the later slots looked best
+(#6 **+$2,438**, #7 **+$3,223** across B's live era) but a 20,000-shuffle permutation on the
+per-slot spread returns **p = 0.597** — indistinguishable from random labelling — and **13:15
+onward has never traded at all.** `bl` exists to *generate* data on those slots. Anyone citing the
+slot-level in-sample numbers as a reason the shift should work is quoting the thing the
+permutation already refuted.
+
+This also does **not** escape the structural problem: 7 correlated slots on one underlying is
+still ~one bet levered 7×, and B's own edge is **t = 0.24** with a ~9.9-year horizon to
+significance. Shifting the clock changes which hours are sampled, not that arithmetic.
+
+### What followed automatically vs by hand
+
+| | |
+|---|---|
+| automatic (taxonomy-driven) | `live_seat_id()` → `bl`, dashboard canonical paths + primary label, group comparison, alert identity, HOMER's `[DRY-RUN]` marker logic |
+| **by hand — remember on the next swap** | `services/agents_config.json` (6 pointers: HERMES state/metrics/read_db, HOMER metrics/read_db, CLIO read_db). **The agents do NOT follow `live_seat_id()`.** Backup at `agents_config.json.bak-2026-10-09-seatswap` |
+
+### Two keys that must never be copied between variants (both were)
+
+`bl` was created by copy-pasting `b`, and inherited:
+
+1. **`logging.log_dir: "logs/hydra_variant_b"`** — and the config key **beats
+   `HYDRA_VARIANT_ID`**, so `bl` wrote into B-A's `bot.log` while
+   `logs/hydra_variant_bl/` stayed empty. The dashboard tails `variant_bl_log_file` for the LIVE
+   seat (empty panel), two processes shared one rotating-file handler, and `trade_log_file` is
+   `log_dir / "trades.json"` — so `bl`'s **real** trades and `b`'s **simulated** ones would have
+   appended to one file. **`bm`, the real-money variant, had the same value** (pre-existing): a
+   real-money log and trades.json inside a *paper* variant's directory.
+2. **`metrics_epoch_date: "2026-07-24"`** — B's C→B swap date. Numerically harmless (`bl` has no
+   history before 10-09) but it re-opened the file-vs-dashboard divergence the 2026-10-06 audit
+   closed, since `variant_bl_baseline_date` is `2026-10-09`. Now pinned equal by test.
+
+Both fixed in `f914a55`. The existing `test_variant_bl_live_seat` asserts bl is an exact copy of b
+and flags every *divergence* — it structurally cannot catch keys that are wrong **because** they
+are identical, so `tests/test_variant_log_isolation_2026_10_09.py` states the invariant against
+each variant's own id and sweeps all 9 configs.
+
+### Also fixed today: the journal's own numbers were wrong for two months
+
+Found while checking what the swap would do to HOMER tonight. `JournalParser` located blocks with
+`section_2_start + <constant>` windows; section 2 grows one line per trading day. **Cumulative
+Metrics** drifted 31 lines past its 180-line window and stopped updating after **2026-08-04** —
+the journal advertised `cumulative_pnl: 15628.27` against an actual **−432.10**. The **P&L
+Verification** list's 30-line inner window returned a *wrong* end, and since the writer inserts at
+`end + 1`, **61 rows ended up in reverse order spliced between Mar 19 and Mar 20.** HOMER logged a
+WARNING for the first, nothing for the second, and reported success both times. Scans are now
+bounded by the next `## ` heading; both messages are ERRORs; the 163 rows were re-sorted (verified
+as a pure permutation — identical multiset, unchanged file length, no duplicate dates). `e7a03ca`.
+
+### What to watch
+
+- [ ] **`bl`'s first live entry at 12:15 ET today.** Nothing has ever placed an order on this
+      clock. Check the entry fires, the credit gate passes, the A2 %-of-width stop is set, and the
+      fill lands in `data/variant_bl/backtesting.db`.
+- [ ] **23:00 / 23:30 ET** — HERMES then HOMER, both now reading `variant_bl`. HOMER's `--dry-run`
+      already confirms `dry_run=False` detection (so no `[DRY-RUN]` marker) and no crash on the
+      thin DB. Tonight is the first real write: expect one new row appended after Oct 8, and the
+      Cumulative Metrics block to refresh for the first time since Aug 4.
+- [ ] **Tomorrow 09:00 ET** — CLIO's weekly now reads `bl`, which will have one day. Accurate, but
+      thin; B-A's record remains in `data/variant_b/`.
+- [ ] `hydra_variant_bl` is `enabled` (survives reboot) — confirmed at deploy. The H incident
+      (running but disabled) is the precedent for checking.
 
 ---
 

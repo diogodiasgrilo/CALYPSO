@@ -69,7 +69,7 @@ bots/
     strangle_strategy.py      # G "Strangle" (registry strangle, class StrangleStrategy — undefined-risk naked 0DTE strangle, requires_protective_wings=False; dry-run-locked)
     dc_recorder.py            # calendar DataRecorder → isolated dc_calendar.db (separate from the shared backtesting.db)
     dc_status.py              # calendar status renderer (reads dc_open_trades.json sidecar + dc_outcomes)
-    config/                   # config.json + config_variant_{b,c,d,e,f,g}.json (config.json gitignored)
+    config/                   # config.json + config_variant_{b,bl,c,d,e,f,g,h}.json (config.json gitignored)
   # On `main` only: iron_fly_0dte/, delta_neutral/, rolling_put_diagonal/, meic/
   # (kill-switched there). NOT on this branch. D/E are calendar SUBCLASSES inside
   # bots/hydra/ (CalendarStrategyBase), NOT restored sibling bots.
@@ -110,7 +110,8 @@ dashboard/                    # HYDRA dashboard (read-only monitoring, v2.0.0)
 
 deploy/
   hydra.service               # main bot (LoadCredentialEncrypted= for 6 IBKR creds, sandboxed)
-  hydra_variant_b.service     # parallel instance (Brandon variant B — LIVE, dashboard PRIMARY since the 2026-07-24 swap)
+  hydra_variant_bl.service    # ⭐ THE LIVE PAPER SEAT since 2026-10-09 (B on a 12:15-15:15 grid)
+  hydra_variant_b.service     # parallel dry-run-shadow instance (now displayed as "B-A"; was the live seat 2026-07-24 → 2026-10-09)
   hydra_variant_c.service     # parallel dry-run instance (Brandon variant C — was live/PRIMARY before the 2026-07-24 swap)
   hydra_variant_d.service     # parallel dry-run-locked instance (D "DC Time Machine", SPX double calendar)
   hydra_variant_e.service     # parallel dry-run-locked instance (E "SPY Double Calendar")
@@ -500,7 +501,7 @@ Gate-4 streak, same dashboard, same alerts — and real money is **added beside 
 | broker | `calypso-broker` :8788 | `calypso-broker-live` :8789 |
 | credentials | `/etc/calypso/ibkr/` | `/etc/calypso/ibkr-live/` (SIBLING, never nested) |
 | IBKR username | paper | **a different username** |
-| strategies | `hydra`, `hydra_variant_{b,c,d,e,f,g}` | `hydra_variant_bm` — the same Brandon code B runs |
+| strategies | `hydra`, `hydra_variant_{bl,b,c,d,e,f,g,h}` | `hydra_variant_bm` — the same Brandon code B runs |
 | sizing | as configured | 1 contract, week 1 (Gate 8) |
 
 **Three things worth knowing before touching any of it:**
@@ -559,21 +560,26 @@ overwrites the paper credentials the live seat is trading on. Procedure:
 
 ## Variant Comparison (Dry-Run Head-to-Head, One Live Seat)
 
-Up to **7 parallel HYDRA processes** run concurrently, clustered into **3 comparability groups** by `shared/strategy_taxonomy.py` — `ic_0dte` (credit, members A/B/C/F), `calendar_multiday` (debit, members D/E), and `undefined_risk_0dte` (credit, naked/undefined-risk, member G — solo, `comparable=False`, no group-comparison renderer built yet). Each variant has its own systemd unit and isolated `data/variant_<id>/*` paths via the `HYDRA_VARIANT_ID` env var. Exactly one `ic_0dte` variant holds the **live paper seat** (`dry_run=false`, `alerts.enabled=true`, `google_sheets.enabled=false` — Sheets logging is off repo-wide post-DB-migration, see the Agent Suite section) at a time — B since the 2026-07-24 swap, C before it; the rest run dry-run-shadow/dry-run-locked with alerts off so they don't pollute the canonical record. Comparability groups are **never compared together** — a credit IC's P&L, a net-debit calendar's P&L, and an undefined-risk naked strangle's P&L are apples-to-oranges, so every comparison view / `/compare` command is group-scoped.
+**9 parallel HYDRA processes** run concurrently (A, `bl`, `b`, C, D, E, F, G, H — this said "up to 7" until 2026-10-09, before H and `bl` existed), clustered into **3 comparability groups** by `shared/strategy_taxonomy.py` — `ic_0dte` (credit, members A/B/C/F), `calendar_multiday` (debit, members D/E), and `undefined_risk_0dte` (credit, naked/undefined-risk, member G — solo, `comparable=False`, no group-comparison renderer built yet). Each variant has its own systemd unit and isolated `data/variant_<id>/*` paths via the `HYDRA_VARIANT_ID` env var. Exactly one `ic_0dte` variant holds the **live paper seat** (`dry_run=false`, `alerts.enabled=true`, `google_sheets.enabled=false` — Sheets logging is off repo-wide post-DB-migration, see the Agent Suite section) at a time — B since the 2026-07-24 swap, C before it; the rest run dry-run-shadow/dry-run-locked with alerts off so they don't pollute the canonical record. Comparability groups are **never compared together** — a credit IC's P&L, a net-debit calendar's P&L, and an undefined-risk naked strangle's P&L are apples-to-oranges, so every comparison view / `/compare` command is group-scoped.
 
 **Current scheme (IBKR-standalone branch):** the table below is **group-scoped** (`ic_0dte`, then `calendar_multiday`, then `undefined_risk_0dte`):
 
 | Variant | Group | Service | Strategy | Schedule | Contracts | Widths | Status |
 |---|---|---|---|---|---|---|---|
-| A | `ic_0dte` | `hydra.service` | HYDRA baseline (MKT-027 dynamic) | 10:45 / 11:15 (+ E6 14:00 conditional) | 1c | 75pt MKT-027 dynamic | dry_run_shadow (config `dry_run=true`; only B is live-paper) |
-| B | `ic_0dte` | `hydra_variant_b.service` | `BrandonHydraStrategy` (Trojan Horse stack LIVE) | 09:45 / 10:15 / 10:45 / 11:15 / 11:45 / 12:15 / 12:45 (7-slot grid; E6 **off** — require-both-sides) | 7c | 5pt below VIX 22, 10pt above (narrow) | **live (dashboard PRIMARY)** — since the 2026-07-24 B↔C live-seat swap (`docs/migration/RUNBOOKS.md` RB-9) |
+| A | `ic_0dte` | `hydra.service` | HYDRA baseline (MKT-027 dynamic) | 10:45 / 11:15 (+ E6 14:00 conditional) | 1c | 75pt MKT-027 dynamic | dry_run_shadow (config `dry_run=true`; only `bl` is live-paper) |
+| **B** (id `bl`) | `ic_0dte` | `hydra_variant_bl.service` | `BrandonHydraStrategy` — **the same code B runs**, different clock | **12:15 / 12:45 / 13:15 / 13:45 / 14:15 / 14:45 / 15:15** (7-slot grid shifted to start at old-B's slot #6; E6 **off**) | 7c | 5pt below VIX 22, 10pt above (narrow) | **live (dashboard PRIMARY)** — since 2026-10-09. ⚠️ **NOT VALIDATED:** the later slots looked best in-sample (#6 +$2,438, #7 +$3,223 over B's live era) but a 20,000-shuffle permutation on the per-slot spread gives **p = 0.597**, and 13:15 onward has **no live record at all**. `bl` exists to generate OUT-OF-SAMPLE data, not because the shift is proven |
+| **B-A** (id `b`) | `ic_0dte` | `hydra_variant_b.service` | `BrandonHydraStrategy` (Trojan Horse stack) | 09:45 / 10:15 / 10:45 / 11:15 / 11:45 / 12:15 / 12:45 (7-slot grid; E6 **off** — require-both-sides) | 7c | 5pt below VIX 22, 10pt above (narrow) | dry_run_shadow since **2026-10-09** — held the live seat 2026-07-24 → 2026-10-09 (its 78-day live record is the control `bl` is measured against, and it keeps id `b` so that record, its DB and its metrics file are not orphaned) |
 | C | `ic_0dte` | `hydra_variant_c.service` | `BrandonHydraStrategy` (Brandon-faithful baseline) | **10:45 / 11:15** — canonical 10:15/10:45/11:15, but the VIX regime caps base entries at 2 below VIX 28 and drops the EARLIEST, so 10:15 does not fire on an ordinary day (verified in C's own log 2026-09-23: `capped to 2 base entries`). E6 **off** — require-both-sides | 7c | Same narrow widths as B | dry_run_shadow — was live (dashboard PRIMARY) before the 2026-07-24 swap |
 | F | `ic_0dte` | `hydra_variant_f.service` | `GhauriMeanReversionStrategy` ("Ghauri Mean Reversion" — fades a touch of the day's expected-move boundary — the **ATM straddle** since 2026-09-23, VIX-derived before that — with a one-sided put/call credit vertical; fully self-contained, does NOT reuse HYDRA's scheduled-entry machinery) | event-triggered, not clock-scheduled (EM-boundary touch, cutoff 13:00 ET) | 1c | fixed 10pt width | dry_run_locked — running since 2026-08-27. **2 recorded entries, lifetime +$45.80** (2026-09-18). ⚠️ Its accounting was wrong until then: it booked every take-profit TWICE, counted no entries at all, and never charged the opening commission — lifetime read $177.90. See `bots/hydra/__init__.py` 2026-09-18. `fomc_announcement_skip=false`. |
 | D | `calendar_multiday` | `hydra_variant_d.service` | `DoubleCalendarStrategy` ("DC Time Machine", multi-day SPX net-debit) | multi-day (not 0DTE) | — | double calendar | dry_run_locked (NO-GO) |
 | E | `calendar_multiday` | `hydra_variant_e.service` | `SpyDoubleCalendarStrategy` ("SPY Double Calendar", multi-day SPY net-debit, from an OptionsKit video) | multi-day (not 0DTE) | — | double calendar | dry_run_locked |
 | G | `undefined_risk_0dte` | `hydra_variant_g.service` | `StrangleStrategy` (0DTE SPX short strangle — two naked shorts, `requires_protective_wings=False`, undefined risk sized by broker margin not a defined-risk floor; reuses HYDRA's scheduled-entry gating unchanged, only strike selection/placement/per-side stops are strangle-specific) | **10:45 / 11:15** — canonical 10:15/10:45/11:15 capped to 2 by the inherited VIX regime, same as A and C (verified in G's own log 2026-09-23: `capped to 2 base entries`). This row read "10:15 / 10:45 / 11:15 (same base schedule as A)" until 2026-09-23, which was wrong twice over: it showed the CANONICAL schedule where A's row shows the EFFECTIVE one, and "same as A" is true only before the cap | 1c | ±8δ-anchored symmetric OTM, no wings | dry_run_locked — running since 2026-08-27. **24 days, 42 entries, lifetime +$190.35** (re-measured 2026-09-30 against both its DB and its metrics file, which agree exactly). ⚠️ This read "+$1,239.35" from a 2026-09-19 measurement — G gave back ~$1,049 in the eleven days since, so the figure was **6.5× overstated**. A dry-run lifetime P&L quoted in this file ages fast; re-measure before citing it. At n=21 traded days G's mean is +$9.06/day, **t = 0.10** — its edge is indistinguishable from zero, though its correlation with B is only **0.04**, which is what makes it the fleet's one structurally independent candidate. ⚠️ `fomc_announcement_skip=false` — **G is the only undefined-risk strategy and the only one that trades FOMC announcement days**; decided 2026-09-17 to leave ON in dry-run and gate it at promotion (blockers G-1/G-2/G-3 in `GO_LIVE_MASTER.md` §2-ter). |
 
-**Live-seat swap (2026-07-24):** the live paper seat moved from C → B (B: dry_run_shadow→live, 10c→7c, 4-slot→7-slot; C: live→dry_run_shadow, alerts/Sheets off). Dashboard canonical/WS/widget views, Telegram alert identity, and the agent suite (`services/agents_config.json`) all follow whichever variant is live via `dashboard/backend/services/variant_readers.live_seat_id()` / dynamic `is_live`/`is_primary` — no other surface should hardcode "C" as the live bot. Swap runbook: `docs/migration/RUNBOOKS.md` RB-9 (RB-8 is the historical A+C go-live, kept for reference only). To reverse: `scripts/flip_bc_rollback.sh`.
+**Live-seat swap (2026-10-09) — B → `bl`.** The live paper seat moved to `bl`, which runs **the same `BrandonHydraStrategy` code on a grid shifted to start at old-B's slot #6** (12:15 instead of 09:45). B keeps id `b`, is displayed as **B-A**, and continues as a dry-run shadow on its original clock — so it is the *control*, not a retired variant. Everything that follows the live seat followed automatically (`live_seat_id()` → `bl`, dashboard canonical paths, alert identity); the agents' `read_db` was repointed by hand (see the Agent Suite section). Two keys had been COPIED from b and had to be un-copied: `logging.log_dir` (bl was writing into B-A's log file and its shared `trades.json`) and `metrics_epoch_date` (b's 2026-07-24 swap date, which bl has no history before). Both are now pinned by `tests/test_variant_log_isolation_2026_10_09.py`.
+
+⚠️ **The shift is not validated.** It is an out-of-sample experiment: in-sample the later slots looked best (#6 +$2,438, #7 +$3,223 across B's live era) but a 20,000-shuffle permutation on the per-slot spread returns **p = 0.597** — indistinguishable from random labelling — and the 13:15–15:15 slots have never traded. Do not quote slot-level in-sample figures as a reason it should work.
+
+**Live-seat swap (2026-07-24, historical):** the live paper seat moved from C → B (B: dry_run_shadow→live, 10c→7c, 4-slot→7-slot; C: live→dry_run_shadow, alerts/Sheets off). Dashboard canonical/WS/widget views, Telegram alert identity, and the agent suite (`services/agents_config.json`) all follow whichever variant is live via `dashboard/backend/services/variant_readers.live_seat_id()` / dynamic `is_live`/`is_primary` — no other surface should hardcode "C" as the live bot. Swap runbook: `docs/migration/RUNBOOKS.md` RB-9 (RB-8 is the historical A+C go-live, kept for reference only). To reverse: `scripts/flip_bc_rollback.sh`.
 
 D and E both subclass `bots/hydra/calendar_strategy_base.py` (`CalendarStrategyBase`); D is byte-identical to its pre-lift body after the extraction. Both are **fully simulated (NOT stubbed)** — the entire entry/monitor/settlement lifecycle runs in dry-run; only the real-order placement path + go-live gates are intentionally absent. They cannot place real orders until a deliberate operator flip (D's verdict is currently NO-GO — see the D go-live docs).
 
@@ -669,7 +675,7 @@ Alerts are sent AFTER actions complete with actual results. The bot publishes to
 | MEDIUM | ✓ | — | Position opened/closed, profit target, settlement complete |
 | LOW | ✓ | — | Bot started/stopped, daily summary, entry skipped, vigilant exit |
 
-Only **B** currently has `alerts.enabled: true` (the live seat) — A/C/D/E/F/G all have alerts disabled, so B is the sole source of every alert today regardless of this table.
+Only **`bl`** currently has `alerts.enabled: true` (the live seat since 2026-10-09) — A/B/C/D/E/F/G/H all have alerts disabled, so `bl` is the sole source of every alert today regardless of this table.
 
 AlertService auto-prefixes `[Nc]` on the title when `contracts > 1` (v1.24.0). 14 HYDRA call sites pass `contracts=entry.contracts` so the prefix appears on multi-contract events.
 
@@ -707,7 +713,7 @@ Full deployment guide: [`docs/ALERTING_SETUP.md`](docs/ALERTING_SETUP.md).
 
 ## Agent Suite (5 Agents)
 
-5 autonomous agents on systemd timers. The 4 narrative agents (APOLLO, HERMES, HOMER, CLIO) use `shared/claude_client.py` for the Claude API. **HERMES/CLIO/HOMER read the live variant's SQLite `backtesting.db` directly** (`shared/sheets_db_shim.py`, `agents_config.json` `data_source: "db"` / `read_db` pointing at `data/variant_<live>/backtesting.db` — repointed to `variant_b` at the 2026-07-24 swap), not Google Sheets — `google_sheets.enabled=false` on every variant including the live seat; Sheets writes were retired in favor of the DB path (functionally complete 2026-07-17, see the Backtesting Database section). `shared/sheets_reader.py` remains as the legacy/fallback path for `data_source: "sheets"`. ARGUS is a bash health-check script (`services/argus/health_check.sh`, launched via `/bin/bash` in `argus.service`) that reads the state file and emits alerts (`notify.py`) — it uses neither the Claude API nor the DB/Sheets read path.
+5 autonomous agents on systemd timers. The 4 narrative agents (APOLLO, HERMES, HOMER, CLIO) use `shared/claude_client.py` for the Claude API. **HERMES/CLIO/HOMER read the live variant's SQLite `backtesting.db` directly** (`shared/sheets_db_shim.py`, `agents_config.json` `data_source: "db"` / `read_db` pointing at `data/variant_<live>/backtesting.db` — repointed to `variant_bl` at the 2026-10-09 swap; **this one is a manual step on every seat swap**, the agents do not follow `live_seat_id()`), not Google Sheets — `google_sheets.enabled=false` on every variant including the live seat; Sheets writes were retired in favor of the DB path (functionally complete 2026-07-17, see the Backtesting Database section). `shared/sheets_reader.py` remains as the legacy/fallback path for `data_source: "sheets"`. ARGUS is a bash health-check script (`services/argus/health_check.sh`, launched via `/bin/bash` in `argus.service`) that reads the state file and emits alerts (`notify.py`) — it uses neither the Claude API nor the DB/Sheets read path.
 
 | Agent | Service | Schedule | Purpose |
 |-------|---------|----------|---------|
@@ -736,6 +742,24 @@ Updates `docs/HYDRA_TRADING_JOURNAL.md` after market close. **Current mode is DB
 5. Use Claude API for narrative sections (observations, assessments)
 6. Validate journal structure, commit + push to git
 7. Send Telegram alert on completion/failure
+
+> ⚠️ **The journal's own numbers were silently wrong for two months — fixed 2026-10-09.**
+> `JournalParser` located blocks by scanning `section_2_start + <constant>` lines, and
+> section 2 grows one line per trading day. Two constants were outgrown, failing in
+> opposite ways: the **Cumulative Metrics** block drifted 31 lines past its 180-line
+> window and simply stopped being updated after **2026-08-04** (the journal advertised
+> `cumulative_pnl: 15628.27` against an actual, epoch-rebased **−432.10**), while the
+> **P&L Verification** list's 30-line inner window returned a *wrong* end, so every new
+> day was inserted at the same mid-list line — 61 rows ended up in reverse order spliced
+> between Mar 19 and Mar 20. HOMER logged a WARNING for the first and **nothing** for the
+> second, and reported success both times. Scans are now bounded by the next `## ` heading
+> (`_section_scan_end`), the two "block not found" messages are ERRORs, and the list was
+> re-sorted (verified as a pure permutation). Pinned by
+> `tests/test_journal_window_drift_2026_10_09.py`, which includes invariants on the
+> committed journal — chronological order, no duplicate dates — that would have caught the
+> splice the day it started. Separately: `get_appendix_f_current_config_range` is **dead
+> code** (no caller) looking for a "(Current, …)" heading the journal has never had;
+> Appendix F is an archive abandoned at v1.5.1.
 
 **Fallback chain for missing trade records** (as documented for legacy Sheets mode — unverified against current DB-primary mode, see note above):
 1. Google Sheets Trades tab (primary in sheets mode; DB `trade_entries`/`trade_stops` tables in db mode)
@@ -891,14 +915,14 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 ```bash
 # Stop HYDRA + variants (broker keeps the IBKR session — strategies stop trading; session stays up)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g hydra_variant_h"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_bl hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g hydra_variant_h"
 
 # Stop just HYDRA
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra"
 
 # Start the broker FIRST (it owns the session the strategies depend on), then HYDRA + variants
 # (run pre-start verification first — see deploy/IBKR_CREDENTIALS_SETUP.md)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start calypso-broker hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g hydra_variant_h"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl start calypso-broker hydra hydra_variant_bl hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g hydra_variant_h"
 
 # Restart HYDRA (config / strategy change pickup — does NOT re-auth the IBKR session)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl restart hydra"
@@ -911,7 +935,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl resta
 
 ```bash
 # All active HYDRA-related services (calypso-broker = the shared IBKR session owner)
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status calypso-broker hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g hydra_variant_h dashboard"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl status calypso-broker hydra hydra_variant_bl hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g hydra_variant_h dashboard"
 
 # Broker session health + re-auth loop logs (where session/auth problems show up in broker mode)
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u calypso-broker -n 50 --no-pager"
@@ -943,7 +967,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u h
 # F and G running while claiming to stop everything. They are dry-run-locked so nothing
 # was at risk, but a command labelled "emergency stop" must not need that caveat to be
 # true. Add hydra_variant_bm once real money runs.
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g hydra_variant_h calypso-broker"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra hydra_variant_bl hydra_variant_b hydra_variant_c hydra_variant_d hydra_variant_e hydra_variant_f hydra_variant_g hydra_variant_h calypso-broker"
 ```
 
 Stopping `calypso-broker` drops the one shared IBKR session; the `hydra*` units will fail their `ensure_connected()` health probe and `break` (then systemd retries them, but they stay down without a healthy broker). Bring the broker back FIRST when restarting.
@@ -1424,9 +1448,9 @@ For the full 86-fix history including all Saxo-era bugs and resolutions, see `bo
 ## Important Notes
 
 1. **Git on VM:** must run as `calypso`: `sudo -u calypso bash -c 'cd /opt/calypso && git pull'`
-2. **Service names use underscores:** `hydra`, `hydra_variant_b`, `hydra_variant_c`, `hydra_variant_d`, `hydra_variant_e`, `hydra_variant_f`, `hydra_variant_g`, **`hydra_variant_h`**, `dashboard` (plus `hydra_variant_bm` + `calypso-broker-live`, built but not installed). ⚠️ **`hydra_variant_h` was missing from every list in this file until 2026-09-28** — including the emergency stop, which therefore did not stop it. It is dry-run-locked so nothing was at risk, but that is the same defect this file already recorded for D/E/F/G on 2026-09-19, repeated. It was also found `systemctl is-enabled` = **disabled** (running, but would not survive a reboot) and on older bytecode than the rest of the fleet; both fixed 2026-09-28. **When adding a variant, grep this file for `hydra_variant_g` and add the new unit to every hit.**
-3. **Log locations:** `/opt/calypso/logs/hydra/bot.log`; variants under `/opt/calypso/logs/hydra_variant_{b,c,d,e,f,g}/`; the real-money broker would write to `logs/broker-live/broker.log`
-4. **State files:** `data/hydra_state.json`, `data/variant_{b,c,d,e,f,g}/hydra_state.json`. Calendar variants D/E also keep a sidecar `data/variant_{d,e}/dc_open_trades.json` (open calendars) + an isolated `data/variant_{d,e}/dc_calendar.db` (calendar tables, separate from the shared `backtesting.db`).
+2. **Service names use underscores:** `hydra`, **`hydra_variant_bl`** (the LIVE seat since 2026-10-09), `hydra_variant_b`, `hydra_variant_c`, `hydra_variant_d`, `hydra_variant_e`, `hydra_variant_f`, `hydra_variant_g`, **`hydra_variant_h`**, `dashboard` (plus `hydra_variant_bm` + `calypso-broker-live`, built but not installed). ⚠️ **`hydra_variant_h` was missing from every list in this file until 2026-09-28** — including the emergency stop, which therefore did not stop it. It is dry-run-locked so nothing was at risk, but that is the same defect this file already recorded for D/E/F/G on 2026-09-19, repeated. It was also found `systemctl is-enabled` = **disabled** (running, but would not survive a reboot) and on older bytecode than the rest of the fleet; both fixed 2026-09-28. **When adding a variant, grep this file for `hydra_variant_g` and add the new unit to every hit.**
+3. **Log locations:** `/opt/calypso/logs/hydra/bot.log`; variants under `/opt/calypso/logs/hydra_variant_{bl,b,c,d,e,f,g,h}/` (⚠️ `bl` and `bm` shipped pointing at `logs/hydra_variant_b/` — the config's `logging.log_dir` BEATS `HYDRA_VARIANT_ID`; fixed 2026-10-09, pinned by `tests/test_variant_log_isolation_2026_10_09.py`); the real-money broker would write to `logs/broker-live/broker.log`
+4. **State files:** `data/hydra_state.json`, `data/variant_{bl,b,c,d,e,f,g,h}/hydra_state.json`. Calendar variants D/E also keep a sidecar `data/variant_{d,e}/dc_open_trades.json` (open calendars) + an isolated `data/variant_{d,e}/dc_calendar.db` (calendar tables, separate from the shared `backtesting.db`).
 5. **Position Registry:** `data/position_registry.json` — vestigial on IBKR (always empty), kept loaded for back-compat
 6. **Token Keeper:** dead on this branch. The `services/token_keeper/` code and the `deploy/token_keeper.service.disabled-on-this-branch` unit (suffixed so no `deploy/*.service` install loop can pick it up) exist only for back-compat with `main` and must never be started. IBKR OAuth 1.0a is unattended.
 7. **All four sibling bots:** **deleted on this branch** (P5a/P5b). `git ls-tree HEAD bots/` shows only `__init__.py` + `hydra/`. The kill-switched versions live on `main`.

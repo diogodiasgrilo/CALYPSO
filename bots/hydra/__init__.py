@@ -36,6 +36,41 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-09 THE JOURNAL'S OWN NUMBERS WERE SILENTLY WRONG FOR TWO MONTHS.
+  `JournalParser` located blocks by scanning `section_2_start + <constant>`
+  lines; section 2 grows one line per trading day, so both constants were
+  outgrown and failed SILENTLY in OPPOSITE ways. (a) Cumulative Metrics (window
+  180): the heading drifted 31 lines past it, the lookup returned None, and the
+  updater skipped the block from 2026-08-04 on -- the journal advertised
+  `cumulative_pnl: 15628.27` against an actual, epoch-rebased -432.10, a ~$16k
+  error on the number most likely to be quoted out of it. HOMER logged a
+  WARNING nightly and reported success. (b) P&L Verification (inner window 30):
+  did NOT return None, returned a WRONG end -- and `add_pnl_verification`
+  inserts at end+1, so every new day was written at the same mid-list line. 61
+  rows ended up in REVERSE chronological order spliced between Mar 19 and Mar
+  20, with nothing logged at all. A wrong answer is worse than no answer. Both
+  now bound their scan with `_section_scan_end` (next `## ` heading, else EOF);
+  both "not found" messages are ERROR, not WARNING. The journal's 163 rows were
+  re-sorted in the same commit, verified as a PURE PERMUTATION (identical
+  multiset, 163 in and out, file length unchanged, no duplicate dates). NOT
+  fixed, recorded instead: `get_appendix_f_current_config_range` is dead code
+  (no caller) looking for a "(Current, ...)" heading the journal has never had.
+  21 tests; negative control restores both windows and fails 10.
+- 2026-10-09 `bl` AND `bm` WERE LOGGING INTO VARIANT B'S DIRECTORY. `bl` was
+  copy-pasted from `b` and inherited `logging.log_dir: "logs/hydra_variant_b"`.
+  The config key BEATS `HYDRA_VARIANT_ID` in `logger_service`, so `bl` wrote
+  into B-A's bot.log while `logs/hydra_variant_bl/` stayed empty: the dashboard
+  tails `variant_bl_log_file` for the LIVE seat (empty panel), two processes
+  shared one TimedRotatingFileHandler target, and `trade_log_file` is
+  `log_dir / "trades.json"` -- so `bl`'s REAL trades and `b`'s SIMULATED ones
+  would have appended to ONE file. `bm`, the real-money variant, carried the
+  same value (pre-existing), which would have put a real-money log and
+  trades.json inside a PAPER variant's directory. Also un-copied `bl`'s
+  inherited `metrics_epoch_date: "2026-07-24"` (b's swap date), which re-opened
+  the file-vs-dashboard era divergence the 2026-10-06 audit closed. The
+  existing exact-copy test flags DIVERGENCES and so structurally cannot catch
+  keys that are wrong BECAUSE they are identical; the new test states the
+  invariant against each variant's own id and sweeps all 9 configs.
 - 2026-10-09 NEW LIVE PAPER SEAT: variant `bl` — the Brandon stack on a
   12:15-15:15 grid. Variant `b` demoted to dry-run shadow, displayed as "B-A".
   Operator decision. `bl` is byte-identical to `b` except the entry grid
