@@ -41,16 +41,59 @@ setting) it **delegates to `super()`** — so the base loop is what runs. I near
 patched the override, whose own loop closes only the short and has no hedge to
 sell. **Check which method actually executes before fixing a stop-path bug.**
 
-### Still open from the same incident
+### ✅ ROOT CAUSE FOUND 2026-10-09 — it was none of the three theories
 
-* **Why did 5 closes report "did not fill" while the broker moved −4?** The
-  partial-fill detector works normally (it fired correctly on 10-01 and once on
-  10-08), and a marketable-limit close on a 0DTE put going ITM in a falling
-  market can genuinely fail inside a 4–5s window. **Not yet established whether
-  this is a detection bug or hard fills.** Do not "fix" it on the strength of
-  one incident.
-* Frequency, all history: `EMERGENCY_CLOSE_FAILED` 32/12/4 in Feb (Saxo era),
-  then **3 on 09-24 and 3 on 10-08**. `CRITICAL #7`: **once, ever**.
+It was **not** a timeout, **not** hard fills, **not** a detection bug. Every one
+of E#6's five close orders was **never submitted**:
+
+```
+ValueError: No answer found for question:
+  "The closing order quantity is greater than your current position.
+   Are you sure you want to submit this order?"
+```
+
+`close_leg_executions` (the telemetry added 10-05, which is what made this
+findable) shows all five were **marketable** — limit above the ask — and were
+abandoned in **1.7–5.3 s**, while the SAME conid had filled for E#2 minutes
+earlier in **30–37 s**. They were blocked at IBKR's confirmation prompt, and
+`place_and_wait_for_fill` surfaced that as a generic failure the caller read as
+"did not fill".
+
+**This single unmapped prompt explains BOTH emergency-close failures of the IBKR
+era** — it has occurred exactly twice, 5 attempts each: **2026-09-24 19:38 and
+2026-10-08 17:28**, precisely the two `EMERGENCY_CLOSE_FAILED` dates.
+
+**And the prompt was CORRECT.** We were trying to buy back more than we held:
+
+* entries **#2 and #6 took IDENTICAL 7735/7730 put spreads**, so IBKR merged
+  them at one conid — the A2 line at 13:28:03 reads `long_put sits at +14
+  against an expected +7`;
+* entry #6's first open had **failed at leg 4 (the short put)** at 12:18 and its
+  unwind partly failed too, so the shorts never reached 14 while our books
+  believed they had;
+* E#2's stop then drained the shared short position, and E#6's close asked for 7
+  against less than that.
+
+### What to do about it — NOT before the open
+
+1. **Clamp the close quantity to the broker's actual position** (the real fix).
+   Answering this prompt "yes" would be WRONG — it would over-close a flat
+   position into a LONG. The prompt is a safety net doing its job.
+2. **An unmapped prompt must fail CLEANLY**, not as a bare `ValueError` the
+   caller reads as a non-fill. `DEFAULT_ORDER_ANSWERS` deliberately answers
+   close-position safety prompts `False`; this one has no entry at all, which is
+   a harder failure than a clean refusal.
+3. **Duplicate strikes now have a demonstrated OPERATIONAL hazard.** They were
+   measured P&L-neutral (t = 0.30) and left alone on that basis — that argument
+   was about returns and is untouched, but it is no longer the whole picture.
+
+⚠️ **Order-path code, the most dangerous in the system, and the acute risk is
+already mitigated** by CRITICAL #7b (shipped 10-09 06:16). Rushing it two hours
+before the open, the morning after an incident, is how the next incident gets
+made. **Do it in an after-close window with the full loop.**
+
+Frequency, all history: `EMERGENCY_CLOSE_FAILED` 32/12/4 in Feb (Saxo era), then
+**3 on 09-24 and 3 on 10-08**. `CRITICAL #7`: **once, ever**.
 
 ### Also shipped 2026-10-09
 
