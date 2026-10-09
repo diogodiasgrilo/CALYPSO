@@ -10,7 +10,7 @@ the narrative_generator module.
 import logging
 import re
 from datetime import datetime
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from services.homer.journal_parser import JournalParser
 
@@ -288,8 +288,17 @@ def add_pnl_verification(parser: JournalParser, day_data: Dict[str, Any]):
 # SECTION 2c: CUMULATIVE METRICS JSON
 # =============================================================================
 
-def update_cumulative_metrics(parser: JournalParser, metrics: Dict, date_label: str):
-    """Replace the cumulative metrics JSON block."""
+def update_cumulative_metrics(parser: JournalParser, metrics: Dict, date_label: str,
+                              source_label: Optional[str] = None):
+    """Replace the cumulative metrics JSON block.
+
+    `source_label` names the variant these figures belong to. It matters because
+    the block is WHOLE-FILE state that silently changes subject on a live-seat
+    swap: on 2026-10-09 the seat moved from `b` (78 days, a stale +$15,628 in
+    this block) to `bl` (one day), and without the label the number simply
+    appears to collapse. The caller derives it from `homer.read_db`, so it
+    follows the seat with no code change.
+    """
     metrics_range = parser.get_cumulative_metrics_range()
     if metrics_range is None:
         logger.error(
@@ -302,6 +311,8 @@ def update_cumulative_metrics(parser: JournalParser, metrics: Dict, date_label: 
     start, end = metrics_range
 
     new_lines = [
+        (f"### Cumulative Metrics ({source_label} — hydra_metrics.json "
+         f"as of {date_label} EOD)") if source_label else
         f"### Cumulative Metrics (hydra_metrics.json as of {date_label} EOD)",
         "```json",
         "{",

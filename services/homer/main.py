@@ -727,7 +727,18 @@ def main():
 
         metrics = all_data.get("metrics", {})
         if metrics:
-            update_cumulative_metrics(jp, metrics, date_labels[-1])
+            # Name the variant in the heading. This block is whole-file state
+            # that silently changes subject on a live-seat swap (2026-10-09:
+            # b -> bl, 78 days -> 1), so an unlabelled number looks like a
+            # collapse. Derived from read_db exactly as the dry-run state file
+            # is above, so it follows the seat with no code change.
+            _src = None
+            _rdb = homer_config.get("read_db")
+            if _rdb and str(homer_config.get("data_source", "")).lower() == "db":
+                _vdir = os.path.basename(os.path.dirname(_rdb))
+                if _vdir.startswith("variant_"):
+                    _src = f"variant {_vdir[len('variant_'):]}"
+            update_cumulative_metrics(jp, metrics, date_labels[-1], source_label=_src)
 
         # 8. Section 5: Recompute aggregates (once, after all days)
         from services.homer.journal_updater import recompute_section5

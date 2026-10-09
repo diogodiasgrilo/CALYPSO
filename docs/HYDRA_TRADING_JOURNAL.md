@@ -262,6 +262,23 @@ Source: Google Sheets "Daily Summary" tab. Feb 17 capital corrected from $12,500
 - Oct 7: 1545 - 0 - 209.30 = 1335.70 ✓
 - Oct 8: 2975 - 2810 - 112.70 = 52.30 ✓
 
+> ⚠️ **The block below changes SUBJECT on a live-seat swap — read its heading.**
+> It is whole-file state showing one variant's lifetime: whichever variant currently
+> holds the live paper seat (`services/agents_config.json` → `homer.read_db`).
+>
+> **2026-10-09: the seat moved from `b` to `bl`**, so from tonight these figures are
+> `bl`'s — which begins with ONE day. The previous 78-day record belongs to `b` (now
+> displayed as **B-A**) and is NOT lost: it lives in `data/variant_b/hydra_metrics.json`
+> and `data/variant_b/backtesting.db`. A drop in `cumulative_pnl` across that boundary
+> is a change of subject, **not** a loss.
+>
+> Separately, this block was **FROZEN at Aug 4 for two months** — `JournalParser` looked
+> for it within a fixed 180-line window of Section 2, Section 2 grows one line per
+> trading day, and the heading drifted past it. HOMER logged a WARNING nightly and
+> reported success, so the journal advertised `cumulative_pnl: 15628.27` against an
+> actual, epoch-rebased −432.10. Fixed 2026-10-09 (`_section_scan_end`); anything dated
+> between Aug 4 and Oct 9 in this block was stale, not real.
+
 ### Cumulative Metrics (hydra_metrics.json as of Aug 4 EOD)
 ```json
 {
