@@ -8,7 +8,7 @@ export function StatusBar() {
 
   return (
     <footer className="flex items-center justify-between px-4 py-1.5 bg-bg border-t border-border-dim text-xs text-text-secondary">
-      <div className="flex items-center gap-2 truncate max-w-[70%]">
+      <div className="flex items-center gap-2 truncate min-w-0 flex-1">
         <span className="text-text-dim">BOT:</span>
         <span className="text-text-primary">{botState}</span>
         {lastLog && (
@@ -23,7 +23,7 @@ export function StatusBar() {
           </>
         )}
       </div>
-      <div className="flex items-center gap-3">
+      <div className="flex items-center gap-3 shrink-0 whitespace-nowrap pl-3">
         <span>{clientCount} client{clientCount !== 1 ? "s" : ""}</span>
         <span className="text-text-dim">
           {hydraState?.date ?? ""}

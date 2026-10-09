@@ -33,13 +33,31 @@ import { useSelectedStrategy } from "../../hooks/useSelectedStrategy";
 import { accentForStrategy } from "../../lib/pnlShape";
 import { colors } from "../../lib/tradingColors";
 
-function LetterBadge({ id, size = 20 }: { id: string; size?: number }) {
+/** The badge text. Normally the id ("b" -> "B"), which is how this project
+ *  talks ("B is the live one"). But on 2026-10-09 a second Brandon variant
+ *  `bl` took the live seat and was NAMED "B", while `b` kept its id and became
+ *  "B-A" — so `id.toUpperCase()` rendered "B" for the variant everyone now
+ *  calls B-A, directly contradicting the label beside it. A badge that
+ *  disagrees with its own label is worse than no badge. Prefer a short
+ *  display_name; fall back to the id when the name is too long to fit. */
+function badgeText(id: string, displayName?: string): string {
+  const name = (displayName ?? "").trim();
+  return name && name.length <= 3 ? name.toUpperCase() : id.toUpperCase();
+}
+
+function LetterBadge({
+  id,
+  displayName,
+  size = 20,
+}: { id: string; displayName?: string; size?: number }) {
   const accent = accentForStrategy(id);
+  const text = badgeText(id, displayName);
   return (
     <span
       className="inline-flex items-center justify-center rounded font-bold shrink-0"
       style={{
-        width: size,
+        minWidth: size,
+        paddingInline: text.length > 1 ? 3 : 0,
         height: size,
         // Mixed toward black rather than an alpha tint, for the same reason the
         // status badges are: an alpha self-tint lifts the background toward the
@@ -52,7 +70,7 @@ function LetterBadge({ id, size = 20 }: { id: string; size?: number }) {
       }}
       aria-hidden
     >
-      {id.toUpperCase()}
+      {text}
     </span>
   );
 }
@@ -122,7 +140,7 @@ export function StrategySwitcher() {
                    bg-bg-elevated pl-1.5 pr-2 py-1 transition-colors hover:border-border
                    focus-visible:border-info focus-visible:outline-none"
       >
-        <LetterBadge id={currentId} />
+        <LetterBadge id={currentId} displayName={current?.display_name} />
         {/* The NAME is hidden on a phone, deliberately. Showing it in full
             consumed the header and pushed the SPX price off the screen
             entirely — which is a worse trade than the truncation it fixed.
@@ -170,7 +188,7 @@ export function StrategySwitcher() {
                                  focus-visible:outline-none"
                     >
                       <span className="pt-0.5">
-                        <LetterBadge id={s.id} size={22} />
+                        <LetterBadge id={s.id} displayName={s.display_name} size={22} />
                       </span>
                       <span className="min-w-0 flex-1">
                         <span className="flex items-center gap-1.5">

@@ -32,6 +32,27 @@ function findEntryByNumber(
  *  with no visual distinction from a routine strategic skip. Excluding it
  *  here routes it through the `positions`/EntryCard path instead, where it
  *  already renders as a visually distinct red "failed" card. */
+/** Group skips by their reason, preserving first-appearance order.
+ *
+ *  Every skip rendered its own copy of `skip_reason`, and the reasons are
+ *  long — the require-both-sides/GEX one is ~60 words. Three slots skipped
+ *  for the same cause produced three identical paragraphs, which on a phone
+ *  is most of the screen saying one thing. The entry numbers differ; the
+ *  reason does not, so say it once. */
+function groupSkipsByReason(skips: HydraEntry[]): Array<[string, HydraEntry[]]> {
+  const order: string[] = [];
+  const byReason = new Map<string, HydraEntry[]>();
+  for (const e of skips) {
+    const reason = e.skip_reason || "credit gate";
+    if (!byReason.has(reason)) {
+      byReason.set(reason, []);
+      order.push(reason);
+    }
+    byReason.get(reason)!.push(e);
+  }
+  return order.map((r) => [r, byReason.get(r)!] as [string, HydraEntry[]]);
+}
+
 function isFullySkipped(e: HydraEntry): boolean {
   return Boolean(e.call_side_skipped && e.put_side_skipped) && !e.execution_failed;
 }
@@ -189,19 +210,25 @@ export function EntryGrid({ entries: entriesProp }: EntryGridProps = {}) {
                 >
                   Skipped — no position ({skips.length})
                 </div>
-                <div className="flex flex-col gap-0.5">
-                  {skips.map((e, i) => (
-                    <div
-                      key={e.entry_number ?? `s${i}`}
-                      className="text-xs font-mono text-text-secondary"
-                    >
-                      <span style={{ color: colors.textDim }}>
-                        #{e.entry_number ?? "?"}
-                      </span>{" "}
-                      {entryHm(e)}{" "}
-                      <span style={{ color: colors.textDim }}>
-                        · {e.skip_reason || "credit gate"}
-                      </span>
+                <div className="flex flex-col gap-1.5">
+                  {groupSkipsByReason(skips).map(([reason, group], gi) => (
+                    <div key={gi} className="text-xs font-mono text-text-secondary">
+                      <div>
+                        {group.map((e, i) => (
+                          <span key={e.entry_number ?? `s${gi}-${i}`}>
+                            {i > 0 && (
+                              <span style={{ color: colors.textDim }}> · </span>
+                            )}
+                            <span style={{ color: colors.textDim }}>
+                              #{e.entry_number ?? "?"}
+                            </span>{" "}
+                            {entryHm(e)}
+                          </span>
+                        ))}
+                      </div>
+                      <div className="text-3xs mt-0.5" style={{ color: colors.textDim }}>
+                        {reason}
+                      </div>
                     </div>
                   ))}
                 </div>
