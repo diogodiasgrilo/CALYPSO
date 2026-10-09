@@ -267,7 +267,7 @@
   },
   "logging": {
     "log_level": "INFO",
-    "log_dir": "logs/hydra_variant_b",
+    "log_dir": "logs/hydra_variant_bm",
     "google_sheets_enabled": true,
     "spreadsheet_name": "Calypso_HYDRA_Variant_B",
     "strategy_type": "hydra_brandon_narrow_dense"

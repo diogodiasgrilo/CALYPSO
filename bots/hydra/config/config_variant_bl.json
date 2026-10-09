@@ -219,8 +219,8 @@
     "entry_pricing": {
       "deliberate_rung_pricing": true
     },
-    "_comment_metrics_epoch_date": "THE LIFETIME RECORD RESTARTS HERE (2026-07-24). B took the LIVE paper seat on this date (the C->B swap, RUNBOOKS RB-9). Everything before it is DRY-RUN SIMULATION with simulated fills, and it was 91% of the headline: the file read +$21,439 while the live record was a small LOSS. Blending a simulated era with a traded one answers neither question, and the raw file is what gets quoted. Set 2026-10-06 after the nightly telemetry audit found the metrics file and the dashboard reporting different eras of the same number -- the dashboard already rebased to variant_b_baseline_date, the file did not, and nothing enforced the invariant that the two must move together. Everything before this date is ARCHIVED, NOT DELETED: it stays in backtesting.db and moves to a 'pre_epoch' block in hydra_metrics.json. Applied inside _reconcile_cumulative_metrics_from_db, which re-derives cumulative_pnl from the FULL daily_summaries table every settlement -- so a hand-edited metrics file would be silently undone at the next close. Remove this key to count the whole history again.",
-    "metrics_epoch_date": "2026-07-24",
+    "_comment_metrics_epoch_date": "THE LIFETIME RECORD STARTS HERE (2026-10-09). `bl` took the LIVE paper seat on this date; it has NO history before it, so this epoch is a statement of fact, not a rebase of an existing record. It is set explicitly because it MUST equal the dashboard's variant_bl_baseline_date -- the 2026-10-06 telemetry audit found the metrics file and the dashboard reporting different eras of the same number, and nothing enforced that the two move together. This key was inherited as '2026-07-24' when bl was copied from b: numerically harmless (bl has nothing before 10-09) but it re-introduced exactly that divergence, so it is pinned by tests/test_variant_log_isolation_2026_10_09.py. Do NOT copy b's value here -- b's 2026-07-24 epoch is about B's own C->B swap and archives a simulated era that bl never had.",
+    "metrics_epoch_date": "2026-10-09",
     "_comment_entry_times": "2026-10-09: grid shifted from 09:45,10:15,10:45,11:15,11:45,12:15,12:45 to 12:15,12:45,13:15,13:45,14:15,14:45,15:15. Same 7 slots / 30min spacing / 7 contracts; ONLY the start time differs from variant b. max_entries stays [7,7,3,1] because the slot COUNT is unchanged \u2014 the VIX regime drops the EARLIEST entries when capped, so in zone 2 this grid keeps 13:45/14:15/14:45... i.e. the latest three. NOT VALIDATED: the later slots looked best in-sample but a 20,000-shuffle permutation on the per-slot spread gives p=0.597, and 13:15 onward has NO live record at all. This exists to generate out-of-sample data."
   },
   "trend_filter": {
@@ -270,7 +270,7 @@
   },
   "logging": {
     "log_level": "INFO",
-    "log_dir": "logs/hydra_variant_b",
+    "log_dir": "logs/hydra_variant_bl",
     "google_sheets_enabled": true,
     "spreadsheet_name": "Calypso_HYDRA_Variant_B",
     "strategy_type": "hydra_brandon_narrow_dense"

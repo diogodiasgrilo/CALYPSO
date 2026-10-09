@@ -88,12 +88,21 @@ class TestTheGrid:
 
 class TestBlIsOtherwiseAnExactCopyOfB:
 
+    # Two kinds of entry here, and the difference matters:
+    #   - MAY differ: the swap's deliberate settings.
+    #   - MUST differ: per-variant isolation. A diff-based test cannot police
+    #     those (identical values pass it silently), so they are pinned by id in
+    #     tests/test_variant_log_isolation_2026_10_09.py. Both keys below were
+    #     found COPIED from b on 2026-10-09, 3h before bl's first live slot.
     ALLOWED = {
         "dry_run",                 # bl is the live seat, b is not
         "alerts",                  # only the live seat alerts
         "strategy.entry_times",    # the whole point
         "strategy._comment_entry_times",
         "_comment_demoted",
+        "logging.log_dir",                        # MUST differ — see above
+        "strategy.metrics_epoch_date",            # MUST differ — bl starts 10-09
+        "strategy._comment_metrics_epoch_date",
     }
 
     def _flat(self, d, prefix=""):
