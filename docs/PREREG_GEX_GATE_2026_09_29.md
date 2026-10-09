@@ -98,3 +98,50 @@ approvals is subtracting information.
 | Shadows running | `shift_first` (per-decision) · `flipped_sign` / `windowed` / `all_fixes` (per-decision) |
 | First evaluable date | **2026-09-30** |
 | Config freeze | holds — [`GO_LIVE_MASTER.md`](GO_LIVE_MASTER.md) §2-quater |
+
+---
+
+## Contamination assessment — recorded 2026-10-09, BEFORE the result is known
+
+**Progress at the time of writing: 19 of 25 out-of-sample vetoes (~3 trading
+days).** The result is NOT yet readable, which is the only reason this
+assessment is worth anything — made after seeing the answer it would be a
+rationalisation.
+
+`scripts/registered_test_eta` flags every economic commit since the cut-off that
+touched this test's dependency paths. It **flags; it does not rule.** Each is
+assessed below against what the test actually measures — *veto decisions and
+delta-target strike selection*.
+
+### Direct hits (paths specific to this test)
+
+| commit | what it changed | verdict |
+|---|---|---|
+| `1ab9222` 10-01 | Polygon chain page cap 4 → 20 (`gex_provider.py`) | ✅ **cleared against DATA**: the chain hit the 1,000 cap on exactly two days ever (09-18, 09-30), which produced **2 GEX decisions and 0 vetoes** between them, and **0 of 54** out-of-sample decisions came from truncated days |
+| `8d4102c` 10-07 | advisory dedupe store + logging helpers | ✅ logging only — adds `_brandon_advisory_log`, `ADVISORY_REPEAT_SECONDS`, `_advisory_log_store`; no order or selection behaviour |
+| `85031dc` 10-01 | a `logger.error` for a failed price refresh | ✅ logging only |
+| `735c2df` 10-06 | `_swallow.note(...)` exception counters | ✅ telemetry only |
+
+### Shared-file hits — including all three of 2026-10-09
+
+`CRITICAL #7b` (hold the hedge when the short close fails), **A3** (clamp the
+close quantity to the broker's position) and **A4** (report refused-vs-unfilled)
+all land in `base_strategy.py` / `strategy.py`, so they flag.
+
+**All three are EXIT-path changes.** This test's subject is **entry-time** strike
+selection and veto decisions. A veto is decided before any position exists, and
+a "breach" is spot crossing a strike — a market fact independent of how, or
+whether, we later closed. No mechanism is apparent by which a close-path change
+could alter which strikes were vetoed or how often a vetoed strike was breached.
+
+### Verdict
+
+**The out-of-sample sample is assessed UNCONTAMINATED.** Every direct hit is
+logging/telemetry, the one substantive direct hit was cleared against data, and
+the 10-09 changes act only after entry.
+
+⚠️ Recorded so the decision in ~3 days is **not** made under time pressure, and
+so this reasoning can be challenged rather than merely asserted. If someone
+disagrees with the exit-path argument, the place to say so is **now**, not after
+reading the number.
+
