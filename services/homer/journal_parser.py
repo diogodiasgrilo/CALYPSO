@@ -43,6 +43,23 @@ class JournalParser:
         """Get the starting line index for an appendix (A-H)."""
         return self._section_starts.get(ord(letter.upper()) - ord("A") + 100)
 
+    def _section_scan_end(self, anchor: int) -> int:
+        """Index of the next top-level (`## `) heading after `anchor`, else EOF.
+
+        Bounds a lookup by the document's STRUCTURE instead of a fixed line
+        count. Section 2 grows by one line per trading day, so every
+        `anchor + <constant>` window in this file is a time bomb: when the
+        content it is looking for drifts past the constant, the lookup fails
+        *silently* and the caller skips its update (or, worse, writes at the
+        wrong line). Both had already happened by 2026-10-09 — see
+        tests/test_journal_window_drift_2026_10_09.py.
+        """
+        for i in range(anchor + 1, len(self.lines)):
+            line = self.lines[i]
+            if line.startswith("## ") and not line.startswith("### "):
+                return i
+        return len(self.lines)
+
     # =========================================================================
     # SECTION 2: DAILY SUMMARY TABLE
     # =========================================================================
@@ -98,29 +115,52 @@ class JournalParser:
         return None
 
     def get_pnl_verification_range(self) -> Optional[Tuple[int, int]]:
-        """Find the P&L Verification Formula section range."""
+        """Find the P&L Verification Formula block: (heading, LAST formula line).
+
+        The end is the last `- <Mon> <D>:` line in the block, because the only
+        caller (`add_pnl_verification`) inserts at `end + 1` to append the new
+        day. It must therefore be the TRUE last row, not the last row within
+        some window.
+
+        It used to scan only `start .. start + 30` for that row. The list grew
+        past 30 rows in July 2026, so from then on every new day was inserted
+        at the same mid-list line — leaving **61 rows in reverse
+        chronological order spliced between Mar 19 and Mar 20** by 2026-10-09.
+        No data was lost; the list was simply no longer a list.
+        """
         sec2_start = self.get_section_start(2)
         if sec2_start is None:
             return None
 
+        stop = self._section_scan_end(sec2_start)
+
         start = None
-        for i in range(sec2_start, min(sec2_start + 150, len(self.lines))):
+        for i in range(sec2_start, stop):
             if "### P&L Verification Formula" in self.lines[i]:
                 start = i
-            elif start and self.lines[i].startswith("### ") and i > start:
-                return (start, i - 1)
+                break
+        if start is None:
+            return None
 
-        if start:
-            # Find the last formula line
-            last_formula = start
-            for i in range(start, min(start + 30, len(self.lines))):
-                if re.match(r"^- (Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Jan)", self.lines[i]):
-                    last_formula = i
-            return (start, last_formula)
-        return None
+        last_formula = start
+        for i in range(start + 1, stop):
+            if self.lines[i].startswith("### "):
+                break
+            if re.match(r"^- (Feb|Mar|Apr|May|Jun|Jul|Aug|Sep|Oct|Nov|Dec|Jan)", self.lines[i]):
+                last_formula = i
+        return (start, last_formula)
 
     def get_cumulative_metrics_range(self) -> Optional[Tuple[int, int]]:
-        """Find the cumulative metrics JSON block range."""
+        """Find the cumulative metrics JSON block range.
+
+        It used to scan only `sec2_start .. sec2_start + 180`. Section 2 grows
+        one line per trading day, so the heading drifted 31 lines past that
+        window and the block stopped being updated after **2026-08-04** — while
+        HOMER logged a WARNING nightly and completed "successfully". The journal
+        therefore advertised `cumulative_pnl: 15628.27` for two months against
+        an actual, epoch-rebased **-432.10**: a ~$16k error on the single number
+        most likely to be quoted from it.
+        """
         sec2_start = self.get_section_start(2)
         if sec2_start is None:
             return None
@@ -129,7 +169,7 @@ class JournalParser:
         end = None
         in_code_block = False
 
-        for i in range(sec2_start, min(sec2_start + 180, len(self.lines))):
+        for i in range(sec2_start, self._section_scan_end(sec2_start)):
             if "### Cumulative Metrics" in self.lines[i]:
                 start = i
             elif start and self.lines[i].strip() == "```json":

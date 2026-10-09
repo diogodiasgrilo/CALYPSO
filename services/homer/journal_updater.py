@@ -243,7 +243,11 @@ def add_pnl_verification(parser: JournalParser, day_data: Dict[str, Any]):
     """Add a P&L verification formula line for the new day."""
     pnl_range = parser.get_pnl_verification_range()
     if pnl_range is None:
-        logger.warning("Cannot find P&L verification section")
+        logger.error(
+            "Cannot find P&L verification section — this day's row was NOT added. "
+            "A skipped update here is silent in the journal; see "
+            "JournalParser._section_scan_end."
+        )
         return
 
     summary = day_data["summary"]
@@ -288,7 +292,11 @@ def update_cumulative_metrics(parser: JournalParser, metrics: Dict, date_label: 
     """Replace the cumulative metrics JSON block."""
     metrics_range = parser.get_cumulative_metrics_range()
     if metrics_range is None:
-        logger.warning("Cannot find cumulative metrics block")
+        logger.error(
+            "Cannot find cumulative metrics block — the journal's cumulative "
+            "figures were NOT refreshed and now understate/overstate the real "
+            "metrics file silently. See JournalParser._section_scan_end."
+        )
         return
 
     start, end = metrics_range
