@@ -36,6 +36,40 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-09 A3 — never ask to close MORE than the broker holds. ROOT CAUSE of
+  BOTH `EMERGENCY_CLOSE_FAILED` incidents of the IBKR era (2026-09-24 and
+  2026-10-08, 5 attempts each — the only two occurrences, ever).
+  IBKR answers an over-sized close with a confirmation prompt — *"The closing
+  order quantity is greater than your current position. Are you sure you want to
+  submit this order?"* — which has NO entry in `DEFAULT_ORDER_ANSWERS`, so ibind
+  raises `ValueError: No answer found for question` and **the order is never
+  submitted**. `close_leg_executions` (the telemetry added 10-05, which is what
+  made this findable) shows all five attempts were **marketable** (limit above
+  ask) and were abandoned in **1.7-5.3s**, against **30-37s** for a real fill on
+  the SAME conid minutes earlier. The caller read that as "did not fill" — and on
+  10-08 the stop then sold the protective long, leaving the live seat naked
+  (see CRITICAL #7b, same day).
+  **The prompt was CORRECT: we were closing more than we held.** Entries #2 and
+  #6 took IDENTICAL 7735/7730 put spreads so IBKR merged them at one conid (A2
+  logged `long_put sits at +14 against an expected +7`), and entry #6's open had
+  failed at leg 4 (its short put) with a partly-failed unwind — so our books
+  believed in more short than existed.
+  FIX: clamp the close quantity to the broker's actual net at that conid. The
+  strict read was ALREADY being taken two lines above (`_qty_before`, for
+  `_correct_over_fill`) and simply never consulted before placing.
+  **Answering the prompt "yes" would be WRONG** — it would over-close a flat
+  position into a LONG; the prompt is a safety net doing its job.
+  INVARIANTS, each with a negative control: the clamp is a **min, never a max**
+  (on a MERGED conid the broker may hold more than this entry owns — clamping UP
+  would eat a co-located entry's short; the control shows it "clamping close from
+  7 to 100"); a FAILED position read (`None`, i.e. unknown ≠ zero) does NOT
+  clamp; `available == 0` is left to the loop's own strict "already gone?" check
+  rather than placing an invalid 0-quantity order. Logged at WARNING because a
+  clamp means our books and the broker disagree.
+  14 tests. ⚠️ They first ran in 112s because the stub sat on `_close_leg_order`
+  while the loop actually calls `_place_marketable_close` and tests
+  `res["filled"]` — so every case silently retried 5x with real 2s sleeps and
+  the assertions passed for the wrong reason. Stubbing the true seam: 0.16s.
 - 2026-10-09 CRITICAL #7b — NEVER sell the hedge whose short you could not buy back.
   2026-10-08, variant B (the LIVE paper seat), entry #6 put side: the stop fired,
   EMERGENCY-001 failed to buy back the short put (conid 926792465) after 5

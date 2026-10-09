@@ -5802,6 +5802,42 @@ class MEICStrategy(abc.ABC):
             )
 
         qty_remaining = int(close_contracts)
+
+        # ── A3 (2026-10-09): never ask to close MORE than the broker holds. ──
+        # Root cause of BOTH EMERGENCY_CLOSE_FAILED incidents of the IBKR era
+        # (2026-09-24 and 2026-10-08, 5 attempts each). IBKR answers an
+        # over-sized close with a confirmation prompt:
+        #   "The closing order quantity is greater than your current position.
+        #    Are you sure you want to submit this order?"
+        # which has no entry in DEFAULT_ORDER_ANSWERS, so ibind raises
+        # `ValueError: No answer found for question` and the order is NEVER
+        # SUBMITTED. Every attempt died in 1.7-5.3s (vs 30-37s for a real fill
+        # on the same conid minutes earlier) and the caller read it as "did not
+        # fill" — which on 10-08 then led the stop to sell the protective long,
+        # leaving B naked. See CRITICAL #7b.
+        #
+        # On 10-08 the mismatch came from entries #2 and #6 holding IDENTICAL
+        # 7735/7730 put spreads (IBKR merges at the conid) plus entry #6's open
+        # having partly failed at its short-put leg, so our books believed in
+        # more short than existed.
+        #
+        # ALWAYS a `min`, never a max: on a MERGED conid the broker may hold
+        # more than this entry's share, and we must still close only OUR size.
+        # Clamping to 0 is deliberately NOT done — the loop's own strict
+        # "already gone?" check owns that case and ends the close as SUCCESS;
+        # placing a 0-quantity order would just be invalid.
+        if _qty_before is not None:
+            available = max(0, -_qty_before) if side == "BUY" else max(0, _qty_before)
+            if 0 < available < qty_remaining:
+                logger.warning(
+                    "A3: %s (conid %s) — clamping close from %d to %d; the broker "
+                    "holds %d at this conid and an over-sized close is REFUSED by "
+                    "IBKR at an unmappable prompt (order never submitted). Our "
+                    "books and the broker disagree — investigate the open path.",
+                    leg_name, uic, qty_remaining, available, available,
+                )
+                qty_remaining = int(available)
+
         filled_price_qty = 0.0   # Σ fill_price_i × filled_qty_i (priced legs only)
         filled_qty_priced = 0    # Σ filled_qty_i for legs that carried a price
         any_partial = False
