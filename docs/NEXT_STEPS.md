@@ -87,13 +87,26 @@ era** — it has occurred exactly twice, 5 attempts each: **2026-09-24 19:38 and
    entry's short); a FAILED position read is **unknown, not zero**, and does not
    clamp; `available == 0` is left to the loop's own "already gone?" check.
    14 tests; verified in the LOADED module on the VM.
-2. ⬜ **An unmapped prompt should still fail CLEANLY**, not as a bare `ValueError`
-   the caller reads as a non-fill. A3 removes the only known trigger, so this is
-   now resilience rather than a live bug — and it touches global order behaviour,
-   so it wants its own window.
-3. ⬜ **Duplicate strikes have a demonstrated OPERATIONAL hazard.** Measured
-   P&L-neutral (t = 0.30) and left alone on that basis — that argument was about
-   returns and is untouched, but it is no longer the whole picture.
+2. ✅ **DONE 2026-10-09 07:19 (`3934b60f`, A4) — the DIAGNOSIS half.** A refused
+   order no longer reports as one that "did not fill". `_place_leg_order` was
+   logging the reason and then **discarding it from the returned dict**, so no
+   caller could tell "never reached the market" from "didn't fill" — on 10-08
+   that produced five misleading log lines AND a CRITICAL alert that said only
+   "FAILED to fully close". Now carries `submitted=False` + `error=...`; the loop
+   logs "was NEVER SUBMITTED (not a non-fill) — <reason>" and the alert appends
+   "ORDERS WERE REFUSED, NOT UNFILLED". **Changes no order behaviour.**
+   ⬜ **The RESILIENCE half is still open and deliberately so:** actually
+   *handling* an unknown prompt (answer it, or fail it as a clean refusal rather
+   than an exception) changes global order behaviour, and A3 removed the only
+   known trigger. It wants its own window and a reason to exist.
+3. ❌ **NOT DOING — duplicate strikes.** Decided 2026-10-09. It is a strategy
+   change under the **config freeze**, it was measured **P&L-neutral (t = 0.30)**,
+   and its operational hazard was removed at the source: A3's clamp is a **min,
+   never a max** precisely so a merged conid cannot eat a co-located entry's
+   short. Changing entry selection off the back of a single incident is the
+   "fix it until it's broken" failure mode — the loser-autopsy trap. Reopen only
+   with evidence that duplicates cost money, which we currently have evidence
+   against.
 
 > ⚠️ **I first wrote "NOT before the open" here and then did it before the open.**
 > Recording the reversal rather than quietly editing it: the original reasoning
