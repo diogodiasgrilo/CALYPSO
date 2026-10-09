@@ -75,9 +75,18 @@ as a pure permutation — identical multiset, unchanged file length, no duplicat
 
 ### What to watch
 
-- [ ] **`bl`'s first live entry at 12:15 ET today.** Nothing has ever placed an order on this
-      clock. Check the entry fires, the credit gate passes, the A2 %-of-width stop is set, and the
-      fill lands in `data/variant_bl/backtesting.db`.
+- [x] **`bl`'s first live entry at 12:15 ET today** — ✅ RAN, ❌ placed nothing. **0 entries from
+      all 7 slots**: GEX accel-zone veto on #1 #2 #3 #4 #6 #7, credit gate on #5 (put $0.05 vs
+      $0.15). The machinery is VERIFIED end to end — slots fired on schedule, credit gate PASSED
+      on #1–#4, adjuster ran, require-both-sides ran, safety events logged, alerts went out tagged
+      `[HYDRA_BL]` — but the order path is still unexercised because nothing reached it. B-A on the
+      morning clock placed 2 the same day with identical code. Structural cause measured and
+      recorded: 8δ strike distance decays toward spot through the session (call OTM 50.7 → 42.0 →
+      37.2 → 32.3 by hour, n=123) while the GEX veto is a **fixed ±25pt from the peak**, so the
+      filter bites ~3× harder at midday (7% → 21% of entries inside 25pt) — and 14:00–15:00, where
+      3 of bl's 7 slots sit, has **n=0** historically. ⚠️ **Do not touch the filter**: its SKIP
+      action is the subject of the pre-registered test now at **24/25**, which would remove 6 of
+      these 7 skips by itself if it says DISABLE. Verdict script: `scripts/gex_gate_verdict.py`.
 - [ ] **23:00 / 23:30 ET** — HERMES then HOMER, both now reading `variant_bl`. HOMER's `--dry-run`
       already confirms `dry_run=False` detection (so no `[DRY-RUN]` marker) and no crash on the
       thin DB. Tonight is the first real write: expect one new row appended after Oct 8, and the
