@@ -74,23 +74,36 @@ era** — it has occurred exactly twice, 5 attempts each: **2026-09-24 19:38 and
 * E#2's stop then drained the shared short position, and E#6's close asked for 7
   against less than that.
 
-### What to do about it — NOT before the open
+### What to do about it
 
-1. **Clamp the close quantity to the broker's actual position** (the real fix).
-   Answering this prompt "yes" would be WRONG — it would over-close a flat
-   position into a LONG. The prompt is a safety net doing its job.
-2. **An unmapped prompt must fail CLEANLY**, not as a bare `ValueError` the
-   caller reads as a non-fill. `DEFAULT_ORDER_ANSWERS` deliberately answers
-   close-position safety prompts `False`; this one has no entry at all, which is
-   a harder failure than a clean refusal.
-3. **Duplicate strikes now have a demonstrated OPERATIONAL hazard.** They were
-   measured P&L-neutral (t = 0.30) and left alone on that basis — that argument
-   was about returns and is untouched, but it is no longer the whole picture.
+1. ✅ **DONE 2026-10-09 07:02 (`dd4592b4`, A3) — clamp the close quantity to the
+   broker's actual position.** The strict read was ALREADY being taken two lines
+   above the placement (`_qty_before`, for `_correct_over_fill`) and simply never
+   consulted before placing. Answering the prompt "yes" would have been WRONG —
+   it would over-close a flat position into a LONG; the prompt is a safety net
+   doing its job. Invariants, each with a negative control: a **min, never a max**
+   (on a merged conid the broker may hold more than this entry owns — the control
+   shows it "clamping close from 7 to **100**", which would eat a co-located
+   entry's short); a FAILED position read is **unknown, not zero**, and does not
+   clamp; `available == 0` is left to the loop's own "already gone?" check.
+   14 tests; verified in the LOADED module on the VM.
+2. ⬜ **An unmapped prompt should still fail CLEANLY**, not as a bare `ValueError`
+   the caller reads as a non-fill. A3 removes the only known trigger, so this is
+   now resilience rather than a live bug — and it touches global order behaviour,
+   so it wants its own window.
+3. ⬜ **Duplicate strikes have a demonstrated OPERATIONAL hazard.** Measured
+   P&L-neutral (t = 0.30) and left alone on that basis — that argument was about
+   returns and is untouched, but it is no longer the whole picture.
 
-⚠️ **Order-path code, the most dangerous in the system, and the acute risk is
-already mitigated** by CRITICAL #7b (shipped 10-09 06:16). Rushing it two hours
-before the open, the morning after an incident, is how the next incident gets
-made. **Do it in an after-close window with the full loop.**
+> ⚠️ **I first wrote "NOT before the open" here and then did it before the open.**
+> Recording the reversal rather than quietly editing it: the original reasoning
+> ("order-path code, morning after an incident") was attached to the CLOCK, when
+> the real risk is **sloppiness**. With 2h25m, a root cause already pinned to one
+> line, and the account flat, there was time to run the full loop — audit,
+> implement, 14 tests, two negative controls, full suite, deploy, verify in the
+> loaded module. The judgement that holds is *"don't rush it"*, not *"don't do it
+> today"*. Had the audit come back broad instead of one-line, the deferral would
+> have stood.
 
 Frequency, all history: `EMERGENCY_CLOSE_FAILED` 32/12/4 in Feb (Saxo era), then
 **3 on 09-24 and 3 on 10-08**. `CRITICAL #7`: **once, ever**.
