@@ -98,6 +98,28 @@ approvals is subtracting information.
 | Shadows running | `shift_first` (per-decision) · `flipped_sign` / `windowed` / `all_fixes` (per-decision) |
 | First evaluable date | **2026-09-30** |
 | Config freeze | holds — [`GO_LIVE_MASTER.md`](GO_LIVE_MASTER.md) §2-quater |
+| **Verdict script** | **`scripts/gex_gate_verdict.py` — written 2026-10-09 at n = 24 of 25, i.e. while the answer was still UNKNOWABLE.** That timing is deliberate: an analysis authored after seeing the numbers can be tuned, however honestly, until it agrees. 21 tests; `tests/test_gex_gate_verdict_2026_10_09.py` |
+| Accrual | **24 of 25** at 2026-10-09 (variant `b`; 5 of them today). 0 on 09-30, so the window effectively opens 10-01 |
+
+### How to run it
+
+```bash
+sudo -u calypso /opt/calypso/.venv/bin/python -m scripts.gex_gate_verdict
+```
+
+It **refuses to emit a verdict below n = 25, and below it prints no breach
+rates at all** — only the accrual. "Not permitted: stopping early on a
+favourable count" cannot be obeyed by someone who already knows the direction,
+so the blindness is enforced in code rather than left to discipline. Two more
+guards: it scores one variant (`--pool` exists only so that deviation has to be
+typed, and it brands the output — variant `bl` logged 8 vetoes on its first day
+and pooling them would clear n = 25 instantly, after the data was seen), and it
+cannot score P&L.
+
+Its statistics are checked against **this document**: the test
+`test_sample_size_table_matches_the_prereg` re-derives the 21-at-20% and
+29-at-15% figures quoted above from its own binomial. If that ever fails,
+either the script drifted or the sample-size reasoning here was wrong.
 
 ---
 
