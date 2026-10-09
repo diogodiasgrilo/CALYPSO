@@ -61,6 +61,16 @@ MAIN_PY = ROOT / "bots" / "hydra" / "main.py"
 # NO-OP CONTROLS — prove this changed nothing about today
 # ══════════════════════════════════════════════════════════════════════════════
 
+def _declared_live_seat() -> str:
+    """The taxonomy's declared live PAPER seat. Derived, not hardcoded, so a seat
+    swap does not silently turn these guards into assertions about a variant that
+    is no longer live (2026-10-09: the seat moved b -> bl)."""
+    from shared.strategy_taxonomy import STRATEGIES
+    live = [k for k, m in STRATEGIES.items() if getattr(m, "status", "") == "live"]
+    assert len(live) == 1, f"expected exactly one live seat, got {live}"
+    return live[0]
+
+
 def test_exactly_one_variant_declares_real_money():
     """NARROWED 2026-09-18 — this asserted that EVERY variant declared paper, and it
     failed the moment `bm` was added. That is the test working, not breaking: its whole
@@ -135,12 +145,18 @@ def seats(tmp_path, monkeypatch):
     return _set
 
 
-def test_live_seat_is_still_b(seats):
-    """THE CONTROL THAT MATTERS. B holds the live paper seat mid-Gate-4; this refactor
-    must not move it."""
+def test_the_declared_live_seat_resolves(seats):
+    """THE CONTROL THAT MATTERS: whichever variant the taxonomy DECLARES live is
+    the one the resolver returns.
+
+    Was `test_live_seat_is_still_b`, asserting the seat had not moved. It moved
+    deliberately on 2026-10-09 (b -> bl), so pinning a specific id was pinning a
+    fact with a shelf life. Deriving it keeps the real invariant — resolver
+    agrees with the taxonomy — across this swap and the next one."""
     from dashboard.backend.services.variant_readers import live_seat_id
-    seats(b=False)
-    assert live_seat_id() == "b"
+    declared = _declared_live_seat()
+    seats(**{declared: False})
+    assert live_seat_id() == declared
 
 
 def test_a_swap_back_to_c_still_resolves(seats):
@@ -160,7 +176,7 @@ def test_two_live_paper_seats_do_not_resolve_to_a_dry_run_variant(seats):
     from dashboard.backend.services.variant_readers import live_seat_id
     seats(a=False, b=False)
     resolved = live_seat_id()
-    assert resolved == "b", (
+    assert resolved == _declared_live_seat(), (
         f"ambiguous seat resolved to {resolved!r}; it must fall back to the taxonomy's "
         f"declared live seat (b), never to a dry-run variant"
     )
@@ -171,7 +187,7 @@ def test_no_live_seat_falls_back_to_the_declared_one(seats):
     than a stale constant."""
     from dashboard.backend.services.variant_readers import live_seat_id
     seats()
-    assert live_seat_id() == "b"
+    assert live_seat_id() == _declared_live_seat()
 
 
 def test_unreadable_config_never_raises(seats, tmp_path):
@@ -187,7 +203,7 @@ def test_unreadable_config_never_raises(seats, tmp_path):
     ns.variant_b_config_file = tmp_path / "vanished.json"
     # B was the only live seat and its config is now gone, so no variant reads as
     # dry_run=false: the declared-seat fallback answers, and nothing raises.
-    assert live_seat_id() == "b"
+    assert live_seat_id() == _declared_live_seat()
 
 
 def test_malformed_config_never_raises(seats, tmp_path):
@@ -197,7 +213,7 @@ def test_malformed_config_never_raises(seats, tmp_path):
     bad = tmp_path / "truncated.json"
     bad.write_text('{"dry_run": fal')
     ns.variant_c_config_file = bad
-    assert live_seat_id() == "b"
+    assert live_seat_id() == _declared_live_seat()
 
 
 def test_seat_candidates_come_from_the_taxonomy_not_a_tuple(seats):

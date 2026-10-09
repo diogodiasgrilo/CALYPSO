@@ -725,10 +725,47 @@ class LongStrangleStrategy(HydraStrategy):
         candidates.append(os.path.join(root, "backtesting.db"))   # variant A
         candidates.append(os.path.join(DATA_DIR, "backtesting.db"))
 
+        # EXISTENCE IS NOT ENOUGH (2026-10-09). A newly-created variant's
+        # backtesting.db exists within minutes of its first start and is EMPTY —
+        # so "first path that exists" silently selected a database with no VIX
+        # history, which is the very failure this docstring already describes as
+        # having skipped H's first entry. It bit again the day the live seat moved
+        # to `bl`: bl's DB existed, held nothing, and sat FIRST in the candidate
+        # order. Require usable rows; fall through to the next candidate if not.
+        fallback = None
         for c in candidates:
-            if c and os.path.exists(c):
+            if not c or not os.path.exists(c):
+                continue
+            if fallback is None:
+                fallback = c
+            if self._db_has_vix_history(c):
                 return c
-        return None
+        # Nothing had history — return something readable rather than None so the
+        # caller still reports "n prior days" instead of "source unavailable".
+        return fallback
+
+    @staticmethod
+    def _db_has_vix_history(path: str, minimum: int = 1) -> bool:
+        """True iff `path` yields at least `minimum` usable VIX closes.
+
+        DELEGATES to `vix_history_from_db` — the same function the caller uses —
+        rather than re-implementing the query. The first version of this check
+        counted `daily_summaries.vix_close`, but the history actually comes from
+        `market_ticks.vix_level` UNIONed with `vix_daily`; it would have reported
+        "no history" for a perfectly good database and silently made the whole
+        guard a no-op. A content check that can disagree with its consumer is
+        worse than no check, so there is exactly one query and both use it.
+
+        Never raises: an unreadable or schema-less candidate is "no", so the
+        resolver moves on instead of the entry gate dying on a bad file.
+        """
+        try:
+            from bots.hydra.iv_percentile import vix_history_from_db
+            from shared.market_hours import get_us_market_time
+            today = get_us_market_time().strftime("%Y-%m-%d")
+            return len(vix_history_from_db(path, today) or []) >= minimum
+        except Exception:  # noqa: BLE001 — a bad candidate is "no", not a crash
+            return False
 
     # ==================================================================
     # Step 4 — sizing for zero

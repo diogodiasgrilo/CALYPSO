@@ -103,9 +103,14 @@ def test_display_name_is_untouched_on_the_live_seat():
     orders. The navigation revamp must not have changed what Telegram says."""
     from shared.strategy_taxonomy import STRATEGIES
 
-    assert STRATEGIES["b"].display_name == "Brandon Narrow (7-slot)", (
-        "B's display_name changed — that is the live seat's alert identity, not "
-        "just a dashboard label"
+    # 2026-10-09: the live seat moved b -> bl, so the alert identity moved with
+    # it. The invariant is unchanged — the LIVE SEAT's display_name is a Telegram
+    # identity, not a dashboard label — it just applies to `bl` now.
+    live = [k for k, m in STRATEGIES.items() if getattr(m, "status", "") == "live"]
+    assert len(live) == 1, live
+    assert STRATEGIES[live[0]].display_name == "B", (
+        f"{live[0]}'s display_name changed — that is the live seat's alert "
+        "identity, not just a dashboard label"
     )
 
 
@@ -261,9 +266,10 @@ def test_ui_name_is_separate_from_the_alert_identity():
     seat."""
     from shared.strategy_taxonomy import STRATEGIES
 
-    b = STRATEGIES["b"]
-    assert b.display_name == "Brandon Narrow (7-slot)", "B's alert identity moved"
-    assert b.ui_name == "Brandon Narrow"
+    live = [k for k, m in STRATEGIES.items() if getattr(m, "status", "") == "live"]
+    b = STRATEGIES[live[0]]
+    assert b.display_name == "B", "the live seat's alert identity moved"
+    assert b.ui_name == "Brandon Late"
     assert b.ui_name != b.display_name, (
         "ui_name and display_name have been collapsed — a label edit now "
         "changes what the live seat sends to Telegram"

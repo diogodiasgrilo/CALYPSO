@@ -157,7 +157,7 @@ class TestMeta:
         # environment, so this asserts the FALLBACK — and the old frozen "c" had been
         # describing the pre-2026-07-24 world for two months. B has held the live seat
         # since that swap; the taxonomy-declared fallback now says so.
-        assert body["primary_id"] == "b"
+        assert body["primary_id"] == "bl"
 
         group_ids = {g["id"] for g in body["groups"]}
         # long_gamma_0dte added 2026-09-23 with variant H (0DTE long strangle). It is
@@ -178,7 +178,7 @@ class TestMeta:
         # axis, and paper-B vs bm on identical signals is the execution-drag measurement.
         # What makes the money real is `account_kind`, not group membership; the group is
         # about structure, which is exactly the separation capital_basis established.
-        assert by_id["ic_0dte"]["member_ids"] == ["a", "b", "bm", "c", "f"]
+        assert by_id["ic_0dte"]["member_ids"] == ["a", "b", "bl", "bm", "c", "f"]
         assert by_id["calendar_multiday"]["pnl_shape"] == "debit"
         assert by_id["calendar_multiday"]["member_ids"] == ["d", "e"]
         # baseline is the first member, not hardcoded "a".
@@ -233,8 +233,8 @@ class TestMeta:
         assert c["is_primary"] is False
         assert c["capabilities"]["history"] is True
 
-        b = next(s for s in body["strategies"] if s["id"] == "b")
-        assert b["is_primary"] is True, "the live seat (B) must be primary"
+        b = next(s for s in body["strategies"] if s["id"] == "bl")
+        assert b["is_primary"] is True, "the live seat (bl, shown as B) must be primary"
         assert b["account_kind"] == "paper"
 
     def test_no_filesystem_paths_leaked(self, client):
@@ -409,7 +409,9 @@ def test_primary_id_follows_live_seat(tmp_path, monkeypatch):
     _write_cfg(b, True); _write_cfg(c, False)
     assert S._primary_id() == "c"
 
-    # After the swap: B live -> primary follows to b
+    # After the swap: B live -> primary follows to b. SYNTHETIC fixture: it proves
+    # the resolver FOLLOWS dry_run, so the expected id is whichever this fixture
+    # made live — not whichever variant happens to be live in production.
     _write_cfg(b, False); _write_cfg(c, True)
     assert S._primary_id() == "b"
 
@@ -431,16 +433,16 @@ def test_primary_id_falls_back_when_ambiguous(tmp_path, monkeypatch):
 
     # both dry -> declared seat
     _write_cfg(b, True); _write_cfg(c, True)
-    assert S._primary_id() == "b"
+    assert S._primary_id() == "bl"
 
     # both live (should never happen, but must not pick arbitrarily) -> declared seat
     _write_cfg(b, False); _write_cfg(c, False)
-    assert S._primary_id() == "b"
+    assert S._primary_id() == "bl"
 
     # unreadable configs -> declared seat (never raises)
     monkeypatch.setattr(settings, "variant_b_config_file", tmp_path / "nope_b.json", raising=False)
     monkeypatch.setattr(settings, "variant_c_config_file", tmp_path / "nope_c.json", raising=False)
-    assert S._primary_id() == "b"
+    assert S._primary_id() == "bl"
 
 
 # ---------------------------------------------------------------------------

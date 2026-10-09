@@ -24,6 +24,14 @@ def _point_configs(tmp_path, monkeypatch, b_dry: bool, c_dry: bool):
     c.write_text(json.dumps({"dry_run": c_dry}))
     monkeypatch.setattr(settings, "variant_b_config_file", b, raising=False)
     monkeypatch.setattr(settings, "variant_c_config_file", c, raising=False)
+    # 2026-10-09: `bl` is the REAL live seat now, and live_seat_id() scans every
+    # paper variant in the taxonomy — so without neutralising it here, setting
+    # b_dry=False yields TWO live seats and the resolver correctly falls back,
+    # which is not what this b/c fixture is testing. Pin it dry-run.
+    for other in ("bl",):
+        f = tmp_path / f"config_variant_{other}.json"
+        f.write_text(json.dumps({"dry_run": True}))
+        monkeypatch.setattr(settings, f"variant_{other}_config_file", f, raising=False)
     # Give each seat distinct canonical paths so we can prove the resolvers move.
     for vid in ("b", "c"):
         for field, val in (
@@ -86,7 +94,9 @@ def test_falls_back_to_the_declared_seat_when_ambiguous(tmp_path, monkeypatch):
     ``account_kind="paper"`` variants) — i.e. B — which is both non-arbitrary and
     actually true.
     """
+    from shared.strategy_taxonomy import STRATEGIES
+    declared = [k for k, m in STRATEGIES.items() if getattr(m, "status", "") == "live"][0]
     _point_configs(tmp_path, monkeypatch, b_dry=True, c_dry=True)    # neither live
-    assert VR.live_seat_id() == "b"
+    assert VR.live_seat_id() == declared
     _point_configs(tmp_path, monkeypatch, b_dry=False, c_dry=False)  # both live (shouldn't happen)
-    assert VR.live_seat_id() == "b"
+    assert VR.live_seat_id() == declared

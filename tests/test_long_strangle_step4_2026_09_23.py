@@ -960,7 +960,15 @@ class TestTheVixHistoryComesFromADatabaseThatHasIt:
         return _strat(ls_cfg=cfg)
 
     def test_it_does_NOT_read_H_s_own_empty_database(self, tmp_path, monkeypatch):
-        s = self._patched(tmp_path, monkeypatch, "variant_b")
+        """H's own DB is empty; it must read one that has history.
+
+        Used to hardcode "variant_b" as the donor. That worked only while `b` was
+        the live seat — the candidate list is (config pin, LIVE SEAT, variant A
+        root, H's own), so once the seat moved to `bl` on 2026-10-09 a DB under
+        variant_b was not reachable at all and this asserted nothing. Derive it."""
+        import shared.strategy_taxonomy as tax
+        live = [v for v, m in tax.STRATEGIES.items() if m.status == "live"][0]
+        s = self._patched(tmp_path, monkeypatch, f"variant_{live}")
         assert s._vix_history_for_percentile() == [15.5]
 
     def test_it_finds_the_live_seat_through_the_taxonomy(self, tmp_path, monkeypatch):
@@ -999,3 +1007,92 @@ class TestTheVixHistoryComesFromADatabaseThatHasIt:
         s = _strat(ls_cfg={"iv_percentile_filter_enabled": True,
                            "iv_percentile_source": "vix"})
         assert "unavailable" in s._iv_percentile_gate(_entry())
+
+
+class TestTheVixSourceNeedsCONTENTNotJustExistence:
+    """2026-10-09. The resolver took the first candidate that EXISTED. A newly
+    created variant's backtesting.db exists within minutes of its first start and
+    holds nothing — so the day the live seat moved to the fresh `bl`, the live
+    seat's EMPTY db sat FIRST in the candidate order and H's VIX percentile would
+    have gone blind, skipping every entry.
+
+    These drive the RESOLVER, not the content helper in isolation: a first
+    version of this suite tested `_db_has_vix_history` directly, and reverting the
+    resolver's USE of it changed nothing — 88 passed against a gutted fix.
+    """
+
+    def _tree_empty_live_seat(self, tmp_path, monkeypatch):
+        """Live seat's DB exists but is EMPTY; variant A's root DB has history —
+        the exact production shape on the day a seat moves."""
+        import sqlite3
+        import shared.strategy_taxonomy as tax
+        live = [v for v, m in tax.STRATEGIES.items() if m.status == "live"][0]
+        root = tmp_path / "data"
+        for sub in (f"variant_{live}", "variant_h"):
+            (root / sub).mkdir(parents=True, exist_ok=True)
+
+        def mk(path, rows):
+            con = sqlite3.connect(str(path))
+            con.execute("CREATE TABLE market_ticks (timestamp TEXT, vix_level REAL)")
+            for ts, v in rows:
+                con.execute("INSERT INTO market_ticks VALUES (?,?)", (ts, v))
+            con.commit(); con.close()
+
+        mk(root / f"variant_{live}" / "backtesting.db", [])          # live seat: EMPTY
+        mk(root / "variant_h" / "backtesting.db", [])                # H's own: EMPTY
+        mk(root / "backtesting.db", [("2026-09-20 15:59:00", 15.5)])  # variant A: HAS history
+
+        import bots.hydra.long_strangle_strategy as mod
+        monkeypatch.setattr(mod, "DATA_DIR", str(root / "variant_h"))
+        monkeypatch.setattr(mod, "HYDRA_VARIANT_ID", "h")
+        return _strat(), str(root), live
+
+    def test_an_EMPTY_live_seat_db_is_SKIPPED_for_one_with_history(self, tmp_path, monkeypatch):
+        """THE REGRESSION. Without the content check the resolver returns the
+        live seat's empty DB and the percentile goes blind."""
+        s, root, live = self._tree_empty_live_seat(tmp_path, monkeypatch)
+        chosen = s._vix_history_db()
+        assert chosen is not None
+        assert f"variant_{live}" not in chosen, (
+            f"resolver chose the EMPTY live-seat db {chosen!r} over one with history")
+        assert s._vix_history_for_percentile() == [15.5]
+
+    def test_it_still_returns_something_when_NOTHING_has_history(self, tmp_path, monkeypatch):
+        """Degrade to a readable db rather than None, so the caller reports
+        'n prior days' instead of 'source unavailable'."""
+        import sqlite3
+        root = tmp_path / "data"; (root / "variant_h").mkdir(parents=True)
+        con = sqlite3.connect(str(root / "variant_h" / "backtesting.db"))
+        con.execute("CREATE TABLE market_ticks (timestamp TEXT, vix_level REAL)")
+        con.commit(); con.close()
+        import bots.hydra.long_strangle_strategy as mod
+        monkeypatch.setattr(mod, "DATA_DIR", str(root / "variant_h"))
+        monkeypatch.setattr(mod, "HYDRA_VARIANT_ID", "h")
+        s = _strat()
+        assert s._vix_history_db() is not None
+        assert s._vix_history_for_percentile() == []
+
+    def test_the_content_check_agrees_with_its_consumer(self, tmp_path):
+        """It delegates to vix_history_from_db, so it cannot drift from the
+        query that actually supplies the history. The first version counted a
+        different table and was silently a no-op."""
+        import sqlite3
+        from bots.hydra.long_strangle_strategy import LongStrangleStrategy as LS
+        full = tmp_path / "full.db"
+        con = sqlite3.connect(str(full))
+        con.execute("CREATE TABLE market_ticks (timestamp TEXT, vix_level REAL)")
+        con.execute("INSERT INTO market_ticks VALUES ('2026-09-20 15:59:00', 15.5)")
+        con.commit(); con.close()
+        assert LS._db_has_vix_history(str(full)) is True
+
+        empty = tmp_path / "empty.db"
+        con = sqlite3.connect(str(empty))
+        con.execute("CREATE TABLE market_ticks (timestamp TEXT, vix_level REAL)")
+        con.commit(); con.close()
+        assert LS._db_has_vix_history(str(empty)) is False
+
+    def test_an_unreadable_candidate_is_NO_not_a_crash(self, tmp_path):
+        from bots.hydra.long_strangle_strategy import LongStrangleStrategy as LS
+        junk = tmp_path / "junk.db"; junk.write_text("not a database")
+        assert LS._db_has_vix_history(str(junk)) is False
+        assert LS._db_has_vix_history(str(tmp_path / "missing.db")) is False

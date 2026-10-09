@@ -1,20 +1,20 @@
 {
   "_comment_variant": "HYDRA Variant B \u2014 Brandon Trojan Horse stack with NARROW 5/10pt widths (same as variant C). CURRENT STATE: B is the LIVE paper seat at 7 contracts, 7-slot entry grid (09:45\u201312:45, 30min grid). 11:15 was dropped 2026-09-02 and RESTORED 2026-09-09. C is dry-run-shadow, still running the original schedule (kept as a control -- see the vix_regime._comment_max_entries note below for the finding). History: 2026-05-13 cut from 7 slots to 4 after a 5/4-5/12 review found commission drag dominated at the original 7-slot x 15c sizing (each Brandon narrow-spread entry pays $2.50/leg x 4 legs x 15c = $150 round-trip; 7 slots = $1,050/day in fees alone). Same 2026-05-13 change: contracts_per_entry 15 -> 10 (same commission-drag logic). 2026-07-01: widened back 4 -> 7 base slots as the per-slot tester for slot_edge (attempt all 7 every zone, gates filter). Later re-sized 10c -> 7c for the live swap. 2026-09-02: dropped 11:15 (7 -> 6 slots) after a per-slot P&L audit found it B's clear worst performer, independently confirmed on C. Pre-2026-05-05 design used HYDRA wide widths; retired because Brandon GEX-ADJ + put-only VIX gate combined to skip B on most days.  2026-09-10: a permutation test on B's live era put the ENTIRE per-slot effect at p=0.569 -- 11:15's whole -$875 was a single -$1,750 stop on 08-28, and excluding it those 8 entries averaged +$109. Detecting a $200/entry slot difference at 80% power needs ~72 entries per slot; there are 8-9. STANDING RULE: no slot is cut or restored again until it has >=70 live-era hedge-free entries. NOTE: this checked-in file is a sample/template, not deploy-authoritative \u2014 the VM's live copy is edited directly there (see CLAUDE.md Config Files) and may diverge from this value.",
   "bot_name": "HYDRA",
-  "dry_run": true,
+  "dry_run": false,
   "_comment_credentials": "IBKR OAuth credentials are loaded from systemd $CREDENTIALS_DIRECTORY on the VM, or env vars in dev. Not in this file.",
   "strategy": {
     "commission_per_leg": 1.15,
     "_comment_widths": "MKT-027 settings here are unused at runtime \u2014 strategy.brandon.narrow_spread.enabled=true overrides _get_vix_adjusted_spread_width with Brandon's 5/10pt rule. Values kept aligned with variant A's VM config (max=75pt) for consistency / debugging clarity.",
     "underlying_symbol": "SPX",
     "entry_times": [
-      "09:45",
-      "10:15",
-      "10:45",
-      "11:15",
-      "11:45",
       "12:15",
-      "12:45"
+      "12:45",
+      "13:15",
+      "13:45",
+      "14:15",
+      "14:45",
+      "15:15"
     ],
     "entry_window_minutes": 5,
     "spread_vix_multiplier": 6.0,
@@ -220,7 +220,8 @@
       "deliberate_rung_pricing": true
     },
     "_comment_metrics_epoch_date": "THE LIFETIME RECORD RESTARTS HERE (2026-07-24). B took the LIVE paper seat on this date (the C->B swap, RUNBOOKS RB-9). Everything before it is DRY-RUN SIMULATION with simulated fills, and it was 91% of the headline: the file read +$21,439 while the live record was a small LOSS. Blending a simulated era with a traded one answers neither question, and the raw file is what gets quoted. Set 2026-10-06 after the nightly telemetry audit found the metrics file and the dashboard reporting different eras of the same number -- the dashboard already rebased to variant_b_baseline_date, the file did not, and nothing enforced the invariant that the two must move together. Everything before this date is ARCHIVED, NOT DELETED: it stays in backtesting.db and moves to a 'pre_epoch' block in hydra_metrics.json. Applied inside _reconcile_cumulative_metrics_from_db, which re-derives cumulative_pnl from the FULL daily_summaries table every settlement -- so a hand-edited metrics file would be silently undone at the next close. Remove this key to count the whole history again.",
-    "metrics_epoch_date": "2026-07-24"
+    "metrics_epoch_date": "2026-07-24",
+    "_comment_entry_times": "2026-10-09: grid shifted from 09:45,10:15,10:45,11:15,11:45,12:15,12:45 to 12:15,12:45,13:15,13:45,14:15,14:45,15:15. Same 7 slots / 30min spacing / 7 contracts; ONLY the start time differs from variant b. max_entries stays [7,7,3,1] because the slot COUNT is unchanged \u2014 the VIX regime drops the EARLIEST entries when capped, so in zone 2 this grid keeps 13:45/14:15/14:45... i.e. the latest three. NOT VALIDATED: the later slots looked best in-sample but a 20,000-shuffle permutation on the per-slot spread gives p=0.597, and 13:15 onward has NO live record at all. This exists to generate out-of-sample data."
   },
   "trend_filter": {
     "enabled": true,
@@ -263,7 +264,7 @@
     "strategy_type": "hydra"
   },
   "alerts": {
-    "enabled": false,
+    "enabled": true,
     "phone_number": "+1XXXXXXXXXX",
     "email": "diogodiasgrilo@gmail.com"
   },
@@ -274,6 +275,5 @@
     "spreadsheet_name": "Calypso_HYDRA_Variant_B",
     "strategy_type": "hydra_brandon_narrow_dense"
   },
-  "api_pacing_multiplier": 2.0,
-  "_comment_demoted": "2026-10-09: DEMOTED from the live paper seat to dry-run shadow; the seat moved to variant `bl` (same stack, 12:15-15:15 grid). Displayed as 'B-A'. Keeps id `b` so its data dir, DB, metrics and 110 days of history stay intact."
+  "api_pacing_multiplier": 2.0
 }

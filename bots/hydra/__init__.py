@@ -36,6 +36,41 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-09 NEW LIVE PAPER SEAT: variant `bl` — the Brandon stack on a
+  12:15-15:15 grid. Variant `b` demoted to dry-run shadow, displayed as "B-A".
+  Operator decision. `bl` is byte-identical to `b` except the entry grid
+  (09:45-12:45 -> 12:15/12:45/13:15/13:45/14:15/14:45/15:15, still 7 slots, 7
+  contracts) — pinned by a test that diffs the two configs and allows ONLY
+  dry_run/alerts/entry_times to differ.
+  ⚠️ **NOT VALIDATED.** The later slots looked best over B's live era (#6
+  +$2,438, #7 +$3,223) but a 20,000-shuffle permutation on the per-slot spread
+  gives **p = 0.597** — the spread is what random labelling looks like — and
+  13:15 onward has NO live record at all. `bl` exists to generate OUT-OF-SAMPLE
+  data and must never be cited as confirmed by the data that motivated it.
+  ⚠️ **ID vs DISPLAY NAME ARE DELIBERATELY DECOUPLED.** `bl` is displayed as
+  "B" and `b` as "B-A", but the IDs are unchanged — renaming `b` would have
+  orphaned its data dir, DB, metrics, 110 days of journal history and the
+  agents' `read_db` pointer. In logs, journalctl and /opt/calypso/data this is
+  `bl` / `hydra_variant_bl`.
+  WIRING: taxonomy row (exactly one `status="live"`, asserted), dashboard
+  `Settings` gained the full `variant_bl_*` block (pydantic bans extras, so an
+  omission is a hard ValueError and the dashboard would not start), the
+  canonical fallbacks now name the live seat, and `max_entries` was confirmed
+  unchanged — the config's own warning is that a stale cap silently drops slots.
+  Eight test files updated from "b is the live seat" to DERIVING the seat from
+  the taxonomy, so the next swap does not break them.
+- 2026-10-09 BUG FOUND WHILE SWAPPING: H's VIX source took the first candidate
+  db that EXISTED. A fresh variant's backtesting.db exists minutes after first
+  start and is EMPTY — so with `bl` live and first in the candidate order, H's
+  IV-percentile gate would have gone blind and skipped every entry. Exactly the
+  failure the resolver's own docstring already described.
+  Now requires USABLE CONTENT, and `_db_has_vix_history` DELEGATES to
+  `vix_history_from_db` — the same function the caller uses. My first version
+  counted `daily_summaries.vix_close` while the history actually comes from
+  `market_ticks.vix_level` UNIONed with `vix_daily`, which made the guard a
+  silent no-op; the negative control passing 88/88 against a gutted fix is what
+  exposed it. A content check that can disagree with its consumer is worse than
+  no check.
 - 2026-10-09 A4 — a REFUSED order must not be reported as one that "did not fill".
   On 2026-10-08 the close loop logged `did not fill — retrying...` FIVE times for
   orders that had been rejected at an unmappable IBKR prompt and **never reached

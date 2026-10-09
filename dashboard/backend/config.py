@@ -32,15 +32,15 @@ class Settings(BaseSettings):
     #
     # `primary_label` is the fallback header label; the header actually shows
     # live_label() (the live seat's variant_*_label).
-    primary_label: str = "B · LIVE (Brandon narrow, 7-slot grid)"
-    bot_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_b.json")
-    hydra_state_file: Path = Path("/opt/calypso/data/variant_b/hydra_state.json")
-    hydra_metrics_file: Path = Path("/opt/calypso/data/variant_b/hydra_metrics.json")
-    backtesting_db: Path = Path("/opt/calypso/data/variant_b/backtesting.db")
+    primary_label: str = "B · LIVE (Brandon narrow, 12:15-15:15 grid)"
+    bot_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_bl.json")
+    hydra_state_file: Path = Path("/opt/calypso/data/variant_bl/hydra_state.json")
+    hydra_metrics_file: Path = Path("/opt/calypso/data/variant_bl/hydra_metrics.json")
+    backtesting_db: Path = Path("/opt/calypso/data/variant_bl/backtesting.db")
     position_registry_file: Path = Path("/opt/calypso/data/position_registry.json")
 
     # Fallback log file — the live seat's, per the note above.
-    hydra_log_file: Path = Path("/opt/calypso/logs/hydra_variant_b/bot.log")
+    hydra_log_file: Path = Path("/opt/calypso/logs/hydra_variant_bl/bot.log")
 
     # ── MARKET-DATA (SPX/VIX price chart) source ─────────────────────────
     # The SPX/VIX price chart is ACCOUNT-AGNOSTIC — every variant watches the SAME
@@ -95,7 +95,18 @@ class Settings(BaseSettings):
     variant_b_backtesting_db: Path = Path("/opt/calypso/data/variant_b/backtesting.db")
     variant_b_log_file: Path = Path("/opt/calypso/logs/hydra_variant_b/bot.log")
     variant_b_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_b.json")
-    variant_b_label: str = "B · LIVE (Brandon narrow, 7-slot grid)"
+    variant_b_label: str = "B-A · shadow (Brandon narrow, 09:45-12:45 grid)"
+    # ── variant bl — THE LIVE PAPER SEAT since 2026-10-09 ──────────────────
+    # Displayed as "B"; the id stays `bl` so variant_b's 110 days of history,
+    # DB, metrics and the agents' read_db pointer are not orphaned. pydantic
+    # bans extras, so every one of these is REQUIRED — an omission is a hard
+    # ValueError at setattr and the dashboard refuses to start.
+    variant_bl_state_file: Path = Path("/opt/calypso/data/variant_bl/hydra_state.json")
+    variant_bl_metrics_file: Path = Path("/opt/calypso/data/variant_bl/hydra_metrics.json")
+    variant_bl_backtesting_db: Path = Path("/opt/calypso/data/variant_bl/backtesting.db")
+    variant_bl_log_file: Path = Path("/opt/calypso/logs/hydra_variant_bl/bot.log")
+    variant_bl_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_bl.json")
+    variant_bl_label: str = "B · LIVE (Brandon narrow, 12:15-15:15 grid)"
 
     # Variant BM ("B, money") — the SAME Brandon strategy B runs, against the FUNDED
     # account via calypso-broker-live on :8789. account_kind="live_money" in the taxonomy;
@@ -241,6 +252,7 @@ class Settings(BaseSettings):
     # (ISO YYYY-MM-DD).
     baseline_date: str = ""
     variant_a_baseline_date: str = ""
+    variant_bl_baseline_date: str = "2026-10-09"  # took the live seat today; no prior history
     variant_b_baseline_date: str = "2026-07-24"  # B went live 2026-07-24; hide pre-live dry-run history from the cumulative card
     variant_c_baseline_date: str = "2026-06-11"  # C's live-history baseline (was the global default); used when C is the live seat
     # D & E (calendars): the dashboard hides every calendar ENTERED before the

@@ -138,10 +138,10 @@ class TestTheTaxonomyIsCoherent:
 class TestTheLiveVariantsAreUntouched:
     def test_the_live_seat_is_still_b(self):
         live = [v for v, m in tax.STRATEGIES.items() if m.status == "live"]
-        assert live == ["b"], f"adding H moved the live seat: {live}"
+        assert live == ["bl"], f"adding H moved the live seat: {live}"
 
     @pytest.mark.parametrize("vid,group", [
-        ("a", "ic_0dte"), ("b", "ic_0dte"), ("c", "ic_0dte"),
+        ("a", "ic_0dte"), ("b", "ic_0dte"), ("bl", "ic_0dte"), ("c", "ic_0dte"),
         ("f", "ic_0dte"), ("g", "undefined_risk_0dte"),
         ("d", "calendar_multiday"), ("e", "calendar_multiday"),
     ])

@@ -257,19 +257,56 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         # per-slot effect at p=0.569 (11:15's entire -$875 was ONE stop on 08-28;
         # excluding it, 8 entries at +$109), so no slot moves again until it has
         # >=70 hedge-free live entries. Verified against the VM config, not assumed.
-        display_name="Brandon Narrow (7-slot)",
+        display_name="B-A",
+        short_name="BRANDON-BA",
+        strategy_class="brandon",
+        group_id="ic_0dte",
+        structure_family="iron_condor",
+        pnl_shape="credit",
+        dte_class="0DTE",
+        # 2026-10-09: DEMOTED to dry_run_shadow. The live paper seat moved to `bl`
+        # (same Brandon stack, grid shifted to 12:15-15:15). This variant keeps its
+        # id `b` — and therefore its data dir, DB, metrics and 110 days of history —
+        # and is displayed as "B-A". Renaming the ID would have orphaned all of it.
+        status="dry_run_shadow",
+        bot_name_base="HYDRA",
+        capital_basis="defined_risk",
+        sides="two_sided",
+        subtitle="0DTE SPX iron condor · 7 slots 09:45-12:45 · 7c · shadow (id: b)",
+        ui_name="B-A",
+    ),
+    "bl": StrategyMeta(
+        id="bl",
+        # ── THE LIVE PAPER SEAT since 2026-10-09 ────────────────────────────
+        # Byte-identical Brandon stack to `b`; the ONLY difference is the entry
+        # grid, shifted from 09:45-12:45 to 12:15-15:15 (still 7 slots, 30min).
+        #
+        # ⚠️ DISPLAY NAME IS "B" BUT THE ID IS "bl". Deliberate. The operator
+        # wanted the new grid to BE "B" on screen with the old one beneath it as
+        # "B-A", but renaming the id `b` would have orphaned its data dir, DB,
+        # metrics file, trading-journal history and the agents' read_db pointer.
+        # So ids are stable and display names carry the intent. In logs,
+        # journalctl and /opt/calypso/data this is `bl` / hydra_variant_bl.
+        #
+        # ⚠️ NOT VALIDATED. The later slots looked best in-sample (#6 +$2,438,
+        # #7 +$3,223 live-era) but a 20,000-shuffle permutation on the per-slot
+        # spread gives p = 0.597 — indistinguishable from random labelling. And
+        # 13:15 onward has NO live record at all; those four slots are an
+        # extrapolation. This variant exists to generate out-of-sample data, and
+        # must not be described as confirmed by the data that motivated it.
+        display_name="B",
         short_name="BRANDON-B",
         strategy_class="brandon",
         group_id="ic_0dte",
         structure_family="iron_condor",
         pnl_shape="credit",
         dte_class="0DTE",
-        status="live",  # live paper seat since the 2026-07-24 B<->C swap (was dry_run_shadow before)
+        status="live",
         bot_name_base="HYDRA",
         capital_basis="defined_risk",
         sides="two_sided",
-        subtitle="0DTE SPX iron condor · 7 slots · 7 contracts",
-        ui_name="Brandon Narrow",
+        subtitle="0DTE SPX iron condor · 7 slots 12:15-15:15 · 7 contracts",
+        ui_name="Brandon Late",
     ),
     "bm": StrategyMeta(
         id="bm",

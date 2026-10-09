@@ -214,9 +214,18 @@ def test_the_fallback_label_names_the_live_seat():
     from dashboard.backend.config import Settings
 
     seat = _live_seat_from_taxonomy()
+    # Compare against the seat's DISPLAY NAME, not its id. Since 2026-10-09 the
+    # two are deliberately decoupled — the live seat's id is `bl` but it is shown
+    # as "B", because renaming the id `b` would have orphaned 110 days of history,
+    # its DB, metrics and the agents' read_db pointer. The drift this test exists
+    # to catch (a label left behind by a seat swap) is still caught: the label
+    # must name whatever the taxonomy currently declares.
+    from shared.strategy_taxonomy import STRATEGIES
+    shown = str(getattr(STRATEGIES[seat], "display_name", seat))
     label = str(Settings.model_fields["primary_label"].default)
-    assert label.strip().upper().startswith(seat.upper()), (
-        f"primary_label {label!r} does not name the live seat {seat!r}"
+    assert label.strip().upper().startswith(shown.upper()), (
+        f"primary_label {label!r} does not name the live seat {seat!r} "
+        f"(displayed as {shown!r})"
     )
 
 
