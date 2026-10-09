@@ -5,11 +5,67 @@
 > [`docs/migration/PROJECT_STATUS.md`](migration/PROJECT_STATUS.md) (project-wide state) and the per-effort
 > design docs.
 >
-> **Last updated: 2026-10-08 (Thu, 11:20 ET).** **Read §A-pent first — it is the whole current state
+> **Last updated: 2026-10-09 (Fri, 06:30 ET).** **Read §A-pent first — it is the whole current state
 > on one screen.** (§A0 below is the 2026-09-19 snapshot, kept for history.) §A–§D are current. **§0–§10 are the older backlog (2026-07-14 / 07-24 era)** — much of
 > it is done or superseded; **verify against the code before acting on anything there.** Real live
 > items still live in §5 (entry-schedule lock, E calendar-stop analyzer) and §6 (Brandon fill-quality
 > confirmations), which is why those sections are kept rather than deleted.
+
+---
+
+# §A-hex. 🔴 INCIDENT 2026-10-08 — B went NAKED on a failed stop close (FIXED)
+
+**First `CRITICAL #7` in the project's history, on the LIVE paper seat.**
+
+13:28 ET, entry #6 put side. The stop fired, `EMERGENCY-001` failed to buy back
+the short put (conid 926792465) after **5 attempts** and raised CRITICAL — **and
+the close loop then sold the protective long at $8.20 anyway.** A defined-risk
+7735/7730 vertical became a **NAKED short 7735 put** for the ~2.5h to expiry,
+with SPX falling through 7746. POS-003 then showed the broker at **−4 against an
+expected −7**, so B sat short ~3 contracts with no hedge, raising Position
+Mismatch at 13:32 / 14:33 / 15:33.
+
+**It settled clean at 21:46 — +$52.30 on the day, account flat — but because
+expiry arrived, not because anything caught it.**
+
+**FIXED `7d027bcf` (CRITICAL #7b):** a `long_*` leg is no longer closed when its
+side's SHORT close failed. The long is the only thing capping the loss while the
+short is live, so its premium is not ours to take. Fails closed — a short that
+was never even attempted (no conid) also holds the hedge. Dry-run and
+naked-by-design sides unaffected. 8 tests + a control that restores the 10-08
+behaviour and fails 3 of them. Verified in the LOADED module on the VM.
+
+⚠️ **The fix had to go in `base_strategy.py`, NOT `strategy.py`.** HydraStrategy
+OVERRIDES `_execute_stop_loss`, but with `short_only_stop=False` (B's live
+setting) it **delegates to `super()`** — so the base loop is what runs. I nearly
+patched the override, whose own loop closes only the short and has no hedge to
+sell. **Check which method actually executes before fixing a stop-path bug.**
+
+### Still open from the same incident
+
+* **Why did 5 closes report "did not fill" while the broker moved −4?** The
+  partial-fill detector works normally (it fired correctly on 10-01 and once on
+  10-08), and a marketable-limit close on a 0DTE put going ITM in a falling
+  market can genuinely fail inside a 4–5s window. **Not yet established whether
+  this is a detection bug or hard fills.** Do not "fix" it on the strength of
+  one incident.
+* Frequency, all history: `EMERGENCY_CLOSE_FAILED` 32/12/4 in Feb (Saxo era),
+  then **3 on 09-24 and 3 on 10-08**. `CRITICAL #7`: **once, ever**.
+
+### Also shipped 2026-10-09
+
+**Quote cache TTL 2.0 → 5.0s.** At 2s the live hit rate was **31.3%** against a
+corrected simulation of **30.0%** — so the cache was behaving exactly as built
+and **the 65.7% projection was the thing that was wrong**: it counted HTTP GETs,
+but each `get_quote` fires an unconditional priming GET plus warmup polls, so one
+logical index read costs **3.13 GETs** and **72% of them happen BELOW
+`get_quote`**, invisible to a cache above it. Re-measured on logical calls, 5s
+gives **50.2%** and index traffic 1.68 → **1.11 GETs/s**; each hit now avoids
+~3.1 IBKR calls. Still a restart-only env knob; 0 disables.
+
+**Plan item #1 is therefore DONE.** The queue is now #2 (GEX gate, accruing), #3
+(the two slot tests), #4 (the snapshot priming call — still needs design, P7-audit
+H10), #5 (funding + Gate-9, operator).
 
 ---
 
