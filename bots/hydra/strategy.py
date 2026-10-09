@@ -2682,6 +2682,9 @@ class HydraStrategy(MEICStrategy):
                     "success": False, "filled": False, "ambiguous": True,
                     "order_id": None, "fill_price": None, "position_id": None,
                     "raw": None,
+                    # A4 (2026-10-09): carry WHY. See the plain-failure return
+                    # below for the incident that motivated it.
+                    "submitted": False, "error": f"{type(e).__name__}: {e}",
                 }
             logger.warning(
                 f"_place_leg_order({instrument_id} {side} x{quantity} "
@@ -2690,6 +2693,18 @@ class HydraStrategy(MEICStrategy):
             return {
                 "success": False, "filled": False, "order_id": None,
                 "fill_price": None, "position_id": None, "raw": None,
+                # ── A4 (2026-10-09): carry WHY the place failed. ─────────────
+                # The reason used to be logged here and then DISCARDED, so a
+                # caller could only see `filled=False` and had no way to tell
+                # "the order was never submitted" from "it didn't fill". On
+                # 2026-10-08 that made the close loop report "did not fill" five
+                # times when the truth was that every order had been REFUSED at
+                # an unmappable IBKR prompt and never reached the market — a
+                # misdirection that cost real diagnosis time. `submitted` is
+                # False because an exception here means the place did not
+                # complete; the ambiguous branch above says the same but adds
+                # `ambiguous` so callers still abort rather than retry.
+                "submitted": False, "error": f"{type(e).__name__}: {e}",
             }
         filled_qty = res.get("filled_quantity") or 0
         return {

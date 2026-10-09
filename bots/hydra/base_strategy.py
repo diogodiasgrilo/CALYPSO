@@ -5842,6 +5842,7 @@ class MEICStrategy(abc.ABC):
         filled_qty_priced = 0    # Σ filled_qty_i for legs that carried a price
         any_partial = False
         last_order_id = None
+        last_refusal = None      # A4: why a place never reached the market
 
         def _blended_fill_price():
             # Volume-weighted avg across all partials that carried a price; the
@@ -5964,10 +5965,24 @@ class MEICStrategy(abc.ABC):
                         time.sleep(EMERGENCY_CLOSE_RETRY_DELAY_SECONDS)
                     continue
 
-                logger.warning(
-                    f"EMERGENCY-001: close {leg_name} attempt {attempt_num} "
-                    f"did not fill — retrying..."
-                )
+                # A4 (2026-10-09): say WHETHER IT WAS EVEN SUBMITTED. "did not
+                # fill" was logged five times on 2026-10-08 for orders that were
+                # REFUSED at an unmappable IBKR prompt and never reached the
+                # market — two very different problems that read identically.
+                _why = res.get("error")
+                if res.get("submitted") is False and _why:
+                    last_refusal = _why
+                    logger.warning(
+                        "EMERGENCY-001: close %s attempt %s was NEVER SUBMITTED "
+                        "(not a non-fill) — %s. Retrying; if this repeats, the "
+                        "order is being REFUSED, not missed.",
+                        leg_name, attempt_num, _why,
+                    )
+                else:
+                    logger.warning(
+                        f"EMERGENCY-001: close {leg_name} attempt {attempt_num} "
+                        f"did not fill — retrying..."
+                    )
                 # Cancel the unfilled close order before retrying — a
                 # timed-out market order stays WORKING and could fill
                 # late, double-closing the leg.
@@ -6027,9 +6042,20 @@ class MEICStrategy(abc.ABC):
             f"partially closed, {qty_remaining} still open)"
             if qty_remaining != close_contracts else ""
         )
+        # A4: if the orders were REFUSED rather than merely unfilled, say so IN
+        # THE ALERT. On 2026-10-08 this alert read "FAILED to fully close" with
+        # no hint that every order had been rejected at an IBKR prompt and never
+        # reached the market — the operator could not tell a liquidity problem
+        # from a blocked submission, and those need opposite responses.
+        refusal_note = (
+            f" ORDERS WERE REFUSED, NOT UNFILLED — never reached the market: "
+            f"{last_refusal}"
+            if last_refusal else ""
+        )
         error_msg = (
             f"EMERGENCY-001 CRITICAL: FAILED to fully close {leg_name} (conid "
             f"{uic}) after {EMERGENCY_CLOSE_MAX_ATTEMPTS} attempts!{partial_note}"
+            f"{refusal_note}"
         )
         logger.critical(error_msg)
         self._emergency_close_alert_once(

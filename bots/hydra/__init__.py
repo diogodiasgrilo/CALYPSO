@@ -36,6 +36,28 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-09 A4 — a REFUSED order must not be reported as one that "did not fill".
+  On 2026-10-08 the close loop logged `did not fill — retrying...` FIVE times for
+  orders that had been rejected at an unmappable IBKR prompt and **never reached
+  the market**, and the CRITICAL alert that paged the operator said only "FAILED
+  to fully close". Those are OPPOSITE problems — a liquidity problem says "walk
+  the price"; a blocked submission says "stop retrying and find out why it is
+  being refused" — and they read identically. The reason was being logged inside
+  `_place_leg_order` and then **DISCARDED from the returned dict**, so no caller
+  could tell them apart. It cost real diagnosis time on 10-09.
+  FIX: `_place_leg_order`'s failure returns now carry `submitted=False` and
+  `error=...` (additive keys; `_place_marketable_close`'s `_done` passes the
+  result through untouched). The close loop logs "was NEVER SUBMITTED (not a
+  non-fill) — <reason>", and the CRITICAL alert appends "ORDERS WERE REFUSED,
+  NOT UNFILLED — never reached the market: <reason>".
+  **Changes NO order behaviour** — only what the logs and the alert say.
+  A genuine non-fill still reads exactly as before (pinned by its own test).
+  6 tests, 2 negative controls (discard the reason again -> 1 fails; collapse the
+  log back to one message -> 3 fail).
+  ⚠️ The tests exhaust all five attempts on purpose and so paid the real 2s
+  inter-attempt delay — 40s for the file. Neutralised with an autouse fixture
+  that zeroes `EMERGENCY_CLOSE_RETRY_DELAY_SECONDS` rather than cutting the retry
+  count, since the exhaustion path is what is under test: 40s -> 0.23s.
 - 2026-10-09 A3 — never ask to close MORE than the broker holds. ROOT CAUSE of
   BOTH `EMERGENCY_CLOSE_FAILED` incidents of the IBKR era (2026-09-24 and
   2026-10-08, 5 attempts each — the only two occurrences, ever).
