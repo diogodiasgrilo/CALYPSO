@@ -118,6 +118,21 @@ deploy/
   hydra_variant_f.service     # parallel dry-run-locked instance (F "Ghauri Mean Reversion", 0DTE)
   hydra_variant_g.service     # parallel dry-run-locked instance (G "Strangle", 0DTE undefined-risk)
   hydra_variant_h.service     # parallel dry-run-locked instance (H "Long Strangle", 0DTE net-debit LONG gamma)
+                              # ⚠️ **H HAS PLACED NOTHING SINCE 2026-09-25.** Measured 2026-10-10 from
+                              # its own `ls_skipped` table: 13 days = 2 entries + 11 skips, and **8 of
+                              # the 11 are the range-expansion gate**. That gate is COMPOUND — the range
+                              # must first COMPRESS (10-day median <= 0.90 x 60-day median) and only then
+                              # EXPAND (latest >= 1.10 x narrow median). The compression half has NEVER
+                              # been satisfied since 09-28: narrow/baseline has run 97/108/110/112/112/
+                              # 112/114/109 % — normal-to-wide, never quiet. The EXPANSION half was often
+                              # fine (114-117%), so the skip message "no range expansion" names the half
+                              # that passed. Not a bug: the filter is doing exactly what it says, and it
+                              # FAILS OPEN by design when unmeasurable.
+                              # 🔴 **Consequence for any H figure: the filter landed 2026-09-24
+                              # (`6a3eae81`), AFTER both of H's entries (09-24, 09-25). So H's entire
+                              # lifetime +$139.80 was earned under rules H no longer runs, and its record
+                              # under the CURRENT rules is literally ZERO observations in 8 attempts.
+                              # Do not quote +$139.80 / t=1.32 as evidence about H as configured.
                               # ⚠️ H trades **SPY**, not SPX (config: underlying_symbol/trading_class "SPY",
                               # strike_increment 1.0, exchange SMART) — verified against its own fills
                               # 2026-09-28 (entries at 764.69/769.57 while SPX was ~7710). Its systemd unit
