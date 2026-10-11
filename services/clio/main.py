@@ -189,7 +189,10 @@ def main():
     cleanup_old_reports(config)
 
     # 8. Send weekend digest alert
-    if config.get("alerts", {}).get("enabled", False):
+    # Per-agent Telegram switch (2026-10-11). Silencing an agent does NOT
+    # stop it running or writing its report — only the notification.
+    from shared.agent_alert_policy import agent_alerts_enabled
+    if agent_alerts_enabled(config, "clio"):
         try:
             from shared.alert_service import AlertService, AlertType, AlertPriority
 

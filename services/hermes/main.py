@@ -125,7 +125,10 @@ def main():
     logger.info(f"Report saved: {report_path} ({len(full_report)} chars)")
 
     # 5. Send alert summary
-    if config.get("alerts", {}).get("enabled", False):
+    # Per-agent Telegram switch (2026-10-11). Silencing an agent does NOT
+    # stop it running or writing its report — only the notification.
+    from shared.agent_alert_policy import agent_alerts_enabled
+    if agent_alerts_enabled(config, "hermes"):
         try:
             from shared.alert_service import AlertService, AlertType, AlertPriority
 

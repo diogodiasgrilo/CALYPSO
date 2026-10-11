@@ -169,7 +169,10 @@ def main():
     logger.info(f"Briefing saved: {report_path} (risk: {risk_level})")
 
     # 6. Send alert with full briefing
-    if config.get("alerts", {}).get("enabled", False):
+    # Per-agent Telegram switch (2026-10-11). Silencing an agent does NOT
+    # stop it running or writing its report — only the notification.
+    from shared.agent_alert_policy import agent_alerts_enabled
+    if agent_alerts_enabled(config, "apollo"):
         try:
             from shared.alert_service import AlertService, AlertType, AlertPriority
 
