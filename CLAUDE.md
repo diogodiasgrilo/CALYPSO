@@ -754,6 +754,22 @@ Full deployment guide: [`docs/ALERTING_SETUP.md`](docs/ALERTING_SETUP.md).
 > timer files are authoritative (`OnCalendar=Mon..Fri *-*-* 23:00:00 America/New_York`); this table
 > had not followed.
 
+> **Telegram: APOLLO and CLIO are SILENCED since 2026-10-11 — they still run and still write
+> their reports.** The operator reads none of the narrative reports, and the four agents were
+> sending ~32 notifications a month into a feed nobody opens. Cost was never the issue (~$10/month
+> measured from their own token logs — 0.8% of one day's SD on B); the notifications were.
+> Per-agent switch: `shared/agent_alert_policy.py`, resolving
+> `config[agent]["alerts"]["enabled"]` → a bare bool → `config[agent]["telegram_alert"]` (HOMER's
+> existing spelling) → the shared `config["alerts"]["enabled"]`. Set `enabled: true` under the
+> agent in `agents_config.json` to restore; backup at `agents_config.json.bak-2026-10-11-silence`.
+>
+> **Why silence rather than disable:** APOLLO calls `fetch_market_snapshot()` live and has NO
+> historical mode, so its inputs (overnight news, pre-market VIX) are stored nowhere — a day not
+> written can never be reconstructed. CLIO's inputs are persisted (so its gaps are recoverable)
+> and **HERMES's daily report is read by HOMER into the journal** (`data_collector.py:114`), which
+> is why HERMES keeps alerting and is not a cut candidate. HOMER keeps alerting too: its failure
+> alert is the one notification that matters.
+
 **Config:** Template `services/agents_config.json.template`; production `services/agents_config.json` (gitignored, on VM only). Shared: `anthropic` API key, `google_sheets` credentials, `alerts` settings.
 
 ### HOMER (Trading Journal Writer)
