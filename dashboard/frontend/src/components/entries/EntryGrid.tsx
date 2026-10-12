@@ -18,50 +18,6 @@ function findEntryByNumber(
   return null;
 }
 
-/** A fully-skipped entry (MKT-011 credit gate, MKT-010 illiquidity, …) is NOT a
- *  position. The bot records it so the dashboard can show WHAT was skipped and
- *  WHY, but it must never be presented as an open/real entry — that made a
- *  $0-capital skip read as a 10:45 "entry" (2026-06-30). A legitimate one-sided
- *  entry skips only ONE side, so a true skip requires BOTH sides skipped.
- *
- *  2026-07-31: a genuine order-EXECUTION FAILURE (broker accepted the order
- *  but it never filled after exhausting retries) ALSO sets both sides
- *  skipped=True (see EntryCard.tsx's getEntryStatus() comment for the full
- *  incident) — it must NOT be bucketed into the generic "Skipped — no
- *  position" strip below, which only shows a plain gray skip_reason line
- *  with no visual distinction from a routine strategic skip. Excluding it
- *  here routes it through the `positions`/EntryCard path instead, where it
- *  already renders as a visually distinct red "failed" card. */
-/** Group skips by their reason, preserving first-appearance order.
- *
- *  Every skip rendered its own copy of `skip_reason`, and the reasons are
- *  long — the require-both-sides/GEX one is ~60 words. Three slots skipped
- *  for the same cause produced three identical paragraphs, which on a phone
- *  is most of the screen saying one thing. The entry numbers differ; the
- *  reason does not, so say it once. */
-function groupSkipsByReason(skips: HydraEntry[]): Array<[string, HydraEntry[]]> {
-  const order: string[] = [];
-  const byReason = new Map<string, HydraEntry[]>();
-  for (const e of skips) {
-    const reason = e.skip_reason || "credit gate";
-    if (!byReason.has(reason)) {
-      byReason.set(reason, []);
-      order.push(reason);
-    }
-    byReason.get(reason)!.push(e);
-  }
-  return order.map((r) => [r, byReason.get(r)!] as [string, HydraEntry[]]);
-}
-
-function isFullySkipped(e: HydraEntry): boolean {
-  return Boolean(e.call_side_skipped && e.put_side_skipped) && !e.execution_failed;
-}
-
-/** Compact "HH:MM" from the bot-stamped entry_time (ISO, ET). */
-function entryHm(e: HydraEntry): string {
-  return e.entry_time ? String(e.entry_time).slice(11, 16) : "—";
-}
-
 interface EntryGridProps {
   /** Polled non-primary snapshot's entries. When provided, the grid renders
    *  THESE instead of the WS store's. The schedule still comes from the bot
@@ -132,7 +88,13 @@ export function EntryGrid({ entries: entriesProp }: EntryGridProps = {}) {
   const config = useBotConfig();
   const { strategy: selectedForSchedule } = useSelectedStrategy();
   const entries: HydraEntry[] = entriesProp ?? hydraState?.entries ?? [];
-  const schedule = hydraState?.entry_schedule;
+  // `hydraState.entry_schedule` is the CANONICAL store — the LIVE SEAT's runtime
+  // schedule, not the selected strategy's. Reading it while rendering a polled
+  // strategy applies one strategy's VIX-regime cap to another's slots. Same
+  // defect, same file family, as the EntryTimeline fix of 2026-10-09. With no
+  // store schedule the intersection below falls back to the canonical config
+  // slots, which is exactly right for a polled strategy.
+  const schedule = entriesProp ? undefined : hydraState?.entry_schedule;
   const showConditional = useShowConditionalEntries();
 
   // ── Event-triggered strategies have NO schedule to render ────────────────
@@ -159,86 +121,6 @@ export function EntryGrid({ entries: entriesProp }: EntryGridProps = {}) {
     );
   }
 
-  // ── Non-primary (polled) strategies ──────────────────────────────────────
-  // When the parent passes a polled snapshot's entries, render EXACTLY those.
-  // Do NOT derive the slot count from useBotConfig() below — that is ALWAYS the
-  // GLOBAL /api/hydra/bot-config (variant A's config: 2 base slots). Any strategy
-  // that runs more entries than A (e.g. B's 4) had its extra entries — AND their
-  // P&L — silently hidden, which made a losing day look like a winning one
-  // (2026-06-17). We don't have the selected strategy's own schedule client-side,
-  // so rendering the actual placed entries (numbered) is the correct, no-hiding
-  // behavior. The primary (WS-store) path below is untouched — there the config
-  // genuinely IS this strategy's (variant A), so its schedule logic stays exact.
-  if (entriesProp) {
-    const sorted = [...entriesProp].sort(
-      (a, b) => (a.entry_number ?? 0) - (b.entry_number ?? 0)
-    );
-    // Separate real positions from fully-skipped attempts: a skip is NOT a
-    // position and must not occupy a position card / inflate the count. Real
-    // positions render as cards; skips collapse into a compact reason strip.
-    const positions = sorted.filter((e) => !isFullySkipped(e));
-    const skips = sorted.filter(isFullySkipped);
-    return (
-      <div>
-        <h3 className="text-xs font-semibold text-text-secondary uppercase tracking-wider mb-2">
-          Entries{positions.length ? ` (${positions.length})` : ""}
-        </h3>
-        {sorted.length === 0 ? (
-          <div className="text-sm text-text-secondary py-2">No entries today.</div>
-        ) : (
-          <>
-            {positions.length > 0 ? (
-              <div className="grid gap-2 max-sm:grid-cols-1 grid-cols-2 lg:grid-cols-3">
-                {positions.map((entry, i) => (
-                  <EntryCard
-                    key={entry.entry_number ?? i}
-                    entry={entry}
-                    label={`#${entry.entry_number ?? i + 1}`}
-                  />
-                ))}
-              </div>
-            ) : (
-              <div className="text-sm text-text-secondary py-2">
-                No positions opened today.
-              </div>
-            )}
-            {skips.length > 0 && (
-              <div className="mt-2 rounded border border-border-dim bg-bg px-3 py-2">
-                <div
-                  className="text-3xs font-semibold uppercase tracking-wider mb-1"
-                  style={{ color: colors.textDim }}
-                >
-                  Skipped — no position ({skips.length})
-                </div>
-                <div className="flex flex-col gap-1.5">
-                  {groupSkipsByReason(skips).map(([reason, group], gi) => (
-                    <div key={gi} className="text-xs font-mono text-text-secondary">
-                      <div>
-                        {group.map((e, i) => (
-                          <span key={e.entry_number ?? `s${gi}-${i}`}>
-                            {i > 0 && (
-                              <span style={{ color: colors.textDim }}> · </span>
-                            )}
-                            <span style={{ color: colors.textDim }}>
-                              #{e.entry_number ?? "?"}
-                            </span>{" "}
-                            {entryHm(e)}
-                          </span>
-                        ))}
-                      </div>
-                      <div className="text-3xs mt-0.5" style={{ color: colors.textDim }}>
-                        {reason}
-                      </div>
-                    </div>
-                  ))}
-                </div>
-              </div>
-            )}
-          </>
-        )}
-      </div>
-    );
-  }
 
   // Canonical base times (pre-VIX-cap) come from bot config.
   // As of 2026-04-17, the 10:15 slot is dropped at ALL VIX levels (max_entries [2,2,2,1]).
@@ -361,6 +243,42 @@ export function EntryGrid({ entries: entriesProp }: EntryGridProps = {}) {
           </div>
         </div>
       )}
+      {/* NO-HIDING GUARANTEE. The per-slot grids above render one card per
+          CONFIGURED slot. If an entry's number falls outside them — the config
+          changed mid-day, the bot emitted more entries than slots, a polled
+          snapshot disagrees with the config it was fetched beside — that entry
+          would silently vanish, taking its P&L with it and making a losing day
+          look like a winning one. That is the 2026-06-17 incident, and it is
+          the reason this component used to render a separate, degenerate grid
+          for polled strategies at all. The schedule is now available per
+          strategy (`useBotConfig` is scoped), so the two paths were merged and
+          this is what keeps the old guarantee. */}
+      {(() => {
+        const slotted = new Set<number>([
+          ...activeBaseTimes.map(effectiveBaseNum),
+          ...(showConditional ? activeCondTimes.map(effectiveCondNum) : []),
+        ]);
+        const orphans = entries
+          .filter((e) => e.entry_number != null && !slotted.has(e.entry_number))
+          .sort((a, b) => (a.entry_number ?? 0) - (b.entry_number ?? 0));
+        if (orphans.length === 0) return null;
+        return (
+          <div className="mt-2">
+            <span className="text-3xs text-text-dim uppercase tracking-wider">
+              Additional entries (outside the configured slots)
+            </span>
+            <div className="grid gap-2 max-sm:grid-cols-1 mt-1 grid-cols-3">
+              {orphans.map((entry, i) => (
+                <EntryCard
+                  key={`orphan-${entry.entry_number ?? i}`}
+                  entry={entry}
+                  label={`#${entry.entry_number}`}
+                />
+              ))}
+            </div>
+          </div>
+        );
+      })()}
     </div>
   );
 }
