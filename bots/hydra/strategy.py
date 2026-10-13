@@ -7448,7 +7448,21 @@ class HydraStrategy(MEICStrategy):
             "reason": "strategy rules changed; earlier days are a different strategy",
             "cumulative_pnl": prior_sum,
             "lifetime_pnl_at_archive": lifetime_at_archive,
+            # ⚠️ These four, plus total_credit_collected, are the LIFETIME values
+            # at archive time — NOT the retired era's own, the way `cumulative_pnl`
+            # is since schema 2. They cannot be derived from `daily_returns` (its
+            # rows carry no entry or stop counts), so splitting them needs the DB
+            # and is deliberately not attempted here. Read them as "the counters
+            # as they stood when the epoch landed"; for the retired era's own
+            # counts, query trade_entries/trade_stops with `date < retired_on`.
             "total_entries": int(cm.get("total_entries", 0) or 0),
+            # ADDED 2026-10-13. The zero-list below has always included
+            # total_credit_collected while this block did not, so the one counter
+            # that was never archived was silently DESTROYED at every cutover —
+            # against this function's own promise that the earlier era is
+            # "preserved rather than deleted". Found on B, whose pre_epoch block
+            # has no credit figure at all for 326 archived entries.
+            "total_credit_collected": round(float(cm.get("total_credit_collected", 0.0) or 0.0), 2),
             "total_stops": int(cm.get("total_stops", 0) or 0),
             "winning_days": int(cm.get("winning_days", 0) or 0),
             "losing_days": int(cm.get("losing_days", 0) or 0),
@@ -7457,6 +7471,11 @@ class HydraStrategy(MEICStrategy):
             "days": len(prior),
             "daily_returns": prior,
         }
+        # ⚠️ EVERY counter zeroed here MUST have a re-derivation in
+        # `_reconcile_cumulative_metrics_from_db`, or the zeroing is permanent:
+        # this runs once, that runs every settlement. total_entries and
+        # total_credit_collected sat in this list with no re-derivation from
+        # 2026-09-24 to 2026-10-13 and were wrong by 13.7x on B. Add to both.
         for k, zero in (("cumulative_pnl", 0.0), ("total_entries", 0),
                         ("total_credit_collected", 0.0), ("total_stops", 0),
                         ("double_stops", 0), ("winning_days", 0), ("losing_days", 0)):
@@ -7485,10 +7504,9 @@ class HydraStrategy(MEICStrategy):
         write — we re-derive cumulative_pnl + per-day net_pnl + win/loss from it. That
         makes the metrics file a SELF-HEALING derived view: any drift (past correction,
         corruption, restart-timing) is corrected on the next close and cannot accumulate.
-        Only net_pnl/total_stops/double_stops are DB-authoritative; capital_deployed/
-        contracts/total_entries/total_credit_collected stay (metrics-only, no confirmed
-        drift found there; return_pct re-derived). No-op when already consistent (the
-        normal case).
+        net_pnl/total_stops/double_stops/total_entries/total_credit_collected are all
+        DB-authoritative; capital_deployed/contracts stay metrics-only (return_pct is
+        re-derived). No-op when already consistent (the normal case).
 
         EXTENDED 2026-09-02: total_stops/double_stops re-derived from trade_stops too.
         A follow-up fleet-wide audit found C's total_stops stuck at 7 in the metrics
@@ -7507,7 +7525,31 @@ class HydraStrategy(MEICStrategy):
         (a win, not a stop) and early_close/EOD flattens (not stops). Legacy rows
         written before the v11 exit_reason migration (NULL) fall back to net_pnl < 0,
         matching what those rows always meant at the time (Brandon's TP/breach paths
-        didn't exist yet, so every pre-v11 trade_stops row IS a real stop-loss)."""
+        didn't exist yet, so every pre-v11 trade_stops row IS a real stop-loss).
+
+        EXTENDED 2026-10-13: total_entries/total_credit_collected re-derived from
+        trade_entries too. The text above used to justify excluding them with "no
+        confirmed drift found there" — that premise was false, and the mechanism is
+        in this same file. `_archive_pre_epoch_metrics` ZEROES SEVEN counters at the
+        epoch cutover; this function restores FIVE of them (cumulative_pnl,
+        total_stops, double_stops, winning_days, losing_days). The two it did not
+        restore were exactly these, so for any variant with a `metrics_epoch_date`
+        the zeroing was PERMANENT and the counters silently came to mean "since the
+        archive ran" — a date that appears nowhere, and is not the epoch. Measured
+        fleet-wide 2026-10-13, epoch-honoured: B 9 entries / $3,522.50 against 123 /
+        $39,887.50 in the DB (13.7x), C 3 / $927.50 against 77 / $19,962.50 (25.7x),
+        bl 0 / $0 against 1 / $125. The confirming control is G: it has NO epoch, was
+        therefore never archived, and its counters are exact (60 = 60,
+        $15,867.70 = $15,867.70). B's archive fired once, on 2026-10-06, and its
+        `pre_epoch.total_entries` holds 326 — so the live 9 counts only the four
+        settlements since.
+
+        This is the THIRD defect in the "increment once, idempotent-by-date, never
+        revisited" family (cumulative_pnl 2026-07-20, the stop counters 2026-09-02,
+        these two now). All seven zeroed counters are DB-derived from here as of
+        today, which closes the class rather than this instance: a future counter
+        added to the archive's zero-list and not to a re-derivation here would be the
+        same bug a fourth time, so add it in both places."""
         if not self._data_recorder:
             return
         try:
@@ -7549,6 +7591,32 @@ class HydraStrategy(MEICStrategy):
                 "HAVING COUNT(DISTINCT side) = 2)",
                 _args,
             ).fetchone()[0]
+            # The LAST TWO counters the epoch archive zeroes (2026-10-13). See
+            # the EXTENDED-2026-10-13 note in the docstring for why these were
+            # excluded before and what falsified that.
+            # Wrapped on ITS OWN, and that is the point: the broad
+            # `except Exception` around this whole method turns any raise into
+            # "the drift guard did NOT run" for EVERY field at once. Without
+            # this try, a database simply lacking the trade_entries table took
+            # down the cumulative_pnl and stop-counter heals too — i.e. a new,
+            # lower-priority read becoming an outage of the ones that already
+            # worked. Caught by tests/test_metrics_epoch_2026_09_24.py on the
+            # day this query was added. A newer read must never be able to
+            # break an older heal.
+            try:
+                db_entries, db_credit = con.execute(
+                    "SELECT COUNT(*), COALESCE(SUM(total_credit), 0.0) "
+                    "FROM trade_entries" + _where, _args).fetchone()
+                db_entries = int(db_entries or 0)
+                db_credit = round(float(db_credit or 0.0), 2)
+                entries_readable = True
+            except Exception as _entry_exc:
+                logger.warning(
+                    "METRICS-RECONCILE %s: trade_entries unreadable (%s: %s) — "
+                    "total_entries/total_credit_collected left untouched; the "
+                    "cumulative_pnl and stop-counter heals still ran.",
+                    date_str, type(_entry_exc).__name__, _entry_exc)
+                db_entries, db_credit, entries_readable = 0, 0.0, False
             con.close()
             if not db:
                 return
@@ -7569,7 +7637,24 @@ class HydraStrategy(MEICStrategy):
             old_stops = int(cm.get("total_stops", 0) or 0)
             old_double_stops = int(cm.get("double_stops", 0) or 0)
             stops_drift = (db_total_stops != old_stops) or (db_double_stops != old_double_stops)
-            if not (corrected or abs(drift) > 0.01 or stops_drift):
+            old_entries = int(cm.get("total_entries", 0) or 0)
+            old_credit = round(float(cm.get("total_credit_collected", 0.0) or 0.0), 2)
+            # GUARD — an empty table is not a zero. D, E and H record their
+            # entries in their OWN database (dc_calendar.db / long_strangle.db),
+            # so `trade_entries` in THIS db is structurally empty for them: 0
+            # rows means "not my table", not "no entries". Measured 2026-10-13:
+            # D's metrics hold 1 entry and H's 2, against 0 rows here, while
+            # their daily_summaries hold 84 and 14 days. Re-deriving blind would
+            # destroy both counts to "fix" a variant that was never broken.
+            # Same trap as the alert DLQ (2026-10-07): an absent signal is
+            # indistinguishable from a zero one, so never infer from absence.
+            # Heal only when the table has rows, or when both sides already
+            # agree at zero (a fresh variant, where writing 0 over 0 is a no-op).
+            entries_healable = entries_readable and (
+                db_entries > 0 or (old_entries == 0 and old_credit == 0.0))
+            entries_drift = entries_healable and (
+                db_entries != old_entries or abs(db_credit - old_credit) > 0.01)
+            if not (corrected or abs(drift) > 0.01 or stops_drift or entries_drift):
                 # SAY SO WHEN IT IS CLEAN. Until 2026-09-30 this branch was
                 # silent, so an absence of METRICS-RECONCILE lines meant either
                 # "ran, nothing to do" or "never ran at all" — and those are
@@ -7579,20 +7664,29 @@ class HydraStrategy(MEICStrategy):
                 # silence mean something.
                 logger.info(
                     "METRICS-RECONCILE %s: clean — metrics agree with the DB "
-                    "(cumulative_pnl $%.2f, %d daily_returns rows, %d summary days).",
-                    date_str, db_cum, len(dr), len(db))
-            if corrected or abs(drift) > 0.01 or stops_drift:
+                    "(cumulative_pnl $%.2f, %d daily_returns rows, %d summary days, "
+                    "%d entries, $%.2f credit).",
+                    date_str, db_cum, len(dr), len(db), old_entries, old_credit)
+            if corrected or abs(drift) > 0.01 or stops_drift or entries_drift:
                 logger.warning(
-                    "METRICS-RECONCILE %s: self-healed from daily_summaries/trade_stops — "
-                    "corrected %d daily_returns net_pnl; cumulative_pnl $%.2f -> $%.2f "
-                    "(drift $%.2f); total_stops %d -> %d; double_stops %d -> %d. "
+                    "METRICS-RECONCILE %s: self-healed from daily_summaries/trade_stops/"
+                    "trade_entries — corrected %d daily_returns net_pnl; cumulative_pnl "
+                    "$%.2f -> $%.2f (drift $%.2f); total_stops %d -> %d; double_stops "
+                    "%d -> %d; total_entries %d -> %s; total_credit_collected $%.2f -> %s. "
                     "Root-cause guard active.",
                     date_str, corrected, old_cum, db_cum, drift,
                     old_stops, db_total_stops, old_double_stops, db_double_stops,
+                    old_entries,
+                    db_entries if entries_healable else "(held: trade_entries empty)",
+                    old_credit,
+                    f"${db_credit:.2f}" if entries_healable else "(held: trade_entries empty)",
                 )
                 cm["cumulative_pnl"] = db_cum
                 cm["total_stops"] = db_total_stops
                 cm["double_stops"] = db_double_stops
+                if entries_healable:
+                    cm["total_entries"] = db_entries
+                    cm["total_credit_collected"] = db_credit
                 # win/loss over the reconciled per-day rows (trading days only)
                 if epoch:
                     # Keep win/loss on the SAME era as cumulative_pnl. Counting

@@ -36,6 +36,70 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-13 THE EPOCH ARCHIVE ZEROES SEVEN COUNTERS; THE SELF-HEAL RESTORED
+  FIVE. Found while checking why the new live seat `bl` reported
+  `total_entries: 0` against a DB holding a real entry worth $125.
+  `_archive_pre_epoch_metrics` runs ONCE at the epoch cutover and zeroes
+  cumulative_pnl, total_entries, total_credit_collected, total_stops,
+  double_stops, winning_days and losing_days.
+  `_reconcile_cumulative_metrics_from_db` runs EVERY settlement and re-derived
+  five of them from the DB -- but not `total_entries` or
+  `total_credit_collected`. For those two the zeroing was therefore PERMANENT,
+  and the counters silently came to mean "since the archive ran" -- a date that
+  appears nowhere in the file and is NOT the epoch. The docstring justified the
+  exclusion with "no confirmed drift found there", which is why nobody looked
+  again. Measured fleet-wide, epoch-honoured: B 9 entries / $3,522.50 against
+  123 / $39,887.50 in its DB (13.7x), C 3 / $927.50 against 77 / $19,962.50
+  (25.7x), bl 0 / $0.00 against 1 / $125.00, A 384 against 383, F 11 against
+  10. THE CONTROL IS G: it is the only 0DTE variant with no
+  `metrics_epoch_date`, was therefore never archived, and its counters are
+  exact to the cent (60 = 60, $15,867.70 = $15,867.70) -- which is what makes
+  this a mechanism rather than a coincidence. B's archive fired once, on
+  2026-10-06, and its `pre_epoch.total_entries` holds 326, so the live 9 counts
+  only the four settlements since. FIX: both counters are now re-derived from
+  `trade_entries` on every settlement, epoch-honoured, so all seven zeroed
+  counters are DB-derived and the class is closed rather than this instance.
+  GUARD (load-bearing): D, E and H record entries in their OWN databases
+  (dc_calendar.db / long_strangle.db) and hold ZERO `trade_entries` rows here
+  while having 84/85/14 daily_summaries days -- so re-deriving blind would have
+  DESTROYED D's and H's real counts to "fix" variants that were never broken.
+  An empty table is not a zero (same trap as the alert DLQ, 2026-10-07): the
+  heal only applies when the table has rows, or when both sides already agree
+  at zero. Also fixed: `total_credit_collected` was in the archive's zero-list
+  but NOT in its `pre_epoch` block, so the one counter never archived was
+  silently DESTROYED at every cutover -- against that function's own promise
+  that the earlier era is "preserved rather than deleted". This is the THIRD
+  defect in the "increment once, idempotent-by-date, never revisited" family
+  (cumulative_pnl 2026-07-20, the stop counters 2026-09-02). No metrics surgery
+  is needed: every variant self-heals at its next settlement. Pinned by
+  tests/test_metrics_entry_counters_selfheal_2026_10_13.py, whose key test runs
+  a real archive followed by a real self-heal and requires EVERY zeroed counter
+  to come back -- so a fourth counter added to the zero-list without a
+  re-derivation fails it. Both halves verified by negative control (8 of 11
+  tests fail with the defect reintroduced).
+
+- 2026-10-13 VARIANT bl: THE 15:15 SLOT REMOVED (7 -> 6 slots, 12:15-14:45).
+  Structural, not P&L. MKT-047 force-flattens every open entry at 15:50 ET, so
+  a 15:15 slot has a 35-MINUTE maximum life: it collects the least theta of any
+  slot while carrying peak 0DTE gamma, and it is GUARANTEED to pay the forced
+  market-order exit, whose slippage measured +$195/stop (n=17, 2026-10-02).
+  Every remaining slot gets >= 65 min. bl's only entry to date (E#7, 2026-10-12
+  15:22:36) was flattened 27.5 min later and MKT-047-RECHECK force-closed the
+  other side at 15:54 -- cited as the mechanism behaving exactly as predicted,
+  NOT as evidence the slot loses money, which n=1 cannot show. Tested against
+  DECISION_FRAMEWORK sec.2 ("would I make this change if the P&L had come out
+  the other way?"): yes, the holding-window argument is a priori and
+  outcome-independent. `max_entries` moved [7,7,3,1] -> [6,6,3,1] in the SAME
+  edit per that config's own standing warning; the cap is non-binding at 6
+  slots either way, so that part is documentary. COST, STATED PLAINLY: this
+  removes a seventh of the out-of-sample coverage `bl` exists to produce, and
+  the per-slot permutation is p = 0.597, so there is NO statistical basis to
+  prefer any slot -- the case rests ENTIRELY on the holding-window mechanism,
+  and if that is wrong this was a tune dressed as a fix. The old
+  `test_no_slot_lands_after_the_EOD_flatten` was BINARY (15:15 < 15:50 passed
+  it for four days); it is now joined by a minimum-holding-window invariant, so
+  a future late slot must justify the window rather than the list.
+
 - 2026-10-09 THE JOURNAL'S OWN NUMBERS WERE SILENTLY WRONG FOR TWO MONTHS.
   `JournalParser` located blocks by scanning `section_2_start + <constant>`
   lines; section 2 grows one line per trading day, so both constants were

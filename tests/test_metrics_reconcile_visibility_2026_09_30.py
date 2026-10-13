@@ -82,7 +82,31 @@ class TestSilenceMeansSomething:
 
     def test_clean_and_drift_paths_are_mutually_exclusive(self):
         """Both must not fire on the same settlement — one says agree, the
-        other says corrected, and printing both would be nonsense."""
+        other says corrected, and printing both would be nonsense.
+
+        DERIVED, not asserted (2026-10-13). This used to pin the literal text
+        `"if not (corrected or abs(drift) > 0.01 or stops_drift):"`. Adding a
+        counter to the self-heal (total_entries/total_credit_collected, the
+        2026-10-13 extension) then broke the test with nothing actually wrong,
+        and the obvious repair — paste the new string in — would leave it just
+        as brittle for the next one. The real invariant is that the two branch
+        conditions are exact NEGATIONS of each other, so extract both and
+        compare. That survives every future counter and still fails loudly if
+        someone edits one branch and forgets the other, which is the mistake
+        worth catching."""
+        import re
         src = _src()
-        assert "if not (corrected or abs(drift) > 0.01 or stops_drift):" in src
-        assert "if corrected or abs(drift) > 0.01 or stops_drift:" in src
+        clean = re.search(r"\n\s*if not \((?P<cond>.+?)\):\n", src)
+        drift = re.search(r"\n\s*if (?P<cond>corrected .+?):\n", src)
+        assert clean, "the clean branch (`if not (...)`) is gone"
+        assert drift, "the drift branch is gone"
+        assert clean.group("cond").strip() == drift.group("cond").strip(), (
+            "the clean and drift branches no longer test the same condition, "
+            "so a settlement could print both lines or neither:\n"
+            f"  clean: {clean.group('cond')}\n  drift: {drift.group('cond')}")
+        # and the condition must actually mention every counter the self-heal
+        # repairs — a counter healed without being in the condition would be
+        # fixed silently, under a line claiming everything agreed.
+        cond = clean.group("cond")
+        for signal in ("corrected", "drift", "stops_drift", "entries_drift"):
+            assert signal in cond, f"{signal!r} missing from the branch condition"

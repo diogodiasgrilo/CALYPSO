@@ -9,6 +9,16 @@ the mechanics, not the merit.
 
 The important one is `test_bl_is_otherwise_an_EXACT_copy_of_b`: the whole premise
 is "same strategy, different clock", so anything else differing is a bug.
+
+UPDATED 2026-10-13 — the grid is now SIX slots, 12:15-14:45. `15:15` was removed
+on a structural argument, not a P&L one: MKT-047 force-flattens at 15:50, so that
+slot had a 35-minute maximum life, collecting the least theta of any slot while
+carrying peak 0DTE gamma and a guaranteed forced market-order exit. The honest
+cost is that it removes a seventh of the out-of-sample coverage `bl` exists to
+produce, and the per-slot permutation (p = 0.597) gives no statistical basis to
+prefer any slot — so if the holding-window mechanism is wrong, this was a tune
+dressed as a fix. `test_every_slot_gets_a_usable_holding_window` encodes the
+reason so the next reader argues with the mechanism rather than the list.
 """
 
 import json
@@ -23,8 +33,14 @@ sys.path.insert(0, str(ROOT))
 from shared import strategy_taxonomy as tax  # noqa: E402
 
 CFG = ROOT / "bots/hydra/config"
-EXPECTED_GRID = ["12:15", "12:45", "13:15", "13:45", "14:15", "14:45", "15:15"]
+EXPECTED_GRID = ["12:15", "12:45", "13:15", "13:45", "14:15", "14:45"]
 B_GRID = ["09:45", "10:15", "10:45", "11:15", "11:45", "12:15", "12:45"]
+
+# MKT-047 force-flattens every open entry at this time. A slot's maximum
+# possible life is therefore (flatten - slot), and the slot that gets the least
+# theta is also the one carrying peak 0DTE gamma.
+EOD_FLATTEN_ET = (15, 50)
+MIN_HOLDING_MINUTES = 60
 
 
 def _cfg(v):
@@ -76,6 +92,39 @@ class TestTheGrid:
         assert mins == sorted(mins)
         assert all(b - a == 30 for a, b in zip(mins, mins[1:]))
 
+    def test_every_slot_gets_a_usable_holding_window(self):
+        """2026-10-13: 15:15 was removed because this invariant failed on it.
+
+        `test_no_slot_lands_after_the_EOD_flatten` below is BINARY — 15:15 sits
+        before the 15:50 flatten and passed it for four days — but the quantity
+        that matters is a continuum. A 15:15 entry has a 35-minute maximum life:
+        the least theta of any slot, at peak 0DTE gamma, and a GUARANTEED forced
+        market-order exit (slippage measured +$195/stop, n=17, 2026-10-02).
+
+        This is the test the config comment cites, so it must keep existing. It
+        is deliberately stated as a floor on the MECHANISM, not a P&L rule — if
+        a future edit re-adds a late slot, the burden is to show the window is
+        long enough, not that the slot made money."""
+        eh, em = EOD_FLATTEN_ET
+        flatten = eh * 60 + em
+        for t in _cfg("bl")["strategy"]["entry_times"]:
+            h, m = (int(x) for x in t.split(":"))
+            window = flatten - (h * 60 + m)
+            assert window >= MIN_HOLDING_MINUTES, (
+                f"slot {t} can be held only {window} min before the "
+                f"{eh:02d}:{em:02d} MKT-047 flatten (floor {MIN_HOLDING_MINUTES})")
+
+    def test_the_flatten_time_the_holding_floor_assumes_is_the_real_one(self):
+        """The invariant above hardcodes 15:50. If the flatten moves, the floor
+        is computed against a fiction — so pin the source of truth. The time
+        lives in code (`eod_flatten` carries only skip_otm_pts in config), and
+        the live seat logged `EOD safety flatten (MKT-047): ENABLED @ 15:50 ET`
+        on 2026-10-09."""
+        src = (ROOT / "bots/hydra/strategy.py").read_text()
+        assert "15:50" in src, (
+            "15:50 no longer appears in strategy.py — confirm the MKT-047 "
+            "flatten time and update EOD_FLATTEN_ET")
+
     def test_no_slot_lands_after_the_EOD_flatten(self):
         """There is NO late-entry cutoff in the code — an entry opened after the
         flatten time would be opened into a window that immediately closes it."""
@@ -99,6 +148,14 @@ class TestBlIsOtherwiseAnExactCopyOfB:
         "alerts",                  # only the live seat alerts
         "strategy.entry_times",    # the whole point
         "strategy._comment_entry_times",
+        # COUPLED to entry_times by the config's own rule ("ALWAYS change
+        # max_entries in the SAME edit as entry_times — a stale cap silently
+        # drops the extra slot via the VIX regime"). b has 7 slots and a [7,7,..]
+        # cap; bl has 6 and [6,6,..]. Non-binding in both cases, so this is a
+        # documentary divergence — but it MUST be declared, because a cap that
+        # silently under-ran its grid is exactly the failure that warning exists
+        # for. This test caught the change the moment it was made.
+        "strategy.vix_regime.max_entries",
         "_comment_demoted",
         "logging.log_dir",                        # MUST differ — see above
         "strategy.metrics_epoch_date",            # MUST differ — bl starts 10-09

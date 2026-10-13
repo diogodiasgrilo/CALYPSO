@@ -16,7 +16,7 @@
 # §A-sept. ⭐ NEW LIVE SEAT `bl` — 2026-10-09 (Fri), deployed 09:11 ET
 
 **The live paper seat is now `bl`: the same `BrandonHydraStrategy` code B runs, on a grid shifted
-to start at old-B's slot #6 — 12:15 / 12:45 / 13:15 / 13:45 / 14:15 / 14:45 / 15:15.** B keeps its
+to start at old-B's slot #6 — 12:15 / 12:45 / 13:15 / 13:45 / 14:15 / 14:45.** (**15:15 was removed 2026-10-13**: MKT-047 flattens at 15:50, giving that slot a 35-minute maximum life — structural, not P&L; see `bots/hydra/__init__.py` version history.) B keeps its
 id (`b`), is displayed as **B-A**, and keeps running dry-run on its original 09:45–12:45 clock, so
 it is the **control**, not a retired variant. Deployed with the account flat, 3h before `bl`'s
 first slot. Commits `c5ec45b` (the seat) + `f914a55` (two copied keys) + `e7a03ca` (the journal).

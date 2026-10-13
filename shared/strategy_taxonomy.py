@@ -265,7 +265,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         pnl_shape="credit",
         dte_class="0DTE",
         # 2026-10-09: DEMOTED to dry_run_shadow. The live paper seat moved to `bl`
-        # (same Brandon stack, grid shifted to 12:15-15:15). This variant keeps its
+        # (same Brandon stack, grid shifted to 12:15-14:45). This variant keeps its
         # id `b` — and therefore its data dir, DB, metrics and 110 days of history —
         # and is displayed as "B-A". Renaming the ID would have orphaned all of it.
         status="dry_run_shadow",
@@ -279,7 +279,9 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         id="bl",
         # ── THE LIVE PAPER SEAT since 2026-10-09 ────────────────────────────
         # Byte-identical Brandon stack to `b`; the ONLY difference is the entry
-        # grid, shifted from 09:45-12:45 to 12:15-15:15 (still 7 slots, 30min).
+        # grid, shifted from 09:45-12:45 to 12:15-14:45 (6 slots, 30min — 15:15 was
+        # removed 2026-10-13: MKT-047 flattens at 15:50, so it had a 35-minute
+        # maximum life. Structural, not P&L. See bots/hydra/__init__.py).
         #
         # ⚠️ DISPLAY NAME IS "B" BUT THE ID IS "bl". Deliberate. The operator
         # wanted the new grid to BE "B" on screen with the old one beneath it as
@@ -305,7 +307,7 @@ STRATEGIES: Dict[str, StrategyMeta] = {
         bot_name_base="HYDRA",
         capital_basis="defined_risk",
         sides="two_sided",
-        subtitle="0DTE SPX iron condor · 7 slots 12:15-15:15 · 7 contracts",
+        subtitle="0DTE SPX iron condor · 6 slots 12:15-14:45 · 7 contracts",
         ui_name="Brandon Late",
     ),
     "bm": StrategyMeta(

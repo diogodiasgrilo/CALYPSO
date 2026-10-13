@@ -13,8 +13,7 @@
       "13:15",
       "13:45",
       "14:15",
-      "14:45",
-      "15:15"
+      "14:45"
     ],
     "entry_window_minutes": 5,
     "spread_vix_multiplier": 6.0,
@@ -93,8 +92,8 @@
         28.0
       ],
       "max_entries": [
-        7,
-        7,
+        6,
+        6,
         3,
         1
       ],
@@ -221,7 +220,7 @@
     },
     "_comment_metrics_epoch_date": "THE LIFETIME RECORD STARTS HERE (2026-10-09). `bl` took the LIVE paper seat on this date; it has NO history before it, so this epoch is a statement of fact, not a rebase of an existing record. It is set explicitly because it MUST equal the dashboard's variant_bl_baseline_date -- the 2026-10-06 telemetry audit found the metrics file and the dashboard reporting different eras of the same number, and nothing enforced that the two move together. This key was inherited as '2026-07-24' when bl was copied from b: numerically harmless (bl has nothing before 10-09) but it re-introduced exactly that divergence, so it is pinned by tests/test_variant_log_isolation_2026_10_09.py. Do NOT copy b's value here -- b's 2026-07-24 epoch is about B's own C->B swap and archives a simulated era that bl never had.",
     "metrics_epoch_date": "2026-10-09",
-    "_comment_entry_times": "2026-10-09: grid shifted from 09:45,10:15,10:45,11:15,11:45,12:15,12:45 to 12:15,12:45,13:15,13:45,14:15,14:45,15:15. Same 7 slots / 30min spacing / 7 contracts; ONLY the start time differs from variant b. max_entries stays [7,7,3,1] because the slot COUNT is unchanged \u2014 the VIX regime drops the EARLIEST entries when capped, so in zone 2 this grid keeps 13:45/14:15/14:45... i.e. the latest three. NOT VALIDATED: the later slots looked best in-sample but a 20,000-shuffle permutation on the per-slot spread gives p=0.597, and 13:15 onward has NO live record at all. This exists to generate out-of-sample data."
+    "_comment_entry_times": "2026-10-13: 15:15 REMOVED (7 -> 6 slots); max_entries [7,7,3,1] -> [6,6,3,1] in the SAME edit, per the warning in _comment_max_entries. The cap is non-binding either way at 6 slots, so this is behaviour-neutral and documentary. REASON IS STRUCTURAL, NOT P&L: MKT-047 force-flattens at 15:50 ET, so a 15:15 slot has a 35-MINUTE maximum life -- it collects the least theta of any slot while carrying peak 0DTE gamma, and it is GUARANTEED to pay the forced market-order exit, whose slippage measured +$195/stop (n=17) on 2026-10-02. Every remaining slot gets >= 65 min. bl's only entry to date (E#7, 2026-10-12 15:22:36) was flattened 27.5 min later and the MKT-047-RECHECK force-closed the other side at 15:54 -- cited as the mechanism behaving as predicted, NOT as evidence the slot loses money (n=1 proves nothing). Tested against DECISION_FRAMEWORK sec.2 'would I make this change if the P&L had come out the other way?': yes -- the holding-window argument is a priori and outcome-independent. COST, STATED PLAINLY: this removes 1/7 of the out-of-sample coverage bl exists to produce, and the per-slot permutation is p=0.597, so there is NO statistical basis to prefer any slot -- the case rests ENTIRELY on the holding-window mechanism. If that mechanism is wrong, this was a tune dressed as a fix. Pinned by tests/test_variant_bl_live_seat_2026_10_09.py::test_every_slot_gets_a_usable_holding_window. 2026-10-09: grid shifted from 09:45,10:15,10:45,11:15,11:45,12:15,12:45 to 12:15,12:45,13:15,13:45,14:15,14:45,15:15. Same 7 slots / 30min spacing / 7 contracts; ONLY the start time differs from variant b. max_entries stays [7,7,3,1] because the slot COUNT is unchanged \u2014 the VIX regime drops the EARLIEST entries when capped, so in zone 2 this grid keeps 13:45/14:15/14:45... i.e. the latest three. NOT VALIDATED: the later slots looked best in-sample but a 20,000-shuffle permutation on the per-slot spread gives p=0.597, and 13:15 onward has NO live record at all. This exists to generate out-of-sample data."
   },
   "trend_filter": {
     "enabled": true,
