@@ -303,3 +303,87 @@ class TestEveryZeroedCounterIsRestored:
         pre = s.cumulative_metrics["pre_epoch"]
         assert "total_credit_collected" in pre, "the credit history vanished"
         assert pre["total_credit_collected"] == pytest.approx(700.0)
+
+
+# ════════════════════ the same-day recording-gap detector ════════════════════
+class TestRecordingGapDetector:
+    """Added 2026-10-13 alongside the heal, because the heal removed the only
+    (weak) signal that a trade_entries row had gone missing: before this,
+    metrics-vs-DB divergence was a hint; now they agree by construction.
+
+    Every instance found was historical or structural — A 2026-03-20 (5 vs 3)
+    and 2026-04-09 (3 vs 2), both Saxo-era; F 2026-09-14 (1 vs 0), pre
+    accounting fix; B 2026-06-05 (4 vs 0), a HOMER-backfilled day where every
+    other table including market_ticks is empty too. All measured eras are
+    clean, so this is defence in depth.
+    """
+
+    def test_warns_when_a_row_is_missing_for_today(self, tmp_path, caplog):
+        import logging
+        s = _strategy(
+            tmp_path,
+            # summary claims 3 placed; only 2 rows exist
+            daily_rows=[{"date": "2026-10-13", "gross_pnl": 0.0, "net_pnl": 0.0,
+                         "commission": 0, "entries_placed": 3}],
+            entry_rows=[_entry("2026-10-13", 1), _entry("2026-10-13", 2)],
+            metrics={"cumulative_pnl": 0.0, "total_entries": 2,
+                     "total_credit_collected": 200.0, "total_stops": 0,
+                     "double_stops": 0, "daily_returns": [_dr("2026-10-13", 0.0)]},
+        )
+        with caplog.at_level(logging.WARNING):
+            s._reconcile_cumulative_metrics_from_db("2026-10-13")
+        assert "RECORDING-GAP" in caplog.text
+        assert "3 entr(ies) placed" in caplog.text and "2 row(s)" in caplog.text
+
+    def test_silent_when_the_day_is_consistent(self, tmp_path, caplog):
+        import logging
+        s = _strategy(
+            tmp_path,
+            daily_rows=[{"date": "2026-10-13", "gross_pnl": 0.0, "net_pnl": 0.0,
+                         "commission": 0, "entries_placed": 2}],
+            entry_rows=[_entry("2026-10-13", 1), _entry("2026-10-13", 2)],
+            metrics={"cumulative_pnl": 0.0, "total_entries": 2,
+                     "total_credit_collected": 200.0, "total_stops": 0,
+                     "double_stops": 0, "daily_returns": [_dr("2026-10-13", 0.0)]},
+        )
+        with caplog.at_level(logging.WARNING):
+            s._reconcile_cumulative_metrics_from_db("2026-10-13")
+        assert "RECORDING-GAP" not in caplog.text
+
+    def test_silent_for_a_variant_that_records_elsewhere(self, tmp_path, caplog):
+        """D/E/H hold ZERO trade_entries rows. Without the gate they would warn
+        at EVERY settlement, which is how a real warning gets ignored."""
+        import logging
+        s = _strategy(
+            tmp_path,
+            daily_rows=[{"date": "2026-10-13", "gross_pnl": 0.0, "net_pnl": 0.0,
+                         "commission": 0, "entries_placed": 1}],
+            entry_rows=[],                       # different recorder
+            metrics={"cumulative_pnl": 0.0, "total_entries": 16,
+                     "total_credit_collected": 0.0, "total_stops": 0,
+                     "double_stops": 0, "daily_returns": [_dr("2026-10-13", 0.0)]},
+        )
+        with caplog.at_level(logging.WARNING):
+            s._reconcile_cumulative_metrics_from_db("2026-10-13")
+        assert "RECORDING-GAP" not in caplog.text
+
+    def test_a_historical_gap_on_another_day_does_not_warn_today(self, tmp_path, caplog):
+        """TODAY only. An era-wide check would warn every settlement forever
+        over A's Saxo-era days, which nobody can ever clear."""
+        import logging
+        s = _strategy(
+            tmp_path,
+            daily_rows=[{"date": "2026-03-20", "gross_pnl": 0.0, "net_pnl": 0.0,
+                         "commission": 0, "entries_placed": 5},
+                        {"date": "2026-10-13", "gross_pnl": 0.0, "net_pnl": 0.0,
+                         "commission": 0, "entries_placed": 1}],
+            entry_rows=[_entry("2026-03-20", 1), _entry("2026-03-20", 2),
+                        _entry("2026-03-20", 3), _entry("2026-10-13", 1)],
+            metrics={"cumulative_pnl": 0.0, "total_entries": 4,
+                     "total_credit_collected": 400.0, "total_stops": 0,
+                     "double_stops": 0, "daily_returns": [_dr("2026-10-13", 0.0)]},
+        )
+        with caplog.at_level(logging.WARNING):
+            s._reconcile_cumulative_metrics_from_db("2026-10-13")
+        assert "RECORDING-GAP" not in caplog.text, (
+            "fired on a historical gap — this must check TODAY only")

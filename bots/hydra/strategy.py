@@ -7610,6 +7610,16 @@ class HydraStrategy(MEICStrategy):
                 db_entries = int(db_entries or 0)
                 db_credit = round(float(db_credit or 0.0), 2)
                 entries_readable = True
+                # SAME-DAY RECORDING GAP (2026-10-13). TODAY only — deliberately
+                # not the whole era, so this is silent unless a row actually went
+                # missing today. An era-wide version would WARN every settlement
+                # forever over historical gaps, and a per-settlement warning
+                # nobody can clear is how logs get ignored.
+                _gap = con.execute(
+                    "SELECT COALESCE((SELECT entries_placed FROM daily_summaries "
+                    "WHERE date = ?), 0), (SELECT COUNT(*) FROM trade_entries "
+                    "WHERE date = ?)", (date_str, date_str)).fetchone()
+                today_placed, today_rows = int(_gap[0] or 0), int(_gap[1] or 0)
             except Exception as _entry_exc:
                 logger.warning(
                     "METRICS-RECONCILE %s: trade_entries unreadable (%s: %s) — "
@@ -7617,6 +7627,7 @@ class HydraStrategy(MEICStrategy):
                     "cumulative_pnl and stop-counter heals still ran.",
                     date_str, type(_entry_exc).__name__, _entry_exc)
                 db_entries, db_credit, entries_readable = 0, 0.0, False
+                today_placed, today_rows = 0, 0
             con.close()
             if not db:
                 return
@@ -7687,6 +7698,27 @@ class HydraStrategy(MEICStrategy):
                 if entries_healable:
                     cm["total_entries"] = db_entries
                     cm["total_credit_collected"] = db_credit
+
+            # RECORDING GAP: today's summary counted more entries than
+            # trade_entries actually holds, i.e. an entry happened and its row
+            # did not get written. Worth its own line because the counters can
+            # no longer reveal it: before 2026-10-13 a metrics-vs-DB divergence
+            # was a weak hint a row had been lost, and making total_entries
+            # DB-authoritative removed that hint by construction.
+            #
+            # Found three historical instances by ad-hoc query, none live: A on
+            # 2026-03-20 (5 vs 3) and 2026-04-09 (3 vs 2), both Saxo-era; F on
+            # 2026-09-14 (1 vs 0), before its accounting fix; and B on
+            # 2026-06-05 (4 vs 0), where EVERY other table is also empty for
+            # that day including market_ticks — a HOMER-backfilled day, not a
+            # lost entry. Every variant's measured (post-epoch) era is clean, so
+            # this is defence in depth, not a fix for an active bug.
+            #
+            # Gated on `db_entries > 0`: D/E/H record entries in their own
+            # databases and hold no trade_entries rows at all, so without this
+            # they would warn every single settlement. Cost of the gate: a gap
+            # on a variant's very FIRST entry day is invisible, because that
+            # case is indistinguishable from "different recorder".
                 # win/loss over the reconciled per-day rows (trading days only)
                 if epoch:
                     # Keep win/loss on the SAME era as cumulative_pnl. Counting
@@ -7697,6 +7729,19 @@ class HydraStrategy(MEICStrategy):
                 cm["winning_days"] = sum(1 for r in dr if float(r.get("net_pnl", 0)) >= 0)
                 cm["losing_days"] = sum(1 for r in dr if float(r.get("net_pnl", 0)) < 0)
                 self._save_cumulative_metrics(trading_date=date_str)
+
+            # Outside the heal branch ON PURPOSE: a recording gap can exist on a
+            # day whose metrics agree with the DB perfectly, so gating this on
+            # "a heal happened" would miss exactly the quiet cases it is for.
+            if entries_readable and db_entries > 0 and today_placed > today_rows:
+                logger.warning(
+                    "RECORDING-GAP %s: daily_summaries says %d entr(ies) placed "
+                    "today but trade_entries holds %d row(s) for the date — an "
+                    "entry is missing from the per-trade record. P&L totals are "
+                    "unaffected (they come from daily_summaries), but per-entry "
+                    "analysis, slot attribution and total_credit_collected all "
+                    "undercount by the missing row(s).",
+                    date_str, today_placed, today_rows)
         except Exception as e:
             # WAS logger.debug until 2026-09-30. The bot runs at INFO, so a
             # self-heal that threw would be completely silent.
