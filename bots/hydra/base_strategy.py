@@ -1420,6 +1420,21 @@ class MEICStrategy(abc.ABC):
         # Orphaned order tracking (ORDER-008)
         self._orphaned_orders: List[str] = []
 
+        # ORDER-DBL ambiguous placement (2026-10-13). Set when a leg placement
+        # could not be confirmed (transport failure after the POST), so the
+        # ENTRY-level retry must not re-place that leg under a fresh cOID.
+        #
+        # WHY A SEPARATE FIELD AND NOT `_orphaned_orders`: that list is keyed on
+        # `order_id` and its only writer is `_add_orphaned_order`, documented as
+        # "cancel failed". A transport-failure orphan has NO order_id — the
+        # response never arrived, only the cOID exists — so the one case where
+        # an order is most likely to be silently live was the one case ORDER-008
+        # could not represent. Live-seat `bl` 2026-10-12: entry #7's long call
+        # transport-failed, ORDER-DBL correctly refused the LEG retry, then
+        # `Entry #7 retry 2/3` re-placed the whole entry and POS-003 found the
+        # broker at 14 against our tracked 7.
+        self._ambiguous_placement: Optional[Dict[str, Any]] = None
+
         # Order slippage settings (from config or defaults)
         self._max_absolute_slippage = self.strategy_config.get("max_absolute_slippage", MAX_ABSOLUTE_SLIPPAGE)
         self._order_timeout = self.strategy_config.get("order_timeout_seconds", ORDER_TIMEOUT_SECONDS)
@@ -3448,6 +3463,16 @@ class MEICStrategy(abc.ABC):
                     open_price_per_share=(
                         weighted_fill_sum / filled_so_far if filled_so_far else None),
                 )
+                # ORDER-DBL-RETRY (2026-10-13): "left for reconciliation" had no
+                # reconciler. Aborting the LEG is not enough — the ENTRY retry
+                # loop re-runs the whole entry (new cOIDs) about a minute later,
+                # which is how `bl` ended 2026-10-12 with 14 long calls against
+                # 7 tracked. Record the ambiguity so that loop stops, and make a
+                # best-effort attempt to kill the order we no longer want.
+                self._note_ambiguous_placement(
+                    coid=attempt_coid, conid=conid, side=side,
+                    quantity=remaining, leg_description=leg_description,
+                )
                 return None
 
             # Authoritative per-rung fill count + a HARD safety gate: we only
@@ -3717,6 +3742,89 @@ class MEICStrategy(abc.ABC):
                 except (TypeError, ValueError):
                     continue
         return None
+
+    # cOID spellings IBKR uses across endpoints/versions. Mirrors
+    # IBClient._find_order_by_coid, which cannot be called in broker mode
+    # (it is private, so not in broker_service.ALLOWED_METHODS) — but
+    # `get_open_orders` IS allowlisted, so the same match runs strategy-side
+    # with no shared/ change and therefore no broker restart.
+    _COID_KEYS = ("cOID", "coid", "order_ref", "orderRef")
+
+    def _note_ambiguous_placement(self, *, coid: str, conid, side: str,
+                                  quantity: int, leg_description: str) -> None:
+        """ORDER-DBL-RETRY: record that a leg placement may be live, and try to
+        kill it.
+
+        Called only from the ORDER-DBL abort. Two jobs, in order of importance:
+
+        1. **Set the flag.** This is the part that must not depend on any
+           network call succeeding. The entry retry loop reads it and refuses
+           to re-place, which is what actually prevents the duplicate.
+        2. **Best-effort cancel.** We aborted this leg, so a working order for
+           it is unwanted. If the cOID resolves to a live order we cancel it;
+           if the cancel fails we hand it to ORDER-008 (`_add_orphaned_order`),
+           which alerts HIGH and blocks further entries.
+
+        Finding nothing is NOT proof of absence — the lookup may have failed, or
+        IBKR may not surface the order yet (position/order reads lag a fill by
+        ~20s on this account). So the flag is set either way and we say which
+        case we are in, rather than logging a reassuring "no order found".
+        """
+        self._ambiguous_placement = {
+            "coid": coid, "conid": conid, "side": side,
+            "quantity": quantity, "leg": leg_description,
+            "noted_at": get_us_market_time().isoformat(),
+            "resolved": None,
+        }
+        try:
+            orders = self._get_open_orders()
+        except Exception as exc:          # defensive: the wrapper already eats
+            logger.warning(                # its own errors, but never raise here
+                "  ORDER-DBL-RETRY: open-order lookup raised (%s: %s) — cannot "
+                "confirm whether %s is working; entry retries are blocked "
+                "regardless.", type(exc).__name__, exc, coid)
+            return
+
+        match = None
+        for o in orders or []:
+            if not isinstance(o, dict):
+                continue
+            if any(str(o.get(k) or "") == coid for k in self._COID_KEYS):
+                match = o
+                break
+
+        if match is None:
+            logger.warning(
+                "  ORDER-DBL-RETRY: cOID %s not found among %d live order(s). "
+                "This is NOT proof it never landed (the lookup can fail and "
+                "IBKR order/position reads lag ~20s) — entry retries stay "
+                "blocked, and POS-003 remains the net that would catch a fill.",
+                coid, len(orders or []))
+            self._ambiguous_placement["resolved"] = "not_found"
+            return
+
+        order_id = (match.get("orderId") or match.get("order_id")
+                    or match.get("OrderId") or match.get("id"))
+        if not order_id:
+            logger.critical(
+                "  ORDER-DBL-RETRY: cOID %s IS working at the broker but the "
+                "row carries no order id (%s) — cannot cancel it here.",
+                coid, sorted(match.keys())[:12])
+            self._ambiguous_placement["resolved"] = "live_no_order_id"
+            return
+
+        logger.critical(
+            "  ORDER-DBL-RETRY: cOID %s IS live at the broker as order %s — "
+            "cancelling the order we abandoned.", coid, order_id)
+        if self._cancel_order(order_id):
+            logger.critical(
+                "  ORDER-DBL-RETRY: cancelled abandoned order %s.", order_id)
+            self._ambiguous_placement["resolved"] = f"cancelled:{order_id}"
+        else:
+            # Cancel failed — this is exactly ORDER-008's contract, and now we
+            # finally have the order_id it needs.
+            self._add_orphaned_order(str(order_id))
+            self._ambiguous_placement["resolved"] = f"orphaned:{order_id}"
 
     def _add_orphaned_order(self, order_id: str):
         """

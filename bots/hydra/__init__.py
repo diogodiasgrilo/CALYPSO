@@ -36,6 +36,60 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-13 ORDER-DBL STOPPED THE LEG RETRY; THE ENTRY RETRY WALKED AROUND IT.
+  Live seat `bl`, 2026-10-12, entry #7: the long-call placement hit a TRANSPORT
+  FAILURE ("order may be LIVE but unconfirmed"), `ORDER-DBL` correctly refused
+  to re-place that LEG under a new cOID (exactly one cOID was ever used), and
+  then `Entry #7 retry 2/3` re-ran the whole entry under fresh cOIDs about a
+  minute later. POS-003 reported "conid 926793533: expected 7, broker shows 14"
+  and raised a HIGH alert, which nothing followed up.
+  ROOT CAUSE: the guard's own message says "reconcile the possibly-open order",
+  and no reconciler existed for it. ORDER-008 (`_orphaned_orders`) is the right
+  machinery and even BLOCKS trading, but its only writer,
+  `_add_orphaned_order`, is keyed on `order_id` and documented "cancel failed".
+  A transport-failure orphan has NO order_id -- the response never arrived, only
+  the cOID exists -- so the one case where an order is most likely to be
+  silently live was the one case ORDER-008 could not represent. The pre-entry
+  ORDER-008 gate ("Entry #N blocked by orphaned orders") would have stopped the
+  retry, but it runs ONCE per slot, BEFORE the retry loop.
+  That instance was benign -- the doubled leg was the protective LONG call on a
+  0DTE that cash-settled, and POS-003 did detect it. Three of those four
+  mitigations are luck about which leg transport-failed: the same path on a
+  SHORT leg leaves an untracked naked short with no stop on it, the shape
+  reached by a different route on 2026-10-08.
+  FIX, reusing existing machinery: (1) `_note_ambiguous_placement()` sets
+  `_ambiguous_placement` UNCONDITIONALLY -- it must not depend on the broker
+  answering, since a broker that just failed is what creates the case -- then
+  best-effort resolves the cOID against `get_open_orders` (all four IBKR
+  spellings: cOID/coid/order_ref/orderRef) and CANCELS the order we abandoned;
+  if that cancel fails it calls `_add_orphaned_order(order_id)`, the hand-off
+  that was impossible before, because resolving the cOID is what finally
+  supplies an order_id. (2) The entry retry loop refuses to retry while the flag
+  is set, checked BEFORE the retry is announced. Losing the slot is the
+  deliberate price: a missed entry costs its expected credit, a duplicate costs
+  an unmonitored position. (3) The flag is cleared per-entry, NOT sticky -- a
+  persistent flag would let one transport blip silently end the trading day,
+  which is a new failure mode rather than a fix.
+  `get_open_orders` was already allowlisted on the broker RPC and already
+  wrapped as `strategy._get_open_orders()`, so NO shared/ change and NO broker
+  restart. `IBClient._find_order_by_coid` could not be called directly (private,
+  therefore not allowlisted), hence the key list is mirrored strategy-side.
+  ALSO: POS-003 now dumps the RAW broker rows for any mismatched conid
+  (`POS-003-RAW`). `_actual_position_quantities` SUMS rows per conid on the
+  stated assumption that "IBKR already returns one row per conid"; if that is
+  ever false, a duplicate row is indistinguishable from a doubled position in
+  the aggregate alone. That ambiguity could not be resolved after the fact for
+  10-12 -- IBKR's realized for the conid was +$6.51, EXACTLY seven contracts'
+  round-trip (7 x $0.0093 x 100), against a position read of fourteen, and
+  `/iserver/account/trades` returns zero rows on this paper account. One row of
+  14 means the position was real; two rows of 7 mean we double-counted. The
+  "+4 against an expected +8" readings fit neither story and remain unexplained
+  -- do not build on a model that cannot reproduce them. TRANSPORT FAILURE has
+  occurred once fleet-wide, so this is rare, not routine. Pinned by
+  tests/test_order_dbl_entry_retry_2026_10_13.py (20 tests; both halves
+  verified by negative control -- 8 behavioural failures with the cancel/orphan
+  logic gutted, 3 with the retry guard removed).
+
 - 2026-10-13 THE EPOCH ARCHIVE ZEROES SEVEN COUNTERS; THE SELF-HEAL RESTORED
   FIVE. Found while checking why the new live seat `bl` reported
   `total_entries: 0` against a DB holding a real entry worth $125.

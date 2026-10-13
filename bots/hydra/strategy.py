@@ -8012,11 +8012,57 @@ class HydraStrategy(MEICStrategy):
         self._entry_in_progress = True
         self.state = MEICState.ENTRY_IN_PROGRESS
 
+        # ORDER-DBL-RETRY: scope the ambiguity to THIS entry's retries.
+        #
+        # Deliberately cleared here rather than left sticky. A later slot uses
+        # different strikes, so re-placing there is not a duplicate of this
+        # orphan — and a flag that persisted would let one transport blip
+        # silently end the trading day, which is a new failure mode rather than
+        # a fix. The cross-slot risk is already covered: the order is cancelled
+        # if it resolves, handed to ORDER-008 (which blocks entries) if the
+        # cancel fails, and POS-003 catches it if it fills anyway.
+        self._ambiguous_placement = None
+
         # Entry retry loop
         last_error = None
         for attempt in range(ENTRY_MAX_RETRIES):
             try:
                 if attempt > 0:
+                    # ORDER-DBL-RETRY (2026-10-13). Checked BEFORE the retry is
+                    # announced, because a retry after an unconfirmed placement
+                    # is the duplicate. On 2026-10-12 the live seat's entry #7
+                    # long call transport-failed; ORDER-DBL correctly refused
+                    # the LEG retry, this loop re-placed the whole entry under
+                    # fresh cOIDs, and POS-003 found the broker at 14 against
+                    # our tracked 7 — an untracked position with no stop on it.
+                    # Benign that time (a long wing on a 0DTE that cash-settled)
+                    # but the same path on a SHORT leg is an untracked naked
+                    # short, which is the one shape this bot must never hold.
+                    #
+                    # The pre-entry ORDER-008 gate (~60 lines above) cannot
+                    # cover this: it runs ONCE per slot, before this loop.
+                    #
+                    # Losing the slot is the deliberate price. A missed entry
+                    # costs its expected credit; a duplicate costs an unbounded,
+                    # unmonitored position.
+                    amb = getattr(self, "_ambiguous_placement", None)
+                    if amb:
+                        logger.critical(
+                            f"Entry #{entry_num}: NOT retrying — a prior leg "
+                            f"placement could not be confirmed "
+                            f"(coid={amb.get('coid')}, leg={amb.get('leg')}, "
+                            f"resolution={amb.get('resolved')}). Retrying would "
+                            f"re-place a possibly-live order under a new cOID."
+                        )
+                        self._log_safety_event(
+                            "ORDER_DBL_RETRY_BLOCKED",
+                            f"Entry #{entry_num}: retry blocked after an "
+                            f"unconfirmed placement (coid={amb.get('coid')}, "
+                            f"resolution={amb.get('resolved')})",
+                        )
+                        last_error = "unconfirmed placement — entry abandoned"
+                        break
+
                     logger.info(f"Entry #{entry_num} retry {attempt + 1}/{ENTRY_MAX_RETRIES}")
                     time.sleep(ENTRY_RETRY_DELAY_SECONDS)
 
@@ -14278,6 +14324,38 @@ class HydraStrategy(MEICStrategy):
                     logger.warning(
                         f"  conid {conid}: expected {exp_qty}, broker shows {act_qty}"
                     )
+                    # RAW ROWS (2026-10-13). `_actual_position_quantities` SUMS
+                    # signed quantities per conid on the stated assumption that
+                    # "IBKR already returns one row per conid". If that is ever
+                    # false, a duplicate row reads as a doubled position and
+                    # this alert is a false alarm — and the aggregate number
+                    # alone cannot tell the two apart.
+                    #
+                    # That ambiguity blocked a real investigation: on 2026-10-12
+                    # the live seat logged "expected 7, broker shows 14" after a
+                    # transport-failure orphan, and it could not be settled
+                    # afterwards, because IBKR's own realized figure for that
+                    # conid (+$6.51) matched SEVEN contracts' round-trip while
+                    # the position read said fourteen. One row of 14 means the
+                    # position was real; two rows of 7 mean we double-counted.
+                    # `/iserver/account/trades` returns zero rows on this paper
+                    # account, so the raw rows are the only evidence available
+                    # and they exist only at this moment.
+                    try:
+                        raw = [p for p in actual_positions
+                               if p.get("instrument_id") == conid]
+                        logger.warning(
+                            "    POS-003-RAW conid %s: %d row(s) from the broker "
+                            "-> %s", conid, len(raw),
+                            [{"quantity": p.get("quantity"),
+                              "side": p.get("side"),
+                              "right": p.get("right"),
+                              "strike": p.get("strike"),
+                              "raw": p.get("raw")} for p in raw])
+                    except Exception as _raw_exc:
+                        logger.warning(
+                            "    POS-003-RAW conid %s: could not dump rows "
+                            "(%s: %s)", conid, type(_raw_exc).__name__, _raw_exc)
                 self.alert_service.send_alert(
                     alert_type=AlertType.CRITICAL_INTERVENTION,
                     title="Position Mismatch Detected",
