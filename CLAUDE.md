@@ -821,7 +821,10 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 
 ### Backtesting Database (`data/backtesting.db`)
 
-SQLite populated live by HYDRA's `DataRecorder` + backfilled by HOMER. Current schema: **v8** (added `contracts` per-row + `contracts_per_entry` on daily_summaries, 2026-04-21).
+SQLite populated live by HYDRA's `DataRecorder` + backfilled by HOMER. Current schema: **v20** (read from `schema_info` on the live VM, 2026-10-14 — every variant is on v20).
+
+> ⚠️ **This said v8 until 2026-10-14**, twelve versions stale, with a date (2026-04-21) that made it look current. Read the version from the database, not from here:
+> `SELECT value FROM schema_info WHERE key='version';` — note the table is a **key/value** pair, so `SELECT version FROM schema_info` fails (a mistake made twice while writing this).
 
 | Table | Content | Rows/day |
 |-------|---------|----------|
