@@ -15070,8 +15070,67 @@ class HydraStrategy(MEICStrategy):
             price, _avail = self._read_index_price(self.underlying_symbol)
         except Exception as exc:  # pragma: no cover - defensive
             logger.warning(f"  Settlement SPX live read failed ({exc}); trying fallback")
+
+        # CORROBORATION GUARD (2026-10-15). The docstring above says freshness is
+        # ignored on purpose, because a 'Z' (Frozen) flag just after 16:00 IS the
+        # settlement reference. That reasoning holds for a read taken minutes
+        # after the close. It does NOT hold hours later: 0DTE settlement can
+        # complete at 21:45+, and by then IBKR's frozen value may have rolled to
+        # a DIFFERENT SESSION entirely.
+        #
+        # Live seat `bl`, 2026-10-14: this returned **7805.45** at 21:45 when the
+        # day's real close was **7720.97** (7805.45 sits beside 10-13's 7804.40 —
+        # a day-stale value). Four call sides with shorts at 7745/7765/7770/7780
+        # were 25-75pt OTM and expired worthless; each was booked as a ~$3,400
+        # ITM loss instead. The day booked **-$12,710.40** against IBKR's own
+        # independent realized figure of **-$1,324.87**, and a true outcome of
+        # roughly +$1,500. Nothing suppressed it, because turning the freshness
+        # gate off is the documented intent.
+        #
+        # ⚠️ This bug fires on GOOD days: the ITM check only matters when
+        # positions reach expiry, which is the outcome a credit strategy wants.
+        # A stale HIGH price converts a maximum-credit day into a near-maximum
+        # loss in the record.
+        #
+        # So the live read is kept but must now be CORROBORATED against the
+        # day's last recorded intraday tick, exactly as `_resolve_spx_close`
+        # already does for the daily summary (its 1% threshold is measured: a
+        # legitimate settlement price sits within ~0.05% of the recorded close,
+        # and the 10-14 divergence was 1.094%). On disagreement the recorded
+        # close wins — it is on disk, it cannot roll to another session, and it
+        # survives a mid-evening restart.
+        disk_close = 0.0
+        rec = getattr(self, "_data_recorder", None)
+        if rec is not None:
+            try:
+                _today = get_us_market_time().strftime("%Y-%m-%d")
+                _last = rec.get_last_spx_for_date(_today)
+                if _last and float(_last) > 0:
+                    disk_close = float(_last)
+            except Exception:
+                pass
+
         if price is not None and price > 0:
+            if disk_close > 0 and abs(float(price) - disk_close) / disk_close > 0.01:
+                logger.warning(
+                    "  SETTLEMENT-SPX GUARD: live read $%.2f diverges %.2f%% from "
+                    "the recorded intraday close $%.2f — using the RECORDED close. "
+                    "An after-hours frozen quote can belong to a prior session "
+                    "(2026-10-14 variant bl: $7805.45 vs a real $7720.97 close "
+                    "booked a phantom -$12,710 on a day that expired worthless).",
+                    float(price), abs(float(price) - disk_close) / disk_close * 100,
+                    disk_close,
+                )
+                return disk_close
             return float(price)
+
+        # No live read: the recorded close is strictly better than current_price,
+        # which the fallback below uses and which can itself be stale by days.
+        if disk_close > 0:
+            logger.info(
+                "  Settlement SPX live read unavailable; using the recorded "
+                "intraday close $%.2f.", disk_close)
+            return disk_close
         # IBKR-audit #5b (2026-06-17): the live read FAILS on a fresh post-close
         # restart (snapshot not warmed up). Fall back to the last-known SPX
         # (persisted as last_spx_price, restored into self.spx_price on recovery)
