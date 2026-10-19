@@ -46,7 +46,7 @@ from bots.hydra.leg import LEG_NAMES
 from bots.hydra.calendar_entry import CalendarEntry, DCPhase  # noqa: F401
 from bots.hydra.strategy import HydraStrategy
 from shared.alert_service import AlertPriority, AlertType
-from shared.market_hours import get_us_market_time
+from shared.market_hours import get_market_close_time, get_us_market_time
 from shared import swallow_counter as _swallow
 
 logger = logging.getLogger(__name__)
@@ -1181,34 +1181,118 @@ class CalendarStrategyBase(HydraStrategy):
     def _clamp(x: float, lo: float, hi: float) -> float:
         return max(lo, min(x, hi))
 
-    def _dc_settlement_spx(self) -> Optional[float]:
-        """SPX level to settle against — HYDRA's close-resolution: current_price,
-        or the day's last recorded SPX tick after-hours (via _resolve_spx_close),
-        so a LATE settlement doesn't mark against a current_price that has decayed
-        to 0 post-close. None if genuinely unreadable (defer settlement). NOTE: this
-        is the recorded close, NOT the official SPXW SOQ/PM-settlement print (not
-        on this feed) — a documented dry-run fidelity limitation."""
+    def _dc_settlement_spx(self, expiry: Optional[str] = None) -> Optional[float]:
+        """SPX level to settle against, for the EXPIRY DATE specifically.
+
+        `expiry` (2026-10-19): settle against that date's own recorded close
+        rather than whatever "today" resolves to. On the normal path they agree
+        — we only settle once that session has closed — but they diverge on the
+        recovery path: if the bot was down across the expiry session and wakes a
+        day or more later, `_resolve_spx_close()` returns the WRONG day's close.
+        The expiry day's ticks are on disk, so the right reference survives both
+        a late settlement and a restart.
+
+        Falls back to the previous behaviour when `expiry` is not supplied or
+        that date has no recorded ticks, so nothing regresses: current_price, or
+        the day's last recorded tick after-hours via `_resolve_spx_close`, so a
+        LATE settlement doesn't mark against a current_price decayed to 0.
+        None if genuinely unreadable (defer settlement rather than guess).
+
+        NOTE: this is the recorded close, NOT the official SPXW SOQ/PM
+        settlement print (not on this feed) — a documented dry-run fidelity
+        limitation.
+        """
+        if expiry:
+            rec = getattr(self, "_data_recorder", None)
+            if rec is not None:
+                try:
+                    px = rec.get_last_spx_for_date(expiry)
+                    if px and float(px) > 0:
+                        return float(px)
+                except Exception:
+                    pass
         try:
             px = self._resolve_spx_close()
         except Exception:
             px = getattr(self, "current_price", 0) or 0
         return px if px and px > 0 else None
 
+    @staticmethod
+    def _dc_expiry_session_closed(expiry: str, today: str, now=None) -> bool:
+        """Has the expiry date's REGULAR SESSION actually ended?
+
+        THE BUG THIS FIXES (found 2026-10-19). The condition was
+        ``short_expiry <= today``, which becomes true at **00:00 on the expiry
+        date** — so a calendar settled the instant the calendar date rolled
+        over, SIXTEEN HOURS before its short leg expired, and necessarily
+        against the only price available at midnight: the PREVIOUS day's close.
+
+        Variant D's entry of 2026-10-07 (short_expiry 2026-10-16) settled at
+        00:00:48 on 10-16 against SPX **7743.37** while 10-16 went on to close
+        at **7659.96** — an 83.41pt error, and the expiry session it was
+        settling was never observed at all. Measured across D's history: 3 of 35
+        outcomes reached expiry, and all three settled a day early at errors of
+        +16.65, −66.52 and +83.41 points, carrying $1,271.15 of realized P&L.
+        (E has never had one — all 6 of its outcomes closed early.)
+
+        ⚠️ ``not is_market_open()`` is NOT a usable test here: it is also true
+        at 00:00, which is exactly the moment being excluded. ``is_after_hours``
+        is no good either — it is a narrow 16:00–17:00 window, while 0DTE/
+        calendar settlement routinely runs at 21:45+. The question is
+        specifically "has the expiry date's close passed", so compare against
+        ``get_market_close_time``, which also handles early-close days.
+
+        ⚠️ ``today`` is a REQUIRED parameter, not derived from the clock. The
+        first version of this method derived it internally and so ignored the
+        ``today`` its caller had been passed — silently making
+        ``_dc_settle_due(today)`` disregard its own argument. An existing test
+        caught it by watching a deliberately-future expiry become due. The
+        caller owns the notion of "today"; this method only answers the question
+        for it, which also keeps it deterministic under test.
+        """
+        now = now or get_us_market_time()
+        if expiry < today:
+            return True          # a whole session (or more) has elapsed
+        if expiry > today:
+            return False         # future expiry
+        return now.time() >= get_market_close_time(now)
+
     def _dc_settle_due(self, today: str) -> bool:
-        """Settle every open position whose SHORT expiry has arrived (ISO compare).
-        Returns True if anything settled."""
+        """Settle every open position whose SHORT expiry SESSION HAS CLOSED.
+
+        `today` is kept in the signature (callers pass it) but the per-entry
+        decision now goes through `_dc_expiry_session_closed`, because an ISO
+        date compare cannot express "after the close" — see that method.
+        """
         due = [
             e for e in self.daily_state.entries
-            if self._dc_entry_is_open(e) and (e.short_expiry or "") and e.short_expiry <= today
+            if self._dc_entry_is_open(e) and (e.short_expiry or "")
+            and self._dc_expiry_session_closed(e.short_expiry, today)
         ]
         if not due:
             return False
-        spx = self._dc_settlement_spx()
-        if spx is None:
-            logger.warning("[CAL-SETTLE] %d position(s) due but SPX unreadable — deferring", len(due))
-            return False
+        settled = 0
         for e in due:
+            # Settle against the EXPIRY DAY's close, not "today's". They are the
+            # same thing on the normal path (we are now past that day's close),
+            # but they diverge on the recovery path: if the bot was down over
+            # the expiry session and wakes a day later, `_resolve_spx_close()`
+            # would hand back the WRONG day's close. The expiry day's recorded
+            # ticks are on disk and are the right reference either way.
+            spx = self._dc_settlement_spx(e.short_expiry)
+            if spx is None:
+                logger.warning(
+                    "[CAL-SETTLE] E#%s due (expiry %s) but no SPX reference for that "
+                    "date — deferring rather than marking against a wrong price",
+                    getattr(e, "entry_number", "?"), e.short_expiry)
+                continue
             self._dc_settle_entry(e, spx)
+            settled += 1
+        # Report what ACTUALLY settled. The first version returned True
+        # unconditionally after the loop, so a call where every entry deferred
+        # on an unreadable price claimed success — an existing test caught it.
+        if not settled:
+            return False
         # Persist BOTH the base state file (realized P&L now in total_realized_pnl)
         # and the sidecar (settled calendars removed) — not just the sidecar.
         self._save_state_to_disk()
