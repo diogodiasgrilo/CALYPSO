@@ -597,6 +597,32 @@ overwrites the paper credentials the live seat is trading on. Procedure:
 
 **Live-seat swap (2026-07-24, historical):** the live paper seat moved from C → B (B: dry_run_shadow→live, 10c→7c, 4-slot→7-slot; C: live→dry_run_shadow, alerts/Sheets off). Dashboard canonical/WS/widget views, Telegram alert identity, and the agent suite (`services/agents_config.json`) all follow whichever variant is live via `dashboard/backend/services/variant_readers.live_seat_id()` / dynamic `is_live`/`is_primary` — no other surface should hardcode "C" as the live bot. Swap runbook: `docs/migration/RUNBOOKS.md` RB-9 (RB-8 is the historical A+C go-live, kept for reference only). To reverse: `scripts/flip_bc_rollback.sh`.
 
+> ⚠️ **D/E write a `daily_summaries` row at the 00:00 new-day reset, dated to the NEW day but
+> carrying the PREVIOUS day's close with NULL OHLC (found 2026-10-19).** At midnight
+> `get_last_spx_for_date(today)` finds no ticks, so `disk == 0`, so `_resolve_spx_close`'s guard
+> (`if disk > 0 and …`) **cannot fire** and it falls through to a stale `current_price`. Calendars
+> hit this because `CalendarStrategyBase` overrides `_had_trading_activity_today()` — a carried
+> position makes the activity gate trivially true, so a summary is written every held day,
+> including before any OHLC exists. Measured: **D 22 of 70 epoch rows, E 42 of 89**; 6 of D's carry
+> real P&L on the wrong date (−$618.70, 10% of its epoch total). Example: D's 2026-10-16 close
+> reads 7743.37 against a true 7660.94.
+>
+> ✅ **D's verdict is robust to it** — t = **−2.28** as recorded vs **−2.22** with the P&L re-dated
+> to the prior row. Same sign, same magnitude; the NO-GO does not rest on the defect, and the
+> TOTALS were never wrong, only per-day attribution, OHLC and market context. So do not quote D/E's
+> **per-day** series or any regime/day-type analysis of them without accounting for these rows
+> (`spx_open IS NULL AND spx_close IS NOT NULL` finds them).
+>
+> ⚠️ **Deliberately NOT fixed, and the obvious fix is worse than the bug:** making
+> `_resolve_spx_close` return 0 when today has no ticks would let the phantom-summary guard skip
+> the row — but `cumulative_pnl` is re-derived *from* `daily_summaries`, so that converts a
+> misdated P&L into one **lost from the record**. The correct fix re-attributes the midnight
+> settlement to the prior trading date, which is a calendar-lifecycle change needing its own audit.
+> Both variants are dry-run-locked NO-GO, so nothing is at risk while it stands.
+>
+> ℹ️ A/B/C/F/G also show 1–5 NULL-OHLC rows — those are **market holidays** (09-07, 07-03, 06-19,
+> 05-25, 04-03) with `net=0, placed=0`. Benign; don't chase them.
+
 D and E both subclass `bots/hydra/calendar_strategy_base.py` (`CalendarStrategyBase`); D is byte-identical to its pre-lift body after the extraction. Both are **fully simulated (NOT stubbed)** — the entire entry/monitor/settlement lifecycle runs in dry-run; only the real-order placement path + go-live gates are intentionally absent. They cannot place real orders until a deliberate operator flip (D's verdict is currently NO-GO — see the D go-live docs).
 
 > ⚠️ **B is NOT Brandon's strategy — audited 2026-09-28 against the actual video transcript**
