@@ -66,7 +66,7 @@ import uuid
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, replace
 from datetime import date, datetime, timezone
-from typing import Iterable, Optional
+from typing import Dict, Iterable, Optional
 
 from ibind import IbkrClient, OrderRequest, QuestionType  # module-level so tests can patch cleanly
 
@@ -531,14 +531,32 @@ class _RateGate:
         self._waited = 0
         self._total_wait_s = 0.0
         self._max_wait_s = 0.0
+        # PER-LABEL BREAKDOWN (2026-10-19). The four counters above measure how
+        # hard the gate is squeezing but say NOTHING about what is squeezing it,
+        # and that gap made demand reduction guesswork. Measured 2026-10-19:
+        # 91.8% of acquisitions waited, 615ms mean — while the quote cache
+        # accounted for only ~92k of 558k acquisitions (16%). The other 84% was
+        # simply unattributed, and the one previous attempt to reduce demand
+        # (the 2026-10-06 pacing change) did not reduce it, which is exactly
+        # what acting on an unmeasured hypothesis looks like.
+        #
+        # `family` and the ibind method name are both already in scope at the
+        # call site, so attribution costs one dict increment inside the lock
+        # that is already held. Bounded cardinality (family x method, ~40 keys).
+        self._by_label: Dict[str, int] = {}
+        self._wait_by_label: Dict[str, float] = {}
 
-    def acquire(self) -> None:
+    def acquire(self, label: Optional[str] = None) -> None:
         with self._lock:
             now = time.monotonic()
             slot = self._next_allowed if self._next_allowed > now else now
             self._next_allowed = slot + self._min_interval
             wait = slot - now
             self._acquisitions += 1
+            if label:
+                self._by_label[label] = self._by_label.get(label, 0) + 1
+                if wait > 0:
+                    self._wait_by_label[label] = self._wait_by_label.get(label, 0.0) + wait
             if wait > 0:
                 self._waited += 1
                 self._total_wait_s += wait
@@ -561,6 +579,18 @@ class _RateGate:
                 "total_wait_s": round(self._total_wait_s, 3),
                 "mean_wait_ms": round(1000.0 * self._total_wait_s / acq, 2) if acq else 0.0,
                 "max_wait_ms": round(1000.0 * self._max_wait_s, 2),
+                # Ordered by call COUNT, which is what demand reduction acts on.
+                # `wait_s` alongside it so a low-volume caller that happens to
+                # land in deep queues is still visible — the two can disagree,
+                # and acting on count alone would miss that.
+                "by_label": [
+                    {"label": k, "calls": v,
+                     "pct": round(100.0 * v / acq, 1) if acq else 0.0,
+                     "wait_s": round(self._wait_by_label.get(k, 0.0), 1)}
+                    for k, v in sorted(self._by_label.items(),
+                                       key=lambda kv: kv[1], reverse=True)[:15]
+                ],
+                "labels_tracked": len(self._by_label),
             }
 
 # Default answers for IBKR's order-reply prompts. Caller can override per-call.
@@ -1586,10 +1616,15 @@ class IBClient:
             # in the guard) because this is where the gate actually runs.
             boxed = bool(self._rate_penalty_until
                          and time.monotonic() < self._rate_penalty_until)
+            # Attribution label (2026-10-19): `family` plus the ibind method
+            # name, both already in scope. This is the only place that knows
+            # both, which is why the label is built here rather than passed
+            # down from every public method.
+            _label = f"{family}:{getattr(fn, '__name__', None) or type(fn).__name__}"
             if _risk_critical and boxed:
-                self._penalty_gate.acquire()
+                self._penalty_gate.acquire(_label)
             elif self._rate_gate is not None:
-                self._rate_gate.acquire()
+                self._rate_gate.acquire(_label)
             if _serialize:
                 with self._call_lock:
                     return fn(*args, **kwargs)
