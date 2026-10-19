@@ -316,6 +316,15 @@ class BrokerDispatcher:
                 base = {**base, "quote_cache": qc}
         except Exception:  # noqa: BLE001
             pass
+        # And the chart-bar cache (2026-10-19), for the same reason: it is the
+        # lever on `history:marketdata_history_by_conid`, which the per-label
+        # gate attribution measured at 16.7% of acquisitions.
+        try:
+            cc = getattr(self._ib, "chart_cache_stats", None)
+            if cc:
+                base = {**base, "chart_cache": cc}
+        except Exception:  # noqa: BLE001
+            pass
         check = getattr(self._ib, "check_auth_status", None)
         try:
             status = check() if callable(check) else None

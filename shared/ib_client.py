@@ -896,6 +896,20 @@ class IBClient:
         except (TypeError, ValueError):
             self._quote_cache_ttl = 0.0          # unparseable -> OFF, never guess
         self._quote_cache_stats = {"hits": 0, "misses": 0, "stored": 0, "dataless": 0}
+        # CHART CACHE (2026-10-19) — all nine strategies fetch the SAME SPX bars
+        # through this one broker for the SAME EMA. 30s default: shorter than
+        # the 1-minute bar it serves, so the newest bar is never more than one
+        # bar stale. Only non-trading-critical consumers read bars (informational
+        # EMA trend signal + the DISABLED MKT-031), unlike the quote cache which
+        # had to exclude option legs because the stop monitor reads them.
+        self._chart_cache: dict[tuple, tuple[float, list]] = {}
+        self._chart_cache_lock = threading.Lock()
+        try:
+            self._chart_cache_ttl = float(
+                os.environ.get("CALYPSO_BROKER_CHART_CACHE_S", "30.0") or "0")
+        except (TypeError, ValueError):
+            self._chart_cache_ttl = 0.0          # unparseable -> OFF, never guess
+        self._chart_cache_stats = {"hits": 0, "misses": 0, "stored": 0, "empty": 0}
         # Phase A.8 — retry + per-family circuit breakers. RetryPolicy
         # defaults: 6 attempts (initial + 5 retries), 1s base, 30s cap,
         # 0.5 jitter, retryable on HTTP 429/5xx + transient network errors.
@@ -1453,6 +1467,10 @@ class IBClient:
             # the call lock (its own lock, taken nowhere else while holding
             # _call_lock) so disconnect's critical section stays one block.
             self._quote_cache.clear()
+        with self._chart_cache_lock:
+            # Same reasoning for bars: data from a dead session must not survive
+            # it, and a reconnect may land on a different trading day.
+            self._chart_cache.clear()
         if unclean:
             logger.error(
                 "IBClient disconnect completed with %d unclean step(s); "
@@ -1744,6 +1762,22 @@ class IBClient:
         st["hit_pct"] = round(100.0 * st["hits"] / served, 1) if served else 0.0
         st["eligible_conids"] = len(getattr(self, "_underlying_conids", ()))
         st["entries"] = len(getattr(self, "_quote_cache", {}))
+        return st
+
+    @property
+    def chart_cache_stats(self) -> dict:
+        """Chart-bar cache counters, or {} when the cache is off.
+
+        Published on /health for the same reason as the quote cache: it lives
+        inside calypso-broker, so a strategy-side read is always empty.
+        """
+        if not getattr(self, "_chart_cache_ttl", 0.0):
+            return {}
+        st = dict(self._chart_cache_stats)
+        served = st["hits"] + st["misses"]
+        st["ttl_s"] = self._chart_cache_ttl
+        st["hit_pct"] = round(100.0 * st["hits"] / served, 1) if served else 0.0
+        st["entries"] = len(getattr(self, "_chart_cache", {}))
         return st
 
     @property
@@ -3465,6 +3499,39 @@ class IBClient:
         SaxoClient.get_chart_data() equivalent.
         """
         self._require_connected()
+
+        # SHORT-TTL CHART CACHE (2026-10-19). The per-label gate attribution
+        # added today measured `history:marketdata_history_by_conid` at **16.7%
+        # of acquisitions** — because all NINE strategy processes fetch the SAME
+        # SPX bars through this one broker to compute the SAME EMA20/EMA40.
+        # Nine identical requests for data that only changes once a minute.
+        #
+        # Safe to cache, and deliberately so rather than by luck — both
+        # consumers are non-trading-critical:
+        #   `_get_trend_signal()`                    the EMA trend signal, which
+        #       is INFORMATIONAL ONLY ("logged + stored, does NOT drive entry
+        #       type" — CLAUDE.md), and
+        #   `_refresh_chart_data_for_scouting()`     feeds MKT-031 Smart Entry
+        #       Windows, which is DISABLED.
+        # No stop, credit gate, strike selection or settlement path reads bars.
+        # Contrast the quote cache, which had to exclude option legs precisely
+        # because the stop monitor reads them.
+        #
+        # Keyed on the full request shape (symbol/bar/period/outside_rth) so a
+        # different window never serves a cached answer for another. Default TTL
+        # 30s: shorter than the 1-minute bar it serves, so the newest bar can
+        # never be more than one bar stale, while still collapsing nine
+        # per-heartbeat fetches into one.
+        _ck = (symbol, bar, period, bool(outside_rth))
+        _ttl = getattr(self, "_chart_cache_ttl", 0.0)
+        if _ttl > 0:
+            with self._chart_cache_lock:
+                _hit = self._chart_cache.get(_ck)
+                if _hit is not None and (time.time() - _hit[0]) < _ttl:
+                    self._chart_cache_stats["hits"] += 1
+                    return list(_hit[1])        # copy: callers must not mutate
+                self._chart_cache_stats["misses"] += 1
+
         # ibind's marketdata_history_by_symbol routes through
         # stock_conid_by_symbol(), which only resolves equities — index
         # symbols like 'SPX' / 'VIX' return no match. Resolve the conid
@@ -3482,9 +3549,21 @@ class IBClient:
             period=period,
             outside_rth=outside_rth,
         ) or {}
-        if isinstance(data, dict):
-            return data.get("data") or []
-        return data if isinstance(data, list) else []
+        bars = data.get("data") or [] if isinstance(data, dict) else (
+            data if isinstance(data, list) else [])
+        if _ttl > 0:
+            # NEVER cache an empty result — same reasoning as the quote cache's
+            # dataless guard. An empty bar list is what a transient history
+            # outage looks like, and storing it would amplify one miss across
+            # every strategy for the whole TTL instead of letting the next
+            # caller retry. `_read_recent_bars` already returns None on empty.
+            if bars:
+                with self._chart_cache_lock:
+                    self._chart_cache[_ck] = (time.time(), list(bars))
+                    self._chart_cache_stats["stored"] += 1
+            else:
+                self._chart_cache_stats["empty"] += 1
+        return bars
 
     # ─── Order placement (write methods) ──────────────────────────────────
 
