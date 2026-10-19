@@ -870,6 +870,16 @@ class IBClient:
         # Cleared on disconnect IN LOCKSTEP with _conid_cache so a cached conid
         # never outlives its priming.
         self._secdef_search_primed: set[tuple] = set()
+        # SNAPSHOT PRIMING (2026-10-19). ibind's snapshot "prime call" arms a
+        # conid's server-side snapshot cache and returns no data itself, so it
+        # is a PER-CONID, PER-SESSION need — but `_snapshot_poll` issued it
+        # unconditionally on every read. Measured with the market open: snapshot
+        # calls were 71% of 4,003 gate acquisitions at 978ms mean queue, and the
+        # warm-conid floor was 2 slots (prime + one data poll) where 1 suffices.
+        # Same shape, same guarantees and same escape hatch as
+        # `_secdef_search_primed` directly above; see
+        # docs/migration/SNAPSHOT_PRIMING_DESIGN_2026_10_19.md.
+        self._snapshot_primed: set[str] = set()
         # ── Underlying-quote cache (2026-10-08) ──────────────────────────────
         # 74.2% of ALL snapshot traffic was two conids: SPX (416904) and VIX
         # (13455763), re-fetched by eight strategies every heartbeat — VIX alone
@@ -1460,6 +1470,7 @@ class IBClient:
             self._connected = False
             self._conid_cache.clear()
             self._secdef_search_primed.clear()  # lockstep with _conid_cache
+            self._snapshot_primed.clear()       # server-side priming dies with the session
             self._underlying_conids.clear()     # lockstep: conid -> cacheability
             self._iserver_primed = False
         with self._quote_cache_lock:
@@ -2436,6 +2447,13 @@ class IBClient:
             self._ensure_iserver_primed(
                 _risk_critical=_risk_critical, force=True
             )
+            # The 01:00 ET reset wipes SERVER-side snapshot priming too, while
+            # OAuth stays authenticated (no disconnect → `_snapshot_primed` is
+            # NOT cleared). Without this, every conid would keep claiming primed
+            # against a reset session and the prime call would never be re-sent
+            # — the exact failure `_ensure_secdef_search_primed(force=True)`
+            # exists to heal for secdef. Obligation 2 of the design doc.
+            self._snapshot_primed.clear()
             return self._snapshot_poll(conids, fields, _risk_critical)
 
     def _snapshot_poll(self, conids: str, fields: list[str],
@@ -2447,22 +2465,47 @@ class IBClient:
         prime-call + warmup-poll mechanics and may raise the 'please query
         /accounts' 500 that triggers the self-heal.
         """
-        # Pre-flight 2: ibind's snapshot priming — first call arms the
-        # conid's snapshot cache, it returns no data itself.
-        self._ib_call(
-            "market", self._client.live_marketdata_snapshot,
-            conids=conids, fields=fields,
-            _risk_critical=_risk_critical,
-        )
-
         # Requested conids — `conids` is the comma-separated string the
-        # endpoint expects. Audit #19: for multi-conid batches we must NOT
+        # endpoint expects. Parsed BEFORE the prime call now, because the prime
+        # decision is per-conid (2026-10-19).
+        requested = {c.strip() for c in str(conids).split(",") if c.strip()}
+
+        # Pre-flight 2: ibind's snapshot priming — the first call for a conid
+        # arms its server-side snapshot cache and returns no data itself.
+        #
+        # ONCE PER CONID PER SESSION (2026-10-19), not once per read. This was
+        # unconditional, so every read of an already-warm conid paid an extra
+        # gate slot. Measured with the market open: snapshot calls were **71% of
+        # 4,003 acquisitions** at a 978ms mean queue, and the warm-conid floor
+        # was 2 slots (prime + one data poll) where 1 suffices. The monitoring
+        # loop re-reads the same legs every tick, so the warm case IS the common
+        # case. Same mechanism, guarantees and `force` escape hatch as
+        # `_secdef_search_primed`; see
+        # docs/migration/SNAPSHOT_PRIMING_DESIGN_2026_10_19.md.
+        #
+        # ⚠️ WHY THIS CANNOT RETURN A WRONG VALUE — the decisive property. If a
+        # conid is marked primed but IBKR's server-side cache has lapsed, the
+        # first data poll simply returns metadata-only and the warmup loop below
+        # keeps polling until the data arrives. The failure mode is ONE EXTRA
+        # POLL, self-corrected by machinery that already exists and is already
+        # counted (`snapshot_warmup_exhausted_count`). Contrast a data cache,
+        # which can hand back a stale PRICE — the reason option legs are
+        # excluded from the quote cache. This never serves old data; it only
+        # stops re-requesting fresh data.
+        _cold = requested - self._snapshot_primed if requested else requested
+        if _cold or not requested:
+            self._ib_call(
+                "market", self._client.live_marketdata_snapshot,
+                conids=conids, fields=fields,
+                _risk_critical=_risk_critical,
+            )
+
+        # Audit #19: for multi-conid batches we must NOT
         # stop the instant ANY one conid populates (the old `_snapshot_has_data`
         # exit), or the still-cold conids silently return all-None — and
         # nothing counts/alerts that partial warmup. Track per-conid
         # readiness and keep polling until EVERY requested conid is warm or
         # the budget is exhausted.
-        requested = {c.strip() for c in str(conids).split(",") if c.strip()}
 
         # Data call + warmup polling — return only when ALL requested conids
         # have data (or budget exhausted, handled below).
@@ -2474,6 +2517,12 @@ class IBClient:
                 _risk_critical=_risk_critical,
             )
             ready = _snapshot_ready_conids(data)
+            # A conid that has returned data IS armed server-side — record it so
+            # the next read skips the prime. Recorded per-conid rather than
+            # per-batch so a partially-warm batch still banks the conids that
+            # did warm, and a cold one is re-primed on its own next read.
+            if ready:
+                self._snapshot_primed |= {str(c) for c in ready}
             if requested:
                 if requested.issubset(ready):
                     return data
