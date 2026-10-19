@@ -1316,6 +1316,40 @@ class DataRecorder:
         except Exception:
             return None
 
+    def get_last_spx_before_date(self, date_str: str) -> Optional[float]:
+        """The most recent recorded SPX tick on any day BEFORE ``date_str``.
+
+        Added 2026-10-19 for the one case ``_resolve_spx_close``'s stale-price
+        guard structurally could not see. That guard compares the live price
+        against ``get_last_spx_for_date(today)`` and is written
+        ``if disk > 0 and …`` — so when TODAY has no recorded ticks at all
+        (pre-market, or the 00:00 new-day reset) ``disk`` is 0, the guard cannot
+        fire, and an in-memory ``current_price`` stale by days passes through
+        unchecked. Variant D, 2026-10-16: a calendar settled at 00:00:48 against
+        7743.37 while the real prior close was 7744.57 and the row was stamped
+        onto 10-16, whose actual close was 7660.94.
+
+        Deliberately reads ``market_ticks``, NOT ``daily_summaries``. The
+        existing ``get_yesterday_spx_close`` reads daily_summaries, which is the
+        table that CONTAINS the stale artifact rows — corroborating against it
+        would be circular. Raw ticks cannot be back-dated by a summary write.
+
+        Returns None when there is no prior tick at all (a genuinely fresh
+        database), so the caller keeps its existing behaviour rather than
+        inventing a reference.
+        """
+        try:
+            with self._connect() as conn:
+                row = conn.execute(
+                    """SELECT spx_price FROM market_ticks
+                    WHERE timestamp < ? AND spx_price > 0
+                    ORDER BY timestamp DESC LIMIT 1""",
+                    (date_str,)
+                ).fetchone()
+                return row[0] if row else None
+        except Exception:
+            return None
+
     def get_last_spx_for_date(self, date_str: str) -> Optional[float]:
         """The last recorded intraday SPX price for ``date_str`` (a robust proxy
         for the day's close).

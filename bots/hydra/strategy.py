@@ -6738,6 +6738,71 @@ class HydraStrategy(MEICStrategy):
         # px<=0: after-hours decay → use the on-disk close (2026-06-11 gap fix).
         if px <= 0:
             return disk or px
+        # NO TICKS TODAY (2026-10-19). The guard below is written
+        # `if disk > 0 and …`, so when TODAY has recorded no ticks at all it
+        # structurally cannot fire and an in-memory `current_price` passes
+        # through unchecked — however stale it is. A guard that needs a
+        # reference cannot protect the case where the reference does not exist
+        # yet, and this is that case.
+        #
+        # It is reachable whenever a summary/settlement runs before the first
+        # tick of a session: pre-market, or the 00:00 new-day reset. The
+        # calendar variants hit it routinely, because CalendarStrategyBase's
+        # activity gate is trivially true while a multi-day position is carried,
+        # so a summary is written at the reset. Variant D, 2026-10-16: a
+        # leftover calendar settled at 00:00:48 against `current_price` 7743.37,
+        # and the row was stamped onto 10-16 — a day that actually closed at
+        # 7660.94. Measured scope: 22 of D's 70 epoch rows, 42 of E's 89.
+        #
+        # Corroborate against the most recent PRIOR recorded tick instead. That
+        # is the authoritative value for a price struck before today opened, and
+        # unlike `current_price` it cannot be a days-old in-memory remnant.
+        #
+        # ⚠️ This fixes the price PROVENANCE only. The row is still DATED to the
+        # new day, and that is deliberate: `_book_daily_cumulative` is
+        # idempotent-by-date, so re-dating a settlement onto an already-booked
+        # prior day would make it early-return and DROP the P&L from
+        # cumulative_pnl (which the settlement self-heal re-derives from
+        # daily_summaries). Suppressing the row loses it the same way. Both
+        # "obvious" fixes are worse than the misdating. Find the affected rows
+        # with `spx_open IS NULL AND spx_close IS NOT NULL`.
+        if disk <= 0:
+            prior = 0.0
+            if rec is not None:
+                try:
+                    _p = rec.get_last_spx_before_date(
+                        get_us_market_time().strftime("%Y-%m-%d"))
+                    if _p and float(_p) > 0:
+                        prior = float(_p)
+                except Exception:
+                    pass
+            # SANITY BAND on the REFERENCE, not just on px. Acting whenever
+            # `prior > 0` meant any positive number could override a good price:
+            # tests/test_aud5_fixes.py mocks the recorder with a bare MagicMock,
+            # `float(MagicMock())` is 1.0, and this branch duly "corrected" a
+            # 7350.5 close to 1.0. Those two pre-existing tests caught it — the
+            # failure was a mock artefact, but the weakness it exposed was real.
+            #
+            # The target of this guard is a price stale by DAYS, which sits a few
+            # percent from a real prior close; SPX has never gapped 20% between
+            # sessions. So a divergence outside [1%, 20%] does not describe a
+            # stale price — it describes an untrustworthy REFERENCE — and the
+            # safe action there is the pre-existing one: keep px. That is also
+            # exactly the intent the original test encoded ("can't be verified →
+            # keep it"); it simply now has a reference it did not have before.
+            _div = abs(px - prior) / prior if prior > 0 else 0.0
+            if prior > 0 and 0.01 < _div <= 0.20:
+                logger.warning(
+                    "SPX-CLOSE GUARD (no ticks today): current_price %.2f diverges "
+                    ">1%% from the most recent recorded tick %.2f — using the "
+                    "recorded value. An in-memory price can be stale by days when "
+                    "a summary/settlement runs before the session's first tick "
+                    "(2026-10-16 variant D settled a calendar at 00:00 on a "
+                    "day-old price).",
+                    px, prior,
+                )
+                return prior
+            return px
         # STALE-PRICE GUARD (2026-07-07): a post-close restart can re-fetch a stale,
         # NON-zero current_price — variant C on 07-06 got 7420.22 (a PRIOR-day value,
         # ~1.6% below the real 7537.86 recorded close). Settling the daily summary /
