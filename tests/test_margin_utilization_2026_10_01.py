@@ -33,7 +33,12 @@ GATE_FIELDS = ["MarginAvailableForTrading", "SpendingPower",
 
 def _strategy(balance):
     s = HydraStrategy.__new__(HydraStrategy)
-    s.broker = SimpleNamespace(get_balance=lambda: balance)
+    # **kwargs, not a bare lambda (2026-10-19): the margin path now calls
+    # `get_balance(with_ledger=False)`, and a zero-arg mock raised TypeError —
+    # which is exactly how a REAL un-restarted broker fails, since BrokerClient
+    # forwards kwargs over /rpc. Modelling the interface loosely here keeps the
+    # mock honest about that boundary instead of pinning one call shape.
+    s.broker = SimpleNamespace(get_balance=lambda **kw: balance)
     return s
 
 
@@ -121,7 +126,7 @@ class TestAbsentMeansNullNotZero:
 
     def test_a_broker_failure_still_returns_empty(self):
         s = HydraStrategy.__new__(HydraStrategy)
-        def boom():
+        def boom(**kw):
             raise RuntimeError("broker down")
         s.broker = SimpleNamespace(get_balance=boom)
         assert s._read_account_balance() == {}

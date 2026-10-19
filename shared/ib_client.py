@@ -2761,7 +2761,7 @@ class IBClient:
             account_id=self.account_id,
         ) or {}
 
-    def get_balance(self, currency: str = "USD") -> dict:
+    def get_balance(self, currency: str = "USD", *, with_ledger: bool = True) -> dict:
         """Live tradable amount in `currency`, plus diagnostics.
 
         CORRECTED 2026-09-10: this account's BASE CURRENCY IS USD, not EUR.
@@ -2799,15 +2799,48 @@ class IBClient:
             "portfolio", self._client.portfolio_summary,
             account_id=self.account_id,
         ) or {}
-        ledger = self._ib_call(
-            "portfolio", self._client.get_ledger,
-            account_id=self.account_id,
-        ) or {}
+
+        # LAZY LEDGER (2026-10-19). `get_ledger` was fetched unconditionally on
+        # every call, and the gate attribution added the same day measured
+        # `portfolio:get_ledger` at **13.8% of all acquisitions** — one IBKR
+        # call per heartbeat per variant, nine variants, ~1,500/day each.
+        #
+        # It has exactly two consumers (`grep get_balance(`):
+        #   strategy.py:2472  the margin / ORDER-004 buying-power gate, which
+        #                     reads only `tradable` -> does NOT need the ledger
+        #   strategy.py:7266  BROKER-RECONCILE's independent realized-P&L
+        #                     anchor (`raw_ledger.USD.realizedpnl`) -> NEEDS it,
+        #                     once per settlement
+        #
+        # ⚠️ So the ledger is NOT dead weight and must not simply be deleted. It
+        # is the only NON-CIRCULAR P&L check in the system, and it is what
+        # exposed the 2026-10-14 stale-settlement phantom (IBKR realized
+        # -$1,324.87 against our -$12,485). It is fetched ~1,500 times a day and
+        # consumed once. That is the waste — not the call itself.
+        #
+        # `with_ledger=True` stays the DEFAULT so no unknown caller changes
+        # behaviour; the heartbeat path opts out explicitly. And the opt-out is
+        # lazy rather than absolute: every branch below that actually needs the
+        # ledger fetches it on demand, so correctness never depends on the
+        # caller having asked for the right thing.
+        _ledger_cache = {}
+
+        def _get_ledger() -> dict:
+            if "v" not in _ledger_cache:
+                _ledger_cache["v"] = self._ib_call(
+                    "portfolio", self._client.get_ledger,
+                    account_id=self.account_id,
+                ) or {}
+            return _ledger_cache["v"]
+
+        ledger = _get_ledger() if with_ledger else {}
 
         # Summary uses keys like {"availablefunds": {"amount": ..., "currency": ...}}
         avail = summary.get("availablefunds") or {}
         base_avail = float(avail.get("amount", 0)) if avail else 0.0
-        base_currency = avail.get("currency") or self._guess_base_currency(ledger) or "USD"
+        base_currency = (avail.get("currency")
+                         or self._guess_base_currency(_get_ledger())
+                         or "USD")
 
         if currency == base_currency:
             tradable = base_avail
@@ -2817,6 +2850,9 @@ class IBClient:
             # Per ledger schema: key by ISO currency code, value contains
             # cashbalance + exchangerate (rate from CURRENCY to base, or
             # base to CURRENCY — needs verification per agent 11)
+            # Needs the ledger for the exchange rate — fetch on demand so a
+            # caller that opted out never silently gets a wrong rate.
+            ledger = _get_ledger()
             row = ledger.get(currency, {}) if isinstance(ledger, dict) else {}
             raw_rate = row.get("exchangerate", 0)
             try:

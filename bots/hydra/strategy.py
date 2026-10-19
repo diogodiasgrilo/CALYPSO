@@ -2469,7 +2469,15 @@ class HydraStrategy(MEICStrategy):
         misleading "0% used".
         """
         try:
-            bal = self.broker.get_balance() or {}
+            # with_ledger=False (2026-10-19): this path reads ONLY `tradable`,
+            # and it runs on every heartbeat. The gate attribution measured
+            # `portfolio:get_ledger` at 13.8% of ALL IBKR acquisitions — fetched
+            # ~1,500x/day per variant here and consumed exactly once per
+            # settlement, by BROKER-RECONCILE's independent P&L anchor (which
+            # keeps the default and is untouched). The opt-out is lazy inside
+            # `get_balance`, so any branch that genuinely needs the ledger still
+            # fetches it; this cannot produce a wrong number, only skip a call.
+            bal = self.broker.get_balance(with_ledger=False) or {}
             out = {
                 "MarginAvailableForTrading": bal.get("tradable"),
                 "_raw": bal,
