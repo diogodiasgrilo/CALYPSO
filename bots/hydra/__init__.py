@@ -36,6 +36,32 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-20 I-M4: ALERT ONCE PER ORPHAN SET, NOT ONCE PER SWEEP. An orphan
+  broker position is DELIBERATELY not auto-closed ("could be a manual
+  position - MANUAL REVIEW"), so the condition persists by design and
+  `_reconcile_orphan_sweep` re-detected and re-alerted on every hourly
+  reconciliation. On 2026-10-19 conid 929372783 (+1 LONG, created by the A2
+  over-close fixed in 460ae3f3) sent four identical CRITICAL alerts at 12:32,
+  13:32, 14:32 and 15:32 ET. It stopped only because the contract was a 0DTE
+  SPXW call that expired that afternoon, realizing +$1.92; anything
+  longer-dated would have emailed ~6x/day indefinitely. CRITICAL is the ONLY
+  tier that sends email (`alert_service._should_send_email`), so repeating an
+  unchanged "MANUAL REVIEW" is precisely how an operator is trained to ignore
+  the one tier that matters. Now latched on the orphan SET, re-arming when the
+  set changes (including a quantity change at the same conid), when it clears,
+  or on a new trading day (also cleared explicitly in `_reset_for_new_day`, so
+  a persistent orphan resurfaces daily rather than never). The latch is set
+  only AFTER a successful send, so a swallowed delivery error re-alerts on the
+  next sweep instead of consuming the only notification. The CRITICAL LOG line
+  remains unconditional - it is the forensic trail that reconstructed this
+  incident and must not get thinner.
+  ⚠️ The cadence was NOT a runaway: RECONCILIATION_INTERVAL_MINUTES = 60 and
+  the timestamps are exactly hourly. A first pass over this incident reported
+  "18 alerts" from `grep -c orphan`, which also counts log lines and the
+  BROKER-RECONCILE leg listing; the true alert count is 4, and it was the
+  entire alert volume for the day across all tiers. The 60-minute gate works
+  correctly - the de-dup was simply absent.
+
 - 2026-10-20 THE PREMATURE-CALENDAR-SETTLEMENT P&L WAS ALMOST ENTIRELY
   UNAFFECTED — correcting my own overstatement. The 2026-10-19 fix
   (`374360c`) said the three at-expiry settlements "carried $1,271.15 of

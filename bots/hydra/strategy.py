@@ -14520,20 +14520,49 @@ class HydraStrategy(MEICStrategy):
         startup (the hourly gate is skipped when _last_reconciliation_time was
         None) — so this doubles as a post-crash startup sweep. Returns the count.
         """
+        now = get_us_market_time()
         orphans = self._recon_suppress_recent_closes(
-            self._recon_detect_orphans(expected, actual), get_us_market_time()
+            self._recon_detect_orphans(expected, actual), now
         )
         if not orphans:
+            # Re-arm: an orphan that CLEARS and later returns is new information.
+            self._orphan_alert_latch = None
             return 0
         detail = ", ".join(
             f"conid {c} qty {q} ({'SHORT' if q < 0 else 'LONG'})"
             for c, q in orphans.items()
         )
+        # The LOG is unconditional — it is the forensic trail that reconstructed
+        # the 2026-10-19 incident, and it must not get thinner. Only the ALERT
+        # is de-duplicated below.
         logger.critical(
             f"POS-003/I-M4: {len(orphans)} ORPHAN broker position(s) at "
             f"untracked conid(s) — {detail}. Possible crash-orphaned leg; "
             f"NOT auto-closing (could be a manual position). MANUAL REVIEW."
         )
+        # I-M4 alert de-dup (2026-10-20). An orphan is deliberately NOT
+        # auto-closed, so the condition PERSISTS by design and this sweep
+        # re-detects it on every reconciliation. On 2026-10-19 a single orphan
+        # (conid 929372783, +1 LONG, created by the A2 over-close now fixed in
+        # 460ae3f3) sent FOUR identical CRITICAL alerts on the hour, and would
+        # have kept sending ~6/day indefinitely had the contract not expired
+        # that afternoon. CRITICAL is the ONLY tier that emails
+        # (alert_service._should_send_email), so repeating an unchanged
+        # "MANUAL REVIEW" is precisely how an operator is trained to ignore the
+        # one tier that matters. Alert ONCE per distinct orphan set; re-arm when
+        # the set CHANGES (genuinely new information), when it clears, or on a
+        # new trading day (a persistent orphan resurfaces daily, not never).
+        latch_key = (
+            now.strftime("%Y-%m-%d"),
+            frozenset((str(c), int(q)) for c, q in orphans.items()),
+        )
+        if getattr(self, "_orphan_alert_latch", None) == latch_key:
+            logger.info(
+                "POS-003/I-M4: orphan set unchanged since today's alert — "
+                "suppressing a duplicate CRITICAL (de-dup; the log line above "
+                "still records every detection)."
+            )
+            return len(orphans)
         try:
             self.alert_service.send_alert(
                 alert_type=AlertType.CRITICAL_INTERVENTION,
@@ -14547,6 +14576,9 @@ class HydraStrategy(MEICStrategy):
                 details={"orphans": {str(c): q for c, q in orphans.items()}},
                 contracts=getattr(self, "contracts_per_entry", 1),
             )
+            # Latch only AFTER a successful send, so a failed delivery re-alerts
+            # on the next sweep instead of being silently swallowed by the latch.
+            self._orphan_alert_latch = latch_key
         except Exception as exc:
             logger.error(f"orphan-sweep alert send failed: {describe_exception(exc)}")
         return len(orphans)
@@ -14930,6 +14962,10 @@ class HydraStrategy(MEICStrategy):
 
         # Reset reconciliation timer
         self._last_reconciliation_time = None
+        # I-M4: re-arm the orphan alert so a persistent orphan is surfaced once
+        # per day rather than once ever (the latch key also carries the date, so
+        # this is a second, explicit mechanism — not the only one).
+        self._orphan_alert_latch = None
         # Confirm-before-alarm: when set, a settle-delay reconciliation re-check
         # is pending (a prior cycle saw a discrepancy that may be IBKR feed lag).
         self._recon_recheck_at = None
