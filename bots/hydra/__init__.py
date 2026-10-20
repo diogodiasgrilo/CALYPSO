@@ -36,6 +36,30 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-20 THE PREMATURE-CALENDAR-SETTLEMENT P&L WAS ALMOST ENTIRELY
+  UNAFFECTED — correcting my own overstatement. The 2026-10-19 fix
+  (`374360c`) said the three at-expiry settlements "carried $1,271.15 of
+  realized P&L", which read as though all of it were suspect. An iron condor's
+  intrinsic at expiry is deterministic arithmetic, so the two
+  `transformed_settled` cases were checkable exactly: 08-28 settled against
+  7731.48 vs a true 7714.83 with shorts at 7770c/7645p, and 09-11 against
+  7591.74 vs a true 7658.26 with shorts at 7700c/7580p. NEITHER wrong price
+  crossed a short strike — both closes sit inside their condors — so intrinsic
+  was 0 either way and realized P&L is UNCHANGED at +$511.50 and +$663.40.
+  $1,174.90 of the $1,271.15 is therefore correct as recorded. Only 2026-10-16
+  (`calendar_leftover`, +$96.25) is of unknown accuracy, and it is NOT
+  recomputable: a calendar settles at mark - debit and a mark needs an option
+  price at the true close, which this system does not retain. That is 1.5% of
+  D's -$6,306.45 epoch total on a dry-run NO-GO variant whose verdict was
+  already robust (t -2.28 as recorded vs -2.22 re-dated), so a recompute is NOT
+  warranted — it would change nothing for two of three and is impossible for
+  the third. Also corrected: a phantom "missing transform record" for 08-18.
+  `dc_transformations.date` is the TRANSFORM date (2026-08-25), not the entry
+  date, so joining on `date = entry_date` drops the row; the transform_credit
+  matches to the cent and nothing was missing. LESSON: before recomputing a
+  suspect number, check whether the error could have changed the OUTCOME — a
+  66pt price error moved an at-expiry intrinsic by exactly zero.
+
 - 2026-10-13 ORDER-DBL STOPPED THE LEG RETRY; THE ENTRY RETRY WALKED AROUND IT.
   Live seat `bl`, 2026-10-12, entry #7: the long-call placement hit a TRANSPORT
   FAILURE ("order may be LIVE but unconfirmed"), `ORDER-DBL` correctly refused
