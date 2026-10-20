@@ -732,17 +732,69 @@ class LongStrangleStrategy(HydraStrategy):
         # having skipped H's first entry. It bit again the day the live seat moved
         # to `bl`: bl's DB existed, held nothing, and sat FIRST in the candidate
         # order. Require usable rows; fall through to the next candidate if not.
+        #
+        # ⚠️ AND THE BAR WAS STILL TOO LOW (2026-10-20). The guard above asked
+        # for >= 1 usable close; the CONSUMER needs
+        # `iv_percentile_min_history_days` (60). So it held for exactly one day:
+        # once `bl` had recorded its own first VIX row it passed the guard, won
+        # on candidate order, and H ranked against a handful of days while
+        # variant A sat on 170. Measured from H's own `ls_skipped.iv_percentile_n`:
+        # 252 days through 10-08, then 1, 2, 3, 5, 7 — bl's age, counting up.
+        # H could not have traded again until ~January.
+        #
+        # THE FIX IS NOT A BIGGER THRESHOLD, because this has now bitten twice
+        # for the same reason: "first candidate past a bar" is defeated by any
+        # new variant, and the right bar is a judgement that can be wrong again.
+        # VIX is MARKET-WIDE and identical across variants, so there is no
+        # correctness reason to prefer one recorder over another — only a
+        # data-quantity one. Pick the candidate with the MOST usable history.
+        # That is immune to a new variant appearing, to the live seat moving,
+        # and to the floor being retuned.
+        want = int(self._ls_config().get("iv_percentile_lookback_days", 252))
+
+        # AN OPERATOR PIN STILL WINS OUTRIGHT. "Prefer the longest" is a
+        # heuristic for choosing among interchangeable recorders; it must never
+        # silently overrule someone who deliberately named a database. If the
+        # pinned path is unusable we fall through, so a typo degrades to the
+        # automatic choice instead of disabling the filter.
+        if cfg_db and os.path.exists(cfg_db) and self._vix_history_len(cfg_db, want):
+            return cfg_db
+
+        best = None
+        best_n = -1
         fallback = None
+        seen = set()
         for c in candidates:
-            if not c or not os.path.exists(c):
+            if not c or c in seen or not os.path.exists(c):
                 continue
+            seen.add(c)
             if fallback is None:
                 fallback = c
-            if self._db_has_vix_history(c):
-                return c
+            n = self._vix_history_len(c, want)
+            if n > best_n:
+                best, best_n = c, n
+        if best is not None and best_n > 0:
+            return best
         # Nothing had history — return something readable rather than None so the
         # caller still reports "n prior days" instead of "source unavailable".
         return fallback
+
+    def _vix_history_len(self, path: str, lookback: int = 252) -> int:
+        """How many usable VIX closes `path` yields. 0 on any failure.
+
+        Same single-query principle as `_db_has_vix_history`: it DELEGATES to
+        `vix_history_from_db`, the function the caller uses, so a resolver can
+        never disagree with its consumer about what a database contains. That
+        disagreement is precisely what made the first version of the guard a
+        silent no-op.
+        """
+        try:
+            from bots.hydra.iv_percentile import vix_history_from_db
+            from shared.market_hours import get_us_market_time
+            today = get_us_market_time().strftime("%Y-%m-%d")
+            return len(vix_history_from_db(path, today, lookback) or [])
+        except Exception:  # noqa: BLE001 — a bad candidate is 0, not a crash
+            return 0
 
     @staticmethod
     def _db_has_vix_history(path: str, minimum: int = 1) -> bool:

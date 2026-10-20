@@ -128,6 +128,16 @@ deploy/
                               # fine (114-117%), so the skip message "no range expansion" names the half
                               # that passed. Not a bug: the filter is doing exactly what it says, and it
                               # FAILS OPEN by design when unmeasurable.
+                              # 🔴 **STALE SINCE 2026-10-09 — the range-expansion gate is NO LONGER
+                              # H's blocker.** Since 10-12 every skip has been the **VIX-percentile
+                              # proxy**: `_vix_history_db` picked the first database with >=1 VIX close,
+                              # and when the live seat moved to `bl` (10-09) it selected bl's new,
+                              # nearly-empty DB. H's own `ls_skipped.iv_percentile_n` shows 252 days
+                              # through 10-08, then 1,2,3,5,7 — bl's age, counting up — against a
+                              # 60-day floor, while variant A held 170. H could not have traded again
+                              # until ~January. Fixed 2026-10-20: the resolver now picks the candidate
+                              # with the MOST history (immune to new variants / seat moves), with an
+                              # operator pin still winning outright.
                               # 🔴 **Consequence for any H figure: the filter landed 2026-09-24
                               # (`6a3eae81`), AFTER both of H's entries (09-24, 09-25). So H's entire
                               # lifetime +$139.80 was earned under rules H no longer runs, and its record

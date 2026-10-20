@@ -36,6 +36,34 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-20 H's VIX HISTORY COLLAPSED 252 -> 7 DAYS WHEN `bl` WAS CREATED,
+  blocking it until roughly January. `_vix_history_db` picked the FIRST
+  candidate with >= 1 usable VIX close, live seat ahead of variant A. When the
+  seat moved to `bl` on 10-09, bl's brand-new database won. A guard added that
+  same day required "usable content" - but at `minimum=1`, while the CONSUMER
+  requires `iv_percentile_min_history_days` (60). So it held for exactly ONE
+  day: as soon as bl recorded its first VIX row it passed the guard and won on
+  candidate order. Measured from H's own `ls_skipped.iv_percentile_n`: 252
+  days through 10-08, 163 on 10-09, then 1, 2, 3, 5, 7 - bl's age counting up -
+  while variant A sat on 170.
+  THE FIX IS NOT A BIGGER THRESHOLD. This bit twice for the same reason:
+  "first candidate past a bar" is defeated by any new variant, and the right
+  bar is a judgement that can be wrong again. VIX is MARKET-WIDE and identical
+  across variants, so there is no correctness reason to prefer one recorder,
+  only a data-quantity one - pick the candidate with the MOST usable history.
+  Immune to a new variant appearing, to the seat moving, and to the floor being
+  retuned. An explicit `iv_percentile_source_db` pin still wins outright (a
+  heuristic must not overrule a deliberate choice); an unusable pin degrades to
+  the automatic pick rather than disabling the filter.
+  H is dry-run-locked so nothing was at risk, but it would have generated ZERO
+  observations for another three months, silently, while CLAUDE.md still named
+  the range-expansion filter as its blocker. That doc line is corrected too.
+  ⚠️ Found only because the live session was checked variant-by-variant rather
+  than by unit health: every unit was `active` with zero errors throughout.
+  11 tests driving the REAL resolver (an earlier draft reimplemented it in the
+  test, which would have passed against the unfixed code), verified by a
+  mutation test that reintroduces the defect and fails 4 of them.
+
 - 2026-10-20 ALERT GATE: close the slow-loop hole centrally, so a future call
   site cannot reintroduce it by forgetting to latch. Layer 1 collapses
   byte-identical repeats inside `_DEDUP_WINDOWS_S`, keyed on PRIORITY
