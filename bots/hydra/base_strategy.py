@@ -3610,8 +3610,12 @@ class MEICStrategy(abc.ABC):
             # (and, if the flatten itself failed, this is a second attempt at
             # clearing it rather than leaving a naked leg).
             if _entry_qty_before is not None:
+                # require_settled: this runs ~1s after the flatten's own fill,
+                # so the position read is structurally unreliable — see the
+                # 2026-10-19 incident in _correct_over_fill.
                 self._correct_over_fill(
-                    conid, side, _entry_qty_before, 0, leg_description)
+                    conid, side, _entry_qty_before, 0, leg_description,
+                    require_settled=True)
             return None
 
         logger.error(
@@ -5666,7 +5670,8 @@ class MEICStrategy(abc.ABC):
 
     def _correct_over_fill(self, uic, side: str, qty_before: int,
                            intended_qty: int, leg_name: str,
-                           allow_defer: bool = True) -> None:
+                           allow_defer: bool = True,
+                           require_settled: bool = False) -> None:
         """A2: detect and undo an order that traded MORE than we asked for.
 
         Used on BOTH paths — closing a leg (2026-09-25) and opening one
@@ -5789,6 +5794,47 @@ class MEICStrategy(abc.ABC):
             # entry would re-park itself forever.
             if allow_defer:
                 self._defer_fill_check(uic, side, qty_before, intended_qty, leg_name)
+            return
+
+        # REQUIRE A SETTLED BOOK (2026-10-20). A corrective TRADE must never be
+        # issued off a position read taken moments after one of our own fills.
+        #
+        # LIVE INCIDENT, seat `bl`, 2026-10-19 12:21. A short call filled 1/7,
+        # GUARD-FLOOR-UNFILLABLE abandoned the leg, and ORDER-010 flattened the
+        # 1-contract partial (BUY 1, confirmed filled at 12:21:33). ONE SECOND
+        # LATER this check read the broker as -1 and "corrected" with another
+        # BUY 1 — leaving **+1 LONG**, an untracked orphan that fired CRITICAL
+        # alerts at 12:32, 13:32, 14:32 and 15:32 and was left to expire.
+        #
+        # Both inputs were stale in the same direction: `qty_before` was
+        # captured at 12:19:43 before any rung (genuinely 0), and `qty_after`
+        # had caught up with the 12:20:32 SELL but not the 12:21:33 BUY. So
+        # `actual_delta` looked like "the book moved 1 against a request of 0"
+        # when nothing had moved — the feed had merely caught up with an earlier
+        # fill.
+        #
+        # ⚠️ That falsifies the "moved more is trustworthy" reasoning above,
+        # which assumes only `qty_after` lags. When `qty_before` is ALSO stale,
+        # a catch-up is indistinguishable from an over-fill — and the safety net
+        # OPENED a position, the one thing its own comment says it must never
+        # do.
+        #
+        # Deferring costs promptness and buys correctness: the deferred pass
+        # re-evaluates the same (qty_before, intended_qty) against a SETTLED
+        # book, which for the incident yields actual_delta 0 and no trade. A
+        # genuine double-fill (the 2026-09-25 shape) persists across the settle
+        # window and is still corrected. Only the post-flatten site passes this,
+        # because only there has a corrective trade of ours just landed.
+        if require_settled and allow_defer:
+            logger.warning(
+                "  A2: %s (conid %s) looks over-filled (%+d vs expected %+d) but "
+                "this read was taken moments after our own flatten — DEFERRING "
+                "instead of trading on it. An immediate post-trade position read "
+                "cannot distinguish a real over-fill from the feed catching up "
+                "(2026-10-19: correcting on one left a +1 LONG orphan).",
+                leg_name, uic, qty_after, expected,
+            )
+            self._defer_fill_check(uic, side, qty_before, intended_qty, leg_name)
             return
 
         fix_side = "SELL" if excess > 0 else "BUY"
