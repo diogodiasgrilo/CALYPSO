@@ -62,6 +62,7 @@ Usage:
 """
 
 import fcntl
+import hashlib
 import json
 import logging
 import os
@@ -990,6 +991,63 @@ class AlertService:
         AlertPriority.LOW: 3600,        # 60 min
     }
 
+    # Per-TYPE override of the layer-1 window, for types that report a
+    # PERSISTING CONDITION (2026-10-20). The per-PRIORITY windows above are
+    # sized for tight loops; a caller on a SLOWER cadence than its window is
+    # structurally invisible to layer 1. POS-003 reconciles hourly against a
+    # 300s CRITICAL window — twelve times longer — so on 2026-10-19 an
+    # unresolved orphan sent four identical CRITICALs straight through a gate
+    # built to prevent exactly that.
+    #
+    # WHY THIS IS SAFE, and why it is NOT the 2026-10-06 token-bucket scar:
+    # layer 2 drops by TYPE regardless of content, which is how three real
+    # "Stop Loss Hit" alerts were lost. Layer 1 is CONTENT-keyed — the FIRST
+    # occurrence always sends, a genuinely different event fingerprints
+    # differently and sends immediately, and anything collapsed is COUNTED and
+    # rolled up on the next send ("+N similar suppressed since last"). Widening
+    # it delays no first notification and loses no event.
+    #
+    # 🔴 LOAD-BEARING DEPENDENCY — do not remove the persisting-condition
+    # branch in `_alert_fingerprint` while this set exists. That safety
+    # argument was FALSE when first written: the fingerprint kept only
+    # entry_number/side from details, so every orphan alert hashed identically
+    # regardless of WHICH conid, and a 4h window would have hidden a genuinely
+    # NEW untracked position for four hours — strictly worse than the four
+    # duplicates it fixes. The fingerprint was extended (scoped to these types)
+    # to make "different condition → different fingerprint" actually true.
+    # Pinned by test_persisting_condition_window_2026_10_20.py.
+    #
+    # MEMBERSHIP follows _NEVER_RATE_LIMIT's principle, inverted: a DISCRETE
+    # COMPLETED ACTION with money attached (a stop, a fill, a failed order) is
+    # a different real event each time and must NEVER be here. A PERSISTING
+    # CONDITION may be, because the next alert carries the same news.
+    # DELTA_BREACH / WING_BREACH / API_ERROR are named as persisting by that
+    # set's own comment.
+    #
+    # DELIBERATELY EXCLUDED: NAKED_POSITION, DAILY_HALT, CIRCUIT_BREAKER and
+    # EMERGENCY_EXIT. Those persist too, but they are active emergencies where
+    # repeated prompting is the POINT — _NEVER_SUPPRESS exists so a naked short
+    # always reaches the operator. CRITICAL_INTERVENTION is included despite
+    # sharing that set because its own text is "MANUAL REVIEW": it needs action,
+    # not hourly nagging, and it is the measured case.
+    #
+    # 4h is chosen to exceed the slowest periodic re-evaluation in the system
+    # (RECONCILIATION_INTERVAL_MINUTES = 60) with margin, while still letting a
+    # condition that survives a whole session resurface once or twice rather
+    # than going quiet for the day. Source-level latches (see
+    # strategy.py:_recon_latch_key) remain the PRECISE mechanism — they can see
+    # a condition clear and return, which content-fingerprinting cannot. This
+    # is the backstop for a call site that forgot.
+    _PERSISTING_CONDITION_WINDOW_S = 4 * 3600
+    _PERSISTING_CONDITION_TYPES = {
+        AlertType.CRITICAL_INTERVENTION,
+        AlertType.DELTA_BREACH,
+        AlertType.WING_BREACH,
+        AlertType.API_ERROR,
+        AlertType.DATA_QUALITY,
+        AlertType.VIX_THRESHOLD,
+    }
+
     # Per-type token bucket: a burst of _BUCKET_CAPACITY, then one refill every
     # _BUCKET_REFILL_S. Catches a storm of same-TYPE alerts whose titles differ
     # just enough to dodge content-dedup (e.g. a loop that embeds a live price).
@@ -1054,6 +1112,31 @@ class AlertService:
             sd = details.get('side')
             if sd is not None:
                 tag += f'|s{sd}'
+            # ── Persisting-condition identity (2026-10-20) ───────────────────
+            # These types get a 4h window (_PERSISTING_CONDITION_WINDOW_S), and
+            # that is ONLY safe if a genuinely different condition fingerprints
+            # differently. For the measured case it did NOT: the orphan alert's
+            # identity lives in details['orphans'] = {conid: qty}, and the tags
+            # above keep only entry_number/side — so EVERY orphan alert
+            # fingerprinted identically regardless of WHICH conid. Widening the
+            # window without this would have hidden a genuinely NEW untracked
+            # position for four hours, which is strictly worse than the four
+            # duplicate alerts being fixed. Caught by
+            # test_a_DIFFERENT_condition_sends_at_once.
+            #
+            # Scoped to these types so every other type's dedup identity is
+            # byte-for-byte unchanged. Volatile tokens are stripped from the
+            # serialized blob exactly as they are from the title, so a drifting
+            # P&L figure cannot defeat the collapse while a changed conid or
+            # quantity still breaks it.
+            if alert_type in self._PERSISTING_CONDITION_TYPES:
+                try:
+                    blob = json.dumps(details, sort_keys=True, default=str)
+                except Exception:
+                    blob = repr(sorted(
+                        ((str(k), str(v)) for k, v in details.items())))
+                blob = self._VOLATILE_TOKEN_RE.sub('#', blob.lower())
+                tag += '|d' + hashlib.sha1(blob.encode('utf-8')).hexdigest()[:12]
         return f'{self.bot_name}|{alert_type.value}|{norm}{tag}'
 
     def _take_type_token(self, alert_type: AlertType, now: float) -> bool:
@@ -1114,7 +1197,11 @@ class AlertService:
         with self._gate_lock:
             # ── Layer 1: content dedup (ALL alerts) ──────────────────────────
             fp = self._alert_fingerprint(alert_type, title, details)
-            window = self._DEDUP_WINDOWS_S.get(priority, 600)
+            window = (
+                self._PERSISTING_CONDITION_WINDOW_S
+                if alert_type in self._PERSISTING_CONDITION_TYPES
+                else self._DEDUP_WINDOWS_S.get(priority, 600)
+            )
             last = self._dedup_last.get(fp)
             if last is not None and (now - last) < window:
                 self._dedup_suppressed[fp] = self._dedup_suppressed.get(fp, 0) + 1

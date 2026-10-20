@@ -36,6 +36,40 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-20 ALERT GATE: close the slow-loop hole centrally, so a future call
+  site cannot reintroduce it by forgetting to latch. Layer 1 collapses
+  byte-identical repeats inside `_DEDUP_WINDOWS_S`, keyed on PRIORITY
+  (CRITICAL = 300s). Any caller on a SLOWER cadence is structurally invisible
+  to it - POS-003 reconciles every 60 min, twelve times that window - which is
+  how four identical orphan CRITICALs passed a gate whose comment promised the
+  inbox "can never be flooded again". Added `_PERSISTING_CONDITION_TYPES` with
+  a 4h layer-1 window: long enough to exceed any periodic re-evaluation, short
+  enough that a condition surviving a whole session still resurfaces.
+  NOT the 2026-10-06 token-bucket scar: that was layer 2, which drops by TYPE
+  regardless of content and lost three real Stop Loss alerts. Layer 1 is
+  content-keyed - first always sends, collapsed repeats are counted and rolled
+  up. Discrete completed actions are excluded by the same principle
+  `_NEVER_RATE_LIMIT` already documents, and NAKED_POSITION / DAILY_HALT /
+  CIRCUIT_BREAKER / EMERGENCY_EXIT are excluded deliberately because repeated
+  prompting on an active emergency is the POINT.
+  🔴 THE SAFETY ARGUMENT WAS FALSE AS FIRST WRITTEN, and a test caught it. It
+  rests on "a genuinely different event fingerprints differently", but
+  `_alert_fingerprint` kept only entry_number/side from details - and the
+  orphan alert's identity is details['orphans'] = {conid: qty}. EVERY orphan
+  hashed identically regardless of WHICH conid, so a 4h window would have
+  hidden a genuinely NEW untracked position for four hours: strictly worse
+  than the duplicates being fixed. The fingerprint was extended, SCOPED to
+  these types, to make that claim true; non-persisting types hash byte-for-byte
+  as before (pinned by a test that recomputes the old formula). Volatile
+  tokens are stripped from the blob as from titles, so a drifting P&L cannot
+  defeat the collapse while a changed conid still breaks it. The dependency is
+  marked load-bearing in both files.
+  Source-level latches remain the PRECISE mechanism - they see a condition
+  clear and return, which fingerprinting cannot. This is defence in depth.
+  ⚠️ DEPLOY: `services/broker/main.py` imports AlertService, so calypso-broker
+  must restart for this to take effect there - restart it FIRST, then the
+  strategies.
+
 - 2026-10-20 ALERT-PATH AUDIT after the orphan incident: one more instance of
   the same bug class, one structural limit, one doc correction.
   (1) POS-003's "Position Mismatch Detected" alert (HIGH) was unlatched in
