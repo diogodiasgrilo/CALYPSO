@@ -14428,6 +14428,10 @@ class HydraStrategy(MEICStrategy):
                 self._save_state_to_disk()
                 return
 
+            if not discrepant:
+                # Re-arm: a mismatch that CLEARS and later returns is new.
+                self._mismatch_alert_latch = None
+
             if is_confirm_pass and not discrepant and not orphans:
                 logger.info(
                     "POS-003: prior discrepancy self-resolved after the settle "
@@ -14474,22 +14478,44 @@ class HydraStrategy(MEICStrategy):
                         logger.warning(
                             "    POS-003-RAW conid %s: could not dump rows "
                             "(%s: %s)", conid, type(_raw_exc).__name__, _raw_exc)
-                self.alert_service.send_alert(
-                    alert_type=AlertType.CRITICAL_INTERVENTION,
-                    title="Position Mismatch Detected",
-                    message=(
-                        f"{len(discrepant)} {self.BOT_NAME} conid(s) mismatch the "
-                        f"broker's position quantity. Manual intervention suspected."
-                    ),
-                    priority=AlertPriority.HIGH,
-                    details={
-                        "discrepancies": {
-                            str(c): {"expected": e, "actual": a}
-                            for c, (e, a) in discrepant.items()
-                        }
-                    },
-                    contracts=self.contracts_per_entry,
+                # De-dup the ALERT only — see _recon_latch_key. A mismatch that
+                # `_handle_position_discrepancies` cannot resolve ("STILL REFUSES
+                # TO GUESS" — ties and unexplainable quantities go to manual
+                # review) persists, and would otherwise re-alert every hour.
+                mismatch_key = self._recon_latch_key(
+                    ((str(c), int(e), int(a)) for c, (e, a) in discrepant.items()), now
                 )
+                if getattr(self, "_mismatch_alert_latch", None) == mismatch_key:
+                    logger.info(
+                        "POS-003: mismatch set unchanged since today's alert — "
+                        "suppressing a duplicate (de-dup; every detection is "
+                        "still logged above, and resolution is still attempted)."
+                    )
+                else:
+                    try:
+                        self.alert_service.send_alert(
+                            alert_type=AlertType.CRITICAL_INTERVENTION,
+                            title="Position Mismatch Detected",
+                            message=(
+                                f"{len(discrepant)} {self.BOT_NAME} conid(s) mismatch the "
+                                f"broker's position quantity. Manual intervention suspected."
+                            ),
+                            priority=AlertPriority.HIGH,
+                            details={
+                                "discrepancies": {
+                                    str(c): {"expected": e, "actual": a}
+                                    for c, (e, a) in discrepant.items()
+                                }
+                            },
+                            contracts=self.contracts_per_entry,
+                        )
+                        # Latch only a DELIVERED alert.
+                        self._mismatch_alert_latch = mismatch_key
+                    except Exception as exc:
+                        logger.error(
+                            f"POS-003 mismatch alert send failed: {describe_exception(exc)}")
+                # UNCONDITIONAL: resolution must be attempted every cycle. The
+                # latch suppresses the notification, never the recovery.
                 self._handle_position_discrepancies(discrepant)
 
             # I-M4 orphan sweep (alerts on untracked broker positions).
@@ -14505,6 +14531,33 @@ class HydraStrategy(MEICStrategy):
 
         except Exception as e:
             logger.error(f"POS-003: Reconciliation failed: {e}")
+
+    # ── POS-003 persisting-condition alert de-dup (2026-10-20) ──────────────
+    # BOTH reconciliation alerts describe a condition that persists until a
+    # HUMAN acts: `_handle_position_discrepancies` "still refuses to guess" and
+    # falls ties / unexplainable quantities through to manual review, and an
+    # orphan is deliberately never auto-closed. The sweep re-evaluates hourly,
+    # so without a latch an unresolved condition re-alerts every hour forever.
+    # On 2026-10-19 one orphan sent four identical CRITICALs (12:32-15:32 ET).
+    #
+    # ⚠️ The shared anti-spam gate CANNOT catch this shape. Its CRITICAL
+    # content-dedup window is 300s against a RECONCILIATION_INTERVAL_MINUTES of
+    # 60 — hourly repeats always land outside the window. De-dup for anything
+    # on a slow loop therefore has to happen HERE, at the source.
+    #
+    # Contrast `_NEVER_RATE_LIMIT`'s principle, which this deliberately mirrors:
+    # a DISCRETE COMPLETED ACTION with money attached (a stop, a failed order)
+    # must never be collapsed, because each occurrence is a different real event.
+    # A PERSISTING CONDITION may be, because the next alert carries the same
+    # news. These two are persisting conditions.
+    def _recon_latch_key(self, signature, now) -> tuple:
+        """Build the (trading-day, signature) key for a persisting-condition latch.
+
+        Keyed on the day so a condition still unresolved tomorrow resurfaces
+        once tomorrow, rather than never. Keyed on the signature so a genuinely
+        changed condition (new conid, changed quantity) alerts immediately.
+        """
+        return (now.strftime("%Y-%m-%d"), frozenset(signature))
 
     def _reconcile_orphan_sweep(self, expected: Dict[Any, int], actual: Dict[Any, int]) -> int:
         """I-M4: detect + alert on ORPHAN broker positions (untracked conids).
@@ -14540,21 +14593,11 @@ class HydraStrategy(MEICStrategy):
             f"untracked conid(s) — {detail}. Possible crash-orphaned leg; "
             f"NOT auto-closing (could be a manual position). MANUAL REVIEW."
         )
-        # I-M4 alert de-dup (2026-10-20). An orphan is deliberately NOT
-        # auto-closed, so the condition PERSISTS by design and this sweep
-        # re-detects it on every reconciliation. On 2026-10-19 a single orphan
-        # (conid 929372783, +1 LONG, created by the A2 over-close now fixed in
-        # 460ae3f3) sent FOUR identical CRITICAL alerts on the hour, and would
-        # have kept sending ~6/day indefinitely had the contract not expired
-        # that afternoon. CRITICAL is the ONLY tier that emails
-        # (alert_service._should_send_email), so repeating an unchanged
-        # "MANUAL REVIEW" is precisely how an operator is trained to ignore the
-        # one tier that matters. Alert ONCE per distinct orphan set; re-arm when
-        # the set CHANGES (genuinely new information), when it clears, or on a
-        # new trading day (a persistent orphan resurfaces daily, not never).
-        latch_key = (
-            now.strftime("%Y-%m-%d"),
-            frozenset((str(c), int(q)) for c, q in orphans.items()),
+        # I-M4 alert de-dup — see _recon_latch_key. The 2026-10-19 orphan
+        # (conid 929372783, +1 LONG, from the A2 over-close fixed in 460ae3f3)
+        # sent four identical CRITICALs; CRITICAL is the ONLY tier that emails.
+        latch_key = self._recon_latch_key(
+            ((str(c), int(q)) for c, q in orphans.items()), now
         )
         if getattr(self, "_orphan_alert_latch", None) == latch_key:
             logger.info(
@@ -14966,6 +15009,7 @@ class HydraStrategy(MEICStrategy):
         # per day rather than once ever (the latch key also carries the date, so
         # this is a second, explicit mechanism — not the only one).
         self._orphan_alert_latch = None
+        self._mismatch_alert_latch = None
         # Confirm-before-alarm: when set, a settle-delay reconciliation re-check
         # is pending (a prior cycle saw a discrepancy that may be IBKR feed lag).
         self._recon_recheck_at = None

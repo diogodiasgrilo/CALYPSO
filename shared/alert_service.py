@@ -519,9 +519,19 @@ class AlertService:
         # ── Anti-spam gate (the single chokepoint every call site passes) ─────
         # Collapses identical alerts within a per-priority window, rate-limits
         # each alert TYPE via a token bucket, and caps total emails per window.
-        # No matter what loop or retry storm fires upstream, the inbox can never
-        # be flooded again. NEVER_SUPPRESS types (halt/naked/breaker/emergency)
-        # bypass this entirely. Uses the RAW details for the fingerprint so
+        # ⚠️ SCOPE, corrected 2026-10-20 — this used to claim "no matter what
+        # loop or retry storm fires upstream, the inbox can never be flooded
+        # again." That is true only for FAST loops. The gate collapses repeats
+        # inside _DEDUP_WINDOWS_S (CRITICAL: 300s), so a caller on a SLOWER
+        # cadence is structurally invisible to it: POS-003 reconciles every
+        # RECONCILIATION_INTERVAL_MINUTES = 60, twelve times the CRITICAL
+        # window, and on 2026-10-19 an unresolved orphan sent four identical
+        # CRITICALs straight through. Anything reporting a PERSISTING condition
+        # on a slow loop must de-dup at its own source (see
+        # strategy.py:_recon_latch_key); this gate is the burst backstop, not a
+        # universal guarantee.
+        # NEVER_SUPPRESS types (halt/naked/breaker/emergency) bypass this
+        # entirely. Uses the RAW details for the fingerprint so
         # entry-number / side keep distinct real events distinct.
         #
         # FAIL-OPEN: a bug in the gate must never SILENCE a real alert. On any

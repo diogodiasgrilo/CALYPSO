@@ -36,6 +36,36 @@ Stop Buffers (Option B per-VIX-regime, deployed 2026-04-27):
 - See docs/HYDRA_BUFFER_OPTIMIZATION.md for the 28-day Saxo study + forward-looking review triggers
 
 Version History:
+- 2026-10-20 ALERT-PATH AUDIT after the orphan incident: one more instance of
+  the same bug class, one structural limit, one doc correction.
+  (1) POS-003's "Position Mismatch Detected" alert (HIGH) was unlatched in
+  exactly the way the orphan alert was. `_handle_position_discrepancies`
+  "STILL REFUSES TO GUESS" - ties and quantities no subset can explain fall
+  through to manual review - so an unresolvable mismatch persists and would
+  re-alert every hour forever. Now latched on the mismatch signature via the
+  shared `_recon_latch_key`. THE LOAD-BEARING INVARIANT, pinned by test: the
+  latch suppresses the NOTIFICATION, never the RECOVERY -
+  `_handle_position_discrepancies` still runs on every suppressed cycle.
+  (2) The shared anti-spam gate CANNOT catch this shape, and its comment
+  claimed otherwise ("no matter what loop or retry storm fires upstream, the
+  inbox can never be flooded again"). Its CRITICAL content-dedup window is
+  300s against RECONCILIATION_INTERVAL_MINUTES = 60 - twelve times longer - so
+  hourly repeats always land outside it. The gate is a BURST backstop; a
+  persisting condition on a slow loop must de-dup at its own source. Comment
+  corrected to state the scope rather than assert a guarantee it does not
+  deliver (the same "log lines must DERIVE, not assert" failure, applied to a
+  comment).
+  (3) CLAUDE.md said `bl` "is the sole source of every alert today". Wrong in
+  principle: the L-C2 severity bypass delivers CRITICAL/HIGH regardless of
+  `alerts.enabled`, so ANY variant can alert. Corrected.
+  EMPIRICAL RESULT: fleet-wide over the 10 days to 2026-10-20 the entire alert
+  volume was FOUR sends, all the orphan. There is no other alert spam.
+  ⚠️ Two claims made and RETRACTED during this audit: that a dry-run shadow had
+  emailed 6 CRITICALs (all 6 were sent while `b` ITSELF held the live seat,
+  07-24 to 10-09), and that variant A's alerts defaulted to enabled (its
+  config read failed with a PermissionError my 2>/dev/null swallowed; A's
+  runtime log says DISABLED). Verify against the runtime, not an inference.
+
 - 2026-10-20 I-M4: ALERT ONCE PER ORPHAN SET, NOT ONCE PER SWEEP. An orphan
   broker position is DELIBERATELY not auto-closed ("could be a manual
   position - MANUAL REVIEW"), so the condition persists by design and

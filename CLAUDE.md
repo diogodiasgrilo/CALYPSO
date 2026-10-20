@@ -727,7 +727,21 @@ Alerts are sent AFTER actions complete with actual results. The bot publishes to
 | MEDIUM | ✓ | — | Position opened/closed, profit target, settlement complete |
 | LOW | ✓ | — | Bot started/stopped, daily summary, entry skipped, vigilant exit |
 
-Only **`bl`** currently has `alerts.enabled: true` (the live seat since 2026-10-09) — A/B/C/D/E/F/G/H all have alerts disabled, so `bl` is the sole source of every alert today regardless of this table.
+Only **`bl`** currently has `alerts.enabled: true` (the live seat since 2026-10-09); A/B/C/D/E/F/G/H have alerts disabled.
+
+> ⚠️ **"Disabled" does NOT mean silent — corrected 2026-10-20.** This line used to
+> say `bl` "is the sole source of every alert today", which is wrong in principle.
+> The **L-C2 severity bypass** (`alert_service.send_alert`) delivers **CRITICAL and
+> HIGH regardless of `alerts.enabled`** — deliberately, so a disabled config can
+> never silence a naked position or a failed emergency close. Only LOW/MEDIUM are
+> suppressed. So **any** variant can alert.
+>
+> In practice none other has: fleet-wide over the 10 days to 2026-10-20 the entire
+> alert volume was **4 sends**, all from `bl`. The 6 historical `HYDRA_B` CRITICALs
+> (09-24 → 10-08) were sent while **`b` itself held the live seat**, not from a
+> dry-run shadow — a claim made and retracted during this audit. Note also that
+> **POS-003 reconciliation is skipped outright in dry-run**, so its mismatch/orphan
+> alerts can only ever come from the live seat.
 
 AlertService auto-prefixes `[Nc]` on the title when `contracts > 1` (v1.24.0). 14 HYDRA call sites pass `contracts=entry.contracts` so the prefix appears on multi-contract events.
 
