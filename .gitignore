@@ -187,3 +187,7 @@ scripts/probe_trades_*.log
 # signal-ingest live config (holds the shared secret; template is tracked)
 services/signal_ingest/config.json
 data/signal_ingest/
+
+# Playwright artifacts
+dashboard/frontend/test-results/
+dashboard/frontend/playwright-report/
