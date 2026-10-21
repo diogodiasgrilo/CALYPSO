@@ -500,7 +500,10 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
           <EmptyChart message="No daily data yet" />
         ) : (
           <ResponsiveContainer width="100%" height={200}>
-            <AreaChart data={cumulativeData}>
+            {/* Recharts' default right margin is 5px, but `preserveStartEnd`
+                centres the FINAL tick on the last data point — so half its
+                label hung off the edge and read "10-2(" on a phone. */}
+            <AreaChart data={cumulativeData} margin={{ top: 5, right: 22, bottom: 5, left: 5 }}>
               <defs>
                 <linearGradient id="cumPnlGrad" x1="0" y1="0" x2="0" y2="1">
                   <stop offset="5%" stopColor={(cumulativeData[cumulativeData.length - 1]?.cumPnl ?? 0) < 0 ? colors.loss : colors.profit} stopOpacity={0.3} />
@@ -512,6 +515,13 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
                 dataKey="date"
                 tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
+                // Recharts keeps every tick regardless of available width, so
+                // at 390px these date labels collided into an unreadable run
+                // ("07-3008-1108-2109-..."). minTickGap drops ticks that would
+                // sit closer than N px, which adapts to ANY width without a
+                // media query. Same pattern LongStrangle.tsx already uses.
+                interval="preserveStartEnd"
+                minTickGap={48}
               />
               <YAxis
                 tick={{ fontSize: 11, fill: colors.textSecondary }}
@@ -588,12 +598,22 @@ function PerformanceTab({ summaries }: { summaries: DaySummary[] }) {
           <EmptyChart message="Need at least 2 trading days" />
         ) : (
           <ResponsiveContainer width="100%" height={200}>
-            <LineChart data={rollingWinRate}>
+            {/* Recharts' default right margin is 5px, but `preserveStartEnd`
+                centres the FINAL tick on the last data point — so half its
+                label hung off the edge and read "10-2(" on a phone. */}
+            <LineChart data={rollingWinRate} margin={{ top: 5, right: 22, bottom: 5, left: 5 }}>
               <CartesianGrid strokeDasharray="3 3" stroke={colors.borderDim} />
               <XAxis
                 dataKey="date"
                 tick={{ fontSize: 11, fill: colors.textSecondary }}
                 axisLine={{ stroke: colors.borderDim }}
+                // Recharts keeps every tick regardless of available width, so
+                // at 390px these date labels collided into an unreadable run
+                // ("07-3008-1108-2109-..."). minTickGap drops ticks that would
+                // sit closer than N px, which adapts to ANY width without a
+                // media query. Same pattern LongStrangle.tsx already uses.
+                interval="preserveStartEnd"
+                minTickGap={48}
               />
               <YAxis
                 tick={{ fontSize: 11, fill: colors.textSecondary }}
