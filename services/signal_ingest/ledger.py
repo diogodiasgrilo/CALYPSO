@@ -15,7 +15,7 @@ import sqlite3
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional
 
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 2
 
 _DDL = """
 CREATE TABLE IF NOT EXISTS signals (
@@ -31,6 +31,11 @@ CREATE TABLE IF NOT EXISTS signals (
     price_hint        REAL,
     outcome           TEXT NOT NULL,   -- would_trade | rejected | duplicate
     reason            TEXT,
+    -- v2: what the ADMITTED signal did to the simulated book, so the ledger
+    -- can answer "would it have worked?" and not only "how often did it fire?"
+    book_effect       TEXT,            -- opened | added | closed | reduced | flat_noop
+    realized_pnl      REAL,            -- gross, upper bound (see positions.py)
+    book_note         TEXT,
     dry_run           INTEGER NOT NULL DEFAULT 1,
     raw               TEXT
 );
@@ -57,6 +62,8 @@ class Ledger:
         con = self._connect()
         try:
             con.executescript(_DDL)
+            from services.signal_ingest import positions
+            positions.ensure_schema(con)
             con.execute("INSERT OR REPLACE INTO schema_info VALUES ('version', ?)",
                         (str(SCHEMA_VERSION),))
             con.commit()
@@ -95,13 +102,17 @@ class Ledger:
     def record(self, *, received_at: datetime, key: str, payload: Dict[str, Any],
                outcome: str, reason: Optional[str] = None,
                quantity_effective: Optional[float] = None,
-               dry_run: bool = True) -> int:
+               dry_run: bool = True,
+               book_effect: Optional[str] = None,
+               realized_pnl: Optional[float] = None,
+               book_note: Optional[str] = None) -> int:
         con = self._connect()
         try:
             cur = con.execute(
                 "INSERT INTO signals (received_at, signal_time, idempotency_key, ticker,"
                 " action, source, quantity_signal, quantity_effective, price_hint,"
-                " outcome, reason, dry_run, raw) VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?)",
+                " outcome, reason, book_effect, realized_pnl, book_note, dry_run, raw)"
+                " VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
                 (
                     received_at.astimezone(timezone.utc).isoformat(),
                     str(payload.get("time") or "") or None,
@@ -114,11 +125,39 @@ class Ledger:
                     _num(payload.get("price")),
                     outcome,
                     reason,
+                    book_effect,
+                    realized_pnl,
+                    book_note,
                     1 if dry_run else 0,
                     json.dumps(_redact(payload), default=str)[:4000],
                 ))
             con.commit()
             return int(cur.lastrowid)
+        finally:
+            con.close()
+
+    def apply_to_book(self, *, symbol: str, action: str, quantity: float,
+                      price: Optional[float], now: Optional[datetime] = None):
+        """Apply an ADMITTED signal to the simulated book.
+
+        Returns positions.apply_signal's (effect, realized_pnl, note).
+        """
+        from services.signal_ingest import positions
+        con = self._connect()
+        try:
+            r = positions.apply_signal(con, symbol=symbol, action=action,
+                                       quantity=quantity, price=price, now=now)
+            con.commit()
+            return r
+        finally:
+            con.close()
+
+    def book_summary(self) -> Dict[str, Any]:
+        """What the dry run has actually learned so far."""
+        from services.signal_ingest import positions
+        con = self._connect()
+        try:
+            return positions.summary(con)
         finally:
             con.close()
 

@@ -99,6 +99,11 @@ def create_app(cfg: Optional[Dict[str, Any]] = None,
             "signals_today": ledger.count_today(),
         }
 
+    @app.get("/summary")
+    def summary() -> Dict[str, Any]:
+        """What the dry run has actually learned — the point of running it."""
+        return ledger.book_summary()
+
     @app.post("/webhook")
     async def webhook(request: Request) -> JSONResponse:
         now = datetime.now(timezone.utc)
@@ -121,19 +126,40 @@ def create_app(cfg: Optional[Dict[str, Any]] = None,
 
         outcome, reason, qty = decide(payload, app.state.cfg, app.state.ledger, now)
         key = gates.idempotency_key(payload, now)
+
+        # Only an ADMITTED signal moves the simulated book — a rejection or a
+        # resend must not, or the position state would drift from what the
+        # service would actually have traded.
+        effect = realized = note = None
+        if outcome == OUTCOME_WOULD_TRADE and qty:
+            price = payload.get("price")
+            try:
+                price = float(price) if price is not None else None
+            except (TypeError, ValueError):
+                price = None
+            effect, realized, note = app.state.ledger.apply_to_book(
+                symbol=str(payload["ticker"]), action=str(payload["action"]),
+                quantity=qty, price=price, now=now)
+
         app.state.ledger.record(received_at=now, key=key, payload=payload,
                                 outcome=outcome, reason=reason,
-                                quantity_effective=qty, dry_run=True)
+                                quantity_effective=qty, dry_run=True,
+                                book_effect=effect, realized_pnl=realized,
+                                book_note=note)
 
         log = logger.info if outcome == OUTCOME_WOULD_TRADE else logger.warning
-        log("%s | %s %s qty=%s | %s", outcome.upper(),
-            payload.get("action"), payload.get("ticker"), qty, reason or "admitted")
+        log("%s | %s %s qty=%s | %s%s", outcome.upper(),
+            payload.get("action"), payload.get("ticker"), qty,
+            reason or "admitted",
+            f" | book={effect}" + (f" pnl={realized:+.2f}" if realized is not None else "")
+            if effect else "")
 
         # Always 200: TradingView retries non-2xx, and a retry storm against a
         # rejection that will never succeed is pure noise. The ledger is the
         # record, not the status code.
         return JSONResponse({"outcome": outcome, "reason": reason,
-                             "quantity": qty, "dry_run": True})
+                             "quantity": qty, "dry_run": True,
+                             "book_effect": effect, "realized_pnl": realized})
 
     return app
 

@@ -327,3 +327,110 @@ class TestTheHTTPLayer:
         con.close()
         assert [r[0] for r in rows] == [
             OUTCOME_WOULD_TRADE, OUTCOME_REJECTED, OUTCOME_REJECTED]
+
+
+class TestTheSimulatedBook:
+    """The half of the instrument that was missing from the first cut.
+
+    Recording intents answers "how often did signals fire?". Only a position
+    book and a round trip answer "would they have made money?" — the more
+    important question, and the one the service could not touch until now.
+    """
+
+    @pytest.fixture
+    def client(self, tmp_path):
+        from fastapi.testclient import TestClient
+        from services.signal_ingest.main import create_app
+        db = str(tmp_path / "s.db")
+        return TestClient(create_app(_cfg(ledger_path=db), Ledger(db)))
+
+    def _send(self, client, action, price, ticker="BTC", qty=None, t=None):
+        p = _sig(ticker=ticker, action=action, price=price,
+                 time=t or f"2026-10-21T14:{price % 60:02.0f}:00Z")
+        if qty is not None:
+            p["quantity"] = qty
+        return client.post("/webhook", json=p).json()
+
+    def test_a_buy_then_sell_produces_a_priced_round_trip(self, client):
+        assert self._send(client, "buy", 100.0)["book_effect"] == "opened"
+        r = self._send(client, "sell", 110.0)
+        assert r["book_effect"] == "closed"
+        assert r["realized_pnl"] == pytest.approx(0.01 * (110.0 - 100.0))
+
+    def test_a_losing_round_trip_is_recorded_as_negative(self, client):
+        self._send(client, "buy", 100.0)
+        assert self._send(client, "sell", 90.0)["realized_pnl"] < 0
+
+    def test_a_SELL_WITH_NO_POSITION_IS_NOT_A_SHORT(self, client):
+        """Shorting is a different risk shape — borrow, unlimited loss,
+        different margin. Inferring one from a bare 'sell' would invent
+        exposure the signal never asked for."""
+        r = self._send(client, "sell", 100.0)
+        assert r["book_effect"] == "flat_noop"
+        assert r["realized_pnl"] is None
+        assert client.get("/summary").json()["open_positions"] == 0
+
+    def test_a_second_buy_ADDS_and_re_averages(self, client):
+        self._send(client, "buy", 100.0, qty=0.01)
+        assert self._send(client, "buy", 200.0, qty=0.01)["book_effect"] == "added"
+        # avg 150 -> selling at 150 is flat
+        r = self._send(client, "sell", 150.0, qty=0.02)
+        assert r["book_effect"] == "closed"
+        assert r["realized_pnl"] == pytest.approx(0.0, abs=1e-9)
+
+    def test_a_partial_sell_REDUCES_and_leaves_the_rest_open(self, client):
+        self._send(client, "buy", 100.0, qty=0.04)
+        r = self._send(client, "sell", 110.0, qty=0.01)
+        assert r["book_effect"] == "reduced"
+        assert client.get("/summary").json()["open_positions"] == 1
+
+    def test_only_ADMITTED_signals_move_the_book(self, client):
+        """A rejection or a resend must not drift the position state."""
+        self._send(client, "buy", 100.0)
+        client.post("/webhook", json=_sig(ticker="GME", action="buy"))   # rejected
+        client.post("/webhook", json=_sig(secret="wrong"))               # rejected
+        before = client.get("/summary").json()
+        assert before["open_positions"] == 1 and before["round_trips"] == 0
+
+    def test_a_priceless_signal_still_tracks_POSITION_but_not_PnL(self, client):
+        """Position state must stay right even when P&L cannot be computed."""
+        p = _sig(ticker="BTC", action="buy"); p.pop("price", None)
+        r = client.post("/webhook", json=p).json()
+        assert r["book_effect"] == "opened" and r["realized_pnl"] is None
+        assert client.get("/summary").json()["open_positions"] == 1
+
+    def test_the_summary_states_it_is_an_UPPER_BOUND(self, client):
+        """It is gross of slippage/spread/commission, and must say so — this
+        project has measured those at ~38% and ~1/3 of net elsewhere."""
+        self._send(client, "buy", 100.0)
+        self._send(client, "sell", 110.0)
+        s = client.get("/summary").json()
+        assert s["round_trips"] == 1 and s["win_rate_pct"] == 100.0
+        assert "UPPER BOUND" in s["caveat"]
+
+    def test_win_rate_is_None_with_no_round_trips(self, client):
+        assert client.get("/summary").json()["win_rate_pct"] is None
+
+
+class TestLatencyBudget:
+    """🔴 TradingView CANCELS any request taking longer than 3 seconds.
+
+    A cancelled request is retried, which idempotency absorbs — but a service
+    that routinely breaches the budget would log a duplicate for every real
+    signal and look like it was being spammed. Measured, not assumed.
+    """
+
+    def test_a_webhook_round_trip_is_far_inside_3s(self, tmp_path):
+        import time
+        from fastapi.testclient import TestClient
+        from services.signal_ingest.main import create_app
+        db = str(tmp_path / "s.db")
+        client = TestClient(create_app(_cfg(ledger_path=db), Ledger(db)))
+        worst = 0.0
+        for i in range(25):
+            t0 = time.perf_counter()
+            client.post("/webhook", json=_sig(ticker="BTC", action="buy",
+                                              price=100.0 + i,
+                                              time=f"2026-10-21T14:{i:02d}:00Z"))
+            worst = max(worst, time.perf_counter() - t0)
+        assert worst < 1.0, f"worst webhook round trip {worst:.3f}s — 3s is the TV limit"
