@@ -23,8 +23,11 @@ function NavTabs() {
   // the scrollable strip below; without them flex would compress the labels
   // into ellipses rather than letting the strip scroll.
   const linkClass = ({ isActive }: { isActive: boolean }) =>
+    // `pointer-coarse:min-h-11` is Apple's 44pt HIG floor, applied to the HIT
+    // AREA rather than the type: the label stays text-xs, only the target grows.
+    // Measured before the change: these tabs were 107x36 on an iPhone 12.
     `flex items-center gap-1.5 px-3 py-1.5 max-sm:py-2.5 rounded text-xs font-medium
-     transition-colors shrink-0 whitespace-nowrap ${
+     transition-colors shrink-0 whitespace-nowrap pointer-coarse:min-h-11 ${
       isActive
         ? "bg-bg-elevated text-text-primary"
         : "text-text-secondary hover:text-text-primary"

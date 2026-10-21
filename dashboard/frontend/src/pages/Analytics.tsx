@@ -326,7 +326,7 @@ export function Analytics() {
           <button
             key={tab}
             onClick={() => setActiveTab(tab)}
-            className={`flex-1 px-3 py-1.5 text-xs font-semibold uppercase tracking-wider rounded-md transition-colors ${
+            className={`flex-1 px-3 py-1.5 pointer-coarse:min-h-11 text-xs font-semibold uppercase tracking-wider rounded-md transition-colors ${
               activeTab === tab
                 ? "bg-bg-elevated text-text-primary shadow-sm"
                 : "text-text-dim hover:text-text-secondary"
@@ -347,7 +347,7 @@ export function Analytics() {
               exportEntriesCSV(summaries as unknown as Record<string, unknown>[]);
             }
           }}
-          className="flex items-center gap-1.5 text-xs text-text-secondary hover:text-text-primary transition-colors px-2 py-1 rounded border border-border-dim hover:border-text-dim"
+          className="flex items-center gap-1.5 text-xs text-text-secondary hover:text-text-primary transition-colors px-2 py-1 pointer-coarse:min-h-11 pointer-coarse:px-4 rounded border border-border-dim hover:border-text-dim"
         >
           <Download size={12} />
           Export CSV

@@ -107,7 +107,7 @@ export function History() {
         <div className="flex justify-end">
           <button
             onClick={() => exportDailySummariesCSV(summaries as unknown as Record<string, unknown>[])}
-            className="flex items-center gap-1.5 text-xs text-text-secondary hover:text-text-primary transition-colors px-2 py-1 rounded border border-border-dim hover:border-text-dim"
+            className="flex items-center gap-1.5 text-xs text-text-secondary hover:text-text-primary transition-colors px-2 py-1 pointer-coarse:min-h-11 pointer-coarse:px-4 rounded border border-border-dim hover:border-text-dim"
           >
             <Download size={12} />
             Export CSV

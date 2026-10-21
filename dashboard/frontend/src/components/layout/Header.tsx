@@ -315,7 +315,10 @@ export function Header() {
           onClick={handleMuteToggle}
           aria-label={muted ? "Unmute alert sounds" : "Mute alert sounds"}
           className="text-text-secondary hover:text-text-primary transition-colors
-                     p-2 -m-1 rounded"
+                     p-2 -m-1 rounded
+                     pointer-coarse:inline-flex pointer-coarse:items-center
+                     pointer-coarse:justify-center pointer-coarse:min-h-11
+                     pointer-coarse:min-w-11"
           title={muted ? "Unmute" : "Mute"}
         >
           {muted ? <VolumeX size={16} /> : <Volume2 size={16} />}
@@ -332,7 +335,10 @@ export function Header() {
               }}
               aria-label="Sign out"
               className="text-text-secondary hover:text-loss transition-colors
-                         p-2 -m-1 rounded"
+                         p-2 -m-1 rounded
+                         pointer-coarse:inline-flex pointer-coarse:items-center
+                         pointer-coarse:justify-center pointer-coarse:min-h-11
+                         pointer-coarse:min-w-11"
               title="Sign out"
             >
               <LogOut size={16} />

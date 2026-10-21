@@ -264,7 +264,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
                 role="option"
                 aria-selected={i === selectedIndex}
                 onClick={cmd.action}
-                className={`w-full flex items-center gap-3 px-4 py-2.5 text-sm transition-colors ${
+                className={`w-full flex items-center gap-3 px-4 py-2.5 pointer-coarse:min-h-11 text-sm transition-colors ${
                   i === selectedIndex
                     ? "bg-card text-text-primary"
                     : "text-text-secondary hover:bg-card/50"
