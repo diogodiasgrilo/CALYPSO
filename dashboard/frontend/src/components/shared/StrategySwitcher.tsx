@@ -158,8 +158,18 @@ export function StrategySwitcher() {
         <div
           role="listbox"
           aria-label="Strategies"
+          // ⚠️ `overflow-hidden` alone CLIPPED the list. Measured on an
+          // iPhone 12: the panel ran y=82..737 in a 664px viewport and did NOT
+          // scroll (scrollHeight == clientHeight), while the page behind it is
+          // exactly viewport-height — so variant H, the last entry, was simply
+          // UNREACHABLE. A whole strategy could not be selected on a phone.
+          //
+          // Cap the height to what is left below the trigger and let it
+          // scroll. `overscroll-contain` keeps a flick inside the panel from
+          // scrolling the page behind it.
           className="absolute left-0 top-full mt-1.5 z-50 w-[22rem] max-sm:w-[calc(100vw-2rem)]
-                     rounded-xl border border-border-dim overflow-hidden"
+                     rounded-xl border border-border-dim overflow-y-auto overscroll-contain
+                     max-h-[calc(100vh-7rem)] table-scroll"
           style={{ backgroundColor: "var(--color-bg-elevated)", boxShadow: "0 12px 40px rgba(0,0,0,0.55)" }}
         >
           {groupsToShow.map((g) => (
