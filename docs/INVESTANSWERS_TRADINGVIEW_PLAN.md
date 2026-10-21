@@ -11,6 +11,99 @@ fact, and this plan is deliberately shaped the same way.
 
 ---
 
+## 0-bis. 🔴 RESEARCHED 2026-10-21 — the premise does not match the product
+
+The plan below was written from reasoning alone. Four facts gathered since, each
+free, change the picture before any of its checks are reached.
+
+### A. There are NO indicators for individual stocks
+
+The ask was Tesla/Apple buy-sell. The catalogue is **crypto and macro**. The full
+product list (investanswers.io/products):
+
+| Product | Price/mo (annual) | Covers |
+|---|---|---|
+| IA Pro Bundle | **$250 ($229)** | everything, incl. IADSS |
+| IADSS | **$175 ($149)** | "trading signals for active traders" |
+| IA Rotation Model | $150 ($124) | capital reallocation among equities |
+| IA Profit Taking Model | $94 ($74) | selling at target levels |
+| IA Pair Trading (PTOS) | $99 ($69) | hedging with correlated assets |
+| IA ATR Model | $89 ($59) | trading ranges, any asset |
+| IA Layer In/Layer Out | $50 ($24) | entry + profit-taking guidance |
+| IA Bitcoin Top & Bottom | $50 ($24) | Bitcoin on-chain |
+| IA Arb Cloud | $50 ($24) | BTC/MSTR-style co-integration |
+| IA DCA on Steroids | $40 ($30) | dollar-cost averaging |
+| IA Macro Model | $40 ($19) | global macro |
+| IA Solana Upside Model | **free** | Solana projections |
+
+Nothing is per-ticker for equities. The closest, **IA Rotation Model**, is an
+*allocation* model — which stocks to hold — not a buy/sell trigger on AAPL.
+
+### B. The one script we can inspect is commentary, not signal
+
+`IA-SOL-Upside-Model` is free and public, so it serves as a free proxy for
+Check 2. It is an **`indicator()`, not a `strategy()`**, published
+**closed-source**, with **no alerts, no `alertcondition`, no entries/exits**. Its
+own description says it helps *"visualize the relative prices based on pricing
+models and also gauge upside for profit taking"* — a projection overlay a human
+reads.
+
+⚠️ One script is not the whole line, and **IADSS is explicitly sold as "trading
+signals"** — so this does not condemn the catalogue. But every product name in
+the table is a *model* or *guidance* ("Upside", "Top & Bottom", "Layer In/Out",
+"Profit Taking"), which is the vocabulary of judgement aids, not triggers.
+**IADSS is the only candidate worth evaluating, and it is the one that cannot be
+inspected without paying.**
+
+### C. The subscription imposes a MINIMUM ACCOUNT SIZE — the new decisive bar
+
+This is arithmetic, and it can be done before anything else:
+
+| account | IADSS $1,788/yr | Pro Bundle $2,748/yr |
+|---|---|---|
+| $20,000 | **8.9% drag** | **13.7% drag** |
+| $50,000 | 3.6% | 5.5% |
+| $100,000 | 1.8% | 2.7% |
+| $200,000 | 0.9% | 1.4% |
+
+**The strategy must clear this hurdle before earning a cent.** At the ~$21k
+scale seen in the sibling Patreon investigation, IADSS is a **~9%/yr headwind**.
+For the data feed to be a <1% drag the account needs roughly **$180k (IADSS)** or
+**$275k (bundle)**.
+
+Combined with the measurability floor (~50 trades/yr), the bar is now **two**
+independent conditions, not one — and both are checkable for free.
+
+### D. The licence binds to the subscriber, which sharpens Check 3
+
+The EULA does **not** forbid automated trading on the outputs ("You are solely
+responsible for your own … trading decisions") — good news. But it does forbid
+"copy, rent, sell, lease, distribute, pledge, assign, or otherwise transfer …
+make it available to or share it … with anyone else".
+
+So the scripts live on **dad's** TradingView account and the webhook must
+originate there. The chain is then: dad's TradingView → our ingest service →
+*which broker account?* His IBKR user is read-only by design, ours is paper.
+**There is still no legal-and-technical endpoint that exists today.**
+
+ℹ️ Separately, and stated as what it is: there are **unverified, user-submitted
+complaints** about the business on a consumer-complaint site. Such reports are
+not evidence of anything and are not a finding — but a ~$2,750/yr recurring
+purchase deserves independent diligence.
+
+### Revised recommendation
+
+**The original question — "automate InvestAnswers' TSLA/AAPL buy-sell signals" —
+has no matching product, so it is answered: not possible as asked.**
+
+If the interest survives re-aiming at what does exist, the order is unchanged
+and still free: ask what **IADSS** actually emits (discrete alerts, or a chart to
+read?), then how many signals per ticker per year, then whether the account size
+clears the subscription drag. Only if all three pass does any of the build below
+become relevant.
+
+---
+
 ## 0. The three checks that come before any code
 
 Each is free or near-free, and **any one of them can end this**. Do them in
