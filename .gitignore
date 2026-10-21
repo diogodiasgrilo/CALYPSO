@@ -183,3 +183,7 @@ backtest/results/sweep_logs/
 scripts/probe_chain_*.log
 scripts/probe_trades_*.log
 .claude/
+
+# signal-ingest live config (holds the shared secret; template is tracked)
+services/signal_ingest/config.json
+data/signal_ingest/

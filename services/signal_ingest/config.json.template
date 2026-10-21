@@ -1,0 +1,17 @@
+{
+  "_comment": "Copy to config.json on the VM. The real secret belongs in SIGNAL_INGEST_SECRET (systemd), not here.",
+  "dry_run": true,
+  "host": "127.0.0.1",
+  "port": 8002,
+  "shared_secret": "",
+  "ledger_path": "data/signal_ingest/signals.db",
+  "max_orders_per_day": 10,
+
+  "_comment_symbols": "The allowlist IS the risk control - the indicator is a black box, so the limits are ours. Empty => refuse everything.",
+  "symbols": {
+    "TSLA": {"asset_class": "equity", "default_quantity": 1, "max_quantity": 5},
+    "AAPL": {"asset_class": "equity", "default_quantity": 1, "max_quantity": 5},
+    "BTC":  {"asset_class": "crypto", "default_quantity": 0.01, "max_quantity": 0.05},
+    "SOL":  {"asset_class": "crypto", "default_quantity": 1, "max_quantity": 10}
+  }
+}

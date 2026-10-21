@@ -1,0 +1,38 @@
+[Unit]
+Description=CALYPSO signal-ingest — TradingView webhook receiver (DRY-RUN ONLY)
+# Receives TradingView alerts and RECORDS what would have been traded. It
+# imports no broker client and cannot place an order; see
+# docs/INVESTANSWERS_TRADINGVIEW_PLAN.md.
+# Deliberately NOT part of hydra/: a strategy outage must not affect it, and an
+# outage here must not affect trading.
+After=network-online.target
+Wants=network-online.target
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+Environment="PYTHONUNBUFFERED=1"
+Environment="PYTHONPATH=/opt/calypso"
+# The shared secret lives here, not in config.json (which is world-readable in
+# the repo tree). Use a systemd drop-in on the VM:
+#   systemctl edit signal-ingest  ->  [Service]
+#                                     Environment="SIGNAL_INGEST_SECRET=..."
+ExecStart=/opt/calypso/.venv/bin/python -m services.signal_ingest.main
+Restart=always
+RestartSec=30
+
+# Sandboxing — this service only ever writes its own ledger.
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/opt/calypso/data/signal_ingest /opt/calypso/logs
+# No network restrictions: it must accept loopback HTTP. The bind address is
+# 127.0.0.1 in config, so it is not reachable off-box regardless.
+
+[Install]
+WantedBy=multi-user.target
