@@ -169,7 +169,7 @@ export function DayDetailModal({
             <button
               onClick={() => prevDate && onNavigate(prevDate)}
               disabled={!prevDate}
-              className="p-1 rounded-md hover:bg-bg-elevated transition-colors text-text-secondary hover:text-text-primary disabled:opacity-20 disabled:cursor-not-allowed"
+              className="p-1 pointer-coarse:inline-flex pointer-coarse:items-center pointer-coarse:justify-center pointer-coarse:min-h-11 pointer-coarse:min-w-11 rounded-md hover:bg-bg-elevated transition-colors text-text-secondary hover:text-text-primary disabled:opacity-20 disabled:cursor-not-allowed"
               title={prevDate ? `Previous: ${prevDate}` : undefined}
             >
               <ChevronLeft size={16} />
@@ -180,7 +180,7 @@ export function DayDetailModal({
             <button
               onClick={() => nextDate && onNavigate(nextDate)}
               disabled={!nextDate}
-              className="p-1 rounded-md hover:bg-bg-elevated transition-colors text-text-secondary hover:text-text-primary disabled:opacity-20 disabled:cursor-not-allowed"
+              className="p-1 pointer-coarse:inline-flex pointer-coarse:items-center pointer-coarse:justify-center pointer-coarse:min-h-11 pointer-coarse:min-w-11 rounded-md hover:bg-bg-elevated transition-colors text-text-secondary hover:text-text-primary disabled:opacity-20 disabled:cursor-not-allowed"
               title={nextDate ? `Next: ${nextDate}` : undefined}
             >
               <ChevronRight size={16} />
@@ -188,7 +188,7 @@ export function DayDetailModal({
           </div>
           <button
             onClick={onClose}
-            className="p-1.5 rounded-lg hover:bg-bg-elevated transition-colors text-text-secondary hover:text-text-primary"
+            className="p-1.5 pointer-coarse:inline-flex pointer-coarse:items-center pointer-coarse:justify-center pointer-coarse:min-h-11 pointer-coarse:min-w-11 rounded-lg hover:bg-bg-elevated transition-colors text-text-secondary hover:text-text-primary"
           >
             <X size={16} />
           </button>
@@ -200,7 +200,7 @@ export function DayDetailModal({
             <button
               key={tab}
               onClick={() => setDetailTab(tab)}
-              className={`px-3 py-1 text-xs font-semibold uppercase tracking-wider rounded-md transition-colors ${
+              className={`px-3 py-1 pointer-coarse:min-h-11 text-xs font-semibold uppercase tracking-wider rounded-md transition-colors ${
                 detailTab === tab
                   ? "bg-bg-elevated text-text-primary"
                   : "text-text-dim hover:text-text-secondary"
