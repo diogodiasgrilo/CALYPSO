@@ -288,7 +288,35 @@ export function SessionReplay({ date, strategyId = "" }: { date: string; strateg
         </div>
       )}
 
-      {/* Real P&L curve from spread_snapshots */}
+      {/* Real P&L curve from spread_snapshots.
+       *
+       * ⚠️ An empty `pnlCurve` used to render NOTHING — no chart and no
+       * message, just a void below working replay controls. Every other empty
+       * state here explains itself ("No tick data available for replay", "No
+       * stops recorded yet"), and a silent blank is the one shape a reader
+       * cannot interpret: it looks broken rather than empty.
+       *
+       * Two DIFFERENT cases, deliberately worded differently. `pnlCurve` empty
+       * means the day has no spread_snapshots at all — typically a day with no
+       * entries, which is a fact about the day. `visiblePnl` short while
+       * `pnlCurve` has rows means the replay simply has not reached the first
+       * snapshot yet, which is a fact about the playhead and resolves itself.
+       */}
+      {pnlCurve.length === 0 && (
+        <div className="bg-card rounded-lg border border-border-dim p-4 text-center">
+          <span className="text-text-dim text-xs">
+            No P&amp;L curve for this day — no entries were monitored.
+          </span>
+        </div>
+      )}
+      {pnlCurve.length > 0 && visiblePnl.length <= 1 && (
+        <div className="bg-card rounded-lg border border-border-dim p-4 text-center">
+          <span className="text-text-dim text-xs">
+            P&amp;L curve begins at the first entry — press play.
+          </span>
+        </div>
+      )}
+
       {visiblePnl.length > 1 && (
         <div className="bg-card rounded-lg border border-border-dim p-2">
           <ResponsiveContainer width="100%" height={140}>

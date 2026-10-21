@@ -45,6 +45,14 @@ for (const [name, path] of ROUTES) {
         const r = el.getBoundingClientRect();
         if (r.width === 0 || r.height === 0) return;        // hidden
         if (getComputedStyle(el).display === "none") return;
+        // ⚠️ THIRD-PARTY ATTRIBUTION IS EXEMPT, and only this. The
+        // `lightweight-charts` library injects a 35x19 "Charting by
+        // TradingView" link that their licence requires be displayed as
+        // supplied. It is not a control we designed and not one a user
+        // needs to hit, so the 44pt rule does not apply — but it is
+        // excluded BY NAME rather than by loosening the threshold, so our
+        // own controls cannot hide behind the same exemption.
+        if ((el.getAttribute("title") || "").includes("TradingView")) return;
         if (r.width < min || r.height < min) {
           out.push({
             label: (el.innerText || el.getAttribute("aria-label") || el.className.toString()).slice(0, 36),
@@ -91,6 +99,14 @@ test("history day-detail MODAL: tap targets meet 44x44", async ({ page }, testIn
       const r = el.getBoundingClientRect();
       if (r.width === 0 || r.height === 0) return;
       if (getComputedStyle(el).display === "none") return;
+      // ⚠️ THIRD-PARTY ATTRIBUTION IS EXEMPT, and only this. The
+      // `lightweight-charts` library injects a 35x19 "Charting by
+      // TradingView" link that their licence requires be displayed as
+      // supplied. It is not a control we designed and not one a user
+      // needs to hit, so the 44pt rule does not apply — but it is
+      // excluded BY NAME rather than by loosening the threshold, so our
+      // own controls cannot hide behind the same exemption.
+      if ((el.getAttribute("title") || "").includes("TradingView")) return;
       if (r.width < min || r.height < min) {
         out.push({
           label: (el.innerText || el.getAttribute("aria-label") || el.className.toString()).slice(0, 36),
