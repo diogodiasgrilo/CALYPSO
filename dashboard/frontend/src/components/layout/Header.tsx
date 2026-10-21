@@ -140,7 +140,24 @@ export function Header() {
           }}
           title="Dry-run mode: real broker prices, no real orders placed."
         >
-          ⚠ DRY-RUN MODE — REAL PRICES, NO REAL ORDERS — POSITION IDs PREFIXED DRY_* ⚠
+          {/* Two renderings of the same warning. The full sentence wrapped to
+              TWO LINES on a phone and ate a sixth of the first screen; the
+              short form keeps the only part that changes behaviour ("no real
+              orders") and drops the implementation detail, which stays in the
+              `title` tooltip and on every wider screen. */}
+          {/* THREE widths, because two were not enough. The full sentence
+              wrapped to two lines on a phone (a sixth of the first screen),
+              and at tablet width it wrapped with the closing ⚠ ORPHANED alone
+              on line two. Each tier is the longest form that fits on one line
+              at that width; the full text stays in the `title` tooltip
+              regardless, so nothing is ever lost. */}
+          <span className="max-lg:hidden">
+            ⚠ DRY-RUN MODE — REAL PRICES, NO REAL ORDERS — POSITION IDs PREFIXED DRY_* ⚠
+          </span>
+          <span className="max-sm:hidden lg:hidden">
+            ⚠ DRY-RUN MODE — REAL PRICES, NO REAL ORDERS ⚠
+          </span>
+          <span className="sm:hidden">⚠ DRY-RUN — NO REAL ORDERS ⚠</span>
         </div>
       )}
       {metricsEpoch && (

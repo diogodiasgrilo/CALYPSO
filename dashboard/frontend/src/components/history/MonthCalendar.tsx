@@ -154,7 +154,7 @@ export function MonthCalendar({
                 return (
                   <div
                     key={di}
-                    className="flex-1 h-8 pointer-coarse:h-11 rounded-sm flex items-center justify-center text-3xs font-mono text-text-dim/40"
+                    className="flex-1 h-8 pointer-coarse:h-11 rounded-sm flex items-center justify-center text-3xs pointer-coarse:text-xs font-mono text-text-dim/40"
                     style={{ backgroundColor: "rgba(90, 100, 120, 0.1)" }}
                     title={date}
                   >
@@ -199,7 +199,7 @@ export function MonthCalendar({
                       ? `${date}: ${formatPnL(pnl)} headline, ${formatPnL(traded)} traded`
                       : `${date}: ${formatPnL(pnl)}`
                   }
-                  className="relative flex-1 h-8 pointer-coarse:h-11 rounded-sm flex items-center justify-center text-3xs font-mono cursor-pointer hover:ring-1 hover:ring-text-dim/50 hover:brightness-125 transition-all focus-visible:ring-2 focus-visible:ring-info focus-visible:outline-none"
+                  className="relative flex-1 h-8 pointer-coarse:h-11 rounded-sm flex items-center justify-center text-3xs pointer-coarse:text-xs font-mono cursor-pointer hover:ring-1 hover:ring-text-dim/50 hover:brightness-125 transition-all focus-visible:ring-2 focus-visible:ring-info focus-visible:outline-none"
                   style={{ backgroundColor: bgColor }}
                   title={
                     misleading

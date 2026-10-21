@@ -32,7 +32,7 @@ class Settings(BaseSettings):
     #
     # `primary_label` is the fallback header label; the header actually shows
     # live_label() (the live seat's variant_*_label).
-    primary_label: str = "B · LIVE (Brandon narrow, 12:15-15:15 grid)"
+    primary_label: str = "B · LIVE (Brandon narrow, 12:15-14:45 grid)"
     bot_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_bl.json")
     hydra_state_file: Path = Path("/opt/calypso/data/variant_bl/hydra_state.json")
     hydra_metrics_file: Path = Path("/opt/calypso/data/variant_bl/hydra_metrics.json")
@@ -106,7 +106,7 @@ class Settings(BaseSettings):
     variant_bl_backtesting_db: Path = Path("/opt/calypso/data/variant_bl/backtesting.db")
     variant_bl_log_file: Path = Path("/opt/calypso/logs/hydra_variant_bl/bot.log")
     variant_bl_config_file: Path = Path("/opt/calypso/bots/hydra/config/config_variant_bl.json")
-    variant_bl_label: str = "B · LIVE (Brandon narrow, 12:15-15:15 grid)"
+    variant_bl_label: str = "B · LIVE (Brandon narrow, 12:15-14:45 grid)"
 
     # Variant BM ("B, money") — the SAME Brandon strategy B runs, against the FUNDED
     # account via calypso-broker-live on :8789. account_kind="live_money" in the taxonomy;

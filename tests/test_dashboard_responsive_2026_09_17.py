@@ -75,13 +75,40 @@ def test_tabs_keep_their_width_inside_the_strip():
 
 
 def test_no_tab_is_hidden_on_small_screens():
-    """Hiding a tab hides a whole page. Scrolling is the correct answer."""
+    """Hiding a DESTINATION hides a whole page. Hiding a label does not.
+
+    ⚠️ TIGHTENED 2026-10-21. This asserted that the literal string
+    `max-sm:hidden` appeared nowhere in the nav block, which is coarser than
+    the rule it exists to protect. It fired on a change that removed no
+    destination at all: the word "Compare" (a non-interactive <span> beside
+    the separator rule) and the TEXT inside the group NavLinks, which keep
+    their icon and gain an explicit `aria-label`.
+
+    That mattered, because the nav needed 708px in a 360px viewport and the
+    last tab was clipped mid-word as "COMP". Dropping 302px of label text is
+    what made every destination fit with nothing cut.
+
+    The invariant is now expressed directly: no NavLink may be hidden, and any
+    NavLink whose label text is conditionally hidden must carry an accessible
+    name instead. That is strictly STRONGER than the string check — it would
+    also catch a hidden tab that avoided the `max-sm:` prefix.
+    """
     src = APP.read_text()
     block = src[src.index("const linkClass"): src.index("</nav>")]
-    assert "max-sm:hidden" not in block, (
-        "a nav tab is hidden on small screens — that removes a page rather "
-        "than making it reachable."
-    )
+
+    for m in re.finditer(r"<NavLink\b[^>]*>", block, re.S):
+        tag = m.group(0)
+        assert "hidden" not in tag, (
+            f"a nav DESTINATION is hidden on small screens — that removes a "
+            f"page rather than making it reachable: {tag[:120]}"
+        )
+
+    # A link that hides its own text must still announce itself.
+    if "max-sm:hidden" in block:
+        assert "aria-label" in block, (
+            "nav label text is hidden on small screens without an aria-label — "
+            "the destination would be unnamed for screen readers and tests."
+        )
 
 
 def test_scrollbar_chrome_is_suppressed_for_the_strip():

@@ -81,9 +81,47 @@ body {
   scrollbar-width: none;            /* Firefox */
   -ms-overflow-style: none;         /* old Edge */
   -webkit-overflow-scrolling: touch;
+
+  /* SCROLL AFFORDANCE (2026-10-21). The strip scrolls by design, but with the
+   * scrollbar hidden and a hard clip at the viewport edge the last tab simply
+   * looked BROKEN — "COMPARE" rendered as "COMP|" on every phone page. A mask
+   * fades the final 2rem instead, which reads as "there is more this way".
+   *
+   * `mask-image` rather than an overlay gradient: an overlay would need a
+   * matching background colour and would break the moment the surface token
+   * changes, which is exactly the kind of drift this theme already fought.
+   * The fade is applied only while the content actually overflows — see the
+   * `scroll-fade` guard below — so a short strip has no phantom edge. */
+   * MEASURED, not eyeballed: at 2rem the fade was real (edge pixels ran
+   * 58 -> 38 -> 28) but far too subtle to read, and the clip still landed
+   * mid-word as "COMP". 3.5rem dissolves the last two or three glyphs, which
+   * reads as "continues" rather than "truncated".
+   */
+  mask-image: linear-gradient(to right, #000 calc(100% - 3.5rem), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 3.5rem), transparent 100%);
+}
+
+/* On a wide viewport the tabs fit, so the mask would fade a tab for no reason. */
+@media (min-width: 900px) {
+  .nav-scroll {
+    mask-image: none;
+    -webkit-mask-image: none;
+  }
 }
 .nav-scroll::-webkit-scrollbar {
   display: none;                    /* WebKit */
+}
+
+/* A comparison matrix is read ACROSS, so it scrolls rather than stacks — and a
+ * value scrolled away from its row label is unreadable. Pin the label column.
+ * Paired with `.nav-scroll` on the wrapper, which hides the scrollbar chrome
+ * and fades the right edge so the scroll is discoverable. */
+.cmp-table th:first-child,
+.cmp-table td:first-child {
+  position: sticky;
+  left: 0;
+  z-index: 1;
+  background: var(--color-card);
 }
 
 /* ── Typography utility classes ── */

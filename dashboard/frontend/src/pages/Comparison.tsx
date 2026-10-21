@@ -576,7 +576,8 @@ function ConfigDelta({
       <div className="text-xs uppercase tracking-wide text-text-secondary mb-2">
         Config Delta
       </div>
-      <table className="w-full text-sm">
+      <div className="-mx-1 overflow-x-auto nav-scroll">
+        <table className="w-full min-w-[32rem] text-sm cmp-table">
         <thead>
           <tr className="text-text-secondary text-xs">
             <th className="text-left font-normal pb-1">Knob</th>
@@ -637,6 +638,7 @@ function ConfigDelta({
           })}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -1234,7 +1236,8 @@ function EndOfDayStats({
       <div className="text-xs uppercase tracking-wide text-text-secondary mb-2">
         Day Summary (Live)
       </div>
-      <table className="w-full text-sm">
+      <div className="-mx-1 overflow-x-auto nav-scroll">
+        <table className="w-full min-w-[32rem] text-sm cmp-table">
         <thead>
           <tr className="text-text-secondary text-xs">
             <th className="text-left font-normal pb-1">Metric</th>
@@ -1271,6 +1274,7 @@ function EndOfDayStats({
           ))}
         </tbody>
       </table>
+      </div>
     </div>
   );
 }
@@ -1363,7 +1367,8 @@ function LifetimeStatsTable({ agg, ids }: { agg: AggregatePayload; ids: string[]
 
   return (
     <div>
-      <table className="w-full text-sm">
+      <div className="-mx-1 overflow-x-auto nav-scroll">
+        <table className="w-full min-w-[32rem] text-sm cmp-table">
         <thead>
           <tr className="text-text-secondary text-xs">
             <th className="text-left font-normal pb-1">Lifetime metric</th>
@@ -1409,6 +1414,7 @@ function LifetimeStatsTable({ agg, ids }: { agg: AggregatePayload; ids: string[]
           ))}
         </tbody>
       </table>
+      </div>
 
       {h2h.common_days > 0 && (
         <div

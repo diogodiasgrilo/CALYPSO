@@ -1,6 +1,6 @@
 import { useState, useCallback } from "react";
 import { Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
-import { LayoutDashboard, CalendarDays, BarChart3, Scale } from "lucide-react";
+import { LayoutDashboard, CalendarDays, BarChart3, Scale, CalendarRange } from "lucide-react";
 import { DashboardLayout } from "./components/layout/DashboardLayout";
 import { ErrorBoundary } from "./components/shared/ErrorBoundary";
 import { Dashboard } from "./pages/Dashboard";
@@ -26,8 +26,11 @@ function NavTabs() {
     // `pointer-coarse:min-h-11` is Apple's 44pt HIG floor, applied to the HIT
     // AREA rather than the type: the label stays text-xs, only the target grows.
     // Measured before the change: these tabs were 107x36 on an iPhone 12.
-    `flex items-center gap-1.5 px-3 py-1.5 max-sm:py-2.5 rounded text-xs font-medium
-     transition-colors shrink-0 whitespace-nowrap pointer-coarse:min-h-11 ${
+    `flex items-center gap-1.5 px-3 max-sm:px-2 max-sm:gap-1 py-1.5 max-sm:py-2.5
+     rounded text-xs font-medium
+     transition-colors shrink-0 whitespace-nowrap
+     pointer-coarse:min-h-11 pointer-coarse:min-w-11
+     pointer-coarse:justify-center ${
       isActive
         ? "bg-bg-elevated text-text-primary"
         : "text-text-secondary hover:text-text-primary"
@@ -42,7 +45,7 @@ function NavTabs() {
     // cannot fit them, and hiding tabs would hide whole pages. `nav-scroll`
     // hides the scrollbar chrome while keeping the scroll (see index.css).
     <nav
-      className="flex gap-1 px-3 py-1.5 bg-bg border-b border-border-dim
+      className="flex gap-1 max-sm:gap-0.5 px-3 max-sm:px-2 py-1.5 bg-bg border-b border-border-dim
                  overflow-x-auto nav-scroll"
     >
       <NavLink to="/" end className={linkClass}>
@@ -76,15 +79,37 @@ function NavTabs() {
             className="self-center h-4 w-px bg-border-dim mx-1.5 shrink-0"
             aria-hidden
           />
-          <span className="self-center text-3xs font-bold uppercase tracking-wider text-text-dim pr-0.5 shrink-0">
+          {/* The WORD is hidden on a phone, the RULE is not. The rule carries
+              the meaning described above (these links leave the selected
+              strategy); the word merely restates it, and at 56px of a 360px
+              strip it was a sixth of the budget. Measured: the strip needed
+              708px in a 360px viewport, which is why the last tab was clipped
+              mid-word as "COMP". */}
+          <span className="self-center text-3xs font-bold uppercase tracking-wider text-text-dim pr-0.5 shrink-0 max-sm:hidden">
             Compare
           </span>
         </>
       )}
       {comparableGroups.map((g) => (
-        <NavLink key={g.id} to={`/comparison/${g.id}`} className={linkClass}>
-          <Scale size={14} />
-          {g.label}
+        // Icon-only below `sm`. "0DTE Iron Condor" + "Multi-day Calendar" are
+        // 302px of label on their own; dropping the text (not the link) is what
+        // takes the strip from 708px to under the 360px viewport, so nothing is
+        // clipped at all. `title` + `aria-label` keep the name for pointer
+        // users, screen readers and tests — the destination is unchanged.
+        <NavLink
+          key={g.id}
+          to={`/comparison/${g.id}`}
+          className={linkClass}
+          title={g.label}
+          aria-label={g.label}
+        >
+          {/* DISTINCT icons per group, because on a phone the label is hidden
+              and two identical scales would make "0DTE Iron Condor" and
+              "Multi-day Calendar" indistinguishable — worse than the clipped
+              label this replaced. Keyed off `pnl_shape`, which the group meta
+              already carries, so this adds no second source of truth. */}
+          {g.pnl_shape === "debit" ? <CalendarRange size={14} /> : <Scale size={14} />}
+          <span className="max-sm:hidden">{g.label}</span>
         </NavLink>
       ))}
     </nav>
