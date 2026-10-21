@@ -95,7 +95,7 @@ export function DayDetailEntries({
       <h4 className="text-2xs font-semibold text-text-secondary uppercase tracking-wider">
         Entries ({entries.length})
       </h4>
-      <div className="overflow-x-auto rounded-lg border border-border-dim">
+      <div className="overflow-x-auto rounded-lg border border-border-dim table-scroll">
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b border-border-dim bg-bg-elevated/30">
@@ -173,7 +173,7 @@ export function DayDetailEntries({
           <h4 className="text-2xs font-semibold text-text-secondary uppercase tracking-wider mt-4">
             Stop Losses ({stops.length})
           </h4>
-          <div className="overflow-x-auto rounded-lg border border-border-dim">
+          <div className="overflow-x-auto rounded-lg border border-border-dim table-scroll">
             <table className="w-full text-xs">
               <thead>
                 <tr className="border-b border-border-dim bg-bg-elevated/30">

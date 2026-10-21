@@ -576,7 +576,7 @@ function ConfigDelta({
       <div className="text-xs uppercase tracking-wide text-text-secondary mb-2">
         Config Delta
       </div>
-      <div className="-mx-1 overflow-x-auto nav-scroll">
+      <div className="-mx-1 overflow-x-auto table-scroll">
         <table className="w-full min-w-[32rem] text-sm cmp-table">
         <thead>
           <tr className="text-text-secondary text-xs">
@@ -1236,7 +1236,7 @@ function EndOfDayStats({
       <div className="text-xs uppercase tracking-wide text-text-secondary mb-2">
         Day Summary (Live)
       </div>
-      <div className="-mx-1 overflow-x-auto nav-scroll">
+      <div className="-mx-1 overflow-x-auto table-scroll">
         <table className="w-full min-w-[32rem] text-sm cmp-table">
         <thead>
           <tr className="text-text-secondary text-xs">
@@ -1367,7 +1367,7 @@ function LifetimeStatsTable({ agg, ids }: { agg: AggregatePayload; ids: string[]
 
   return (
     <div>
-      <div className="-mx-1 overflow-x-auto nav-scroll">
+      <div className="-mx-1 overflow-x-auto table-scroll">
         <table className="w-full min-w-[32rem] text-sm cmp-table">
         <thead>
           <tr className="text-text-secondary text-xs">

@@ -112,6 +112,23 @@ body {
   display: none;                    /* WebKit */
 }
 
+/* Table scroll: scrollbar hidden, but only a WHISPER of a fade.
+ *
+ * ⚠️ These wrappers used `.nav-scroll`, whose 3.5rem fade is tuned for a NAV
+ * strip where the faded thing is a label and the fade is a hint. On a data
+ * table the faded thing is a VALUE — the config-delta matrix had a whole
+ * column of numbers (75, 7, 2.5, 2.75 …) washed out to near-unreadable.
+ * Readability of data beats affordance here: the sticky first column and the
+ * cut-off column already signal that it scrolls. */
+.table-scroll {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+  -webkit-overflow-scrolling: touch;
+  mask-image: linear-gradient(to right, #000 calc(100% - 0.75rem), transparent 100%);
+  -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 0.75rem), transparent 100%);
+}
+.table-scroll::-webkit-scrollbar { display: none; }
+
 /* A comparison matrix is read ACROSS, so it scrolls rather than stacks — and a
  * value scrolled away from its row label is unreadable. Pin the label column.
  * Paired with `.nav-scroll` on the wrapper, which hides the scrollbar chrome

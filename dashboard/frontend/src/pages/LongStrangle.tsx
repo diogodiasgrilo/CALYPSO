@@ -522,7 +522,7 @@ function RunningRecord({ rows }: { rows: RecentRow[] }) {
           hint="sum of debits — every dollar was capped"
         />
       </div>
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto table-scroll">
         <table className="w-full text-3xs">
           <thead className="text-text-dim">
             <tr className="text-left">

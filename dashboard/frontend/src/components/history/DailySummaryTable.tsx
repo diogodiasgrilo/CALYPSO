@@ -65,7 +65,7 @@ export function DailySummaryTable({
 
   return (
     <div className="bg-card rounded-lg border border-border-dim overflow-hidden">
-      <div className="overflow-x-auto">
+      <div className="overflow-x-auto table-scroll">
         <table className="w-full text-xs">
           <thead>
             <tr className="border-b border-border-dim">

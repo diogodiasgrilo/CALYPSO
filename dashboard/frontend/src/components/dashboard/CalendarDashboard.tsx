@@ -122,7 +122,7 @@ function OutcomesTable({ outcomes }: { outcomes: DCRecentOutcome[] }) {
     return <div className="text-sm text-text-secondary">No closed calendars yet.</div>;
   }
   return (
-    <div className="overflow-x-auto">
+    <div className="overflow-x-auto table-scroll">
       <table className="w-full text-sm">
         <thead>
           <tr className="text-3xs uppercase tracking-wide text-text-secondary border-b border-border-dim">
