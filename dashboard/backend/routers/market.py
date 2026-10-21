@@ -70,8 +70,26 @@ async def get_ohlc(date_str: str | None = None):
         return JSONResponse(status_code=400, content={"error": err})
     target = date_str or get_today_et()
 
-    # 1. Authoritative dense bars from the market-data source (HOMER writes
-    #    market_ohlc_1min post-close for the densest variant).
+    # 1. Cached bars from the market-data source, IF ANY.
+    #
+    #    ⚠️ This said "HOMER writes market_ohlc_1min post-close", which reads as
+    #    an automatic nightly job. It is not: `backfill_day()` is reachable ONLY
+    #    via `python -m services.homer.main --backfill`, a MANUAL command, and
+    #    the nightly HOMER run never writes this table. The last rows in the
+    #    market-data source are from 2026-07-16; variant C's stop at 2026-06-02
+    #    and b/bl/g have no such table at all.
+    #
+    #    That is HARMLESS, and the comment is what made it look otherwise —
+    #    step 2 below computes equally dense bars on demand from the SAME
+    #    source's market_ticks, which are recorded live and continuously (the
+    #    market-data source wrote 760 ticks on 2026-10-20). Measured on
+    #    2026-10-21: this endpoint returns 378 bars for a ~390-minute session
+    #    with real high-low ranges, i.e. true candles, via step 2 alone.
+    #
+    #    So treat step 1 as an optional cache, not the authoritative path, and
+    #    do NOT conclude from an empty market_ohlc_1min that the chart is
+    #    degraded. (I did, and reported it as a three-month regression before
+    #    measuring what the endpoint actually returns.)
     ohlc = await market_reader.get_today_ohlc(target)
 
     # 2. Live (intraday, before HOMER): compute dense bars from the market-data
