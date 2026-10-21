@@ -97,6 +97,9 @@ body {
    * mid-word as "COMP". 3.5rem dissolves the last two or three glyphs, which
    * reads as "continues" rather than "truncated".
    */
+}
+
+.nav-scroll[data-overflowing="true"] {
   mask-image: linear-gradient(to right, #000 calc(100% - 3.5rem), transparent 100%);
   -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 3.5rem), transparent 100%);
 }
@@ -124,10 +127,16 @@ body {
   scrollbar-width: none;
   -ms-overflow-style: none;
   -webkit-overflow-scrolling: touch;
+}
+.table-scroll::-webkit-scrollbar { display: none; }
+
+/* Only while it ACTUALLY overflows — set by useOverflowFade. Default (no
+ * attribute) is unfaded, so a failure to measure shows data rather than
+ * hiding it. */
+.table-scroll[data-overflowing="true"] {
   mask-image: linear-gradient(to right, #000 calc(100% - 0.75rem), transparent 100%);
   -webkit-mask-image: linear-gradient(to right, #000 calc(100% - 0.75rem), transparent 100%);
 }
-.table-scroll::-webkit-scrollbar { display: none; }
 
 /* A comparison matrix is read ACROSS, so it scrolls rather than stacks — and a
  * value scrolled away from its row label is unreadable. Pin the label column.
