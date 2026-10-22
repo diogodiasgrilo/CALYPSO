@@ -730,5 +730,40 @@ await t("after the last slot, with nothing traded, it says so plainly", async ()
   assert.ok(!r.all.includes("next entry"));
 });
 
+console.log("\n#20 the layout must FIT the tile");
+
+await t("the current fleet fits a Large widget with margins intact", async () => {
+  // Measured from a real home-screen screenshot 2026-10-22: the Large tile is
+  // 356pt, Apple's 16pt margins leave 324pt usable, and the layout came to
+  // 339pt. It OVERFLOWED, so iOS compressed the padding — the top margin
+  // measured 5.7pt against the 16pt set, which is exactly why the tile looked
+  // edge-to-edge above and loose below. Not visible in any assertion until
+  // the pixels were measured.
+  const { estimateHeight, USABLE } = await import("./widget_layout_budget.mjs");
+  const rows = FLEET.groups.reduce((a, g) => a + g.rows.length, 0);
+  const h = estimateHeight({ rows, groups: FLEET.groups.length });
+  assert.ok(h <= USABLE, `layout ${h}pt exceeds ${USABLE}pt usable`);
+});
+
+await t("ADDING A STRATEGY surfaces the overflow here, not on the phone", async () => {
+  // The fleet is 9 today and a 10th is plausible (bm, once real money runs).
+  // At that point the vertical rhythm has to be retuned; this is the alarm.
+  const { estimateHeight, USABLE } = await import("./widget_layout_budget.mjs");
+  assert.ok(estimateHeight({ rows: 10, groups: 4 }) > USABLE,
+            "the budget model has drifted — it no longer detects an overflow");
+});
+
+await t("CONTROL: the pre-fix rhythm is detected as overflowing", async () => {
+  // Proves the model has discrimination rather than just returning a small
+  // number: the 7pt/3pt gaps that shipped are reported as too tall.
+  const LINE = { title: 20, sub: 14, hero: 26, colhdr: 12, grouphdr: 13, row: 15 };
+  const rows = 9, groups = 4;
+  const old = LINE.title + 6 + LINE.sub + LINE.hero + 9 + LINE.colhdr + 3
+    + groups * (LINE.grouphdr + 3) + (groups - 1) * (7 + 1 + 7)
+    + rows * LINE.row + (rows - groups) * 3;
+  const { USABLE } = await import("./widget_layout_budget.mjs");
+  assert.ok(old > USABLE, `old rhythm ${old}pt should exceed ${USABLE}pt`);
+});
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

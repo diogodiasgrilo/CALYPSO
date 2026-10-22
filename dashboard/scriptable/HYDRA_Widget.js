@@ -395,7 +395,7 @@ function createFleetWidget(res, family, logo) {
 
   // ── hero: the live seat ──
   if (d.live) {
-    w.addSpacer(6);
+    w.addSpacer(5);
     const sub = row(w);
     const tag = sub.addText("LIVE");
     tag.font = T.caption2();
@@ -427,7 +427,7 @@ function createFleetWidget(res, family, logo) {
           null, C.label3, T.caption2());
   }
 
-  w.addSpacer(9);
+  w.addSpacer(7);
 
   // Column headings ONCE, in the SAME fixed-width cells as the figures they
   // describe. Putting them in each group header with a flexible spacer both
@@ -438,21 +438,28 @@ function createFleetWidget(res, family, logo) {
     ch.addSpacer();
     numCell(ch, "TODAY", W_TODAY, C.label3, N.head);
     numCell(ch, "LIFETIME", W_LIFE, C.label3, N.head);
-    w.addSpacer(3);
+    w.addSpacer(2);
   }
 
+  // Vertical rhythm, measured rather than chosen. On a 356pt Large tile with
+  // Apple's 16pt margins there is 324pt of usable height; at 7pt group gaps
+  // and 3pt row gaps the content came to 339pt, so it OVERFLOWED and iOS
+  // compressed the padding — the top margin measured 5.7pt against the 16pt
+  // set, which is why the tile looked edge-to-edge at the top and loose at
+  // the bottom. Trimming 2pt per group gap and 1pt per row gap recovers ~21pt
+  // and brings the content inside the box with the margins intact.
   groups.forEach((g, gi) => {
-    if (gi > 0) { w.addSpacer(7); rule(w); w.addSpacer(7); }
+    if (gi > 0) { w.addSpacer(4); rule(w); w.addSpacer(4); }
     const gh = row(w);
     label(gh, (g.label || g.id), null, C.label3, T.caption2());
     gh.addSpacer();
     label(gh, g.pnl_shape === "debit" ? "debit" : "credit",
           null, C.label3, T.caption2());
-    w.addSpacer(3);
+    w.addSpacer(1);
 
     const rows = compact ? (g.rows || []).slice(0, 1) : (g.rows || []);
     rows.forEach((r, ri) => {
-      if (ri > 0) w.addSpacer(3);
+      if (ri > 0) w.addSpacer(2);
       const rr = row(w);
       const nm = rr.addText(r.name || r.id);
       nm.font = T.caption1();

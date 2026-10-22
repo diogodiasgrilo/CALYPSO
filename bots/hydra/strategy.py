@@ -4825,7 +4825,8 @@ class HydraStrategy(MEICStrategy):
     # =========================================================================
 
     def _build_credit_gate_skip_message(
-        self, nonviable_side: str, est_call: float, est_put: float
+        self, nonviable_side: str, est_call: float, est_put: float,
+        mkt048_veto: Optional[dict] = None,
     ) -> Tuple[str, str]:
         """Build the (skip_reason, skip_details) pair for a credit-gate SKIP.
 
@@ -4842,6 +4843,32 @@ class HydraStrategy(MEICStrategy):
         """
         _min_call = self.min_viable_credit_per_side / 100
         _min_put = self.min_viable_credit_put_side / 100
+
+        # MKT-048 flips a side non-viable for UNFILLABILITY, not for a thin
+        # credit, and downstream the only signal was the flipped flag. The
+        # operator was therefore told "Call spread $0.05 is below our $0.05
+        # minimum" — false, and self-contradictory. Live on bl entry #2,
+        # 2026-10-22: mid credit $0.05 PASSED, fillable was $0.03/sh.
+        if mkt048_veto and mkt048_veto.get("side") == nonviable_side:
+            _side = nonviable_side
+            _f = mkt048_veto.get("fillable_ps", 0.0)
+            _fl = mkt048_veto.get("floor_ps", 0.0)
+            _est = est_call if _side == "call" else est_put
+            skip_reason = (
+                f"The {_side} spread priced fine at the midpoint "
+                f"(${_est / 100:.2f}) but could not actually be FILLED as a "
+                f"credit: buying the long at its ask and selling the short at "
+                f"its bid nets ${_f:.2f}/share, under our ${_fl:.2f} floor. "
+                f"Placing it would have failed at the third leg. "
+                f"Skipped (fillability, not price)."
+            )
+            skip_details = (
+                f"• {_side.capitalize()} mid est: ${_est / 100:.2f} — passed the minimum\n"
+                f"• {_side.capitalize()} FILLABLE: ${_f:.2f}/sh (floor ${_fl:.2f}/sh) — vetoed\n"
+                f"• One-sided entries disabled, so the whole entry is skipped"
+            )
+            return (skip_reason, skip_details)
+
         if nonviable_side == "unresolved_conids":
             # MKT-011C. NOT a credit decision — nothing was ever priced, so
             # quoting "$0.00 vs the minimum" would assert a measurement that
@@ -5092,6 +5119,13 @@ class HydraStrategy(MEICStrategy):
             fill_put_ps = getattr(entry, "_fillable_put_ps", None)
             if call_viable and fill_call_ps is not None and fill_call_ps < floor_ps:
                 call_viable = False
+                # Record WHY. Downstream the only signal was the flipped flag,
+                # so the skip path reported a CREDIT failure — logging
+                # "call credit non-viable ($0.05 < $0.05)" when the credit
+                # had in fact passed and MKT-048 vetoed on fillability. Live
+                # on bl, entry #2, 2026-10-22 12:45:37.
+                entry._mkt048_veto = {"side": "call", "fillable_ps": fill_call_ps,
+                                      "floor_ps": floor_ps}
                 logger.warning(
                     f"MKT-048: Entry #{entry.entry_number} call side unfillable — "
                     f"fillable ${fill_call_ps:.2f}/sh < net-credit floor ${floor_ps:.2f}/sh "
@@ -5105,6 +5139,13 @@ class HydraStrategy(MEICStrategy):
                 )
             if put_viable and fill_put_ps is not None and fill_put_ps < floor_ps:
                 put_viable = False
+                # Record WHY. Downstream the only signal was the flipped flag,
+                # so the skip path reported a CREDIT failure — logging
+                # "put credit non-viable ($0.05 < $0.05)" when the credit
+                # had in fact passed and MKT-048 vetoed on fillability. Live
+                # on bl, entry #2, 2026-10-22 12:45:37.
+                entry._mkt048_veto = {"side": "put", "fillable_ps": fill_put_ps,
+                                      "floor_ps": floor_ps}
                 logger.warning(
                     f"MKT-048: Entry #{entry.entry_number} put side unfillable — "
                     f"fillable ${fill_put_ps:.2f}/sh < net-credit floor ${floor_ps:.2f}/sh "
@@ -5176,11 +5217,22 @@ class HydraStrategy(MEICStrategy):
                 return ("skip", True, estimated_call, estimated_put, "call")
             else:
                 # One-sided disabled → skip entirely
-                logger.warning(
-                    f"MKT-011: Entry #{entry.entry_number} call credit non-viable "
-                    f"(${estimated_call / 100:.2f} < ${call_min / 100:.2f}) - "
-                    f"SKIPPING (one-sided entries disabled)"
-                )
+                _v = getattr(entry, "_mkt048_veto", None)
+                if _v and _v.get("side") == "call":
+                    logger.warning(
+                        f"MKT-011: Entry #{entry.entry_number} SKIPPING "
+                        f"(one-sided entries disabled) — call side was vetoed by "
+                        f"MKT-048 as UNFILLABLE (fillable ${_v['fillable_ps']:.2f}/sh "
+                        f"< floor ${_v['floor_ps']:.2f}/sh); its mid credit "
+                        f"${estimated_call / 100:.2f} had PASSED the "
+                        f"${call_min / 100:.2f} minimum"
+                    )
+                else:
+                    logger.warning(
+                        f"MKT-011: Entry #{entry.entry_number} call credit non-viable "
+                        f"(${estimated_call / 100:.2f} < ${call_min / 100:.2f}) - "
+                        f"SKIPPING (one-sided entries disabled)"
+                    )
                 self._log_safety_event(
                     "MKT-011_SKIP",
                     f"Entry #{entry.entry_number} - call non-viable, one-sided disabled",
@@ -8532,7 +8584,8 @@ class HydraStrategy(MEICStrategy):
                         self._next_entry_index += 1
                         # Determine specific skip reason for dashboard/alert.
                         skip_reason, skip_details = self._build_credit_gate_skip_message(
-                            nonviable_side, est_call, est_put
+                            nonviable_side, est_call, est_put,
+                            getattr(entry, "_mkt048_veto", None),
                         )
                         # proposed_entry (2026-09-11): keep the strikes this entry
                         # WOULD have used. `entry` is still in scope here even
