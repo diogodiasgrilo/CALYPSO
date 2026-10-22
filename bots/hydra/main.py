@@ -44,6 +44,14 @@ import subprocess
 import threading
 from datetime import datetime
 
+# MONITOR-STARVED: how long one run_strategy_check() may block before the loop
+# says so. Entries and stop monitoring share this thread, so a long call is a
+# blind spell for every stop check. Set between the two measured modes rather
+# than guessed: healthy entry attempts are p90 66s (bl, since 2026-09-01) while
+# the broker-degraded tail is 550-730s. 120s is ~2x p90, so a normal day is
+# silent and only genuine starvation is reported.
+MONITOR_STARVED_WARN_S = 120.0
+
 # Ensure project root is in path for imports when running as script
 _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _project_root not in sys.path:
@@ -1029,7 +1037,56 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                     trade_logger.log_error(f"Directional pivot monitor error (non-fatal): {e}", exception=e)
 
                 # Run strategy check
+                #
+                # MONITOR-STARVED (2026-10-22): time this call and say so when
+                # it blocks for long enough to matter. run_strategy_check does
+                # entries AND stop monitoring sequentially on this one thread,
+                # so a slow entry attempt is also a blind spell for every stop
+                # check, MKT-046 confirmation window and A2 evaluation.
+                #
+                # This was completely silent until now. On 2026-10-21 the live
+                # seat went 569 seconds without a tick (13:14:56 -> 13:24:25)
+                # while carrying an open entry at 72% call cushion, and nothing
+                # in the log said so — it was only visible as a gap in
+                # market_ticks, after the fact. Measured fleet-wide since
+                # 2026-09-01: b 96 spells >120s totalling 410 min, bl 17 / 98
+                # min. Healthy entry attempts are p90 66s; the degraded tail is
+                # 550-730s, so the two are cleanly separable and the threshold
+                # below sits between them rather than being a round guess.
+                #
+                # Observability only — it changes no decision. The point is to
+                # know when a blind spell coincides with an open position,
+                # because the risk is currently LATENT: across 73 spells >180s
+                # and 63 stops, none has yet overlapped (~1.6 expected by
+                # chance, so zero is luck, not safety).
+                _iter_started = time.monotonic()
                 action = strategy.run_strategy_check()
+                _iter_elapsed = time.monotonic() - _iter_started
+                if _iter_elapsed >= MONITOR_STARVED_WARN_S:
+                    try:
+                        _open = len(getattr(strategy.daily_state, "active_entries", ()) or ())
+                    except Exception:  # noqa: BLE001
+                        _open = -1
+                    _msg = (
+                        f"MONITOR-STARVED: the trading loop blocked for "
+                        f"{_iter_elapsed:.0f}s with {_open} open entr"
+                        f"{'y' if _open == 1 else 'ies'} — no stop check, "
+                        f"MKT-046 confirmation or cushion read ran in that window"
+                    )
+                    if _open > 0:
+                        logger.warning(_msg)
+                        try:
+                            strategy._log_safety_event(
+                                "MONITOR_STARVED",
+                                f"loop blocked {_iter_elapsed:.0f}s with "
+                                f"{_open} open entries",
+                            )
+                        except Exception:  # noqa: BLE001
+                            pass  # never let observability break the loop
+                    else:
+                        # Flat book: the same block carries no stop risk. Worth
+                        # recording (it still delays entries) but not a warning.
+                        logger.info(_msg)
 
                 consecutive_errors = 0
 

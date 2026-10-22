@@ -4842,7 +4842,21 @@ class HydraStrategy(MEICStrategy):
         """
         _min_call = self.min_viable_credit_per_side / 100
         _min_put = self.min_viable_credit_put_side / 100
-        if nonviable_side == "both":
+        if nonviable_side == "unresolved_conids":
+            # MKT-011C. NOT a credit decision — nothing was ever priced, so
+            # quoting "$0.00 vs the minimum" would assert a measurement that
+            # was never taken. This is the same mistake the docstring above
+            # records for the one-sided case, in a new place.
+            skip_reason = (
+                "Could not resolve the option contracts with the broker, so no "
+                "order could be placed — the credit was never measured. "
+                "Skipped (contract lookup failed)."
+            )
+            skip_details = (
+                "• Conid resolution failed for both sides\n"
+                "• No credit estimate taken (not a credit rejection)"
+            )
+        elif nonviable_side == "both":
             skip_reason = (
                 f"Not enough premium — both spreads came in below our minimum credit. "
                 f"Call spread ${est_call / 100:.2f} (need ≥ ${_min_call:.2f}), "
@@ -4925,7 +4939,9 @@ class HydraStrategy(MEICStrategy):
             - estimation_worked: True if we got valid quotes, False if estimation failed
             - estimated_call: estimated call credit in cents (0.0 if failed)
             - estimated_put: estimated put credit in cents (0.0 if failed)
-            - nonviable_side: only meaningful when result=="skip" — "both", "call", or
+            - nonviable_side: only meaningful when result=="skip" — "both", "call",
+              "unresolved_conids" (MKT-011C: contracts never resolved, so nothing
+              was priced and nothing could be placed), or
               "put", naming which side(s) the FINAL (post-MKT-029-fallback,
               post-MKT-048-fillability-veto) viability determination actually
               rejected. "" for every other result. Added (2026-08-13) so callers
@@ -4965,6 +4981,41 @@ class HydraStrategy(MEICStrategy):
         # below every threshold and every MKT-029 fallback, and the entry is skipped —
         # which is what entries #1-#6 did.
         if not getattr(entry, "_credit_estimate_ok", False):
+            # MKT-011C (2026-10-22): one cause of "could not estimate" makes
+            # proceeding structurally FUTILE rather than merely risky.
+            #
+            # 019f188 fixed the MEASURED-zero half of this. The remaining
+            # fall-through is correct when the inputs merely degraded (quotes
+            # thin, a leg unquoted) — MKT-010 still checks liquidity and the
+            # entry can genuinely fill. It is NOT correct when the thing that
+            # failed was CONID RESOLUTION: placement keys on those same conids,
+            # so the order cannot be placed no matter what MKT-010 says.
+            #
+            # Live seat, 2026-10-21 13:17:36 (broker degraded, two 75s
+            # ReadTimeouts): qualify_option_strikes timed out -> "Could not
+            # resolve call conids" -> "Could not resolve put conids" ->
+            # MKT-011 fell back to MKT-010 -> "NEUTRAL -> placing full iron
+            # condor" -> it actually attempted "Placing Long Call at 7790.0"
+            # and failed 76s later with "no conid for Call 7790.0".
+            #
+            # Two costs, both avoidable with zero trade-off: an order placement
+            # attempted with no conid, and ~76s of extra blocking on the thread
+            # the STOP MONITOR shares (run_strategy_check does entries and
+            # monitoring sequentially). That attempt sat inside a measured
+            # 569-second gap in bl's market_ticks during which no stop check
+            # ran while entry #1 was open at 72% call cushion.
+            #
+            # Declining here is not a new risk envelope: the attempt was
+            # already going to fail. It fails sooner, without an order.
+            if getattr(entry, "_credit_estimate_fail_reason", None) == "unresolved_conids":
+                logger.warning(
+                    f"MKT-011C: Entry #{entry.entry_number} SKIPPED — conid "
+                    f"resolution failed, so no order can be placed. Not "
+                    f"falling through to MKT-010 (placement needs the same "
+                    f"conids the estimate could not get)."
+                )
+                return ("skip", False, 0.0, 0.0, "unresolved_conids")
+
             logger.warning(
                 f"MKT-011: Could not estimate credit for Entry #{entry.entry_number} - "
                 f"falling back to MKT-010 illiquidity check"

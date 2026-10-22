@@ -2415,6 +2415,13 @@ class MEICStrategy(abc.ABC):
         # Stashed on the entry rather than widening the return type, mirroring
         # _fillable_*_ps immediately above — same function, same consumer, same reason.
         entry._credit_estimate_ok = False
+        # WHY it failed, not just that it did. The 019f188 fix made a MEASURED
+        # zero decline; "could not measure" still falls through to MKT-010 and
+        # proceeds, which is right when the inputs merely degraded — but NOT
+        # when the thing that failed was conid resolution, because placement
+        # needs those same conids and cannot succeed without them. See the
+        # gate's use of this in strategy.py (MKT-011).
+        entry._credit_estimate_fail_reason = None
 
         expiry = self._get_todays_expiry()
         if not expiry:
@@ -2483,6 +2490,7 @@ class MEICStrategy(abc.ABC):
                         )
                     else:
                         logger.warning("Could not resolve call conids")
+                        entry._credit_estimate_fail_reason = "unresolved_conids"
                         return (0.0, 0.0)
                 elif not (_quoted(sc) and _quoted(lc)):
                     logger.warning(
@@ -2519,6 +2527,7 @@ class MEICStrategy(abc.ABC):
                         )
                         return (estimated_call_credit, 0.0)
                     logger.warning("Could not resolve put conids")
+                    entry._credit_estimate_fail_reason = "unresolved_conids"
                     return (0.0, 0.0)
                 elif not (_quoted(sp) and _quoted(lp)):
                     logger.warning(
