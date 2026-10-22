@@ -180,5 +180,170 @@ await t("the pre-2026-10-22 bare cache shape still loads", async () => {
   assert.ok(r.all.includes("−$500"), `old cache unreadable: ${r.all}`);
 });
 
+
+// ───────────────────────────────────────────────────────────────────────────
+// Fleet view (Large / Medium), added 2026-10-22.
+//
+// /api/widget serves the LIVE SEAT only — how it was written in March — which
+// made the home screen a very narrow window on a nine-strategy fleet. The fleet
+// view shows all of them, grouped by COMPARABILITY, with no global #1.
+//
+// That last part is a data property, not taste. On the real payload below,
+// a global leaderboard would crown H at +$139.80 — but H trades SPY at one
+// contract (~1/70th of bl's notional at 7 SPX contracts) and its entire figure
+// predates the range-expansion filter it now runs, so it has zero observations
+// under current rules. Meanwhile bl's lifetime covers 9 days and c's covers 94.
+// ───────────────────────────────────────────────────────────────────────────
+
+// Captured verbatim from https://domytrade.com/api/widget/fleet on 2026-10-22.
+const FLEET = {
+  date: "2026-10-22", market_open: false,
+  live: { id: "bl", name: "Brandon Late", today: 0.0, lifetime: -43.65, days: 9, live: true, status: "live" },
+  groups: [
+    { id: "ic_0dte", label: "0DTE Iron Condor", pnl_shape: "credit", comparable: true, rows: [
+      { id: "a",  name: "Baseline",        today: 0.0, lifetime: 674.0,     days: 95, live: false, status: "dry_run_shadow" },
+      { id: "bl", name: "Brandon Late",    today: 0.0, lifetime: -43.65,    days: 9,  live: true,  status: "live" },
+      { id: "f",  name: "Ghauri",          today: 0.0, lifetime: -171.1,    days: 40, live: false, status: "dry_run_locked" },
+      { id: "b",  name: "B-A",             today: 0.0, lifetime: -3327.3,   days: 64, live: false, status: "dry_run_shadow" },
+      { id: "c",  name: "Brandon Narrow",  today: 0.0, lifetime: -12244.78, days: 94, live: false, status: "dry_run_shadow" }]},
+    { id: "calendar_multiday", label: "Multi-day Calendar", pnl_shape: "debit", comparable: true, rows: [
+      { id: "e", name: "Double Calendar", today: 0.0, lifetime: -92.85,   days: 20, live: false, status: "dry_run_locked" },
+      { id: "d", name: "Time Machine",    today: 0.0, lifetime: -6307.75, days: 73, live: false, status: "dry_run_locked" }]},
+    { id: "undefined_risk_0dte", label: "Undefined-Risk 0DTE", pnl_shape: "credit", comparable: false, rows: [
+      { id: "g", name: "Strangle", today: 0.0, lifetime: -310.55, days: 40, live: false, status: "dry_run_locked" }]},
+    { id: "long_gamma_0dte", label: "Long-Gamma 0DTE", pnl_shape: "debit", comparable: false, rows: [
+      { id: "h", name: "Long Strangle", today: 0.0, lifetime: 139.8, days: 21, live: false, status: "dry_run_locked" }]},
+  ],
+};
+const f = (o) => ({ ...FLEET, ...o });
+
+console.log("\n#7 the right endpoint for the right size");
+await t("Large fetches the FLEET endpoint", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.urls.some(u => u.endsWith("/api/widget/fleet")), r.urls.join());
+  assert.ok(!r.urls.some(u => u.endsWith("/api/widget")), "also hit the single-seat endpoint");
+});
+await t("Small still fetches the single-seat endpoint", async () => {
+  const r = await render({ family: "small", body: p({}), nowISO: MIDDAY });
+  assert.ok(r.urls.some(u => u.endsWith("/api/widget")), r.urls.join());
+  assert.ok(!r.urls.some(u => u.includes("/fleet")), "small should not fetch the fleet");
+});
+await t("extraLarge (iPad) falls through to the fleet layout", async () => {
+  const r = await render({ family: "extraLarge", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.urls.some(u => u.endsWith("/api/widget/fleet")));
+  assert.ok(r.all.includes("HYDRA FLEET"));
+});
+
+console.log("\n#8 the whole fleet is visible");
+await t("every one of the 9 strategies appears", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  for (const n of ["Baseline", "Brandon Late", "Ghauri", "B-A", "Brandon Narrow",
+                   "Double Calendar", "Time Machine", "Strangle", "Long Strangle"])
+    assert.ok(r.all.includes(n), `${n} missing from the fleet view`);
+});
+await t("every comparability group is labelled", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  for (const g of ["0DTE IRON CONDOR", "MULTI-DAY CALENDAR",
+                   "UNDEFINED-RISK 0DTE", "LONG-GAMMA 0DTE"])
+    assert.ok(r.all.includes(g), `${g} missing`);
+});
+await t("each row carries its day count", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  // 9d for bl against 94d for c is the whole reason lifetimes are not ranked
+  for (const d of ["95d", "9d", "40d", "64d", "94d", "20d", "73d", "21d"])
+    assert.ok(r.all.includes(d), `${d} missing — lifetime shown without its window`);
+});
+
+console.log("\n#9 no global leaderboard");
+await t("H (+$140) is NOT presented above the rest", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  const iH = r.all.indexOf("Long Strangle");
+  const iA = r.all.indexOf("Baseline");
+  assert.ok(iA < iH, "H appears before the IC group — that is a global ranking");
+});
+await t("ordering is group-scoped, best-first WITHIN each group", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  // Scope the search to the group's own section. A bare indexOf finds
+  // "Brandon Late" in the LIVE header line ABOVE the groups and reports a
+  // false ordering failure — the same class of mistake as indexing the
+  // market-state dot as entry #1.
+  const section = (label, nextLabel) => {
+    const a = r.all.indexOf(label);
+    const b = nextLabel ? r.all.indexOf(nextLabel) : r.all.length;
+    assert.ok(a >= 0 && b > a, `section ${label} not found`);
+    return r.all.slice(a, b);
+  };
+  const ic = section("0DTE IRON CONDOR", "MULTI-DAY CALENDAR");
+  assert.ok(ic.indexOf("Baseline") < ic.indexOf("Brandon Late"), "IC not best-first");
+  assert.ok(ic.indexOf("Brandon Late") < ic.indexOf("Brandon Narrow"), "IC not best-first");
+  const cal = section("MULTI-DAY CALENDAR", "UNDEFINED-RISK 0DTE");
+  assert.ok(cal.indexOf("Double Calendar") < cal.indexOf("Time Machine"),
+            "calendar group not best-first");
+});
+
+await t("CONTROL: the live seat name DOES appear above the groups", () => {
+  // Proves the scoping above is necessary, not defensive clutter.
+  assert.ok(FLEET.live.name === "Brandon Late" &&
+            FLEET.groups[0].rows.some(r => r.name === "Brandon Late"),
+            "fixture no longer exercises the duplicate-name case");
+});
+await t("no '#1' / 'winner' / 'best' label anywhere", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(!/#1|winner|best overall/i.test(r.all), r.all);
+});
+
+console.log("\n#10 the live seat is distinguishable from 8 simulations");
+await t("the LIVE tag is rendered", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.all.includes("LIVE"), r.all);
+});
+await t("the live row is the accent colour, simulated rows are muted", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  const live = r.texts.find(x => x.text === "Brandon Late" && x.color === "#7ee8c7");
+  const sim  = r.texts.find(x => x.text === "Brandon Narrow");
+  assert.ok(live, "live row not highlighted");
+  assert.equal(sim.color, "#8b9bb0");
+});
+
+console.log("\n#11 amounts keep their sign in the fleet too");
+await t("A's +$674 renders with a plus", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.all.includes("+$674"), r.all);
+});
+await t("C's −$12,245 renders with a minus", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.all.includes("−$12245"), r.all);
+});
+await t("a null lifetime shows a dash, never a fabricated 0", async () => {
+  const body = f({ groups: [{ id: "x", label: "X", pnl_shape: "credit", comparable: true,
+    rows: [{ id: "z", name: "Zed", today: 0, lifetime: null, days: 0, live: false, status: "s" }] }] });
+  const r = await render({ family: "large", fleetBody: body, nowISO: MIDDAY });
+  assert.ok(r.all.includes("—"), r.all);
+});
+
+console.log("\n#12 medium shows group leaders only");
+await t("one row per group, and it is that group's leader", async () => {
+  const r = await render({ family: "medium", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.all.includes("Baseline"), "IC leader missing");
+  assert.ok(!r.all.includes("Brandon Narrow"), "medium rendered a non-leader");
+  assert.ok(r.all.includes("Double Calendar") && !r.all.includes("Time Machine"));
+});
+
+console.log("\n#13 fleet inherits the freshness + auth guarantees");
+await t("a stale fleet payload is flagged with its date", async () => {
+  const r = await render({ family: "large", fleetBody: f({ date: "2026-10-20" }), nowISO: MIDDAY });
+  assert.ok(r.all.includes("⚠ 2026-10-20"), r.all);
+});
+await t("a 401 on the fleet says rejected, not offline", async () => {
+  const r = await render({ family: "large", httpStatus: 401,
+                           fleetBody: { detail: "Not authenticated" } });
+  assert.ok(/rejected/i.test(r.all), r.all);
+});
+await t("the fleet caches under its OWN key, not the small widget's", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.cachedFleet, "fleet cache not written");
+  assert.ok(JSON.parse(r.cachedFleet).data.groups, "wrong shape cached");
+});
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

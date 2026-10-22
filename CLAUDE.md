@@ -957,7 +957,8 @@ Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
 | `GET /api/strategies/{meta,{id}/snapshot,groups/{group_id}/comparison}` | Taxonomy boot payload, per-strategy live snapshot, group-scoped head-to-head (also `groups/{group_id}/aggregate`) |
 | `GET /api/dc/status` | D's isolated calendar status (reads `dc_calendar.db` + `dc_open_trades.json` sidecar) |
 | `GET /api/long-strangle/{status,recent}` | H's isolated long-gamma status (reads `long_strangle.db`). Debit-shaped payload — no `total_credit`, no spread width. `available:false` when H has never recorded a row, which is today's expected response. |
-| `GET /api/widget` | Flat JSON for iOS Scriptable. The **only** endpoint that also accepts a scoped `X-Widget-Token` header (read-only, revocable) — see the widget-token note under Access & auth |
+| `GET /api/widget` | Flat JSON for the iOS Scriptable **Small** widget (live seat only). One of two endpoints that also accept a scoped `X-Widget-Token` header (read-only, revocable) — see the widget-token note under Access & auth |
+| `GET /api/widget/fleet` | All 9 strategies for the **Medium/Large** widget, grouped by comparability with per-row `days` of history. Deliberately **no global ranking** — cross-group P&L is not comparable, raw dollars rank by position size, lifetimes span different eras (bl 9 days vs c 94), and 8 of 9 are dry-run. Same widget-token scope. |
 | `WS /ws/dashboard` | Real-time updates |
 
 ### Safety guarantees

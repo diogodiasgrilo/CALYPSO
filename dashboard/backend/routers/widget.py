@@ -142,3 +142,139 @@ async def get_widget_data():
         "summary": summary,
         "contracts_per_entry": contracts,
     }
+
+
+# ---------------------------------------------------------------------------
+# Fleet view (2026-10-22) — every strategy, grouped by COMPARABILITY
+# ---------------------------------------------------------------------------
+#
+# /api/widget serves the live seat alone, which is how it was written in March.
+# That makes the home screen a very narrow window on a 9-strategy fleet, so this
+# adds the whole board for the Large widget.
+#
+# Deliberately NOT a single ranked leaderboard, for reasons that are properties
+# of the data rather than taste:
+#
+#   * Cross-group ranking is the one comparison this system exists to prevent.
+#     A credit iron condor, a net-debit calendar and a naked strangle do not
+#     share a P&L axis — hence `comparable` on GroupMeta and the group-scoping of
+#     every /compare command.
+#   * Raw dollars rank by SIZE, not edge. A is 1 contract at 75pt; bl/b/c are 7
+#     at 5pt; H trades SPY (~1/70th of bl's notional at 1 contract). On the same
+#     55 days A returned -$23.55 against B-A's -$432.10 — size scaled the loss.
+#   * Lifetimes span DIFFERENT ERAS. Measured 2026-10-22: bl has 9 days of
+#     history against c's 94. `days` is returned per row so the number can be
+#     read honestly rather than compared blind.
+#   * 8 of the 9 are dry-run. Ranking simulated fills against the one live seat
+#     would be a category error.
+#
+# So: grouped, best-first WITHIN a group, live flagged, no global #1.
+
+_FLEET_TTL_S = 60.0
+_fleet_cache: dict = {"at": 0.0, "payload": None}
+
+
+def _variant_today_pnl(vid: str) -> float:
+    """Today's net from the variant's STATE file, not daily_summaries.
+
+    daily_summaries is only written at settlement, so during the session it
+    carries yesterday — reading it here would show a stale number all day on
+    the one view meant to be glanceable. Mirrors the live-seat calculation in
+    get_widget_data above.
+    """
+    try:
+        from dashboard.backend.services.variant_readers import state_file_for
+        import json as _json
+        with open(state_file_for(vid)) as fh:
+            st = _json.load(fh)
+        return round(float(st.get("total_realized_pnl", 0) or 0)
+                     - float(st.get("total_commission", 0) or 0), 2)
+    except Exception:  # noqa: BLE001
+        return 0.0
+
+
+@router.get("/api/widget/fleet")
+async def get_widget_fleet():
+    """Every strategy's today + lifetime, grouped by comparability group."""
+    import time as _time
+    now = _time.monotonic()
+    if _fleet_cache["payload"] is not None and now - _fleet_cache["at"] < _FLEET_TTL_S:
+        return _fleet_cache["payload"]
+
+    from dashboard.backend.config import settings as _settings
+    from dashboard.backend.services.variant_readers import (
+        db_reader_for_variant, live_seat_id, state_file_for,
+    )
+    from shared import strategy_taxonomy as tax
+
+    market = get_current_status()
+    seat = live_seat_id()
+    groups: dict[str, dict] = {}
+
+    for sid, meta in tax.STRATEGIES.items():
+        # Skip anything with no state file on this host — that is how `bm`
+        # (real-money, built but never installed) excludes itself, instead of a
+        # hardcoded name that a future variant would silently fall foul of.
+        try:
+            if not state_file_for(sid).exists():
+                continue
+        except Exception:  # noqa: BLE001
+            continue
+
+        lifetime, days = None, 0
+        try:
+            baseline = getattr(_settings, f"variant_{sid}_baseline_date", "") or ""
+            reader = db_reader_for_variant(sid)
+            ov = await reader.get_cumulative_overrides(baseline)
+            lifetime = (ov or {}).get("cumulative_pnl")
+            days = len(await reader.get_all_summaries(baseline))
+        except Exception:  # noqa: BLE001
+            pass  # a variant with no DB yet shows "-", never breaks the board
+
+        g = tax.GROUPS.get(meta.group_id)
+        bucket = groups.setdefault(meta.group_id, {
+            "id": meta.group_id,
+            "label": getattr(g, "label", meta.group_id) if g else meta.group_id,
+            "pnl_shape": getattr(g, "pnl_shape", meta.pnl_shape) if g else meta.pnl_shape,
+            "comparable": bool(getattr(g, "comparable", False)) if g else False,
+            "rows": [],
+        })
+        bucket["rows"].append({
+            "id": sid,
+            "name": meta.ui_name or sid.upper(),
+            "today": _variant_today_pnl(sid),
+            "lifetime": round(lifetime, 2) if isinstance(lifetime, (int, float)) else None,
+            "days": days,
+            "live": sid == seat,
+            "status": str(meta.status),
+        })
+
+    # Best-first WITHIN each group. A row with no lifetime sorts last rather
+    # than being treated as a zero, which would rank "no data yet" above a
+    # genuine loss.
+    for b in groups.values():
+        b["rows"].sort(key=lambda r: (r["lifetime"] is None,
+                                      -(r["lifetime"] or 0.0)))
+
+    ordered = [groups[gid] for gid in tax.GROUPS if gid in groups]
+    live_row = next((r for b in ordered for r in b["rows"] if r["live"]), None)
+
+    # The ET trading date, from the project's canonical exchange clock.
+    # get_current_status() carries NO date field — using market.get("date")
+    # would have shipped "" straight into the widget's staleness check, which
+    # treats a falsy date as "cannot tell" and would silently disable the stale
+    # warning on the fleet view forever.
+    try:
+        from shared.market_hours import get_us_market_time
+        et_date = get_us_market_time().strftime("%Y-%m-%d")
+    except Exception:  # noqa: BLE001
+        et_date = ""
+
+    payload = {
+        "date": et_date,
+        "market_open": market.get("is_open", False),
+        "live": live_row,
+        "groups": ordered,
+    }
+    _fleet_cache.update(at=now, payload=payload)
+    return payload

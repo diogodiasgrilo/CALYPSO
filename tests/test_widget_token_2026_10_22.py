@@ -234,3 +234,74 @@ class TestEndToEndOverHTTP:
         t = _issue(db)
         r = client.get(path, headers={"X-Widget-Token": t})
         assert r.status_code == 401, f"{path} accepted a widget token"
+
+
+class TestTheFleetEndpoint:
+    """`/api/widget/fleet` (2026-10-22) — the whole board, grouped.
+
+    /api/widget serves the live seat alone (how it was written in March), which
+    made the home screen a very narrow window on a nine-strategy fleet.
+    """
+
+    @pytest.fixture()
+    def client(self, db, monkeypatch):
+        from fastapi.testclient import TestClient
+        from dashboard.backend.config import settings
+        monkeypatch.setattr(settings, "dashboard_auth_db", db, raising=False)
+        import dashboard.backend.auth as auth_mod
+        monkeypatch.setattr(auth_mod.settings, "dashboard_auth_db", db, raising=False)
+        from dashboard.backend.main import app
+        return TestClient(app)
+
+    def test_the_widget_token_opens_it(self, client, db):
+        t = _issue(db)
+        r = client.get("/api/widget/fleet", headers={"X-Widget-Token": t})
+        assert r.status_code == 200, r.text
+
+    def test_it_is_still_closed_without_a_credential(self, client):
+        assert client.get("/api/widget/fleet").status_code == 401
+
+    def test_it_is_GET_only_so_the_token_stays_read_only(self, client, db):
+        t = _issue(db)
+        for verb in ("post", "put", "patch", "delete"):
+            r = getattr(client, verb)("/api/widget/fleet",
+                                      headers={"X-Widget-Token": t})
+            assert r.status_code in (404, 405), f"{verb} is routable"
+
+    def test_it_returns_a_usable_shape_with_no_variant_data_present(self, client, db):
+        """On a machine with no /opt/calypso data dirs every variant is skipped.
+        That must yield an empty board, never a 500 — the widget has to render
+        SOMETHING on a fresh checkout or a half-deployed host."""
+        t = _issue(db)
+        d = client.get("/api/widget/fleet", headers={"X-Widget-Token": t}).json()
+        assert set(d) >= {"date", "market_open", "live", "groups"}
+        assert isinstance(d["groups"], list)
+
+    def test_the_date_is_a_REAL_ET_date_not_an_empty_string(self, client, db):
+        """get_current_status() carries NO date field. Using market.get("date")
+        shipped "" straight into the widget's staleness check, which treats a
+        falsy date as "cannot tell" and would have silently disabled the stale
+        warning on the fleet view forever. Caught before deploy; pinned here."""
+        import re
+        t = _issue(db)
+        d = client.get("/api/widget/fleet", headers={"X-Widget-Token": t}).json()
+        assert re.fullmatch(r"\d{4}-\d{2}-\d{2}", d["date"] or ""), d["date"]
+
+    def test_rows_are_grouped_by_the_taxonomy_never_flattened(self):
+        """The ordering guarantee, asserted on the builder rather than on live
+        data: a flat global ranking is the one comparison this system exists to
+        prevent (credit ICs, debit calendars and naked strangles share no P&L
+        axis), so group identity must survive into the payload."""
+        import inspect
+        from dashboard.backend.routers import widget as w
+        src = inspect.getsource(w.get_widget_fleet)
+        assert "tax.GROUPS" in src and "group_id" in src
+        assert "rows" in src and ".sort(" in src
+
+    def test_a_missing_lifetime_sorts_LAST_not_as_a_zero(self):
+        """Treating None as 0 would rank "no data yet" above every genuine
+        loss — and on this fleet almost every lifetime is negative, so a new
+        variant would appear to lead on its first day."""
+        rows = [{"lifetime": -100.0}, {"lifetime": None}, {"lifetime": 50.0}]
+        rows.sort(key=lambda r: (r["lifetime"] is None, -(r["lifetime"] or 0.0)))
+        assert [r["lifetime"] for r in rows] == [50.0, -100.0, None]

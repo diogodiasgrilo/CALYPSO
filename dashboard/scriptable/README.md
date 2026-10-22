@@ -1,7 +1,36 @@
 # HYDRA iOS widget (Scriptable)
 
-A home-screen tile showing today's net P&L, per-entry status, and lifetime —
-read-only, and scoped to a single API endpoint.
+Home-screen tiles for the HYDRA fleet — read-only, scoped to two API endpoints.
+
+| size | shows | endpoint |
+|---|---|---|
+| **Small** | the live seat alone: today's P&L, entry dots, lifetime | `/api/widget` |
+| **Medium** | each comparability group's leader | `/api/widget/fleet` |
+| **Large** | all 9 strategies, grouped | `/api/widget/fleet` |
+
+Large is the biggest size iOS offers on iPhone (`extraLarge` is iPad-only and
+falls through to the same fleet layout).
+
+## Why the fleet view is grouped and has no global #1
+
+Ranking all nine on one axis would be wrong four ways, and the live data shows
+each one:
+
+1. **Cross-group ranking is the comparison this system exists to prevent.** A
+   credit iron condor, a net-debit calendar and a naked strangle share no P&L
+   axis — hence `comparable` on `GroupMeta` and the group-scoping of every
+   `/compare`.
+2. **Raw dollars rank by SIZE, not edge.** A is 1 contract at 75pt; bl/b/c are
+   7 at 5pt; H trades SPY at ~1/70th of bl's notional. Over the same 55 days A
+   returned −$23.55 against B-A's −$432.10 — size scaled the loss, not the edge.
+3. **Lifetimes cover different eras.** Measured 2026-10-22: bl has **9 days** of
+   history against c's **94**. Every row therefore carries its day count.
+4. **Eight of the nine are simulated.** Only the live seat places real orders,
+   so it gets its own highlighted line rather than a rank among simulations.
+
+A global leaderboard would currently crown **H at +$139.80** — the only green
+number — despite H being ~1/70th the size and having *zero* observations under
+the rules it now runs (its range-expansion filter landed after both its entries).
 
 ## Why this needs its own credential
 

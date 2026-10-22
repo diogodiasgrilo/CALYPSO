@@ -33,7 +33,8 @@ const DASHBOARD_URL = "https://domytrade.com";
 // and reported it as "HYDRA Offline".
 const WIDGET_TOKEN = "";
 
-const CACHE_KEY = "hydra-widget-cache";
+const CACHE_KEY = "hydra-widget-cache";       // small: live seat
+const FLEET_CACHE_KEY = "hydra-widget-fleet";  // medium/large: whole fleet
 
 const C = {
   bg: "#2d353f",
@@ -56,13 +57,13 @@ const C = {
 // dead network are completely different situations — one needs a new token,
 // the other needs nothing — and collapsing them is how this widget stayed
 // broken from 2026-08-03 to 2026-10-22 without anyone noticing.
-async function fetchData() {
+async function fetchData(path, cacheKey) {
   if (!WIDGET_TOKEN) {
-    return { data: readCache(), source: readCache() ? "cache" : null,
-             problem: "no-token" };
+    const c = readCache(cacheKey);
+    return { data: c, source: c ? "cache" : null, problem: "no-token" };
   }
 
-  const req = new Request(`${DASHBOARD_URL}/api/widget`);
+  const req = new Request(`${DASHBOARD_URL}${path}`);
   req.headers = { "X-Widget-Token": WIDGET_TOKEN };
   req.timeoutInterval = 10;
 
@@ -74,24 +75,24 @@ async function fetchData() {
     // confident "+$0". Check the status explicitly.
     const status = req.response ? req.response.statusCode : 200;
     if (status === 401 || status === 403 || (data && data.detail)) {
-      return { data: readCache(), source: readCache() ? "cache" : null,
-               problem: "rejected" };
+      const c = readCache(cacheKey);
+      return { data: c, source: c ? "cache" : null, problem: "rejected" };
     }
     try {
-      Keychain.set(CACHE_KEY, JSON.stringify({ at: Date.now(), data: data }));
+      Keychain.set(cacheKey, JSON.stringify({ at: Date.now(), data: data }));
     } catch (e) {
       // Caching is a convenience; never fail the render over it.
     }
     return { data: data, source: "live", problem: null };
   } catch (e) {
-    return { data: readCache(), source: readCache() ? "cache" : null,
-             problem: "unreachable" };
+    const c = readCache(cacheKey);
+    return { data: c, source: c ? "cache" : null, problem: "unreachable" };
   }
 }
 
-function readCache() {
+function readCache(cacheKey) {
   try {
-    const raw = JSON.parse(Keychain.get(CACHE_KEY));
+    const raw = JSON.parse(Keychain.get(cacheKey));
     // Tolerate the pre-2026-10-22 cache shape, which stored the payload bare
     // with no timestamp.
     return raw && raw.data ? raw.data : raw;
@@ -117,6 +118,20 @@ function etToday() {
 
 // ── render ─────────────────────────────────────────────────────────────────
 
+// A signed amount. The minus is NEVER dropped: the pre-2026-10-22 widget
+// printed Math.abs() with a "+" only for gains, so a $500 loss read "$500"
+// and was distinguishable from a $500 gain by colour alone.
+function money(v, dp) {
+  if (v === undefined || v === null) return "—";
+  const s = v > 0 ? "+" : v < 0 ? "−" : "";
+  return `${s}$${Math.abs(v).toFixed(dp === undefined ? 0 : dp)}`;
+}
+
+function pnlColor(v) {
+  if (v === undefined || v === null) return C.dim;
+  return v < 0 ? C.loss : v > 0 ? C.accent : C.muted;
+}
+
 function row(w) {
   const s = w.addStack();
   s.layoutHorizontally();
@@ -140,6 +155,115 @@ function notice(w, title, detail) {
   d.font = Font.systemFont(11);
   d.textColor = new Color(C.muted);
   d.minimumScaleFactor = 0.8;
+}
+
+// ── fleet view (Large / Medium) ────────────────────────────────────────────
+//
+// Grouped by COMPARABILITY, best-first within a group, and deliberately with
+// NO global #1. Ranking all nine on one axis would be wrong four ways: a credit
+// iron condor, a net-debit calendar and a naked strangle do not share a P&L
+// axis; raw dollars rank by position SIZE (A is 1 contract at 75pt, bl is 7 at
+// 5pt, H trades SPY at ~1/70th the notional); the lifetimes cover DIFFERENT
+// eras (bl has 9 days of history against c's 94, which is why `days` is shown
+// on every row); and 8 of the 9 are simulated.
+function createFleetWidget(res, family) {
+  const w = new ListWidget();
+  w.backgroundColor = new Color(C.bg);
+  w.setPadding(10, 12, 10, 12);
+  w.url = DASHBOARD_URL;
+
+  const d = res.data;
+  if (!d) {
+    if (res.problem === "no-token") notice(w, "Token needed", "Set WIDGET_TOKEN in this script.");
+    else if (res.problem === "rejected") notice(w, "Token rejected", "The dashboard refused this token (401).");
+    else notice(w, "Unreachable", `No response from ${DASHBOARD_URL.replace("https://", "")}.`);
+    return w;
+  }
+
+  const today = etToday();
+  const stale = res.source === "cache" || (today && d.date && d.date !== today);
+
+  // header
+  const head = row(w);
+  const t = head.addText("HYDRA FLEET");
+  t.font = Font.boldMonospacedSystemFont(12);
+  t.textColor = new Color(C.accent);
+  head.addSpacer();
+  if (stale) {
+    label(head, d.date ? `⚠ ${d.date}` : "⚠ stale", 9, C.warn);
+  } else {
+    label(head, d.market_open ? "● open" : "○ closed", 9, C.dim);
+  }
+
+  // the live seat gets its own line — it is the only one placing real orders,
+  // and burying it among eight simulations is how it stops being obvious which
+  // number actually matters.
+  if (d.live) {
+    w.addSpacer(3);
+    const lr = row(w);
+    const tag = lr.addText("LIVE");
+    tag.font = Font.boldSystemFont(9);
+    tag.textColor = new Color(C.active);
+    lr.addSpacer(5);
+    label(lr, d.live.name, 10, C.muted);
+    lr.addSpacer();
+    const big = lr.addText(money(d.live.today));
+    big.font = Font.boldMonospacedSystemFont(15);
+    big.textColor = new Color(pnlColor(d.live.today));
+  }
+
+  const groups = d.groups || [];
+  const compact = family === "medium";
+
+  groups.forEach((g) => {
+    w.addSpacer(compact ? 3 : 5);
+    const gh = row(w);
+    label(gh, (g.label || g.id).toUpperCase(), 8, C.dim);
+    gh.addSpacer();
+    label(gh, g.pnl_shape === "debit" ? "debit" : "credit", 8, C.dim);
+
+    // Medium has room for roughly one line per group, so it shows that group's
+    // leader only — never a cross-group winner.
+    const rows = compact ? (g.rows || []).slice(0, 1) : (g.rows || []);
+    rows.forEach((r) => {
+      const rr = row(w);
+      const nm = rr.addText(r.name || r.id);
+      nm.font = r.live ? Font.boldSystemFont(10) : Font.systemFont(10);
+      nm.textColor = new Color(r.live ? C.accent : C.muted);
+      nm.lineLimit = 1;
+      // Days of history, because a lifetime without its window invites exactly
+      // the comparison this layout is trying to prevent.
+      if (r.days) {
+        rr.addSpacer(4);
+        label(rr, `${r.days}d`, 8, C.dim);
+      }
+      rr.addSpacer();
+      const td = rr.addText(money(r.today));
+      td.font = Font.monospacedSystemFont ? Font.monospacedSystemFont(10) : Font.systemFont(10);
+      td.textColor = new Color(pnlColor(r.today));
+      rr.addSpacer(8);
+      const lt = rr.addText(money(r.lifetime));
+      lt.font = Font.monospacedSystemFont ? Font.monospacedSystemFont(10) : Font.systemFont(10);
+      lt.textColor = new Color(r.lifetime === null || r.lifetime === undefined
+                               ? C.dim : pnlColor(r.lifetime));
+    });
+  });
+
+  w.addSpacer(4);
+  const foot = row(w);
+  label(foot, "today            lifetime", 8, C.dim);
+  foot.addSpacer();
+  label(foot, stale ? "cached" : "live", 8, stale ? C.warn : C.dim);
+
+  if (res.problem === "rejected") {
+    w.addSpacer(2);
+    label(w, "token rejected", 9, C.warn);
+  }
+
+  const refresh = new Date();
+  refresh.setMinutes(refresh.getMinutes() + 15);
+  w.refreshAfterDate = refresh;
+  return w;
 }
 
 function createWidget(res) {
@@ -283,19 +407,37 @@ function createWidget(res) {
   return w;
 }
 
-const res = await fetchData();
-const widget = createWidget(res);
+// Small  -> the live seat alone (today's P&L, entry dots) — the glanceable one.
+// Medium -> each group's leader.
+// Large  -> the whole fleet, grouped.
+//
+// Large is the biggest size iOS offers on iPhone; extraLarge exists but is
+// iPad-only, so it falls through to the same fleet layout.
+const family = config.widgetFamily || "large";
+
+let widget;
+let res;
+if (family === "small") {
+  res = await fetchData("/api/widget", CACHE_KEY);
+  widget = createWidget(res);
+} else {
+  res = await fetchData("/api/widget/fleet", FLEET_CACHE_KEY);
+  widget = createFleetWidget(res, family);
+}
 
 if (config.runsInWidget) {
   Script.setWidget(widget);
 } else {
-  // Running it by hand inside Scriptable: say plainly what happened, because
-  // the widget has only a few words of room for it.
+  // Run by hand inside Scriptable: say plainly what happened, because the
+  // widget itself has only a few words of room for it.
+  console.log(`family : ${family}`);
   console.log(`source : ${res.source || "none"}`);
   console.log(`problem: ${res.problem || "none"}`);
   console.log(`ET today: ${etToday()}  payload date: ${res.data ? res.data.date : "-"}`);
   if (res.data) console.log(JSON.stringify(res.data, null, 2));
-  widget.presentSmall();
+  if (family === "small") widget.presentSmall();
+  else if (family === "medium") widget.presentMedium();
+  else widget.presentLarge();
 }
 
 Script.complete();
