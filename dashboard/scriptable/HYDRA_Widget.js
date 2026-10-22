@@ -100,13 +100,28 @@ async function loadLogo() {
 // A sparkline of the cumulative curve, drawn with DrawContext. Apple's Stocks
 // widget does exactly this: the shape carries information a single figure
 // cannot — whether a lifetime number is a steady bleed or one bad week.
-function sparkline(series, w2, h2, color) {
+function sparkline(series, w2, h2, color, scale) {
   if (!series || series.length < 2) return null;
   const ctx = new DrawContext();
   ctx.size = new Size(w2, h2);
   ctx.opaque = false;
   ctx.respectScreenScale = true;
-  const lo = Math.min(...series), hi = Math.max(...series);
+  // PER-ROW scaling: the curve carries SHAPE, the figure beside it carries
+  // MAGNITUDE. A group-shared axis was implemented and then MEASURED against
+  // live data, and it was worse:
+  //
+  //   Ghauri          -$171      0.2pt   <- a flat line, no information
+  //   Brandon Late     -$44      0.8pt   <- the LIVE SEAT, nearly flat
+  //   Brandon Narrow  -$12,245   7.5pt
+  //
+  // One strategy losing 280x more than another flattened the row you most
+  // want to read down to nothing. Magnitude is already unambiguous in the
+  // adjacent number; shape is the only thing the curve can add, and a shared
+  // axis destroys it for every small-magnitude row. Apple's Stocks widget
+  // scales per row for the same reason. `scale` is retained so a caller can
+  // still impose an axis where the magnitudes genuinely are of one kind.
+  const lo = scale ? scale.lo : Math.min(...series);
+  const hi = scale ? scale.hi : Math.max(...series);
   const span = hi - lo || 1;
   const pad = 1.5;
   const pts = series.map((v, i) => new Point(
@@ -388,12 +403,18 @@ function createFleetWidget(res, family, logo) {
     sub.addSpacer(5);
     label(sub, d.live.name, null, C.label2, T.caption2());
 
+    // Before the first entry the live P&L is STRUCTURALLY zero, so a 22pt "$0"
+    // was the largest and least informative element on the tile. When nothing
+    // has traded yet, show the next scheduled entry instead — a time stays
+    // true even on a stale tile, which a P&L figure does not.
     const hero = row(w);
-    const big = hero.addText(money(d.live.today));
+    const showNext = !anyActivity && d.next_entry;
+    const big = hero.addText(showNext ? d.next_entry : money(d.live.today));
     big.font = mono(N.hero, "bold");
-    big.textColor = new Color(pnlColor(d.live.today));
+    big.textColor = new Color(showNext ? C.label : pnlColor(d.live.today));
     hero.addSpacer();
-    label(hero, anyActivity ? "today" : "no entries yet today",
+    label(hero,
+          showNext ? "next entry" : anyActivity ? "today" : "no entries today",
           null, C.label3, T.caption2());
   }
 

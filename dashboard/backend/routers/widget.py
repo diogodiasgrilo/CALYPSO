@@ -171,6 +171,29 @@ async def get_widget_data():
 # So: grouped, best-first WITHIN a group, live flagged, no global #1.
 
 
+
+def _next_entry_time(vid: str):
+    """The live seat's NEXT scheduled entry (ET "HH:MM"), or None.
+
+    Read from the bot's OWN pointer — `next_entry_index` into
+    `entry_schedule.base` — rather than re-derived from the clock, so a slot
+    the bot has already consumed, skipped or capped away is never advertised
+    as still to come.
+    """
+    try:
+        from dashboard.backend.services.variant_readers import state_file_for
+        import json as _json
+        with open(state_file_for(vid)) as fh:
+            st = _json.load(fh)
+        sched = (st.get("entry_schedule") or {}).get("base") or []
+        idx = int(st.get("next_entry_index") or 0)
+        if 0 <= idx < len(sched):
+            return str(sched[idx])
+    except Exception:  # noqa: BLE001
+        pass
+    return None
+
+
 def _spark_series(summaries: list, points: int = 16) -> list:
     """A downsampled running-cumulative curve for the widget's sparkline.
 
@@ -300,6 +323,7 @@ async def get_widget_fleet():
 
     payload = {
         "date": et_date,
+        "next_entry": _next_entry_time(seat),
         "market_open": market.get("is_open", False),
         "live": live_row,
         "groups": ordered,

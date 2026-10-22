@@ -210,7 +210,8 @@ await t("the pre-2026-10-22 bare cache shape still loads", async () => {
 // Captured verbatim from https://domytrade.com/api/widget/fleet on 2026-10-22.
 const FLEET = {
   date: "2026-10-22", market_open: false,
-  live: { id: "bl", name: "Brandon Late", today: 0.0, lifetime: -43.65, days: 9, live: true, status: "live" },
+  next_entry: "12:15",
+  live: { id: "bl", name: "Brandon Late", today: 0.0, lifetime: -43.65, days: 9, live: true, status: "live", spark: [0,20,-10,-30,-44] },
   groups: [
     { id: "ic_0dte", label: "0DTE Iron Condor", pnl_shape: "credit", comparable: true, rows: [
       { id: "a",  name: "Baseline",        today: 0.0, lifetime: 674.0,     days: 95, live: false, status: "dry_run_shadow", spark: [0,-50,-120,-80,-200] },
@@ -405,8 +406,10 @@ await t("an all-zero TODAY column is HIDDEN, and says so", async () => {
   // that is actually informative; a column of placeholders is neither.
   const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
   const zeros = r.texts.filter(x => x.text === "$0");
-  assert.equal(zeros.length, 1, `expected only the hero $0, got ${zeros.length}`);
-  assert.ok(r.all.includes("no entries yet today"), r.all);
+  // NONE now: the column is hidden, and the hero shows the next entry instead
+  // of a structurally-guaranteed zero.
+  assert.equal(zeros.length, 0, `a placeholder $0 survived: ${zeros.length}`);
+  assert.ok(r.all.includes("next entry"), r.all);
   assert.ok(!r.all.includes("TODAY"), "a heading for a hidden column");
 });
 
@@ -442,8 +445,8 @@ await t("the TITLE is SF Pro; only NUMERALS are monospaced", async () => {
   const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
   const title = r.texts.find(x => x.text === "HYDRA");
   assert.equal(title.font, "headline", "title should not be monospaced");
-  const hero = r.texts.find(x => x.text === "$0");
-  assert.equal(hero.font, "boldMono", "aligned figures must be monospaced");
+  const hero = r.texts.find(x => x.text === "12:15");
+  assert.equal(hero.font, "boldMono", "the hero slot must be monospaced");
 });
 
 await t("every colour comes from HYDRA's OWN design system", async () => {
@@ -581,6 +584,89 @@ await t("the SMALL widget follows the same policy", async () => {
   const r = await render({ family: "small", nowISO: MIDDAY,
                            body: p({ market_open: true }) });
   assert.equal(minsFromNow(r, MIDDAY), 2);
+});
+
+console.log("\n#18 sparklines carry SHAPE; the figure carries magnitude");
+
+await t("each row scales to its own range", async () => {
+  // A group-shared axis was built and then MEASURED against live data:
+  //   Ghauri -$171 -> 0.2pt (flat), Brandon Late -$44 -> 0.8pt (the LIVE
+  //   seat, flat), Brandon Narrow -$12,245 -> 7.5pt.
+  // One strategy losing 280x more flattened the row you most want to read.
+  // Magnitude is unambiguous in the adjacent number; shape is all the curve
+  // can add, so it gets the full height. Apple's Stocks widget does the same.
+  const body = f({ groups: [{ id: "ic", label: "IC", pnl_shape: "credit",
+    comparable: true, rows: [
+      { id: "small", name: "Small", today: 0, lifetime: -171, days: 40,
+        spark: [0, -60, -120, -171], live: false, status: "s" },
+      { id: "big", name: "Big", today: 0, lifetime: -12245, days: 94,
+        spark: [0, -4000, -9000, -12245], live: false, status: "s" }] }] });
+  const r = await render({ family: "large", fleetBody: body, nowISO: MIDDAY });
+  const curves = r.sparks.filter(s2 => s2.color !== "#3d5058");
+  assert.equal(curves.length, 2);
+  const amp = (k) => { const ys = curves[k].points.points.map(p2 => p2.y);
+    return Math.max(...ys) - Math.min(...ys); };
+  // BOTH curves must use most of the available height — neither collapses
+  assert.ok(amp(0) > 8, `small row flattened to ${amp(0).toFixed(1)}pt`);
+  assert.ok(amp(1) > 8, `big row flattened to ${amp(1).toFixed(1)}pt`);
+});
+
+await t("the LIVE seat's curve is never flattened by a group peer", async () => {
+  // The specific regression the measurement exposed: a shared axis reduced the
+  // live seat to 0.8pt because another member of its group lost 280x more.
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  const curves = r.sparks.filter(s2 => s2.color !== "#3d5058");
+  const rows = FLEET.groups.flatMap(g => g.rows);
+  const i = rows.findIndex(x => x.live);
+  const ys = curves[i].points.points.map(p2 => p2.y);
+  const amp = Math.max(...ys) - Math.min(...ys);
+  assert.ok(amp > 8, `live seat curve is only ${amp.toFixed(1)}pt`);
+});
+
+await t("a zero crossing is still drawn as a reference line", async () => {
+  const body = f({ groups: [{ id: "g", label: "G", pnl_shape: "credit",
+    comparable: true, rows: [
+      { id: "x", name: "X", today: 0, lifetime: 50, days: 9,
+        spark: [-100, -40, 10, 50], live: false, status: "s" }] }] });
+  const r = await render({ family: "large", fleetBody: body, nowISO: MIDDAY });
+  assert.ok(r.sparks.some(s2 => s2.color === "#3d5058"), "no zero line drawn");
+});
+
+await t("a curve that never crosses zero draws NO zero line", async () => {
+  const body = f({ groups: [{ id: "g", label: "G", pnl_shape: "credit",
+    comparable: true, rows: [
+      { id: "x", name: "X", today: 0, lifetime: 700, days: 9,
+        spark: [500, 560, 640, 700], live: false, status: "s" }] }] });
+  const r = await render({ family: "large", fleetBody: body, nowISO: MIDDAY });
+  assert.ok(!r.sparks.some(s2 => s2.color === "#3d5058"),
+            "drew a zero line the data never reaches");
+});
+
+console.log("\n#19 the hero adapts — a guaranteed zero is not information");
+
+await t("before any entry it shows the NEXT scheduled one", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.all.includes("12:15"), r.all);
+  assert.ok(r.all.includes("next entry"), r.all);
+  const t1 = r.texts.find(x => x.text === "12:15");
+  assert.equal(t1.font, "boldMono", "the hero slot, not a caption");
+  assert.equal(t1.color, "#e8edf3", "a time is not P&L — must not be red/green");
+});
+
+await t("once something trades the hero becomes today's P&L", async () => {
+  const live = JSON.parse(JSON.stringify(FLEET));
+  live.groups[0].rows[1].today = 412.5;
+  live.live.today = 412.5;
+  const r = await render({ family: "large", fleetBody: live, nowISO: MIDDAY });
+  assert.ok(r.all.includes("+$413"), r.all);
+  assert.ok(r.all.includes("today") && !r.all.includes("next entry"), r.all);
+});
+
+await t("after the last slot, with nothing traded, it says so plainly", async () => {
+  const done = f({ next_entry: null });
+  const r = await render({ family: "large", fleetBody: done, nowISO: MIDDAY });
+  assert.ok(r.all.includes("no entries today"), r.all);
+  assert.ok(!r.all.includes("next entry"));
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
