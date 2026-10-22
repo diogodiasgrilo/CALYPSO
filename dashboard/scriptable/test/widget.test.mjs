@@ -21,6 +21,18 @@ const p = (o) => ({ ...PAYLOAD, ...o });
 const NIGHT = "2026-10-22T02:00:00Z";
 const MIDDAY = "2026-10-22T16:00:00Z";   // same date in both zones
 
+
+// Source assertions must read EXECUTABLE lines only. Four separate tests in
+// this file have now matched a comment that documents the very bug being
+// asserted against — `?api_key=`, `Font.monospacedSystemFont`, and twice on
+// retired colour values. A comment explaining a fix is not the fix regressing.
+import fs from "node:fs";
+const WIDGET_SRC = fs.readFileSync("dashboard/scriptable/HYDRA_Widget.js", "utf8");
+const widgetCode = () =>
+  WIDGET_SRC.split("\n")
+            .filter(l => !l.trim().startsWith("//") && !l.trim().startsWith("*"))
+            .join("\n");
+
 let pass = 0, fail = 0;
 async function t(name, fn) {
   try { await fn(); pass++; console.log(`  ok   ${name}`); }
@@ -126,19 +138,19 @@ await t("skipped is amber; pending is grey", async () => {
   // order: expired, stopped, skipped, active, pending, pending
   const skipped = colors[2], pending = colors[4];
   assert.notEqual(skipped, pending, "skipped renders identically to pending");
-  assert.equal(skipped, "#e3b341");
+  assert.equal(skipped, "#FFD60A");   // systemYellow dark
 });
 await t("every documented disposition has its own colour", async () => {
   const r = await render({ nowISO: MIDDAY, body: p({ market_open: false,
     entry_dots: ["expired", "stopped", "failed", "skipped", "active", "pending"] }) });
   const c = r.texts.filter(x => x.text === "●").map(d => d.color);
   assert.equal(c.length, 6, "market dot leaked into the entry dots");
-  assert.equal(c[0], "#7ee8c7");                 // expired = kept credit
-  assert.equal(c[1], "#f85149");                 // stopped
-  assert.equal(c[2], "#f85149");                 // failed  = also alarming
-  assert.equal(c[3], "#e3b341");                 // skipped = a decision
-  assert.equal(c[4], "#58a6ff");                 // active
-  assert.equal(c[5], "#5e6e82");                 // pending
+  assert.equal(c[0], "#30D158");                 // systemGreen — kept credit
+  assert.equal(c[1], "#FF453A");                 // systemRed  — stopped
+  assert.equal(c[2], "#FF453A");                 // systemRed  — failed
+  assert.equal(c[3], "#FFD60A");                 // systemYellow — a decision
+  assert.equal(c[4], "#0A84FF");                 // systemBlue — active
+  assert.equal(c[5], "#5A5A5F");                 // tertiaryLabel — pending
   assert.notEqual(c[0], c[3]);                   // the 2026-07-22 distinction
 });
 
@@ -231,7 +243,7 @@ await t("Small still fetches the single-seat endpoint", async () => {
 await t("extraLarge (iPad) falls through to the fleet layout", async () => {
   const r = await render({ family: "extraLarge", fleetBody: FLEET, nowISO: MIDDAY });
   assert.ok(r.urls.some(u => u.endsWith("/api/widget/fleet")));
-  assert.ok(r.all.includes("HYDRA FLEET"));
+  assert.ok(r.all.includes("HYDRA"));
 });
 
 console.log("\n#8 the whole fleet is visible");
@@ -243,8 +255,8 @@ await t("every one of the 9 strategies appears", async () => {
 });
 await t("every comparability group is labelled", async () => {
   const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
-  for (const g of ["0DTE IRON CONDOR", "MULTI-DAY CALENDAR",
-                   "UNDEFINED-RISK 0DTE", "LONG-GAMMA 0DTE"])
+  for (const g of ["0DTE Iron Condor", "Multi-day Calendar",
+                   "Undefined-Risk 0DTE", "Long-Gamma 0DTE"])
     assert.ok(r.all.includes(g), `${g} missing`);
 });
 await t("each row carries its day count", async () => {
@@ -273,10 +285,10 @@ await t("ordering is group-scoped, best-first WITHIN each group", async () => {
     assert.ok(a >= 0 && b > a, `section ${label} not found`);
     return r.all.slice(a, b);
   };
-  const ic = section("0DTE IRON CONDOR", "MULTI-DAY CALENDAR");
+  const ic = section("0DTE Iron Condor", "Multi-day Calendar");
   assert.ok(ic.indexOf("Baseline") < ic.indexOf("Brandon Late"), "IC not best-first");
   assert.ok(ic.indexOf("Brandon Late") < ic.indexOf("Brandon Narrow"), "IC not best-first");
-  const cal = section("MULTI-DAY CALENDAR", "UNDEFINED-RISK 0DTE");
+  const cal = section("Multi-day Calendar", "Undefined-Risk 0DTE");
   assert.ok(cal.indexOf("Double Calendar") < cal.indexOf("Time Machine"),
             "calendar group not best-first");
 });
@@ -299,10 +311,10 @@ await t("the LIVE tag is rendered", async () => {
 });
 await t("the live row is the accent colour, simulated rows are muted", async () => {
   const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
-  const live = r.texts.find(x => x.text === "Brandon Late" && x.color === "#7ee8c7");
+  const live = r.texts.find(x => x.text === "Brandon Late" && x.color === "#FFFFFF");
   const sim  = r.texts.find(x => x.text === "Brandon Narrow");
-  assert.ok(live, "live row not highlighted");
-  assert.equal(sim.color, "#8b9bb0");
+  assert.ok(live, "live row not at full label contrast");
+  assert.equal(sim.color, "#98989F");   // secondaryLabel
 });
 
 console.log("\n#11 amounts keep their sign in the fleet too");
@@ -356,15 +368,14 @@ console.log("\n#14 presentation — the first rendering was functional, not poli
 await t("content is pushed to the TOP of the tile", async () => {
   // ListWidget CENTRES its content, which left ~45% of the Large tile empty
   // above and below a cramped block. A trailing flexible spacer fixes it.
-  const src = await import("node:fs").then(fs =>
-    fs.readFileSync("dashboard/scriptable/HYDRA_Widget.js", "utf8"));
-  const body = src.slice(src.indexOf("function createFleetWidget"),
-                         src.indexOf("function createWidget("));
+  const code = widgetCode();
+  const body = code.slice(code.indexOf("function createFleetWidget"),
+                          code.indexOf("function createWidget("));
   // Must come AFTER the groups are rendered. An earlier version of this test
   // only asserted "a spacer exists before the final return", which the
   // error-branch spacer near the top of the function satisfied — so deleting
   // the real one did not fail anything. Caught by its own mutation control.
-  const afterGroups = body.lastIndexOf("(d.groups || [])");
+  const afterGroups = body.lastIndexOf("groups.forEach(");
   const spacer = body.lastIndexOf("w.addSpacer();");
   const ret = body.lastIndexOf("return w;");
   assert.ok(afterGroups > 0, "fixture stale: groups loop not found");
@@ -376,13 +387,7 @@ await t("numbers use a font that ACTUALLY EXISTS in Scriptable", async () => {
   // `Font.monospacedSystemFont` is not a Scriptable API. The first version
   // guarded on it and silently fell through to the proportional font, which is
   // why the columns looked ragged. The harness omits it for the same reason.
-  // EXECUTABLE lines only. The file's comments name the non-existent API on
-  // purpose, to explain the bug — searching the whole file matches the
-  // explanation of the fix rather than the code. Third time this exact
-  // false positive has appeared in this suite; strip comments by default.
-  const raw = await import("node:fs").then(fs =>
-    fs.readFileSync("dashboard/scriptable/HYDRA_Widget.js", "utf8"));
-  const src = raw.split("\n").filter(l => !l.trim().startsWith("//")).join("\n");
+  const src = widgetCode();
   assert.ok(!src.includes("Font.monospacedSystemFont"),
             "references a Font API that does not exist");
   assert.ok(src.includes("MonospacedSystemFont"), "no monospaced font at all");
@@ -391,31 +396,67 @@ await t("numbers use a font that ACTUALLY EXISTS in Scriptable", async () => {
 await t("numeric columns are FIXED WIDTH so they align", async () => {
   const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
   // every numeric cell lives in its own sized stack
-  assert.ok(r.sizes.some(s2 => s2 && s2.width === 50), "no today column width");
-  assert.ok(r.sizes.some(s2 => s2 && s2.width === 72), "no lifetime column width");
+  assert.ok(r.sizes.some(s2 => s2 && s2.width === 78), "no lifetime column width");
 });
 
-await t("column headings sit ABOVE the columns, not in a footer", async () => {
+await t("an all-zero TODAY column is HIDDEN, and says so", async () => {
+  // The single most obvious flaw in the previous rendering was a column of
+  // NINE identical "$0". Apple's principle is a small amount of information
+  // that is actually informative; a column of placeholders is neither.
   const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
-  assert.ok(r.all.includes("TODAY") && r.all.includes("LIFETIME"), r.all);
-  // and before any strategy row
-  assert.ok(r.all.indexOf("TODAY") < r.all.indexOf("Baseline"),
-            "headings appear after the data — that is a stranded legend");
+  const zeros = r.texts.filter(x => x.text === "$0");
+  assert.equal(zeros.length, 1, `expected only the hero $0, got ${zeros.length}`);
+  assert.ok(r.all.includes("no entries yet today"), r.all);
+  assert.ok(!r.all.includes("TODAY"), "a heading for a hidden column");
 });
 
-await t("a $0 is dimmed so it does not compete with the real figure", async () => {
+await t("once ANYTHING has traded the TODAY column appears", async () => {
+  const live = JSON.parse(JSON.stringify(FLEET));
+  live.groups[0].rows[1].today = 412.5;     // bl trades
+  live.live.today = 412.5;
+  const r = await render({ family: "large", fleetBody: live, nowISO: MIDDAY });
+  assert.ok(r.all.includes("TODAY"), "column heading missing once active");
+  assert.ok(r.all.includes("+$413") || r.all.includes("+$412"), r.all);
+  assert.ok(!r.all.includes("no entries yet today"));
+});
+
+console.log("\n#15 Apple specifics, verified against the real APIs");
+
+await t("16pt margins, per Apple's widget spec", async () => {
+  const body = widgetCode().slice(widgetCode().indexOf("function createFleetWidget"));
+  assert.ok(body.includes("setPadding(16, 16, 16, 16)"), "not 16pt margins");
+});
+
+await t("typography uses Dynamic Type presets, not hardcoded sizes", async () => {
+  // Scriptable exposes the real Apple text styles (caption1/2, footnote,
+  // headline, ...). Hardcoding point sizes both looks non-native and ignores
+  // the user's accessibility text-size setting.
   const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
-  const zeros = r.texts.filter(x => x.text === "$0" && x.color === "#56626f");
-  assert.ok(zeros.length >= 9, `expected dimmed zeros, got ${zeros.length}`);
+  const fonts = r.texts.map(x => x.font).filter(Boolean);
+  assert.ok(fonts.includes("headline"), "title is not a text style");
+  assert.ok(fonts.includes("caption1") && fonts.includes("caption2"),
+            "rows/labels are not text styles");
 });
 
-await t("a NON-zero today is NOT dimmed", async () => {
-  const body = { ...FLEET, groups: [{ id: "x", label: "X", pnl_shape: "credit",
-    comparable: true, rows: [{ id: "z", name: "Zed", today: 250.0,
-    lifetime: -10, days: 3, live: false, status: "s" }] }] };
-  const r = await render({ family: "large", fleetBody: body, nowISO: MIDDAY });
-  const cell = r.texts.find(x => x.text === "+$250");
-  assert.ok(cell && cell.color === "#7ee8c7", JSON.stringify(cell));
+await t("the TITLE is SF Pro; only NUMERALS are monospaced", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  const title = r.texts.find(x => x.text === "HYDRA");
+  assert.equal(title.font, "headline", "title should not be monospaced");
+  const hero = r.texts.find(x => x.text === "$0");
+  assert.equal(hero.font, "boldMono", "aligned figures must be monospaced");
+});
+
+await t("every colour is a verified iOS system colour", async () => {
+  const raw = widgetCode();
+  const pal = raw.slice(raw.indexOf("const C = {"), raw.indexOf("const T = {"));
+  const hexes = (pal.match(/#[0-9A-Fa-f]{6}/g) || []);
+  const allowed = ["#1C1C1E", "#FFFFFF", "#98989F", "#5A5A5F",
+                   "#38383A", "#FF453A", "#30D158", "#0A84FF", "#FFD60A"];
+  for (const h of hexes)
+    assert.ok(allowed.includes(h), `${h} is not an iOS system colour`);
+  // and the invented ones are gone
+  for (const bad of ["#f85149", "#7ee8c7", "#2d353f", "#8b9bb0", "#e3b341"])
+    assert.ok(!raw.includes(bad), `invented colour ${bad} still present`);
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

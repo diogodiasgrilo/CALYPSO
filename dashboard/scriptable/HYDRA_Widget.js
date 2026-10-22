@@ -36,18 +36,44 @@ const WIDGET_TOKEN = "";
 const CACHE_KEY = "hydra-widget-cache";       // small: live seat
 const FLEET_CACHE_KEY = "hydra-widget-fleet";  // medium/large: whole fleet
 
+// Apple's ACTUAL dark-mode system colours, not an invented palette. Verified
+// against the iOS semantic colour values rather than eyeballed:
+//   systemRed   dark  #FF453A        (was #f85149 — GitHub's red)
+//   systemGreen dark  #30D158        (was #7ee8c7 — a teal, not a system green)
+//   systemBlue  dark  #0A84FF
+//   secondaryLabel    #EBEBF5 @ 60%  composited over the card -> #98989F
+//   tertiaryLabel     #EBEBF5 @ 30%  composited over the card -> #5A5A5F
+//   opaqueSeparator   #38383A
+//   secondarySystemBackground  #1C1C1E   (was #2d353f — invented)
 const C = {
-  bg: "#2d353f",
-  accent: "#7ee8c7",
-  loss: "#f85149",
-  muted: "#8b9bb0",
-  dim: "#5e6e82",
-  active: "#58a6ff",
-  warn: "#e3b341",
-  rule: "#3a434f",
-  zero: "#56626f",   // a $0 among nine $0s is noise, not information
+  bg: "#1C1C1E",
+  label: "#FFFFFF",
+  label2: "#98989F",
+  label3: "#5A5A5F",
+  separator: "#38383A",
+  red: "#FF453A",
+  green: "#30D158",
+  blue: "#0A84FF",
+  warn: "#FFD60A",       // systemYellow dark
 };
 
+// Apple's Dynamic Type text styles. Scriptable exposes the real presets
+// (largeTitle/title1-3/headline/subheadline/body/callout/footnote/caption1-2)
+// and I had been hardcoding point sizes instead — which is both why the
+// typography did not read as native and why it ignored accessibility text
+// settings entirely.
+const T = {
+  headline: () => Font.headline(),
+  subheadline: () => Font.subheadline(),
+  footnote: () => Font.footnote(),
+  caption1: () => Font.caption1(),
+  caption2: () => Font.caption2(),
+};
+
+// Numerals that must align cannot use a Dynamic Type preset — Scriptable has
+// no "monospaced digits of a text style" — so aligned figures use a
+// monospaced face at a size paired to the adjacent style.
+const N = { row: 12, hero: 22, head: 10 };
 // ── data ───────────────────────────────────────────────────────────────────
 
 // Returns {data, source, problem}:
@@ -165,14 +191,14 @@ function numCell(parent, text, width, color, size, weight) {
 function rule(w, color) {
   const s = w.addStack();
   s.size = new Size(0, 1);
-  s.backgroundColor = new Color(color || C.rule);
+  s.backgroundColor = new Color(color || C.separator);
   s.addSpacer();
   return s;
 }
 
 function pnlColor(v) {
-  if (v === undefined || v === null) return C.dim;
-  return v < 0 ? C.loss : v > 0 ? C.accent : C.muted;
+  if (v === undefined || v === null) return C.label3;
+  return v < 0 ? C.red : v > 0 ? C.green : C.label2;
 }
 
 function row(w) {
@@ -182,10 +208,13 @@ function row(w) {
   return s;
 }
 
-function label(stack, text, size, color) {
+// `font` takes a Dynamic Type preset (T.caption2() etc). `size` remains for
+// the few places that still need an explicit point size.
+function label(stack, text, size, color, font) {
   const t = stack.addText(text);
-  t.font = Font.systemFont(size);
+  t.font = font || Font.systemFont(size);
   t.textColor = new Color(color);
+  t.lineLimit = 1;
   return t;
 }
 
@@ -196,7 +225,7 @@ function notice(w, title, detail) {
   w.addSpacer(4);
   const d = w.addText(detail);
   d.font = Font.systemFont(11);
-  d.textColor = new Color(C.muted);
+  d.textColor = new Color(C.label2);
   d.minimumScaleFactor = 0.8;
 }
 
@@ -212,7 +241,9 @@ function notice(w, title, detail) {
 function createFleetWidget(res, family) {
   const w = new ListWidget();
   w.backgroundColor = new Color(C.bg);
-  w.setPadding(12, 13, 12, 13);
+  // Apple specifies a 16pt margin from the widget edges (11pt only for
+  // graphics-dense layouts). The first two versions used 12-13pt.
+  w.setPadding(16, 16, 16, 16);
   w.url = DASHBOARD_URL;
 
   const d = res.data;
@@ -227,95 +258,88 @@ function createFleetWidget(res, family) {
   const today = etToday();
   const stale = res.source === "cache" || (today && d.date && d.date !== today);
   const compact = family === "medium";
-  const W_TODAY = compact ? 52 : 50;
-  const W_LIFE = compact ? 70 : 72;
+  const groups = d.groups || [];
+  const allRows = groups.reduce((a, g) => a.concat(g.rows || []), []);
+
+  // A column of nine identical "$0" is data for its own sake — the single
+  // most obvious thing wrong with the previous rendering. Show today's column
+  // only once ANY strategy has actually traded; say so plainly otherwise.
+  const anyActivity = allRows.some((r) => r.today);
+  const W_LIFE = 78;
+  const W_TODAY = 62;
 
   // ── title ──
   const head = row(w);
-  const t = head.addText("HYDRA FLEET");
-  t.font = Font.boldMonospacedSystemFont(13);
-  t.textColor = new Color(C.accent);
+  const t = head.addText("HYDRA");
+  t.font = T.headline();            // SF Pro. Monospace is for NUMERALS only.
+  t.textColor = new Color(C.label);
   head.addSpacer();
   if (stale) {
-    label(head, d.date ? `⚠ ${d.date}` : "⚠ stale", 9, C.warn);
+    label(head, d.date ? `⚠ ${d.date}` : "⚠ stale", null, C.warn, T.caption2());
   } else {
-    label(head, d.market_open ? "● open" : "○ closed", 9, C.dim);
+    label(head, d.market_open ? "Open" : "Closed", null, C.label3, T.caption2());
   }
 
-  // ── the live seat, as the hero ──
-  // It is the only strategy placing real orders; among eight simulations it
-  // needs to be the thing the eye lands on, not one row of nine.
+  // ── hero: the live seat ──
   if (d.live) {
-    w.addSpacer(5);
-    const lr = row(w);
-    const tag = lr.addText("LIVE");
-    tag.font = Font.boldSystemFont(9);
-    tag.textColor = new Color(C.active);
-    lr.addSpacer(6);
-    label(lr, d.live.name, 11, C.muted);
-    lr.addSpacer();
-    const big = lr.addText(money(d.live.today));
-    big.font = mono(20, "bold");
+    w.addSpacer(6);
+    const sub = row(w);
+    const tag = sub.addText("LIVE");
+    tag.font = T.caption2();
+    tag.textColor = new Color(C.blue);
+    sub.addSpacer(5);
+    label(sub, d.live.name, null, C.label2, T.caption2());
+
+    const hero = row(w);
+    const big = hero.addText(money(d.live.today));
+    big.font = mono(N.hero, "bold");
     big.textColor = new Color(pnlColor(d.live.today));
+    hero.addSpacer();
+    label(hero, anyActivity ? "today" : "no entries yet today",
+          null, C.label3, T.caption2());
   }
 
-  // ── column headings, aligned to the columns they describe ──
-  // The first rendering put "today  lifetime" in a footer, left-aligned under
-  // the NAMES, where it labelled nothing and read as stray text.
-  w.addSpacer(6);
-  const ch = row(w);
-  ch.addSpacer();
-  numCell(ch, "TODAY", W_TODAY, C.dim, 8);
-  numCell(ch, "LIFETIME", W_LIFE, C.dim, 8);
-  w.addSpacer(2);
-  rule(w);
+  w.addSpacer(10);
 
-  (d.groups || []).forEach((g, gi) => {
-    if (gi > 0) { w.addSpacer(4); rule(w); }
-    w.addSpacer(4);
+  groups.forEach((g, gi) => {
+    if (gi > 0) { w.addSpacer(7); rule(w); w.addSpacer(7); }
     const gh = row(w);
-    label(gh, (g.label || g.id).toUpperCase(), 8, C.dim);
+    label(gh, (g.label || g.id), null, C.label3, T.caption2());
     gh.addSpacer();
-    label(gh, g.pnl_shape === "debit" ? "debit" : "credit", 8, C.dim);
-    w.addSpacer(2);
+    if (anyActivity) label(gh, "TODAY", null, C.label3, T.caption2());
+    w.addSpacer(3);
 
     const rows = compact ? (g.rows || []).slice(0, 1) : (g.rows || []);
-    rows.forEach((r) => {
+    rows.forEach((r, ri) => {
+      if (ri > 0) w.addSpacer(3);
       const rr = row(w);
       const nm = rr.addText(r.name || r.id);
-      nm.font = r.live ? Font.semiboldSystemFont ? Font.semiboldSystemFont(11)
-                                                 : Font.boldSystemFont(11)
-                       : Font.systemFont(11);
-      nm.textColor = new Color(r.live ? C.accent : C.muted);
+      nm.font = T.caption1();
+      nm.textColor = new Color(r.live ? C.label : C.label2);
       nm.lineLimit = 1;
-      nm.minimumScaleFactor = 0.8;
-      // Days of history: a lifetime without its window invites exactly the
-      // comparison this layout exists to prevent (bl 9d vs c 94d).
+      nm.minimumScaleFactor = 0.9;
       if (r.days) {
-        rr.addSpacer(4);
-        label(rr, `${r.days}d`, 8, C.dim);
+        rr.addSpacer(5);
+        label(rr, `${r.days}d`, null, C.label3, T.caption2());
       }
       rr.addSpacer();
-      // A $0 among nine $0s is noise. Dim it so the eye goes to the figure
-      // that actually differs, without hiding the value.
-      numCell(rr, money(r.today), W_TODAY,
-              r.today ? pnlColor(r.today) : C.zero, 11);
+      if (anyActivity) {
+        numCell(rr, money(r.today), W_TODAY,
+                r.today ? pnlColor(r.today) : C.label3, N.row);
+      }
       numCell(rr, money(r.lifetime), W_LIFE,
-              r.lifetime === null || r.lifetime === undefined ? C.dim
-                                                              : pnlColor(r.lifetime),
-              11);
-      w.addSpacer(1);
+              r.lifetime === null || r.lifetime === undefined
+                ? C.label3 : pnlColor(r.lifetime), N.row);
     });
   });
 
   if (res.problem === "rejected") {
-    w.addSpacer(4);
-    label(w, "token rejected — showing cached figures", 9, C.warn);
+    w.addSpacer(6);
+    label(w, "token rejected — cached figures", null, C.warn, T.caption2());
   }
 
-  // Push everything to the TOP. ListWidget centres its content, which left the
-  // first rendering with ~45% of the tile empty above and below a cramped
-  // block of 10pt rows.
+  // Top-align: ListWidget CENTRES its content by default, which left the first
+  // version with ~45% of the tile empty above and below a cramped block.
   w.addSpacer();
 
   const refresh = new Date();
@@ -354,14 +378,14 @@ function createWidget(res) {
   const head = row(w);
   const title = head.addText("HYDRA");
   title.font = Font.boldMonospacedSystemFont(13);
-  title.textColor = new Color(C.accent);
+  title.textColor = new Color(C.green);
 
   // contracts badge — the backend exposes contracts_per_entry expressly for
   // this ("so iOS widget can show a [Nc] badge"); it went unused until now.
   const contracts = data.contracts_per_entry || 0;
   if (contracts > 1) {
     head.addSpacer(5);
-    label(head, `${contracts}c`, 10, C.dim);
+    label(head, `${contracts}c`, 10, C.label3);
   }
 
   head.addSpacer();
@@ -378,7 +402,7 @@ function createWidget(res) {
   } else {
     const dot = head.addText(data.market_open ? "●" : "○");
     dot.font = Font.systemFont(8);
-    dot.textColor = new Color(data.market_open ? C.accent : C.dim);
+    dot.textColor = new Color(data.market_open ? C.green : C.label3);
   }
 
   w.addSpacer(6);
@@ -392,7 +416,7 @@ function createWidget(res) {
   const sign = pnl > 0 ? "+" : pnl < 0 ? "−" : "";
   const big = w.addText(`${sign}$${Math.abs(pnl).toFixed(0)}`);
   big.font = Font.boldMonospacedSystemFont(28);
-  big.textColor = new Color(pnl < 0 ? C.loss : pnl > 0 ? C.accent : C.muted);
+  big.textColor = new Color(pnl < 0 ? C.red : pnl > 0 ? C.green : C.label2);
   big.minimumScaleFactor = 0.5;
 
   w.addSpacer(4);
@@ -401,23 +425,23 @@ function createWidget(res) {
   const dots = row(w);
   dots.spacing = 4;
   const dotColors = {
-    active: C.active,
-    expired: C.accent,
-    stopped: C.loss,
+    active: C.blue,
+    expired: C.green,
+    stopped: C.red,
     // A genuine order-execution FAILURE (2026-07-31) — same red as stopped so
     // it reads as "something went wrong", not as a routine non-event.
-    failed: C.loss,
+    failed: C.red,
     // SKIPPED was missing here and fell through to the pending grey, so six
     // skips at 15:00 looked like a day that had not started yet. The backend
     // separates the two deliberately (dashboard audit 2026-07-22) because
     // "expired" reads as a kept-credit win. Amber = a decision was made.
     skipped: C.warn,
-    pending: C.dim,
+    pending: C.label3,
   };
   (data.entry_dots || []).forEach((s) => {
     const d = dots.addText("●");
     d.font = Font.systemFont(10);
-    d.textColor = new Color(dotColors[s] || C.dim);
+    d.textColor = new Color(dotColors[s] || C.label3);
   });
 
   w.addSpacer(4);
@@ -426,10 +450,10 @@ function createWidget(res) {
   const stats = row(w);
   const n = data.entries || 0;
   const st = data.stops || 0;
-  label(stats, `${n} ${n === 1 ? "entry" : "entries"}`, 10, C.muted);
+  label(stats, `${n} ${n === 1 ? "entry" : "entries"}`, 10, C.label2);
   stats.addSpacer();
   label(stats, `${st} ${st === 1 ? "stop" : "stops"}`, 10,
-        st > 0 ? C.loss : C.muted);
+        st > 0 ? C.red : C.label2);
 
   w.addSpacer(3);
 
@@ -440,13 +464,13 @@ function createWidget(res) {
   const foot = row(w);
   const cum = data.cumulative_pnl;
   if (cum === undefined || cum === null) {
-    label(foot, "lifetime —", 9, C.dim);
+    label(foot, "lifetime —", 9, C.label3);
   } else {
     const cs = cum > 0 ? "+" : cum < 0 ? "−" : "";
-    label(foot, `lifetime ${cs}$${Math.abs(cum).toFixed(0)}`, 9, C.dim);
+    label(foot, `lifetime ${cs}$${Math.abs(cum).toFixed(0)}`, 9, C.label3);
   }
   foot.addSpacer();
-  label(foot, stale ? "cached" : data.market_open ? "open" : "closed", 9, C.dim);
+  label(foot, stale ? "cached" : data.market_open ? "open" : "closed", 9, C.label3);
 
   // A token the server rejected, while cached data is still displayable: show
   // the numbers AND the reason they are frozen, rather than silently serving

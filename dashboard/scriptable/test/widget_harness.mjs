@@ -35,7 +35,7 @@ export async function render({ token = "tok", httpStatus = 200, body = null,
     addText(t) { const o = { text: t, color: null }; texts.push(o);
                  // unwrap the Color stub: a `class` constructor cannot return
                  // a primitive, so `new Color("#fff")` yields an instance.
-                 return { set font(_f) {},
+                 return { set font(fv) { o.font = fv; },
                           set textColor(c) { o.color = (c && c.hex) || c; },
                           set lineLimit(_l) {},
                           set minimumScaleFactor(_m) {} }; }
@@ -58,11 +58,22 @@ export async function render({ token = "tok", httpStatus = 200, body = null,
     // The REAL Scriptable surface. `monospacedSystemFont` is deliberately
     // ABSENT — it does not exist on the device either, and the first fleet
     // rendering silently fell back to the proportional font because of it.
-    Font: { systemFont: () => 0, boldSystemFont: () => 0,
+    // The REAL Scriptable Font surface, verified against docs.scriptable.app.
+    // `monospacedSystemFont` is deliberately ABSENT — it does not exist on the
+    // device either, and the first fleet rendering silently fell back to the
+    // proportional font because the code guarded on it.
+    Font: { systemFont: () => "systemFont", boldSystemFont: () => 0,
             semiboldSystemFont: () => 0, mediumSystemFont: () => 0,
-            boldMonospacedSystemFont: () => 0,
-            mediumMonospacedSystemFont: () => 0,
-            regularMonospacedSystemFont: () => 0 },
+            boldMonospacedSystemFont: () => "boldMono",
+            mediumMonospacedSystemFont: () => "mediumMono",
+            regularMonospacedSystemFont: () => 0,
+            // Dynamic Type presets
+            largeTitle: () => "largeTitle", title1: () => "title1",
+            title2: () => "title2", title3: () => "title3",
+            headline: () => "headline", subheadline: () => "subheadline",
+            body: () => "body", callout: () => "callout",
+            footnote: () => "footnote", caption1: () => "caption1",
+            caption2: () => "caption2" },
     Size: class { constructor(w2, h2) { this.width = w2; this.height = h2; } },
     Keychain: {
       set: (k, v) => { store[k] = v; },
