@@ -126,6 +126,67 @@ def cmd_unlock(args):
     return 0
 
 
+# ── widget tokens ────────────────────────────────────────────────────────────
+
+
+def cmd_widget_token_issue(args):
+    """Mint a scoped, read-only widget token for an existing account.
+
+    Shown ONCE. Only the hash is stored, so a lost token is re-issued, never
+    recovered — the same posture as the temp password above.
+    """
+    db_path = settings.dashboard_auth_db
+    auth_db.init_db(db_path)
+    user = auth_db.get_user_by_username(db_path, args.username)
+    if not user:
+        print(f"Error: no such user '{args.username}'.", file=sys.stderr)
+        return 1
+    if not user["is_active"]:
+        print(f"Error: account '{args.username}' is disabled — a token issued "
+              f"to it would not work.", file=sys.stderr)
+        return 1
+    token = auth_crypto.generate_session_token()
+    auth_db.create_widget_token(
+        db_path, auth_crypto.hash_token(token), user["id"], args.label or "")
+    print(f"Widget token for '{args.username}' (shown once):\n")
+    print(f"  {token}\n")
+    print("Put it in dashboard/scriptable/HYDRA_Widget.js as WIDGET_TOKEN.")
+    print("It is sent as the X-Widget-Token header — NOT a query parameter, which")
+    print("nginx's access log would record in plaintext on every poll.")
+    print("Scope: /api/widget only, read-only. Revoke with "
+          "`widget-token revoke <prefix>`.")
+    return 0
+
+
+def cmd_widget_token_list(args):
+    db_path = settings.dashboard_auth_db
+    auth_db.init_db(db_path)
+    rows = auth_db.list_widget_tokens(db_path)
+    if not rows:
+        print("No widget tokens issued.")
+        return 0
+    print(f"{'prefix':<14} {'user':<16} {'state':<9} {'label':<16} "
+          f"{'created':<20} {'last used'}")
+    for r in rows:
+        print(f"{r['token_hash'][:12]:<14} {r['username']:<16} "
+              f"{'revoked' if r['revoked'] else 'active':<9} "
+              f"{(r['label'] or '-')[:16]:<16} {_fmt_ts(r['created_at']):<20} "
+              f"{_fmt_ts(r['last_used_at'])}")
+    return 0
+
+
+def cmd_widget_token_revoke(args):
+    db_path = settings.dashboard_auth_db
+    auth_db.init_db(db_path)
+    n = auth_db.revoke_widget_token(db_path, args.prefix)
+    if not n:
+        print(f"No ACTIVE widget token matches prefix '{args.prefix}'. "
+              f"Run `widget-token list` to see prefixes.", file=sys.stderr)
+        return 1
+    print(f"Revoked {n} widget token(s). Effective on the next request.")
+    return 0
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     sub = parser.add_subparsers(dest="command", required=True)
@@ -160,6 +221,24 @@ def main():
     )
     p_unlock.add_argument("username")
     p_unlock.set_defaults(func=cmd_unlock)
+
+    p_wt = sub.add_parser(
+        "widget-token",
+        help="Issue/list/revoke scoped read-only tokens for the iOS widget")
+    wt_sub = p_wt.add_subparsers(dest="wt_command", required=True)
+
+    wt_issue = wt_sub.add_parser("issue", help="Mint a token (shown once)")
+    wt_issue.add_argument("username")
+    wt_issue.add_argument("--label", default="",
+                          help="e.g. 'iphone-home-screen'")
+    wt_issue.set_defaults(func=cmd_widget_token_issue)
+
+    wt_list = wt_sub.add_parser("list", help="List tokens (hash prefixes only)")
+    wt_list.set_defaults(func=cmd_widget_token_list)
+
+    wt_revoke = wt_sub.add_parser("revoke", help="Revoke by hash prefix")
+    wt_revoke.add_argument("prefix")
+    wt_revoke.set_defaults(func=cmd_widget_token_revoke)
 
     args = parser.parse_args()
     sys.exit(args.func(args))

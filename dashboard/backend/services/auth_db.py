@@ -41,6 +41,28 @@ CREATE TABLE IF NOT EXISTS sessions (
 );
 
 CREATE INDEX IF NOT EXISTS idx_sessions_user ON sessions(user_id);
+
+-- Widget tokens (2026-10-22). A SEPARATE table, not a flag on `sessions`,
+-- because the scoping is the whole point: a token in here is accepted by
+-- /api/widget and by nothing else, which is a structural property rather than
+-- a conditional one somebody can later forget to check. It also keeps the
+-- lifetimes apart -- a browser session idles out in hours, an iOS widget on a
+-- home screen must keep working for months -- so neither set of rules has to
+-- bend to accommodate the other.
+--
+-- Replaces nothing that worked: the old shared DASHBOARD_API_KEY was retired
+-- with the 2026-08-03 account migration and the Scriptable widget has been
+-- sending a dead `?api_key=` ever since, getting {"detail":"Not authenticated"}.
+CREATE TABLE IF NOT EXISTS widget_tokens (
+    token_hash TEXT PRIMARY KEY,
+    user_id INTEGER NOT NULL REFERENCES users(id),
+    label TEXT NOT NULL DEFAULT '',
+    created_at REAL NOT NULL,
+    last_used_at REAL,
+    revoked INTEGER NOT NULL DEFAULT 0
+);
+
+CREATE INDEX IF NOT EXISTS idx_widget_tokens_user ON widget_tokens(user_id);
 """
 
 
@@ -399,6 +421,95 @@ def cleanup_expired_sessions(db_path: Path) -> int:
         cur = conn.execute(
             "DELETE FROM sessions WHERE expires_at < ? OR revoked = 1",
             (time.time() - 86400,),  # keep 1 day of revoked rows for forensics
+        )
+        conn.commit()
+        return cur.rowcount
+    finally:
+        conn.close()
+
+
+# ── widget tokens ────────────────────────────────────────────────────────────
+# Scoped, read-only, instantly revocable credentials for the iOS Scriptable
+# widget and Siri shortcuts. Only the HASH is stored, exactly like sessions, so
+# a stolen database yields no usable token.
+
+
+def create_widget_token(db_path: Path, token_hash: str, user_id: int,
+                        label: str = "") -> None:
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "INSERT INTO widget_tokens (token_hash, user_id, label, created_at) "
+            "VALUES (?, ?, ?, ?)",
+            (token_hash, user_id, label, time.time()),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def get_widget_token_with_user(db_path: Path, token_hash: str) -> Optional[dict]:
+    """Joined token+user row, or None if missing/revoked/user-disabled.
+
+    Deliberately has NO expiry check: a widget token does not idle out (see the
+    schema comment). Disabling the user or revoking the token are the two ways
+    it stops working, and both take effect on the next request.
+    """
+    conn = _connect(db_path)
+    try:
+        row = conn.execute(
+            "SELECT w.token_hash, w.user_id, w.label, w.created_at, "
+            "w.last_used_at, w.revoked, u.username, u.is_active "
+            "FROM widget_tokens w JOIN users u ON u.id = w.user_id "
+            "WHERE w.token_hash = ?",
+            (token_hash,),
+        ).fetchone()
+        if not row:
+            return None
+        d = dict(row)
+        if d["revoked"] or not d["is_active"]:
+            return None
+        return d
+    finally:
+        conn.close()
+
+
+def touch_widget_token(db_path: Path, token_hash: str) -> None:
+    """Record last use. Best-effort telemetry so an operator can tell a live
+    widget from a forgotten token before revoking it."""
+    conn = _connect(db_path)
+    try:
+        conn.execute(
+            "UPDATE widget_tokens SET last_used_at = ? WHERE token_hash = ?",
+            (time.time(), token_hash),
+        )
+        conn.commit()
+    finally:
+        conn.close()
+
+
+def list_widget_tokens(db_path: Path) -> list:
+    conn = _connect(db_path)
+    try:
+        return [dict(r) for r in conn.execute(
+            "SELECT w.token_hash, w.label, w.created_at, w.last_used_at, "
+            "w.revoked, u.username FROM widget_tokens w "
+            "JOIN users u ON u.id = w.user_id ORDER BY w.created_at"
+        )]
+    finally:
+        conn.close()
+
+
+def revoke_widget_token(db_path: Path, token_hash_prefix: str) -> int:
+    """Revoke by hash PREFIX, since the operator never sees the full token
+    again after issue and the listing shows a short prefix. Returns the number
+    of rows affected so the caller can report 'no such token' honestly."""
+    conn = _connect(db_path)
+    try:
+        cur = conn.execute(
+            "UPDATE widget_tokens SET revoked = 1 "
+            "WHERE token_hash LIKE ? AND revoked = 0",
+            (token_hash_prefix + "%",),
         )
         conn.commit()
         return cur.rowcount

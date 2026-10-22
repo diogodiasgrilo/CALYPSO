@@ -4,15 +4,32 @@
 // Setup:
 // 1. Install Scriptable from App Store
 // 2. Create new script, paste this code
-// 3. Set DASHBOARD_URL below to your VM's external IP
-// 4. Add Scriptable widget to home screen, select this script
+// 3. Set DASHBOARD_URL below (https://domytrade.com for the deployed dashboard)
+// 4. Issue a widget token on the VM and paste it into WIDGET_TOKEN below:
+//      sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m \
+//        scripts.manage_dashboard_users widget-token issue <username> \
+//        --label iphone-home-screen'
+//    It is shown ONCE (only its hash is stored). Revoke any time with
+//      ... widget-token revoke <prefix>
+// 5. Add Scriptable widget to home screen, select this script
 
-const DASHBOARD_URL = "http://YOUR_VM_IP:8080";
-const API_KEY = ""; // Set if you configured DASHBOARD_API_KEY
+const DASHBOARD_URL = "https://domytrade.com";
+
+// Scoped, read-only, revocable. Accepted by /api/widget and nothing else.
+//
+// Sent as a HEADER, deliberately. The old shape was `?api_key=`, and nginx's
+// combined log format records the full request line — so a query parameter
+// would write this credential to disk in plaintext on a public host, on every
+// poll the widget ever makes.
+//
+// This replaces the long-dead `API_KEY` constant: the shared DASHBOARD_API_KEY
+// was retired by the 2026-08-03 per-account migration, so from that date until
+// 2026-10-22 this widget received {"detail":"Not authenticated"} on every call.
+const WIDGET_TOKEN = "";
 
 async function fetchData() {
-  const url = `${DASHBOARD_URL}/api/widget${API_KEY ? `?api_key=${API_KEY}` : ""}`;
-  const req = new Request(url);
+  const req = new Request(`${DASHBOARD_URL}/api/widget`);
+  if (WIDGET_TOKEN) req.headers = { "X-Widget-Token": WIDGET_TOKEN };
   req.timeoutInterval = 10;
 
   try {

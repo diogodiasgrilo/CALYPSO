@@ -957,7 +957,7 @@ Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
 | `GET /api/strategies/{meta,{id}/snapshot,groups/{group_id}/comparison}` | Taxonomy boot payload, per-strategy live snapshot, group-scoped head-to-head (also `groups/{group_id}/aggregate`) |
 | `GET /api/dc/status` | D's isolated calendar status (reads `dc_calendar.db` + `dc_open_trades.json` sidecar) |
 | `GET /api/long-strangle/{status,recent}` | H's isolated long-gamma status (reads `long_strangle.db`). Debit-shaped payload — no `total_credit`, no spread width. `available:false` when H has never recorded a row, which is today's expected response. |
-| `GET /api/widget` | Flat JSON for iOS Scriptable |
+| `GET /api/widget` | Flat JSON for iOS Scriptable. The **only** endpoint that also accepts a scoped `X-Widget-Token` header (read-only, revocable) — see the widget-token note under Access & auth |
 | `WS /ws/dashboard` | Real-time updates |
 
 ### Safety guarantees
@@ -975,6 +975,14 @@ Public URL: **`https://domytrade.com`** (real Let's Encrypt cert via certbot, au
 ```bash
 gcloud compute ssh calypso-bot --zone=us-east1-b --project=calypso-trading-bot --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m scripts.manage_dashboard_users {add,list,disable,enable,reset-password,reset-2fa} [username]'"
 ```
+
+**The iOS widget uses a separate scoped token** (added 2026-10-22). Scriptable cannot do a password + TOTP login, so when the 2026-08-03 migration retired the shared `DASHBOARD_API_KEY` the widget went dead — it kept sending `?api_key=` and receiving `{"detail":"Not authenticated"}` for ten weeks, silently. Issue one per device:
+
+```bash
+gcloud compute ssh calypso-bot --zone=us-east1-b --project=calypso-trading-bot --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m scripts.manage_dashboard_users widget-token {issue <username> --label <device>,list,revoke <prefix>}'"
+```
+
+Shown once (only the hash is stored). It is sent as the **`X-Widget-Token` header, never a query parameter** — nginx's combined log format writes the full request line, so `?api_key=` would persist the credential to disk in plaintext on every poll. Scope is structural, not a conditional: the token lives in its own `widget_tokens` table and the dependency is attached to the widget router alone, so it opens `/api/widget` and nothing else (pinned across 7 endpoints by `tests/test_widget_token_2026_10_22.py`). Revoking the token **or** disabling the owning account kills it on the next request.
 
 `dashboard.service` **fails closed at startup** (`DASHBOARD_REQUIRE_ACCOUNTS_CONFIGURED=true`) if zero accounts exist — it will not silently serve an open dashboard. Bootstrap the first account with `add` before the service can start.
 

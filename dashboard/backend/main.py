@@ -8,7 +8,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
 from pathlib import Path
 
-from dashboard.backend.auth import require_session
+from dashboard.backend.auth import require_session, require_widget_token
 from dashboard.backend.config import settings
 from dashboard.backend.ws.manager import ConnectionManager
 from dashboard.backend.ws.broadcaster import Broadcaster
@@ -81,7 +81,13 @@ app.include_router(hydra.router, dependencies=_api_guard)
 app.include_router(metrics.router, dependencies=_api_guard)
 app.include_router(market.router, dependencies=_api_guard)
 app.include_router(agents.router, dependencies=_api_guard)
-app.include_router(widget.router, dependencies=_api_guard)
+# The widget is the ONE endpoint that also accepts a scoped widget token: the
+# iOS Scriptable widget cannot perform a password + TOTP login, so it has been
+# dead since the 2026-08-03 account migration retired the shared API key. The
+# token is read-only by construction (no non-GET route here) and is rejected by
+# every other router, which is why it gets its own dependency rather than being
+# folded into require_session.
+app.include_router(widget.router, dependencies=[Depends(require_widget_token)])
 app.include_router(variants.router, dependencies=_api_guard)
 app.include_router(dc.router, dependencies=_api_guard)  # Strategy D native view
 app.include_router(strategies.router, dependencies=_api_guard)  # taxonomy-driven strategy + group API

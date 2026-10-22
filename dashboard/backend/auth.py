@@ -18,7 +18,7 @@ import logging
 import time
 from typing import Optional
 
-from fastapi import Cookie, HTTPException, status
+from fastapi import Cookie, Header, HTTPException, status
 
 from dashboard.backend.config import settings
 from dashboard.backend.services import auth_crypto, auth_db
@@ -91,3 +91,59 @@ async def get_current_username(
             detail="Not authenticated",
         )
     return session["username"]
+
+
+# ── widget token (scoped, read-only, revocable) ──────────────────────────────
+
+WIDGET_TOKEN_HEADER = "X-Widget-Token"
+
+
+async def require_widget_token(
+    calypso_session: Optional[str] = Cookie(default=None),
+    x_widget_token: Optional[str] = Header(default=None),
+) -> None:
+    """Gate for /api/widget ONLY: a valid widget token OR a normal session.
+
+    Why a second credential at all. The iOS Scriptable widget and Siri
+    shortcuts cannot do a username + password + TOTP login, so when the
+    2026-08-03 account migration retired the shared DASHBOARD_API_KEY the
+    widget simply died — it has been sending a dead `?api_key=` and receiving
+    {"detail":"Not authenticated"} ever since.
+
+    Why a HEADER and not a query parameter. The widget's old shape was
+    `?api_key=...`, and nginx's combined log format writes the full request
+    line — so every poll would persist the credential to disk in plaintext, on
+    a public host, forever. Scriptable sets request headers in one line
+    (`req.headers = {...}`), so there is no convenience being traded away.
+
+    Why a session is ALSO accepted. The browser dashboard and the e2e harness
+    read this endpoint too; refusing a logged-in operator from their own
+    widget JSON would be a regression with no security benefit.
+
+    Scope is structural, not conditional: this dependency is attached to the
+    widget router alone, and the token lives in its own table, so a widget
+    token cannot reach /api/hydra, /api/variants or anything else even if this
+    function were later copied carelessly. The endpoint itself is read-only —
+    there is no non-GET route on the widget router.
+    """
+    if dev_mode_open():
+        return
+
+    if x_widget_token:
+        token_hash = auth_crypto.hash_token(x_widget_token)
+        row = auth_db.get_widget_token_with_user(
+            settings.dashboard_auth_db, token_hash)
+        if row:
+            try:
+                auth_db.touch_widget_token(settings.dashboard_auth_db, token_hash)
+            except Exception:  # noqa: BLE001
+                pass  # last-used telemetry must never fail a valid request
+            return
+
+    if validate_and_refresh_session(calypso_session):
+        return
+
+    raise HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Not authenticated",
+    )
