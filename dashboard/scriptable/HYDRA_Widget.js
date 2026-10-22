@@ -230,6 +230,39 @@ function money(v, dp) {
   return `${sign}$${grouped}${frac ? "." + frac : ""}`;
 }
 
+
+// How soon to ask iOS to refresh. This is a HINT, not a guarantee: Apple
+// budgets a widget roughly 40-70 reloads per 24h and decides the real timing
+// from battery, how often the widget is actually looked at, and system load.
+// Scriptable's own docs: "It is not guaranteed that the widget will refresh at
+// exactly the specified date."
+//
+// But the request still MATTERS — a shorter one measurably yields shorter
+// intervals (community testing: a 30s request produced real refreshes every
+// ~61s to ~3min). So a flat 15 minutes was leaving frequency on the table AND
+// spending the budget badly: it spread ~96 requests evenly across 24 hours,
+// landing only about a quarter of them inside the 6.5-hour session. The other
+// 17.5 hours are provably static — the bot is flat, the numbers cannot move.
+//
+// So: concentrate the budget where the data actually changes.
+function refreshInterval(marketOpen) {
+  let hour = null, day = null;
+  try {
+    const f = new Intl.DateTimeFormat("en-US", {
+      timeZone: "America/New_York", hour: "numeric", hour12: false,
+      weekday: "short" }).formatToParts(new Date());
+    hour = Number(f.find((x) => x.type === "hour").value);
+    day = f.find((x) => x.type === "weekday").value;
+  } catch (e) { /* fall through to the safe default */ }
+
+  if (marketOpen) return 2;                       // the session: as fast as iOS allows
+  if (day === "Sat" || day === "Sun") return 60;  // nothing can change
+  if (hour === null) return 15;                   // unknown clock: the old default
+  if (hour >= 7 && hour < 10) return 10;          // pre-open: entries approach
+  if (hour >= 16 && hour < 23) return 15;         // settlement lands ~21:45-22:37 ET
+  return 60;                                      // overnight
+}
+
 // A fixed-width, right-aligned numeric cell. Without a fixed width the columns
 // are laid out by their own text length, so "$0" drifts left as the figure
 // beside it grows — which is exactly how the first fleet rendering looked.
@@ -417,7 +450,7 @@ function createFleetWidget(res, family, logo) {
   w.addSpacer();
 
   const refresh = new Date();
-  refresh.setMinutes(refresh.getMinutes() + 15);
+  refresh.setMinutes(refresh.getMinutes() + refreshInterval(d.market_open));
   w.refreshAfterDate = refresh;
   return w;
 }
@@ -557,7 +590,7 @@ function createWidget(res) {
   }
 
   const refresh = new Date();
-  refresh.setMinutes(refresh.getMinutes() + 15);
+  refresh.setMinutes(refresh.getMinutes() + refreshInterval(data.market_open));
   w.refreshAfterDate = refresh;
 
   return w;

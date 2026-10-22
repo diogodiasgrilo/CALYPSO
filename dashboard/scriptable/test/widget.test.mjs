@@ -513,5 +513,75 @@ await t("a row with too few points draws NO line rather than a flat fake", async
   assert.ok(r.all.includes("Zed"), "the row itself must still render");
 });
 
+console.log("\n#17 refresh cadence — spend the budget where data moves");
+
+const minsFromNow = (r, nowISO) =>
+  Math.round((r.refreshes[0].getTime() - new Date(nowISO).getTime()) / 60000);
+
+await t("during the session it asks for the fastest useful interval", async () => {
+  // iOS budgets ~40-70 reloads/day and decides the real timing, but the
+  // REQUEST still matters: a shorter one measurably yields shorter intervals.
+  const r = await render({ family: "large", nowISO: MIDDAY,
+                           fleetBody: f({ market_open: true }) });
+  assert.equal(minsFromNow(r, MIDDAY), 2);
+});
+
+await t("overnight it backs right off — nothing can change", async () => {
+  // 02:00 ET on a Thursday. The bot is flat; the figures cannot move.
+  const night = "2026-10-22T06:00:00Z";
+  const r = await render({ family: "large", nowISO: night,
+                           fleetBody: f({ market_open: false }) });
+  assert.equal(minsFromNow(r, night), 60);
+});
+
+await t("pre-open it tightens again as entries approach", async () => {
+  const preopen = "2026-10-22T12:00:00Z";   // 08:00 ET
+  const r = await render({ family: "large", nowISO: preopen,
+                           fleetBody: f({ market_open: false }) });
+  assert.equal(minsFromNow(r, preopen), 10);
+});
+
+await t("the evening keeps a moderate cadence through settlement", async () => {
+  const evening = "2026-10-22T22:00:00Z";   // 18:00 ET; settlement ~21:45-22:37
+  const r = await render({ family: "large", nowISO: evening,
+                           fleetBody: f({ market_open: false }) });
+  assert.equal(minsFromNow(r, evening), 15);
+});
+
+await t("weekends back off even at an hour that would otherwise tighten", async () => {
+  // Sat 08:00 ET. Deliberately inside the pre-open window: WITHOUT the weekend
+  // branch this falls through to 10 minutes. An earlier version of this test
+  // used Sat 13:00, which returns 60 either way — it passed with the weekend
+  // check deleted, i.e. it asserted nothing. Caught by its mutation control.
+  const sat = "2026-10-24T12:00:00Z";
+  const r = await render({ family: "large", nowISO: sat,
+                           fleetBody: f({ market_open: false }) });
+  assert.equal(minsFromNow(r, sat), 60);
+});
+
+await t("CONTROL: that same hour on a WEEKDAY tightens to 10", () => {
+  // Proves the test above is not vacuous — the hour alone would give 10.
+  const weekday = new Intl.DateTimeFormat("en-US", { timeZone: "America/New_York",
+    weekday: "short", hour: "numeric", hour12: false })
+    .formatToParts(new Date("2026-10-22T12:00:00Z"));
+  assert.equal(weekday.find(x => x.type === "weekday").value, "Thu");
+  assert.equal(Number(weekday.find(x => x.type === "hour").value), 8);
+});
+
+await t("market_open OVERRIDES the clock", async () => {
+  // A half day, an extended session, or simply the clock being unreadable:
+  // if the server says the market is open, trust that over the hour.
+  const night = "2026-10-22T06:00:00Z";
+  const r = await render({ family: "large", nowISO: night,
+                           fleetBody: f({ market_open: true }) });
+  assert.equal(minsFromNow(r, night), 2);
+});
+
+await t("the SMALL widget follows the same policy", async () => {
+  const r = await render({ family: "small", nowISO: MIDDAY,
+                           body: p({ market_open: true }) });
+  assert.equal(minsFromNow(r, MIDDAY), 2);
+});
+
 console.log(`\n${pass} passed, ${fail} failed\n`);
 process.exit(fail ? 1 : 0);

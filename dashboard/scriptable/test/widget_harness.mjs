@@ -24,6 +24,7 @@ export async function render({ token = "tok", httpStatus = 200, body = null,
   const sizes = [];
   const images = [];
   const sparks = [];
+  const refreshes = [];
 
   class Stack {
     layoutHorizontally() {} centerAlignContent() {} addSpacer() {}
@@ -53,7 +54,7 @@ export async function render({ token = "tok", httpStatus = 200, body = null,
   }
   class ListWidget extends Stack {
     setPadding() {} set backgroundColor(_c) {} set url(_u) {}
-    set refreshAfterDate(_d) {}
+    set refreshAfterDate(v) { refreshes.push(v); }
     presentSmall() {} presentMedium() {} presentLarge() {}
   }
 
@@ -139,7 +140,7 @@ export async function render({ token = "tok", httpStatus = 200, body = null,
   vm.createContext(ctx);
   await vm.runInContext(`(async () => { ${src} })()`, ctx);
   return { texts, all: texts.map(t => t.text).join(" | "),
-           headers: ctx.__headers, urls, sizes, images, sparks,
+           headers: ctx.__headers, urls, sizes, images, sparks, refreshes,
            cached: store["hydra-widget-cache"],
            cachedFleet: store["hydra-widget-fleet"] };
 }
