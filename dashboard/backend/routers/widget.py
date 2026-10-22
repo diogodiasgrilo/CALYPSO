@@ -170,6 +170,31 @@ async def get_widget_data():
 #
 # So: grouped, best-first WITHIN a group, live flagged, no global #1.
 
+
+def _spark_series(summaries: list, points: int = 16) -> list:
+    """A downsampled running-cumulative curve for the widget's sparkline.
+
+    Reuses the dashboard's own definition of "cumulative" (variants.py
+    `_cumulative_series`) rather than inventing a second one — a parallel
+    calculation here is exactly how the widget's lifetime card drifted ~$1,966
+    from the web card before the 2026-07-22 fix.
+
+    Downsampled to at most `points` because a 95-day curve rendered into ~40pt
+    of width resolves to nothing finer, and the payload is fetched by a phone
+    every 15 minutes.
+    """
+    if not summaries:
+        return []
+    from dashboard.backend.routers.variants import _cumulative_series
+    series = [p["cumulative"] for p in _cumulative_series(summaries)]
+    if len(series) <= points:
+        return series
+    step = (len(series) - 1) / float(points - 1)
+    # Always keep the FIRST and LAST point: the endpoints are what make the
+    # shape readable, and a naive stride can drop the latest value entirely.
+    return [series[min(len(series) - 1, int(round(i * step)))] for i in range(points)]
+
+
 _FLEET_TTL_S = 60.0
 _fleet_cache: dict = {"at": 0.0, "payload": None}
 
@@ -221,13 +246,15 @@ async def get_widget_fleet():
         except Exception:  # noqa: BLE001
             continue
 
-        lifetime, days = None, 0
+        lifetime, days, spark = None, 0, []
         try:
             baseline = getattr(_settings, f"variant_{sid}_baseline_date", "") or ""
             reader = db_reader_for_variant(sid)
             ov = await reader.get_cumulative_overrides(baseline)
             lifetime = (ov or {}).get("cumulative_pnl")
-            days = len(await reader.get_all_summaries(baseline))
+            summaries = await reader.get_all_summaries(baseline)
+            days = len(summaries)
+            spark = _spark_series(summaries)
         except Exception:  # noqa: BLE001
             pass  # a variant with no DB yet shows "-", never breaks the board
 
@@ -245,6 +272,7 @@ async def get_widget_fleet():
             "today": _variant_today_pnl(sid),
             "lifetime": round(lifetime, 2) if isinstance(lifetime, (int, float)) else None,
             "days": days,
+            "spark": spark,
             "live": sid == seat,
             "status": str(meta.status),
         })

@@ -36,32 +36,34 @@ const WIDGET_TOKEN = "";
 const CACHE_KEY = "hydra-widget-cache";       // small: live seat
 const FLEET_CACHE_KEY = "hydra-widget-fleet";  // medium/large: whole fleet
 
-// Apple's ACTUAL dark-mode system colours, not an invented palette. Verified
-// against the iOS semantic colour values rather than eyeballed:
-//   systemRed   dark  #FF453A        (was #f85149 — GitHub's red)
-//   systemGreen dark  #30D158        (was #7ee8c7 — a teal, not a system green)
-//   systemBlue  dark  #0A84FF
-//   secondaryLabel    #EBEBF5 @ 60%  composited over the card -> #98989F
-//   tertiaryLabel     #EBEBF5 @ 30%  composited over the card -> #5A5A5F
-//   opaqueSeparator   #38383A
-//   secondarySystemBackground  #1C1C1E   (was #2d353f — invented)
+// HYDRA's OWN design system, read from dashboard/frontend/src/index.css —
+// not Apple's system palette and not an invention.
+//
+// The previous version replaced these with generic iOS colours (#FF453A /
+// #30D158 / #1C1C1E) in pursuit of "Apple-like", which stripped the product's
+// identity out entirely. The teal below is the brand: it is the colour of the
+// HYDRA mark itself, and `--color-profit` across the whole dashboard. Apple's
+// contribution here is STRUCTURE — 16pt margins, Dynamic Type, monospaced
+// numerals, show-only-what-is-informative — not colour.
 const C = {
-  bg: "#1C1C1E",
-  label: "#FFFFFF",
-  label2: "#98989F",
-  label3: "#5A5A5F",
-  separator: "#38383A",
-  red: "#FF453A",
-  green: "#30D158",
-  blue: "#0A84FF",
-  warn: "#FFD60A",       // systemYellow dark
+  bg: "#1a2229",          // --color-bg
+  card: "#222e35",        // --color-card
+  elevated: "#2d3b43",    // --color-bg-elevated
+  separator: "#3d5058",   // --color-border
+  green: "#7ee8c7",       // --color-profit      (the HYDRA teal)
+  greenDim: "#5ca18d",    // --color-profit-muted
+  red: "#f95f58",         // --color-loss
+  redDim: "#cd5049",      // --color-loss-muted
+  warn: "#d29922",        // --color-warning
+  blue: "#5da8ff",        // --color-info
+  label: "#e8edf3",       // --color-text-primary
+  label2: "#c2cad5",      // --color-text-secondary
+  label3: "#98a5b5",      // --color-text-dim
 };
 
-// Apple's Dynamic Type text styles. Scriptable exposes the real presets
-// (largeTitle/title1-3/headline/subheadline/body/callout/footnote/caption1-2)
-// and I had been hardcoding point sizes instead — which is both why the
-// typography did not read as native and why it ignored accessibility text
-// settings entirely.
+// Apple's Dynamic Type presets. Scriptable exposes the real text styles, and
+// the first two versions hardcoded point sizes instead — which both looked
+// non-native and ignored the accessibility text-size setting.
 const T = {
   headline: () => Font.headline(),
   subheadline: () => Font.subheadline(),
@@ -72,8 +74,65 @@ const T = {
 
 // Numerals that must align cannot use a Dynamic Type preset — Scriptable has
 // no "monospaced digits of a text style" — so aligned figures use a
-// monospaced face at a size paired to the adjacent style.
+// monospaced face at a size paired to the adjacent style. The dashboard's own
+// scale bottoms out at 10px (--text-3xs) for dense tabular data; matched here.
 const N = { row: 12, hero: 22, head: 10 };
+
+const LOGO_URL = `${DASHBOARD_URL}/hydra-logo-120.png`;
+const LOGO_FILE = "hydra-logo-120.png";
+
+// The mark, fetched once and cached on disk. Re-downloading it on every
+// 15-minute refresh would be wasteful, and a widget that fails to render
+// because an image did not load is worse than one with no image.
+async function loadLogo() {
+  try {
+    const fm = FileManager.local();
+    const path = fm.joinPath(fm.cacheDirectory(), LOGO_FILE);
+    if (fm.fileExists(path)) return fm.readImage(path);
+    const img = await new Request(LOGO_URL).loadImage();
+    try { fm.writeImage(path, img); } catch (e) { /* cache is optional */ }
+    return img;
+  } catch (e) {
+    return null;   // render without the mark rather than not at all
+  }
+}
+
+// A sparkline of the cumulative curve, drawn with DrawContext. Apple's Stocks
+// widget does exactly this: the shape carries information a single figure
+// cannot — whether a lifetime number is a steady bleed or one bad week.
+function sparkline(series, w2, h2, color) {
+  if (!series || series.length < 2) return null;
+  const ctx = new DrawContext();
+  ctx.size = new Size(w2, h2);
+  ctx.opaque = false;
+  ctx.respectScreenScale = true;
+  const lo = Math.min(...series), hi = Math.max(...series);
+  const span = hi - lo || 1;
+  const pad = 1.5;
+  const pts = series.map((v, i) => new Point(
+    (i / (series.length - 1)) * (w2 - 2 * pad) + pad,
+    h2 - pad - ((v - lo) / span) * (h2 - 2 * pad)));
+  // Zero line, when the curve crosses it — it is the only reference that
+  // makes the shape mean anything.
+  if (lo < 0 && hi > 0) {
+    const y0 = h2 - pad - ((0 - lo) / span) * (h2 - 2 * pad);
+    const zp = new Path();
+    zp.move(new Point(0, y0));
+    zp.addLine(new Point(w2, y0));
+    ctx.setStrokeColor(new Color(C.separator));
+    ctx.setLineWidth(0.5);
+    ctx.addPath(zp);
+    ctx.strokePath();
+  }
+  const path = new Path();
+  path.move(pts[0]);
+  path.addLines(pts);
+  ctx.setStrokeColor(new Color(color));
+  ctx.setLineWidth(1.4);
+  ctx.addPath(path);
+  ctx.strokePath();
+  return ctx.getImage();
+}
 // ── data ───────────────────────────────────────────────────────────────────
 
 // Returns {data, source, problem}:
@@ -238,9 +297,9 @@ function notice(w, title, detail) {
 // 5pt, H trades SPY at ~1/70th the notional); the lifetimes cover DIFFERENT
 // eras (bl has 9 days of history against c's 94, which is why `days` is shown
 // on every row); and 8 of the 9 are simulated.
-function createFleetWidget(res, family) {
+function createFleetWidget(res, family, logo) {
   const w = new ListWidget();
-  w.backgroundColor = new Color(C.bg);
+  w.backgroundColor = new Color(C.card);
   // Apple specifies a 16pt margin from the widget edges (11pt only for
   // graphics-dense layouts). The first two versions used 12-13pt.
   w.setPadding(16, 16, 16, 16);
@@ -268,8 +327,14 @@ function createFleetWidget(res, family) {
   const W_LIFE = 78;
   const W_TODAY = 62;
 
-  // ── title ──
+  // ── title, with the mark ──
   const head = row(w);
+  if (logo) {
+    const li = head.addImage(logo);
+    li.imageSize = new Size(20, 20);
+    li.cornerRadius = 5;            // the mark is a square PNG with no alpha
+    head.addSpacer(7);
+  }
   const t = head.addText("HYDRA");
   t.font = T.headline();            // SF Pro. Monospace is for NUMERALS only.
   t.textColor = new Color(C.label);
@@ -323,6 +388,15 @@ function createFleetWidget(res, family) {
         label(rr, `${r.days}d`, null, C.label3, T.caption2());
       }
       rr.addSpacer();
+      // The curve, before the figure: the shape says whether a lifetime number
+      // is a steady bleed or one bad week, which the number alone cannot.
+      const spark = sparkline(r.spark, 44, 14,
+                              r.lifetime < 0 ? C.redDim : C.greenDim);
+      if (spark) {
+        const si = rr.addImage(spark);
+        si.imageSize = new Size(44, 14);
+        rr.addSpacer(8);
+      }
       if (anyActivity) {
         numCell(rr, money(r.today), W_TODAY,
                 r.today ? pnlColor(r.today) : C.label3, N.row);
@@ -350,7 +424,7 @@ function createFleetWidget(res, family) {
 
 function createWidget(res) {
   const w = new ListWidget();
-  w.backgroundColor = new Color(C.bg);
+  w.backgroundColor = new Color(C.card);
   w.setPadding(12, 14, 12, 14);
   w.url = DASHBOARD_URL;
 
@@ -504,7 +578,7 @@ if (family === "small") {
   widget = createWidget(res);
 } else {
   res = await fetchData("/api/widget/fleet", FLEET_CACHE_KEY);
-  widget = createFleetWidget(res, family);
+  widget = createFleetWidget(res, family, await loadLogo());
 }
 
 if (config.runsInWidget) {

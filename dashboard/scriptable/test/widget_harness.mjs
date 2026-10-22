@@ -11,7 +11,7 @@ const SRC = path.join(import.meta.dirname, "..", "HYDRA_Widget.js");
 export async function render({ token = "tok", httpStatus = 200, body = null,
                                throwOnFetch = false, cache = null,
                                nowISO = null, family = "small",
-                               fleetBody = null } = {}) {
+                               fleetBody = null, logo = { __img: true } } = {}) {
   let src = fs.readFileSync(SRC, "utf8");
   src = src.replace('const WIDGET_TOKEN = "";',
                     `const WIDGET_TOKEN = ${JSON.stringify(token)};`);
@@ -22,6 +22,8 @@ export async function render({ token = "tok", httpStatus = 200, body = null,
                   "hydra-widget-fleet": cache === null ? undefined : JSON.stringify(cache) };
   const urls = [];
   const sizes = [];
+  const images = [];
+  const sparks = [];
 
   class Stack {
     layoutHorizontally() {} centerAlignContent() {} addSpacer() {}
@@ -32,6 +34,15 @@ export async function render({ token = "tok", httpStatus = 200, body = null,
     get size() { return this._size; }
     set backgroundColor(_c) {}
     addStack() { return new Stack(); }
+    addImage(img) { const o = { image: img }; images.push(o);
+                    return { set imageSize(v) { o.size = v; },
+                             set cornerRadius(v) { o.radius = v; },
+                             set imageOpacity(_v) {}, set borderWidth(_v) {},
+                             set borderColor(_v) {}, set tintColor(_v) {},
+                             set containerRelativeShape(_v) {}, set resizable(_v) {},
+                             leftAlignImage() {}, centerAlignImage() {},
+                             rightAlignImage() {}, applyFittingContentMode() {},
+                             applyFillingContentMode() {} }; }
     addText(t) { const o = { text: t, color: null }; texts.push(o);
                  // unwrap the Color stub: a `class` constructor cannot return
                  // a primitive, so `new Color("#fff")` yields an instance.
@@ -94,6 +105,33 @@ export async function render({ token = "tok", httpStatus = 200, body = null,
       }
     },
     config: { runsInWidget: true, widgetFamily: family },
+    // Image + drawing surface, verified against docs.scriptable.app.
+    Point: class { constructor(x, y) { this.x = x; this.y = y; } },
+    Rect: class { constructor(x, y, w3, h3) { Object.assign(this, { x, y, width: w3, height: h3 }); } },
+    Path: class {
+      constructor() { this.points = []; }
+      move(pt) { this.points.push(pt); }
+      addLine(pt) { this.points.push(pt); }
+      addLines(pts) { this.points.push(...pts); }
+      addRect() {} addEllipse() {} addRoundedRect() {}
+      addCurve() {} addQuadCurve() {} closeSubpath() {}
+    },
+    DrawContext: class {
+      constructor() { this.paths = []; }
+      set size(v) { this._size = v; } get size() { return this._size; }
+      set opaque(_v) {} set respectScreenScale(_v) {}
+      setFillColor() {} setStrokeColor(c) { this._stroke = (c && c.hex) || c; }
+      setLineWidth() {} addPath(p2) { this.paths.push(p2); }
+      strokePath() { sparks.push({ points: this.paths[this.paths.length - 1],
+                                   color: this._stroke, size: this._size }); }
+      fillPath() {} fill() {} stroke() {} drawImageInRect() {} drawText() {}
+      getImage() { return { __spark: true, paths: this.paths.length }; }
+    },
+    FileManager: { local: () => ({
+      joinPath: (a, b) => `${a}/${b}`, cacheDirectory: () => "/cache",
+      fileExists: () => logo !== null, readImage: () => logo,
+      writeImage: () => {},
+    }) },
     Script: { setWidget: () => {}, complete: () => {} },
     console, Intl, Date: FakeDate, JSON, Math,
   };
@@ -101,7 +139,7 @@ export async function render({ token = "tok", httpStatus = 200, body = null,
   vm.createContext(ctx);
   await vm.runInContext(`(async () => { ${src} })()`, ctx);
   return { texts, all: texts.map(t => t.text).join(" | "),
-           headers: ctx.__headers, urls, sizes,
+           headers: ctx.__headers, urls, sizes, images, sparks,
            cached: store["hydra-widget-cache"],
            cachedFleet: store["hydra-widget-fleet"] };
 }

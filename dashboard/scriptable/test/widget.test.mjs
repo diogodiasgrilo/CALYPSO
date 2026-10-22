@@ -138,19 +138,19 @@ await t("skipped is amber; pending is grey", async () => {
   // order: expired, stopped, skipped, active, pending, pending
   const skipped = colors[2], pending = colors[4];
   assert.notEqual(skipped, pending, "skipped renders identically to pending");
-  assert.equal(skipped, "#FFD60A");   // systemYellow dark
+  assert.equal(skipped, "#d29922");   // --color-warning
 });
 await t("every documented disposition has its own colour", async () => {
   const r = await render({ nowISO: MIDDAY, body: p({ market_open: false,
     entry_dots: ["expired", "stopped", "failed", "skipped", "active", "pending"] }) });
   const c = r.texts.filter(x => x.text === "●").map(d => d.color);
   assert.equal(c.length, 6, "market dot leaked into the entry dots");
-  assert.equal(c[0], "#30D158");                 // systemGreen — kept credit
-  assert.equal(c[1], "#FF453A");                 // systemRed  — stopped
-  assert.equal(c[2], "#FF453A");                 // systemRed  — failed
-  assert.equal(c[3], "#FFD60A");                 // systemYellow — a decision
-  assert.equal(c[4], "#0A84FF");                 // systemBlue — active
-  assert.equal(c[5], "#5A5A5F");                 // tertiaryLabel — pending
+  assert.equal(c[0], "#7ee8c7");                 // --color-profit — kept credit
+  assert.equal(c[1], "#f95f58");                 // --color-loss   — stopped
+  assert.equal(c[2], "#f95f58");                 // --color-loss   — failed
+  assert.equal(c[3], "#d29922");                 // --color-warning — a decision
+  assert.equal(c[4], "#5da8ff");                 // --color-info   — active
+  assert.equal(c[5], "#98a5b5");                 // --color-text-dim — pending
   assert.notEqual(c[0], c[3]);                   // the 2026-07-22 distinction
 });
 
@@ -213,18 +213,18 @@ const FLEET = {
   live: { id: "bl", name: "Brandon Late", today: 0.0, lifetime: -43.65, days: 9, live: true, status: "live" },
   groups: [
     { id: "ic_0dte", label: "0DTE Iron Condor", pnl_shape: "credit", comparable: true, rows: [
-      { id: "a",  name: "Baseline",        today: 0.0, lifetime: 674.0,     days: 95, live: false, status: "dry_run_shadow" },
-      { id: "bl", name: "Brandon Late",    today: 0.0, lifetime: -43.65,    days: 9,  live: true,  status: "live" },
-      { id: "f",  name: "Ghauri",          today: 0.0, lifetime: -171.1,    days: 40, live: false, status: "dry_run_locked" },
-      { id: "b",  name: "B-A",             today: 0.0, lifetime: -3327.3,   days: 64, live: false, status: "dry_run_shadow" },
-      { id: "c",  name: "Brandon Narrow",  today: 0.0, lifetime: -12244.78, days: 94, live: false, status: "dry_run_shadow" }]},
+      { id: "a",  name: "Baseline",        today: 0.0, lifetime: 674.0,     days: 95, live: false, status: "dry_run_shadow", spark: [0,-50,-120,-80,-200] },
+      { id: "bl", name: "Brandon Late",    today: 0.0, lifetime: -43.65,    days: 9,  live: true,  status: "live", spark: [0,20,-10,-30,-44] },
+      { id: "f",  name: "Ghauri",          today: 0.0, lifetime: -171.1,    days: 40, live: false, status: "dry_run_locked", spark: [0,-5,-40,-70,-93] },
+      { id: "b",  name: "B-A",             today: 0.0, lifetime: -3327.3,   days: 64, live: false, status: "dry_run_shadow", spark: [0,-50,-120,-80,-200] },
+      { id: "c",  name: "Brandon Narrow",  today: 0.0, lifetime: -12244.78, days: 94, live: false, status: "dry_run_shadow", spark: [0,-2000,-6000,-9000,-12245] }]},
     { id: "calendar_multiday", label: "Multi-day Calendar", pnl_shape: "debit", comparable: true, rows: [
-      { id: "e", name: "Double Calendar", today: 0.0, lifetime: -92.85,   days: 20, live: false, status: "dry_run_locked" },
-      { id: "d", name: "Time Machine",    today: 0.0, lifetime: -6307.75, days: 73, live: false, status: "dry_run_locked" }]},
+      { id: "e", name: "Double Calendar", today: 0.0, lifetime: -92.85,   days: 20, live: false, status: "dry_run_locked", spark: [0,-5,-40,-70,-93] },
+      { id: "d", name: "Time Machine",    today: 0.0, lifetime: -6307.75, days: 73, live: false, status: "dry_run_locked", spark: [0,10,40,90,140] }]},
     { id: "undefined_risk_0dte", label: "Undefined-Risk 0DTE", pnl_shape: "credit", comparable: false, rows: [
-      { id: "g", name: "Strangle", today: 0.0, lifetime: -310.55, days: 40, live: false, status: "dry_run_locked" }]},
+      { id: "g", name: "Strangle", today: 0.0, lifetime: -310.55, days: 40, live: false, status: "dry_run_locked", spark: [0,10,40,90,140] }]},
     { id: "long_gamma_0dte", label: "Long-Gamma 0DTE", pnl_shape: "debit", comparable: false, rows: [
-      { id: "h", name: "Long Strangle", today: 0.0, lifetime: 139.8, days: 21, live: false, status: "dry_run_locked" }]},
+      { id: "h", name: "Long Strangle", today: 0.0, lifetime: 139.8, days: 21, live: false, status: "dry_run_locked", spark: [0,10,40,90,140] }]},
   ],
 };
 const f = (o) => ({ ...FLEET, ...o });
@@ -311,10 +311,10 @@ await t("the LIVE tag is rendered", async () => {
 });
 await t("the live row is the accent colour, simulated rows are muted", async () => {
   const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
-  const live = r.texts.find(x => x.text === "Brandon Late" && x.color === "#FFFFFF");
+  const live = r.texts.find(x => x.text === "Brandon Late" && x.color === "#e8edf3");
   const sim  = r.texts.find(x => x.text === "Brandon Narrow");
   assert.ok(live, "live row not at full label contrast");
-  assert.equal(sim.color, "#98989F");   // secondaryLabel
+  assert.equal(sim.color, "#c2cad5");   // --color-text-secondary
 });
 
 console.log("\n#11 amounts keep their sign in the fleet too");
@@ -446,17 +446,71 @@ await t("the TITLE is SF Pro; only NUMERALS are monospaced", async () => {
   assert.equal(hero.font, "boldMono", "aligned figures must be monospaced");
 });
 
-await t("every colour is a verified iOS system colour", async () => {
+await t("every colour comes from HYDRA's OWN design system", async () => {
+  // The previous version replaced the brand palette with generic iOS system
+  // colours in pursuit of "Apple-like", which stripped the product's identity
+  // out entirely. The teal IS the brand — it is the colour of the HYDRA mark
+  // and `--color-profit` across the whole dashboard. Apple's contribution is
+  // STRUCTURE (16pt margins, Dynamic Type, monospaced numerals), not colour.
   const raw = widgetCode();
   const pal = raw.slice(raw.indexOf("const C = {"), raw.indexOf("const T = {"));
-  const hexes = (pal.match(/#[0-9A-Fa-f]{6}/g) || []);
-  const allowed = ["#1C1C1E", "#FFFFFF", "#98989F", "#5A5A5F",
-                   "#38383A", "#FF453A", "#30D158", "#0A84FF", "#FFD60A"];
+  const hexes = pal.match(/#[0-9a-fA-F]{6}/g) || [];
+  // read straight from the frontend theme so the two cannot drift apart
+  const css = await import("node:fs").then(fs =>
+    fs.readFileSync("dashboard/frontend/src/index.css", "utf8"));
+  const theme = (css.match(/#[0-9a-fA-F]{6}/g) || []).map(h => h.toLowerCase());
   for (const h of hexes)
-    assert.ok(allowed.includes(h), `${h} is not an iOS system colour`);
-  // and the invented ones are gone
-  for (const bad of ["#f85149", "#7ee8c7", "#2d353f", "#8b9bb0", "#e3b341"])
-    assert.ok(!raw.includes(bad), `invented colour ${bad} still present`);
+    assert.ok(theme.includes(h.toLowerCase()),
+              `${h} is not a token in dashboard/frontend/src/index.css`);
+  // and the generic iOS palette is gone
+  for (const bad of ["#FF453A", "#30D158", "#1C1C1E", "#0A84FF", "#FFD60A"])
+    assert.ok(!raw.includes(bad), `generic iOS colour ${bad} still present`);
+});
+
+await t("the brand teal is present and is the profit colour", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  const profit = r.texts.find(x => x.text === "+$674");
+  assert.equal(profit.color, "#7ee8c7", "profit is not the HYDRA teal");
+});
+
+console.log("\n#16 brand identity — the mark and the curves");
+
+await t("the HYDRA mark is rendered in the header", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY,
+                           logo: { __img: true } });
+  assert.ok(r.images.length >= 1, "no image in the widget at all");
+  const mark = r.images.find(i => i.size && i.size.width === 20);
+  assert.ok(mark, "no 20pt mark in the header");
+  assert.equal(mark.radius, 5, "square mark — the PNG has no alpha");
+});
+
+await t("the widget still renders if the logo cannot load", async () => {
+  // A tile that fails because an image 404'd is worse than one with no image.
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY,
+                           logo: null });
+  assert.ok(r.all.includes("HYDRA") && r.all.includes("+$674"), r.all);
+});
+
+await t("each row draws a sparkline of its cumulative curve", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.sparks.length >= 9, `expected a curve per row, got ${r.sparks.length}`);
+});
+
+await t("a losing curve is drawn in the loss colour, a winning one in profit", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  const colors = r.sparks.map(s2 => s2.color);
+  assert.ok(colors.includes("#cd5049"), "no muted-loss curve");
+  assert.ok(colors.includes("#5ca18d"), "no muted-profit curve");
+});
+
+await t("a row with too few points draws NO line rather than a flat fake", async () => {
+  const body = { ...FLEET, groups: [{ id: "x", label: "X", pnl_shape: "credit",
+    comparable: true, rows: [
+      { id: "z", name: "Zed", today: 0, lifetime: -10, days: 1, spark: [], live: false, status: "s" },
+      { id: "y", name: "Yan", today: 0, lifetime: -10, days: 1, spark: [5], live: false, status: "s" }] }] };
+  const r = await render({ family: "large", fleetBody: body, nowISO: MIDDAY });
+  assert.equal(r.sparks.length, 0, "drew a curve from fewer than 2 points");
+  assert.ok(r.all.includes("Zed"), "the row itself must still render");
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);
