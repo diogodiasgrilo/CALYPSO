@@ -310,9 +310,15 @@ await t("A's +$674 renders with a plus", async () => {
   const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
   assert.ok(r.all.includes("+$674"), r.all);
 });
-await t("C's −$12,245 renders with a minus", async () => {
+await t("C's −$12,245 renders with a minus AND a thousands separator", async () => {
   const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
-  assert.ok(r.all.includes("−$12245"), r.all);
+  assert.ok(r.all.includes("−$12,245"), r.all);
+  assert.ok(!r.all.includes("−$12245"), "ungrouped digits still present");
+});
+await t("thousands grouping applies across the board", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.all.includes("−$3,327") && r.all.includes("−$6,308"), r.all);
+  assert.ok(r.all.includes("+$674"), "3 digits must NOT be grouped");
 });
 await t("a null lifetime shows a dash, never a fabricated 0", async () => {
   const body = f({ groups: [{ id: "x", label: "X", pnl_shape: "credit", comparable: true,
@@ -343,6 +349,73 @@ await t("the fleet caches under its OWN key, not the small widget's", async () =
   const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
   assert.ok(r.cachedFleet, "fleet cache not written");
   assert.ok(JSON.parse(r.cachedFleet).data.groups, "wrong shape cached");
+});
+
+console.log("\n#14 presentation — the first rendering was functional, not polished");
+
+await t("content is pushed to the TOP of the tile", async () => {
+  // ListWidget CENTRES its content, which left ~45% of the Large tile empty
+  // above and below a cramped block. A trailing flexible spacer fixes it.
+  const src = await import("node:fs").then(fs =>
+    fs.readFileSync("dashboard/scriptable/HYDRA_Widget.js", "utf8"));
+  const body = src.slice(src.indexOf("function createFleetWidget"),
+                         src.indexOf("function createWidget("));
+  // Must come AFTER the groups are rendered. An earlier version of this test
+  // only asserted "a spacer exists before the final return", which the
+  // error-branch spacer near the top of the function satisfied — so deleting
+  // the real one did not fail anything. Caught by its own mutation control.
+  const afterGroups = body.lastIndexOf("(d.groups || [])");
+  const spacer = body.lastIndexOf("w.addSpacer();");
+  const ret = body.lastIndexOf("return w;");
+  assert.ok(afterGroups > 0, "fixture stale: groups loop not found");
+  assert.ok(spacer > afterGroups && spacer < ret,
+            "no flexible spacer AFTER the rows — the tile will stay centred");
+});
+
+await t("numbers use a font that ACTUALLY EXISTS in Scriptable", async () => {
+  // `Font.monospacedSystemFont` is not a Scriptable API. The first version
+  // guarded on it and silently fell through to the proportional font, which is
+  // why the columns looked ragged. The harness omits it for the same reason.
+  // EXECUTABLE lines only. The file's comments name the non-existent API on
+  // purpose, to explain the bug — searching the whole file matches the
+  // explanation of the fix rather than the code. Third time this exact
+  // false positive has appeared in this suite; strip comments by default.
+  const raw = await import("node:fs").then(fs =>
+    fs.readFileSync("dashboard/scriptable/HYDRA_Widget.js", "utf8"));
+  const src = raw.split("\n").filter(l => !l.trim().startsWith("//")).join("\n");
+  assert.ok(!src.includes("Font.monospacedSystemFont"),
+            "references a Font API that does not exist");
+  assert.ok(src.includes("MonospacedSystemFont"), "no monospaced font at all");
+});
+
+await t("numeric columns are FIXED WIDTH so they align", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  // every numeric cell lives in its own sized stack
+  assert.ok(r.sizes.some(s2 => s2 && s2.width === 50), "no today column width");
+  assert.ok(r.sizes.some(s2 => s2 && s2.width === 72), "no lifetime column width");
+});
+
+await t("column headings sit ABOVE the columns, not in a footer", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.all.includes("TODAY") && r.all.includes("LIFETIME"), r.all);
+  // and before any strategy row
+  assert.ok(r.all.indexOf("TODAY") < r.all.indexOf("Baseline"),
+            "headings appear after the data — that is a stranded legend");
+});
+
+await t("a $0 is dimmed so it does not compete with the real figure", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  const zeros = r.texts.filter(x => x.text === "$0" && x.color === "#56626f");
+  assert.ok(zeros.length >= 9, `expected dimmed zeros, got ${zeros.length}`);
+});
+
+await t("a NON-zero today is NOT dimmed", async () => {
+  const body = { ...FLEET, groups: [{ id: "x", label: "X", pnl_shape: "credit",
+    comparable: true, rows: [{ id: "z", name: "Zed", today: 250.0,
+    lifetime: -10, days: 3, live: false, status: "s" }] }] };
+  const r = await render({ family: "large", fleetBody: body, nowISO: MIDDAY });
+  const cell = r.texts.find(x => x.text === "+$250");
+  assert.ok(cell && cell.color === "#7ee8c7", JSON.stringify(cell));
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

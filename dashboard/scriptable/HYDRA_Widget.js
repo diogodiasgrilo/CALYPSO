@@ -44,6 +44,8 @@ const C = {
   dim: "#5e6e82",
   active: "#58a6ff",
   warn: "#e3b341",
+  rule: "#3a434f",
+  zero: "#56626f",   // a $0 among nine $0s is noise, not information
 };
 
 // ── data ───────────────────────────────────────────────────────────────────
@@ -118,13 +120,54 @@ function etToday() {
 
 // ── render ─────────────────────────────────────────────────────────────────
 
-// A signed amount. The minus is NEVER dropped: the pre-2026-10-22 widget
-// printed Math.abs() with a "+" only for gains, so a $500 loss read "$500"
-// and was distinguishable from a $500 gain by colour alone.
+// TABULAR digits. Scriptable has no `Font.monospacedSystemFont` — the real
+// names are regular/medium/boldMonospacedSystemFont — so the first version's
+// `Font.monospacedSystemFont ? ... : Font.systemFont(...)` guard silently fell
+// through to the PROPORTIONAL font. That is why the first rendering's number
+// columns looked ragged: "1" and "7" occupied different widths.
+function mono(size, weight) {
+  if (weight === "bold" && Font.boldMonospacedSystemFont)
+    return Font.boldMonospacedSystemFont(size);
+  if (Font.mediumMonospacedSystemFont) return Font.mediumMonospacedSystemFont(size);
+  if (Font.regularMonospacedSystemFont) return Font.regularMonospacedSystemFont(size);
+  return Font.systemFont(size);
+}
+
+// A signed amount, grouped in thousands. The minus is NEVER dropped: the
+// pre-2026-10-22 widget printed Math.abs() with a "+" only for gains, so a
+// $500 loss read "$500" and differed from a $500 gain by colour alone.
 function money(v, dp) {
   if (v === undefined || v === null) return "—";
-  const s = v > 0 ? "+" : v < 0 ? "−" : "";
-  return `${s}$${Math.abs(v).toFixed(dp === undefined ? 0 : dp)}`;
+  const sign = v > 0 ? "+" : v < 0 ? "−" : "";
+  const n = Math.abs(v).toFixed(dp === undefined ? 0 : dp);
+  const [whole, frac] = n.split(".");
+  const grouped = whole.replace(/\B(?=(\d{3})+(?!\d))/g, ",");
+  return `${sign}$${grouped}${frac ? "." + frac : ""}`;
+}
+
+// A fixed-width, right-aligned numeric cell. Without a fixed width the columns
+// are laid out by their own text length, so "$0" drifts left as the figure
+// beside it grows — which is exactly how the first fleet rendering looked.
+function numCell(parent, text, width, color, size, weight) {
+  const cell = parent.addStack();
+  cell.size = new Size(width, 0);
+  cell.layoutHorizontally();
+  cell.addSpacer();
+  const t = cell.addText(text);
+  t.font = mono(size, weight);
+  t.textColor = new Color(color);
+  t.lineLimit = 1;
+  return t;
+}
+
+// A 1pt hairline. The inner spacer is what makes the stack span the full
+// width; a stack with no content collapses.
+function rule(w, color) {
+  const s = w.addStack();
+  s.size = new Size(0, 1);
+  s.backgroundColor = new Color(color || C.rule);
+  s.addSpacer();
+  return s;
 }
 
 function pnlColor(v) {
@@ -169,7 +212,7 @@ function notice(w, title, detail) {
 function createFleetWidget(res, family) {
   const w = new ListWidget();
   w.backgroundColor = new Color(C.bg);
-  w.setPadding(10, 12, 10, 12);
+  w.setPadding(12, 13, 12, 13);
   w.url = DASHBOARD_URL;
 
   const d = res.data;
@@ -177,16 +220,20 @@ function createFleetWidget(res, family) {
     if (res.problem === "no-token") notice(w, "Token needed", "Set WIDGET_TOKEN in this script.");
     else if (res.problem === "rejected") notice(w, "Token rejected", "The dashboard refused this token (401).");
     else notice(w, "Unreachable", `No response from ${DASHBOARD_URL.replace("https://", "")}.`);
+    w.addSpacer();
     return w;
   }
 
   const today = etToday();
   const stale = res.source === "cache" || (today && d.date && d.date !== today);
+  const compact = family === "medium";
+  const W_TODAY = compact ? 52 : 50;
+  const W_LIFE = compact ? 70 : 72;
 
-  // header
+  // ── title ──
   const head = row(w);
   const t = head.addText("HYDRA FLEET");
-  t.font = Font.boldMonospacedSystemFont(12);
+  t.font = Font.boldMonospacedSystemFont(13);
   t.textColor = new Color(C.accent);
   head.addSpacer();
   if (stale) {
@@ -195,70 +242,81 @@ function createFleetWidget(res, family) {
     label(head, d.market_open ? "● open" : "○ closed", 9, C.dim);
   }
 
-  // the live seat gets its own line — it is the only one placing real orders,
-  // and burying it among eight simulations is how it stops being obvious which
-  // number actually matters.
+  // ── the live seat, as the hero ──
+  // It is the only strategy placing real orders; among eight simulations it
+  // needs to be the thing the eye lands on, not one row of nine.
   if (d.live) {
-    w.addSpacer(3);
+    w.addSpacer(5);
     const lr = row(w);
     const tag = lr.addText("LIVE");
     tag.font = Font.boldSystemFont(9);
     tag.textColor = new Color(C.active);
-    lr.addSpacer(5);
-    label(lr, d.live.name, 10, C.muted);
+    lr.addSpacer(6);
+    label(lr, d.live.name, 11, C.muted);
     lr.addSpacer();
     const big = lr.addText(money(d.live.today));
-    big.font = Font.boldMonospacedSystemFont(15);
+    big.font = mono(20, "bold");
     big.textColor = new Color(pnlColor(d.live.today));
   }
 
-  const groups = d.groups || [];
-  const compact = family === "medium";
+  // ── column headings, aligned to the columns they describe ──
+  // The first rendering put "today  lifetime" in a footer, left-aligned under
+  // the NAMES, where it labelled nothing and read as stray text.
+  w.addSpacer(6);
+  const ch = row(w);
+  ch.addSpacer();
+  numCell(ch, "TODAY", W_TODAY, C.dim, 8);
+  numCell(ch, "LIFETIME", W_LIFE, C.dim, 8);
+  w.addSpacer(2);
+  rule(w);
 
-  groups.forEach((g) => {
-    w.addSpacer(compact ? 3 : 5);
+  (d.groups || []).forEach((g, gi) => {
+    if (gi > 0) { w.addSpacer(4); rule(w); }
+    w.addSpacer(4);
     const gh = row(w);
     label(gh, (g.label || g.id).toUpperCase(), 8, C.dim);
     gh.addSpacer();
     label(gh, g.pnl_shape === "debit" ? "debit" : "credit", 8, C.dim);
+    w.addSpacer(2);
 
-    // Medium has room for roughly one line per group, so it shows that group's
-    // leader only — never a cross-group winner.
     const rows = compact ? (g.rows || []).slice(0, 1) : (g.rows || []);
     rows.forEach((r) => {
       const rr = row(w);
       const nm = rr.addText(r.name || r.id);
-      nm.font = r.live ? Font.boldSystemFont(10) : Font.systemFont(10);
+      nm.font = r.live ? Font.semiboldSystemFont ? Font.semiboldSystemFont(11)
+                                                 : Font.boldSystemFont(11)
+                       : Font.systemFont(11);
       nm.textColor = new Color(r.live ? C.accent : C.muted);
       nm.lineLimit = 1;
-      // Days of history, because a lifetime without its window invites exactly
-      // the comparison this layout is trying to prevent.
+      nm.minimumScaleFactor = 0.8;
+      // Days of history: a lifetime without its window invites exactly the
+      // comparison this layout exists to prevent (bl 9d vs c 94d).
       if (r.days) {
         rr.addSpacer(4);
         label(rr, `${r.days}d`, 8, C.dim);
       }
       rr.addSpacer();
-      const td = rr.addText(money(r.today));
-      td.font = Font.monospacedSystemFont ? Font.monospacedSystemFont(10) : Font.systemFont(10);
-      td.textColor = new Color(pnlColor(r.today));
-      rr.addSpacer(8);
-      const lt = rr.addText(money(r.lifetime));
-      lt.font = Font.monospacedSystemFont ? Font.monospacedSystemFont(10) : Font.systemFont(10);
-      lt.textColor = new Color(r.lifetime === null || r.lifetime === undefined
-                               ? C.dim : pnlColor(r.lifetime));
+      // A $0 among nine $0s is noise. Dim it so the eye goes to the figure
+      // that actually differs, without hiding the value.
+      numCell(rr, money(r.today), W_TODAY,
+              r.today ? pnlColor(r.today) : C.zero, 11);
+      numCell(rr, money(r.lifetime), W_LIFE,
+              r.lifetime === null || r.lifetime === undefined ? C.dim
+                                                              : pnlColor(r.lifetime),
+              11);
+      w.addSpacer(1);
     });
   });
 
-  w.addSpacer(4);
-  const foot = row(w);
-  label(foot, "today            lifetime", 8, C.dim);
-  foot.addSpacer();
-  label(foot, stale ? "cached" : "live", 8, stale ? C.warn : C.dim);
-
   if (res.problem === "rejected") {
-    w.addSpacer(2);
-    label(w, "token rejected", 9, C.warn);
+    w.addSpacer(4);
+    label(w, "token rejected — showing cached figures", 9, C.warn);
   }
+
+  // Push everything to the TOP. ListWidget centres its content, which left the
+  // first rendering with ~45% of the tile empty above and below a cramped
+  // block of 10pt rows.
+  w.addSpacer();
 
   const refresh = new Date();
   refresh.setMinutes(refresh.getMinutes() + 15);

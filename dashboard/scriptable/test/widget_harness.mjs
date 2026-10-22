@@ -21,10 +21,16 @@ export async function render({ token = "tok", httpStatus = 200, body = null,
   const store = { "hydra-widget-cache": cache === null ? undefined : JSON.stringify(cache),
                   "hydra-widget-fleet": cache === null ? undefined : JSON.stringify(cache) };
   const urls = [];
+  const sizes = [];
 
   class Stack {
     layoutHorizontally() {} centerAlignContent() {} addSpacer() {}
     set spacing(_v) {}
+    // Fixed-width numeric columns and the 1pt hairlines set .size; the fleet
+    // layout depends on both, so the stub has to accept them.
+    set size(v) { this._size = v; sizes.push(v); }
+    get size() { return this._size; }
+    set backgroundColor(_c) {}
     addStack() { return new Stack(); }
     addText(t) { const o = { text: t, color: null }; texts.push(o);
                  // unwrap the Color stub: a `class` constructor cannot return
@@ -49,9 +55,15 @@ export async function render({ token = "tok", httpStatus = 200, body = null,
   const ctx = {
     ListWidget,
     Color: class { constructor(hex) { this.hex = hex; } },
+    // The REAL Scriptable surface. `monospacedSystemFont` is deliberately
+    // ABSENT — it does not exist on the device either, and the first fleet
+    // rendering silently fell back to the proportional font because of it.
     Font: { systemFont: () => 0, boldSystemFont: () => 0,
-            mediumSystemFont: () => 0, boldMonospacedSystemFont: () => 0,
-            monospacedSystemFont: () => 0 },
+            semiboldSystemFont: () => 0, mediumSystemFont: () => 0,
+            boldMonospacedSystemFont: () => 0,
+            mediumMonospacedSystemFont: () => 0,
+            regularMonospacedSystemFont: () => 0 },
+    Size: class { constructor(w2, h2) { this.width = w2; this.height = h2; } },
     Keychain: {
       set: (k, v) => { store[k] = v; },
       get: (k) => { if (store[k] === undefined) throw new Error("missing");
@@ -78,7 +90,7 @@ export async function render({ token = "tok", httpStatus = 200, body = null,
   vm.createContext(ctx);
   await vm.runInContext(`(async () => { ${src} })()`, ctx);
   return { texts, all: texts.map(t => t.text).join(" | "),
-           headers: ctx.__headers, urls,
+           headers: ctx.__headers, urls, sizes,
            cached: store["hydra-widget-cache"],
            cachedFleet: store["hydra-widget-fleet"] };
 }
