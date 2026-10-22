@@ -1043,8 +1043,15 @@ class LongStrangleStrategy(HydraStrategy):
                 em_source=getattr(entry, "ls_em_source", ""),
                 expected_move=getattr(entry, "ls_expected_move", 0.0),
                 iv_percentile=getattr(entry, "ls_iv_percentile", None),
-    iv_percentile_n=getattr(entry, "ls_iv_percentile_n", None),
+                iv_percentile_n=getattr(entry, "ls_iv_percentile_n", None),
                 skew_gap_pct=getattr(entry, "ls_skew_gap_pct", 0.0),
+                # The BINDING gate, and the one that was unscoreable: the entry
+                # writer passed this from the start, ``_skip`` never did, so all
+                # 19 skips to 2026-10-22 recorded NULL — including the 8 this
+                # very gate caused. ``None`` now means "the gate did not run"
+                # (it is ordered after the IV gate, which short-circuits), not
+                # "no reading taken".
+                range_expansion=getattr(entry, "ls_range_expansion", None),
             )
         logger.info("LONGSTRANGLE entry #%d skipped - %s", entry_num, reason)
         return f"Entry #{entry_num} skipped - {reason}"
