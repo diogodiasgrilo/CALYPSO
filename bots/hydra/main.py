@@ -938,7 +938,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                             if not broker_outage_active:
                                 broker_outage_active = True
                                 alert_hooks.on_ensure_connected_failed(
-                                    reason="morning daily re-auth gate"
+                                    reason="morning daily re-auth gate", paused=True
                                 )
                                 trade_logger.log_error(
                                     "Broker session unavailable (morning re-auth "
@@ -991,7 +991,7 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                             if not broker_outage_active:
                                 broker_outage_active = True
                                 alert_hooks.on_ensure_connected_failed(
-                                    reason="intraday session re-check (every 15 min)"
+                                    reason="intraday session re-check (every 15 min)", paused=True
                                 )
                                 trade_logger.log_error(
                                     "Broker session unavailable (intraday re-check) "

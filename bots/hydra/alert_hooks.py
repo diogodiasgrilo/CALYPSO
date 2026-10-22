@@ -123,15 +123,30 @@ class IBKRAlertHooks:
             # Defensive: a bug in this module must NEVER take down main.py.
             logger.exception("IBKRAlertHooks.poll() error (non-fatal): %s", e)
 
-    def on_ensure_connected_failed(self, reason: str = "", *, will_restart: bool = True) -> None:
+    def on_ensure_connected_failed(self, reason: str = "", *, will_restart: bool = True,
+                                   paused: bool = False) -> None:
         """Fire the highest-value alert in the polish pass (A1.3): an intraday
         ``ensure_connected()`` returned False.
 
         Two callers, two framings:
 
-        * **Strategy bot** (``will_restart=True``, default): main.py is about to
-          ``break`` out of its loop for a systemd restart — without this
-          Telegram the operator only sees the bot vanish.
+        * **Strategy bot, legacy direct-IBClient** (``will_restart=True``,
+          default): main.py is about to ``break`` out of its loop for a systemd
+          restart — without this Telegram the operator only sees the bot vanish.
+        * **Strategy bot, BROKER MODE** (``paused=True``): main.py does NOT
+          exit. It pauses, re-checks each loop and resumes when the shared
+          broker recovers.
+
+          ⚠️ ADDED 2026-10-22, because the two existing framings could not
+          describe what actually happens in the DEPLOYED topology, and the
+          default was wrong for it. On 2026-10-21 the live seat alerted
+          "exiting for an automatic systemd restart (back in ~30s)" while the
+          code on the very next line logged "pausing … (NOT exiting)". It had
+          not exited: PID 3589980 was unchanged and ``NRestarts`` was 0, and
+          the session recovered 29 seconds later. Flipping those call sites to
+          ``will_restart=False`` would have been worse — that is the BROKER's
+          framing, HIGH and emailing, asserting broker re-auth has failed for
+          2+ cycles, which is a different and more alarming claim.
         * **Shared broker** (``will_restart=False``): calypso-broker does NOT
           exit — it stays up and keeps retrying re-auth — so the wording and
           expectation differ. The broker only calls this after **≥2 consecutive
@@ -145,7 +160,19 @@ class IBKRAlertHooks:
             will_restart: see above — selects bot-exit vs broker-stays-up wording.
         """
         try:
-            if will_restart:
+            if paused:
+                title = "HYDRA — IBKR session unavailable (paused, not exiting)"
+                body = (
+                    "Strategy ensure_connected() health-probe failed — the bot "
+                    "has PAUSED trading and is re-checking each loop. It does "
+                    "NOT exit and does NOT restart: in broker mode the shared "
+                    "session is owned by calypso-broker, which recovers on its "
+                    "own, and restarting the strategy cannot repair it. "
+                    "Informational. If this persists past a few minutes, check "
+                    "calypso-broker."
+                )
+                priority = _alert_priority("LOW")
+            elif will_restart:
                 # SELF-HEALING in the deployed (broker-mode) topology: the
                 # strategy's ensure_connected() is only a GET /health probe; on
                 # failure main.py break()s and systemd restarts it in 30s, then
