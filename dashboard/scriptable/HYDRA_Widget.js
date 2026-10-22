@@ -408,24 +408,46 @@ function createFleetWidget(res, family, logo) {
     // has traded yet, show the next scheduled entry instead — a time stays
     // true even on a stale tile, which a P&L figure does not.
     const hero = row(w);
-    const showNext = !anyActivity && d.next_entry;
+    // Keyed on the LIVE SEAT, not the fleet. `anyActivity` is fleet-wide and
+    // governs the TODAY column, which is correct — a shadow variant's P&L is
+    // real information. But the hero is about the one strategy placing real
+    // orders, and the two diverge every single morning: the shadow grids open
+    // at 09:45 while the live seat's first slot is 12:15. Found live at 10:44
+    // ET with B-A at -$32.20 and bl flat, where the fleet-wide flag showed a
+    // 22pt "$0" and discarded the useful "12:15" — reintroducing exactly the
+    // guaranteed-zero hero this logic exists to prevent.
+    const liveTraded = !!(d.live && d.live.today);
+    const showNext = !liveTraded && d.next_entry;
     const big = hero.addText(showNext ? d.next_entry : money(d.live.today));
     big.font = mono(N.hero, "bold");
     big.textColor = new Color(showNext ? C.label : pnlColor(d.live.today));
     hero.addSpacer();
     label(hero,
-          showNext ? "next entry" : anyActivity ? "today" : "no entries today",
+          showNext ? "next entry" : liveTraded ? "today" : "no entries today",
           null, C.label3, T.caption2());
   }
 
-  w.addSpacer(10);
+  w.addSpacer(9);
+
+  // Column headings ONCE, in the SAME fixed-width cells as the figures they
+  // describe. Putting them in each group header with a flexible spacer both
+  // repeated them four times AND right-aligned them over the LIFETIME column,
+  // so "TODAY" sat above the lifetime figures. Visible on the home screen.
+  if (anyActivity) {
+    const ch = row(w);
+    ch.addSpacer();
+    numCell(ch, "TODAY", W_TODAY, C.label3, N.head);
+    numCell(ch, "LIFETIME", W_LIFE, C.label3, N.head);
+    w.addSpacer(3);
+  }
 
   groups.forEach((g, gi) => {
     if (gi > 0) { w.addSpacer(7); rule(w); w.addSpacer(7); }
     const gh = row(w);
     label(gh, (g.label || g.id), null, C.label3, T.caption2());
     gh.addSpacer();
-    if (anyActivity) label(gh, "TODAY", null, C.label3, T.caption2());
+    label(gh, g.pnl_shape === "debit" ? "debit" : "credit",
+          null, C.label3, T.caption2());
     w.addSpacer(3);
 
     const rows = compact ? (g.rows || []).slice(0, 1) : (g.rows || []);

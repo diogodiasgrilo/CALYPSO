@@ -586,6 +586,43 @@ await t("the SMALL widget follows the same policy", async () => {
   assert.equal(minsFromNow(r, MIDDAY), 2);
 });
 
+await t("column headings appear ONCE, not per group", async () => {
+  // Seen on the home screen 2026-10-22: "TODAY" rendered in all four group
+  // headers. Four labels for two columns.
+  const live = JSON.parse(JSON.stringify(FLEET));
+  live.groups[0].rows[0].today = -5;
+  const r = await render({ family: "large", fleetBody: live, nowISO: MIDDAY });
+  const n = r.texts.filter(x => x.text === "TODAY").length;
+  assert.equal(n, 1, `TODAY appears ${n} times`);
+  assert.equal(r.texts.filter(x => x.text === "LIFETIME").length, 1);
+});
+
+await t("headings sit in the SAME fixed cells as their figures", async () => {
+  // The worse half of the same bug: a flexible spacer right-aligned "TODAY"
+  // over the LIFETIME column, so it labelled the wrong numbers.
+  const live = JSON.parse(JSON.stringify(FLEET));
+  live.groups[0].rows[0].today = -5;
+  const r = await render({ family: "large", fleetBody: live, nowISO: MIDDAY });
+  const hdr = r.texts.findIndex(x => x.text === "TODAY");
+  const life = r.texts.findIndex(x => x.text === "LIFETIME");
+  assert.ok(hdr >= 0 && life === hdr + 1, "headings are not adjacent cells");
+  // COUNT the sized cells, don't just check one exists: the data rows also
+  // use these widths, so "some cell is 62pt wide" is true whether or not the
+  // HEADING went through numCell. An earlier version asserted exactly that
+  // and passed with the heading reverted to a flexible-spacer label.
+  const rows = live.groups.reduce((a, g) => a + g.rows.length, 0);
+  const n62 = r.sizes.filter(z => z && z.width === 62).length;
+  const n78 = r.sizes.filter(z => z && z.width === 78).length;
+  assert.equal(n62, rows + 1, `TODAY cells: ${n62}, expected ${rows} rows + 1 heading`);
+  assert.equal(n78, rows + 1, `LIFETIME cells: ${n78}, expected ${rows} rows + 1 heading`);
+});
+
+await t("group headers carry credit/debit, not a column name", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.equal(r.texts.filter(x => x.text === "credit").length, 2);
+  assert.equal(r.texts.filter(x => x.text === "debit").length, 2);
+});
+
 console.log("\n#18 sparklines carry SHAPE; the figure carries magnitude");
 
 await t("each row scales to its own range", async () => {
@@ -651,6 +688,30 @@ await t("before any entry it shows the NEXT scheduled one", async () => {
   const t1 = r.texts.find(x => x.text === "12:15");
   assert.equal(t1.font, "boldMono", "the hero slot, not a caption");
   assert.equal(t1.color, "#e8edf3", "a time is not P&L — must not be red/green");
+});
+
+await t("a SHADOW variant trading must not hijack the hero", async () => {
+  // Found live 2026-10-22 10:44 ET. The shadow grids open at 09:45; the live
+  // seat's first slot is 12:15. A fleet-wide activity flag flipped the hero to
+  // "today" on B-A's -$32.20 and rendered a 22pt "$0" for the live seat —
+  // reintroducing the guaranteed-zero hero this logic exists to remove.
+  const mixed = JSON.parse(JSON.stringify(FLEET));
+  mixed.groups[0].rows[3].today = -32.2;     // B-A (a shadow) trades
+  const r = await render({ family: "large", fleetBody: mixed, nowISO: MIDDAY });
+  assert.ok(r.all.includes("12:15") && r.all.includes("next entry"), r.all);
+  assert.ok(!r.texts.some(x => x.text === "$0" && x.font === "boldMono"),
+            "a guaranteed-zero hero came back");
+  // the shadow's figure must still appear in the TODAY column
+  assert.ok(r.all.includes("TODAY") && r.all.includes("−$32"), r.all);
+});
+
+await t("the LIVE seat trading DOES take the hero", async () => {
+  const mixed = JSON.parse(JSON.stringify(FLEET));
+  mixed.live.today = 412.5;
+  mixed.groups[0].rows[1].today = 412.5;
+  const r = await render({ family: "large", fleetBody: mixed, nowISO: MIDDAY });
+  assert.ok(r.all.includes("+$413") && r.all.includes("today"), r.all);
+  assert.ok(!r.all.includes("next entry"));
 });
 
 await t("once something trades the hero becomes today's P&L", async () => {
