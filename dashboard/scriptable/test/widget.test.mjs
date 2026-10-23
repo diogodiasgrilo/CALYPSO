@@ -211,6 +211,7 @@ await t("the pre-2026-10-22 bare cache shape still loads", async () => {
 const FLEET = {
   date: "2026-10-22", market_open: false,
   next_entry: "12:15",
+  as_of: "13:30",
   live: { id: "bl", name: "Brandon Late", today: 0.0, lifetime: -43.65, days: 9, live: true, status: "live", spark: [0,20,-10,-30,-44] },
   groups: [
     { id: "ic_0dte", label: "0DTE Iron Condor", pnl_shape: "credit", comparable: true, rows: [
@@ -763,6 +764,44 @@ await t("CONTROL: the pre-fix rhythm is detected as overflowing", async () => {
     + rows * LINE.row + (rows - groups) * 3;
   const { USABLE } = await import("./widget_layout_budget.mjs");
   assert.ok(old > USABLE, `old rhythm ${old}pt should exceed ${USABLE}pt`);
+});
+
+console.log("\n#21 the tile says WHEN its figures were read");
+
+await t("the read time is stamped in the header", async () => {
+  // A widget renders ONCE and then sits there ageing, so it cannot show
+  // "N minutes ago" — that number freezes at the moment of drawing and
+  // becomes a lie. A timestamp stays true however long the tile sits.
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.all.includes("13:30"), r.all);
+  assert.ok(r.all.includes("Open · 13:30") || r.all.includes("Closed · 13:30"), r.all);
+});
+
+await t("it rides WITH the market state, costing no extra row", async () => {
+  // Vertical space is the binding constraint: the layout has ~10pt of slack.
+  const { estimateHeight, USABLE } = await import("./widget_layout_budget.mjs");
+  const rows = FLEET.groups.reduce((a, g) => a + g.rows.length, 0);
+  assert.ok(estimateHeight({ rows, groups: FLEET.groups.length }) <= USABLE);
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  // one combined label, not two
+  assert.ok(!r.texts.some(x => x.text === "Closed"), "market state split into its own label");
+});
+
+await t("a DATE-stale tile still shows the warning, not the stamp", async () => {
+  // Overnight staleness is a louder failure than intraday lag and keeps the
+  // slot: a timestamp alone would not say "this is yesterday's board".
+  const r = await render({ family: "large", nowISO: MIDDAY,
+                           fleetBody: f({ date: "2026-10-20" }) });
+  assert.ok(r.all.includes("⚠ 2026-10-20"), r.all);
+  assert.ok(!r.all.includes("· 13:30"), "stamp shown alongside a stale warning");
+});
+
+await t("a missing stamp degrades to just the market state", async () => {
+  // FLEET has market_open:false, so the bare state is "Closed".
+  const r = await render({ family: "large", nowISO: MIDDAY,
+                           fleetBody: f({ as_of: null }) });
+  assert.ok(r.texts.some(x => x.text === "Closed"), r.all);
+  assert.ok(!r.all.includes("·"), "rendered a dangling separator");
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

@@ -390,7 +390,15 @@ function createFleetWidget(res, family, logo) {
   if (stale) {
     label(head, d.date ? `⚠ ${d.date}` : "⚠ stale", null, C.warn, T.caption2());
   } else {
-    label(head, d.market_open ? "Open" : "Closed", null, C.label3, T.caption2());
+    // The read time, not an age. iOS refreshes on its own budget — measured at
+    // ~35 minutes against a 2-minute request on the day the tile was added —
+    // and the date-only staleness check cannot see an INTRADAY lag at all. On
+    // 2026-10-22 the tile showed the live seat at -$64 against an actual -$97,
+    // with two positions opened in between, and nothing on screen suggested it
+    // was behind. A timestamp stays true however long the tile sits.
+    const stamp = d.as_of ? ` · ${d.as_of}` : "";
+    label(head, (d.market_open ? "Open" : "Closed") + stamp,
+          null, C.label3, T.caption2());
   }
 
   // ── hero: the live seat ──

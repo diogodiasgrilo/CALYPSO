@@ -139,6 +139,7 @@ async def get_widget_data():
         "entry_dots": entry_dots,
         "cumulative_pnl": round(cumulative_pnl, 2),
         "date": state.get("date", ""),
+        "as_of": _et_now_hhmm(),
         "summary": summary,
         "contracts_per_entry": contracts,
     }
@@ -170,6 +171,16 @@ async def get_widget_data():
 #
 # So: grouped, best-first WITHIN a group, live flagged, no global #1.
 
+
+
+
+def _et_now_hhmm() -> str:
+    """Exchange-time HH:MM, or "" if the clock is unreadable."""
+    try:
+        from shared.market_hours import get_us_market_time
+        return get_us_market_time().strftime("%H:%M")
+    except Exception:  # noqa: BLE001
+        return ""
 
 
 def _next_entry_time(vid: str):
@@ -323,6 +334,15 @@ async def get_widget_fleet():
 
     payload = {
         "date": et_date,
+        # WHEN this data was read, in exchange time. A widget renders once and
+        # then sits there ageing, so it cannot display "N minutes ago" — that
+        # number would freeze at the moment of drawing and become a lie. A
+        # TIMESTAMP stays true however long the tile sits, and the reader
+        # compares it against their own clock.
+        #
+        # Stamped where the payload is BUILT, so it is inside the 60s cache and
+        # honestly reports the age of the figures rather than of the request.
+        "as_of": _et_now_hhmm(),
         "next_entry": _next_entry_time(seat),
         "market_open": market.get("is_open", False),
         "live": live_row,
