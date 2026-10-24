@@ -3103,6 +3103,77 @@ class MEICStrategy(abc.ABC):
             quantity=quantity,
         )
 
+
+    # ENTRY-CHECKPOINT: the monitoring loop is blind for as long as an entry
+    # takes to leg in, because run_strategy_check() does entries AND stop
+    # monitoring on one thread and the per-rung wait happens server-side in
+    # calypso-broker, inside a single blocking HTTP call.
+    #
+    # Measured on the live seat 2026-10-23: five blind spells of 191/173/271/
+    # 260/318s, 20.2 minutes in one session, with up to 4 open entries. The
+    # dominant cost is not latency or retries — it is deliberately waiting ~45s
+    # per rung for a limit order to fill, which IS the strategy.
+    #
+    # Why that matters more than it first appears: the WARNING TIME before a
+    # stop fires is SHORTER than the blind window. Measured over 68 stops on
+    # bl+b since 2026-09-01 (seconds between a side's cost-to-close last being
+    # under 70% of its trigger, and the stop firing):
+    #
+    #     median warning   bl 54s   b 159s
+    #     stops whose ENTIRE warning window fits inside 318s:  53/68 (78%)
+    #                                              inside 50s:  16/68 (24%)
+    #
+    # So a blind spell coinciding with a developing breach does not DELAY the
+    # stop, it MISSES it — the position goes from safe to past-stop with no
+    # check in between. Checkpointing every rung cuts that exposure 78% -> 24%.
+    #
+    # Safe to run here, and the reason is specific: the entry under
+    # construction is NOT yet in daily_state.active_entries, so this only ever
+    # evaluates ALREADY-OPEN entries — independent positions, independent
+    # orders. The strategy is single-threaded, so nothing can race the
+    # placement this is interleaved with.
+    ENTRY_CHECKPOINT_MIN_GAP_S = 15.0
+
+    def _entry_checkpoint(self, where: str) -> None:
+        """Run a stop check at a quiescent point during entry placement."""
+        if getattr(self, "_in_entry_checkpoint", False):
+            return                      # never re-enter from within itself
+        # getattr on SELF first: a strategy object without daily_state (or
+        # without a broker) must not crash the placement path. The checkpoint's
+        # whole contract is that it can never harm the entry it interleaves,
+        # and reaching through self.daily_state unguarded broke exactly that.
+        _ds = getattr(self, "daily_state", None)
+        if not getattr(_ds, "active_entries", None):
+            return                      # nothing open to protect
+        now = time.monotonic()
+        last = getattr(self, "_last_entry_checkpoint_at", 0.0)
+        if now - last < self.ENTRY_CHECKPOINT_MIN_GAP_S:
+            return                      # throttle: the gate is already ~83% saturated
+        self._in_entry_checkpoint = True
+        self._last_entry_checkpoint_at = now
+        saved_state = self.state
+        try:
+            action = self._check_stop_losses()
+            if action:
+                logger.warning(
+                    "  ENTRY-CHECKPOINT (%s): acted on an open position while "
+                    "legging in — %s", where, action
+                )
+        except Exception as e:  # noqa: BLE001
+            # A checkpoint must never break the placement it is interleaved
+            # with: the entry is the thing holding real money right now.
+            logger.error(
+                "  ENTRY-CHECKPOINT (%s) failed (%s: %s) — placement continues",
+                where, type(e).__name__, e
+            )
+        finally:
+            # The stop path may transition state; the entry IS still in
+            # progress, so restore it rather than letting the checkpoint
+            # strand the state machine mid-placement.
+            self.state = saved_state
+            self._in_entry_checkpoint = False
+
+
     def _place_option_order_ib(
         self,
         strike: float,
@@ -3244,6 +3315,11 @@ class MEICStrategy(abc.ABC):
             remaining = target_qty - filled_so_far
             if remaining <= 0:
                 break  # leg already whole (defensive — we return on completion)
+
+            # One insertion point covers BOTH boundaries: attempt 0 is the
+            # start of a leg, later attempts are rung boundaries. Max blind
+            # interval becomes one rung wait rather than a whole entry.
+            self._entry_checkpoint(f"{leg_description} rung {attempt + 1}")
 
             # B4: stop escalating once THIS LEG has spent its budget. Only
             # from the SECOND rung on — the first attempt of every leg always
