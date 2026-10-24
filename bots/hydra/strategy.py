@@ -5235,7 +5235,15 @@ class HydraStrategy(MEICStrategy):
                     )
                 self._log_safety_event(
                     "MKT-011_SKIP",
-                    f"Entry #{entry.entry_number} - call non-viable, one-sided disabled",
+                    # Derive, do not assert. The log line and the operator
+                    # message were corrected on 2026-10-22; this third copy was
+                    # missed and still claimed a credit failure on 10-23 entry
+                    # #6 — and THIS is the one that reaches the DB and journal.
+                    (f"Entry #{entry.entry_number} - call UNFILLABLE "
+                     f"(${_v['fillable_ps']:.2f}/sh < floor ${_v['floor_ps']:.2f}/sh, "
+                     f"mid credit passed), one-sided disabled"
+                     if _v and _v.get("side") == "call" else
+                     f"Entry #{entry.entry_number} - call non-viable, one-sided disabled"),
                     "Skipped"
                 )
                 return ("skip", True, estimated_call, estimated_put, "call")
@@ -5262,9 +5270,14 @@ class HydraStrategy(MEICStrategy):
                     f"(${estimated_put / 100:.2f} < ${put_min / 100:.2f}) - "
                     f"SKIPPING (one-sided entries disabled)"
                 )
+                _vp = getattr(entry, "_mkt048_veto", None)
                 self._log_safety_event(
                     "MKT-011_SKIP",
-                    f"Entry #{entry.entry_number} - put non-viable, one-sided disabled",
+                    (f"Entry #{entry.entry_number} - put UNFILLABLE "
+                     f"(${_vp['fillable_ps']:.2f}/sh < floor ${_vp['floor_ps']:.2f}/sh, "
+                     f"mid credit passed), one-sided disabled"
+                     if _vp and _vp.get("side") == "put" else
+                     f"Entry #{entry.entry_number} - put non-viable, one-sided disabled"),
                     "Skipped"
                 )
                 return ("skip", True, estimated_call, estimated_put, "put")

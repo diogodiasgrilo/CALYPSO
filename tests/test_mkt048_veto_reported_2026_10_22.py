@@ -113,3 +113,36 @@ class TestTheDecisionSiteRecordsWhy:
         # occurrence preceded by "self."
         i = src.index("self._build_credit_gate_skip_message(")
         assert "_mkt048_veto" in src[i:i + 400], "call site drops the veto"
+
+class TestTheSAFETYEVENTAlsoDerives:
+    """The 2026-10-22 fix corrected the log line and the operator message and
+    MISSED a third copy — the safety event, which is the one that reaches the
+    DB and the journal. Observed live the next day, 10-23 entry #6:
+
+        MKT-011: Entry #6 SKIPPING ... vetoed by MKT-048 as UNFILLABLE   <- fixed
+        SAFETY EVENT: MKT-011_SKIP - Entry #6 - call non-viable ...      <- not
+
+    A partial fix to a reporting defect leaves the most durable surface wrong.
+    """
+
+    def test_the_call_side_safety_event_names_unfillability(self):
+        import inspect
+        src = inspect.getsource(HydraStrategy._check_credit_gate)
+        i = src.index('"MKT-011_SKIP"')
+        window = src[i:i + 700]
+        assert "UNFILLABLE" in window, "safety event still asserts a credit failure"
+        assert "_v" in window or "_vp" in window, "it does not read the veto"
+
+    def test_BOTH_sides_derive(self):
+        import inspect
+        src = inspect.getsource(HydraStrategy._check_credit_gate)
+        assert src.count("UNFILLABLE \"") + src.count("UNFILLABLE ") >= 3, (
+            "only one side's safety event was corrected")
+        assert "put UNFILLABLE" in src and "call UNFILLABLE" in src
+
+    def test_a_genuine_thin_credit_still_reads_as_non_viable(self):
+        """Control: the fallback wording must survive for real credit skips."""
+        import inspect
+        src = inspect.getsource(HydraStrategy._check_credit_gate)
+        assert "call non-viable, one-sided disabled" in src
+        assert "put non-viable, one-sided disabled" in src

@@ -104,14 +104,21 @@ class TestTheCallSitesUseIt:
         src = open(os.path.join(ROOT, "bots/hydra/main.py")).read()
         # Each broker-mode branch logs "NOT exiting" shortly after alerting.
         for block in re.findall(r"on_ensure_connected_failed\((?:[^()]|\([^()]*\))*\)"
-                                r".{0,400}?NOT exiting", src, re.S):
+                                r".{0,1400}?NOT exiting", src, re.S):
             assert "paused=True" in block, (
                 "a call site that pauses (logs 'NOT exiting') does not pass "
                 f"paused=True:\n{block[:200]}")
 
     def test_at_least_two_such_sites_exist(self):
-        """Guard: if the regex stops matching, the test above is vacuous."""
+        """Guard: if the regex stops matching, the test above is vacuous.
+
+        ⚠️ The window is deliberately generous. A 400-char window broke on
+        2026-10-24 when an explanatory comment was added between the alert call
+        and the log call — the CODE was fine, the proximity assertion was not.
+        A source test that measures distance in characters will keep failing on
+        comments; widen it rather than deleting the comment.
+        """
         src = open(os.path.join(ROOT, "bots/hydra/main.py")).read()
         blocks = re.findall(r"on_ensure_connected_failed\((?:[^()]|\([^()]*\))*\)"
-                            r".{0,400}?NOT exiting", src, re.S)
+                            r".{0,1400}?NOT exiting", src, re.S)
         assert len(blocks) >= 2, f"expected >=2 pause call sites, found {len(blocks)}"

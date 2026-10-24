@@ -3508,10 +3508,57 @@ class MEICStrategy(abc.ABC):
                     # the remainder can fill between the last poll and the cancel
                     # taking effect (cancel is async). That count — not the
                     # pre-cancel snapshot — is authoritative.
-                    terminal = self._extract_filled_quantity(
-                        self._get_order_status(order_id)
-                    )
+                    #
+                    # ORDER-010-SETTLE (2026-10-23): reading it IMMEDIATELY is
+                    # not enough. `_cancel_order` returning True means IBKR
+                    # ACCEPTED the cancel, not that the order is dead and its
+                    # count is final, and a status read in that window still
+                    # shows the pre-cancel figure. Live on `bl`, entry #5:
+                    #
+                    #   14:18:01  Cancelling working order ...759 (2/7 filled)
+                    #   14:18:04  ORDER-010: partial 2/7 — escalating
+                    #   14:18:05  Attempt 2: LIMIT @ $0.55   (5 contracts)
+                    #   14:18:07  Filled Put 7600.0 7/7      (booked 2 + 5)
+                    #
+                    # The original filled its remaining 5 anyway, so the broker
+                    # held 2 + 5 + 5 = 12 against our tracked 7. POS-003 caught
+                    # it an hour later: five untracked long puts, $280, no stop
+                    # on them, and invisible to our P&L. The same pattern on
+                    # Call 7670 forty seconds later did NOT over-fill — it is a
+                    # race, which is why it survived this long.
+                    #
+                    # So wait for a genuinely TERMINAL status before trusting
+                    # the count, and fail closed if it never arrives.
+                    # Scoped to a PARTIAL fill. The over-fill arises only when
+                    # we size a REMAINDER from a count that is still moving; a
+                    # rung that filled nothing has no remainder to mis-size, and
+                    # making the whole retry ladder wait (and fail closed) would
+                    # cost entries for no safety gain. A zero-fill rung keeps
+                    # the original behaviour: trust the confirmed cancel.
+                    if snapshot > 0:
+                        terminal, settled = self._await_terminal_fill(
+                            order_id, snapshot, cancel_confirmed=bool(cancelled)
+                        )
+                    else:
+                        terminal, settled = (
+                            self._extract_filled_quantity(
+                                self._get_order_status(order_id)
+                            ),
+                            True,
+                        )
                     confirmed = terminal if terminal is not None else snapshot
+                    if not settled:
+                        # Never reached a terminal state: we cannot say what it
+                        # filled, so treat it exactly like a failed cancel
+                        # rather than re-placing against a live order.
+                        logger.critical(
+                            f"  ORDER-010-SETTLE: order {order_id} on "
+                            f"{leg_description} never reached a terminal state "
+                            f"after cancel — refusing to size a remainder from "
+                            f"an unsettled count (last seen {confirmed}/"
+                            f"{remaining})."
+                        )
+                        cancelled = False
                     if cancelled:
                         # Order is dead — its fill count is final and safe to keep.
                         rung_filled = confirmed
@@ -3731,6 +3778,62 @@ class MEICStrategy(abc.ABC):
                 f"partial on {leg_description} — MANUAL INTERVENTION REQUIRED"
             )
             self._add_orphaned_order(f"PARTIAL_{conid}")
+
+
+    # ORDER-010-SETTLE: how long to wait for a cancelled order to reach a
+    # terminal state, and how often to look. IBKR's cancel is asynchronous;
+    # measured on the live seat, fills landed within ~2s of the cancel but the
+    # status read immediately after still showed the stale count. Six seconds
+    # is well past that and is paid only on a PARTIAL fill, not on the normal
+    # path.
+    ORDER_SETTLE_TIMEOUT_S = 6.0
+    ORDER_SETTLE_POLL_S = 0.5
+
+    def _await_terminal_fill(self, order_id, fallback: int,
+                             cancel_confirmed: bool = False):
+        """Poll an order until it is settled, then return ``(filled, settled)``.
+
+        Two ways to be satisfied the count is final:
+
+        1. The order reports a TERMINAL status. Parsed exactly as
+           ``place_and_wait_for_fill`` parses the same dict (``status`` then
+           ``order_status``), so the two cannot disagree about what terminal
+           means.
+        2. The cancel was CONFIRMED and the fill count did not move for the
+           whole budget. A per-order status read can come back thin — a count
+           with no status field — and failing closed on that alone would abort
+           legs whenever the endpoint is terse, which is far worse than the
+           over-fill being fixed. A confirmed-dead order whose count has
+           stopped moving is settled enough to size a remainder from.
+
+        ``settled`` False means we genuinely cannot say what it filled; the
+        caller must then refuse to re-place, exactly as for a failed cancel.
+        Sizing a remainder from an unsettled order is how five untracked
+        contracts reached the live account on 2026-10-23.
+        """
+        from shared.ib_client import _TERMINAL_ORDER_STATUSES
+        deadline = time.time() + self.ORDER_SETTLE_TIMEOUT_S
+        last = fallback
+        moved = False
+        saw_any = False
+        while time.time() < deadline:
+            status = self._get_order_status(order_id) or {}
+            qty = self._extract_filled_quantity(status)
+            if qty is not None:
+                saw_any = True
+                if qty != last:
+                    moved = True
+                last = qty
+            state = str(
+                status.get("status") or status.get("order_status") or ""
+            ).strip().lower()
+            if state in _TERMINAL_ORDER_STATUSES:
+                return (last, True)
+            time.sleep(self.ORDER_SETTLE_POLL_S)
+        # No terminal status inside the budget. Accept a confirmed-dead order
+        # whose count never moved; anything else is unknown.
+        stable = cancel_confirmed and saw_any and not moved
+        return (last, bool(stable))
 
     @staticmethod
     def _extract_filled_quantity(status: dict) -> Optional[int]:

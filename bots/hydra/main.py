@@ -948,10 +948,19 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                                 alert_hooks.on_ensure_connected_failed(
                                     reason="morning daily re-auth gate", paused=True
                                 )
-                                trade_logger.log_error(
+                                # WARNING, not ERROR. In broker mode this is a
+                                # routine, self-healing pause — we deliberately
+                                # do NOT exit, and the paired alert is LOW. It
+                                # fired on a/f/h at 09:30 on 2026-10-23 and
+                                # showed up in an error sweep as three faults
+                                # that were nothing of the kind. Reserve ERROR
+                                # for the legacy path below, where the outage
+                                # really does end in a restart.
+                                trade_logger.log_event(
                                     "Broker session unavailable (morning re-auth "
                                     "gate) — pausing trading and waiting for the "
-                                    "broker to self-heal (NOT exiting)."
+                                    "broker to self-heal (NOT exiting).",
+                                    level="WARNING",
                                 )
                             interruptible_sleep(BROKER_OUTAGE_RECHECK_S)
                             continue
@@ -1001,10 +1010,14 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                                 alert_hooks.on_ensure_connected_failed(
                                     reason="intraday session re-check (every 15 min)", paused=True
                                 )
-                                trade_logger.log_error(
+                                # WARNING for the same reason as the morning
+                                # gate above: a self-healing pause is not a
+                                # fault, but it is not routine either.
+                                trade_logger.log_event(
                                     "Broker session unavailable (intraday re-check) "
                                     "— pausing trading and waiting for the broker to "
-                                    "self-heal (NOT exiting)."
+                                    "self-heal (NOT exiting).",
+                                    level="WARNING",
                                 )
                             interruptible_sleep(BROKER_OUTAGE_RECHECK_S)
                             continue
