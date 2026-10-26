@@ -1073,18 +1073,30 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 # and 63 stops, none has yet overlapped (~1.6 expected by
                 # chance, so zero is luck, not safety).
                 _iter_started = time.monotonic()
+                _cp_before = getattr(strategy, "entry_checkpoints_run", 0)
                 action = strategy.run_strategy_check()
                 _iter_elapsed = time.monotonic() - _iter_started
+                _cp_ran = getattr(strategy, "entry_checkpoints_run", 0) - _cp_before
                 if _iter_elapsed >= MONITOR_STARVED_WARN_S:
                     try:
                         _open = len(getattr(strategy.daily_state, "active_entries", ()) or ())
                     except Exception:  # noqa: BLE001
                         _open = -1
+                    # DERIVED, not asserted. The ENTRY-CHECKPOINT (2026-10-25)
+                    # runs stop checks INSIDE run_strategy_check, so a long
+                    # iteration no longer implies a blind one — and this line
+                    # claimed blindness regardless. The checkpoint does NOT
+                    # shorten this number; it changes what happened during it.
+                    _cover = (
+                        f"{_cp_ran} stop check(s) ran inside it (ENTRY-CHECKPOINT)"
+                        if _cp_ran else
+                        "no stop check, MKT-046 confirmation or cushion read "
+                        "ran in that window"
+                    )
                     _msg = (
                         f"MONITOR-STARVED: the trading loop blocked for "
                         f"{_iter_elapsed:.0f}s with {_open} open entr"
-                        f"{'y' if _open == 1 else 'ies'} — no stop check, "
-                        f"MKT-046 confirmation or cushion read ran in that window"
+                        f"{'y' if _open == 1 else 'ies'} — {_cover}"
                     )
                     if _open > 0:
                         logger.warning(_msg)

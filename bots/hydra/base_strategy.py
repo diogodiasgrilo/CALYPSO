@@ -3157,6 +3157,11 @@ class MEICStrategy(abc.ABC):
             return                      # throttle: the gate is already ~83% saturated
         self._in_entry_checkpoint = True
         self._last_entry_checkpoint_at = now
+        # Count them so MONITOR-STARVED can DERIVE whether the monitor was
+        # actually blind, instead of asserting it. Before the checkpoint
+        # existed the assertion was true; now it may not be, and nothing in
+        # the logs said which. Fourth instance of this pattern in the project.
+        self.entry_checkpoints_run = getattr(self, "entry_checkpoints_run", 0) + 1
         saved_state = self.state
         _cp_started = now
         try:

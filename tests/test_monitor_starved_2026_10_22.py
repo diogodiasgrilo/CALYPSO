@@ -57,11 +57,16 @@ class TestItIsWiredAroundTheRightCall:
     def test_it_times_run_strategy_check_specifically(self):
         """Timing the whole iteration instead would fold in the deliberate
         sleep at the bottom of the loop and never mean anything."""
+        # The checkpoint counter is captured between the start mark and the
+        # call (2026-10-26); allow bookkeeping lines but NOT another call.
         m = re.search(
-            r"_iter_started = time\.monotonic\(\)\s*\n\s*"
+            r"_iter_started = time\.monotonic\(\)\s*\n"
+            r"(?:\s*_cp_before = [^\n]*\n)?\s*"
             r"action = strategy\.run_strategy_check\(\)\s*\n\s*"
             r"_iter_elapsed = time\.monotonic\(\) - _iter_started", SRC)
         assert m, "the timer must bracket run_strategy_check() and nothing else"
+        # and nothing expensive may sit inside the bracket
+        assert "broker." not in m.group(0), "a broker call is inside the timer"
 
     def test_it_uses_a_MONOTONIC_clock(self):
         """Wall-clock would report a spurious multi-hour spell across a DST
@@ -114,3 +119,48 @@ class TestObservabilityCannotBreakTheTradingLoop:
         assert not re.search(
             r"\n\s*# Run strategy check\n\s*action = strategy\.run_strategy_check\(\)",
             SRC), "the untimed call shape is what allowed a silent 569s spell"
+
+class TestItDerivesCoverageRatherThanAssertingBlindness:
+    """The message claimed "no stop check ... ran in that window". That was
+    true until the ENTRY-CHECKPOINT (2026-10-25) started running stop checks
+    INSIDE run_strategy_check — after which a long iteration no longer implies
+    a blind one, and the line asserted something it could not know.
+
+    Seen live 2026-10-26: variant A blocked 191s and the message still claimed
+    total blindness, with nothing in the logs saying whether the checkpoint had
+    fired. Fourth occurrence of assert-instead-of-derive in this project.
+
+    ⚠️ The checkpoint does NOT shorten this number. MONITOR-STARVED times the
+    OUTER iteration; the checkpoint runs inside it. Expecting the durations to
+    fall was my own error — what changes is the coverage during them.
+    """
+
+    def test_it_counts_checkpoints_across_the_iteration(self):
+        import re
+        assert re.search(r"_cp_before = getattr\(strategy, \"entry_checkpoints_run\", 0\)",
+                         SRC), "no before-count"
+        assert "_cp_ran = getattr(strategy, \"entry_checkpoints_run\", 0) - _cp_before" in SRC
+
+    def test_the_blind_claim_is_conditional_on_zero_checkpoints(self):
+        i = SRC.index("_cover = (")
+        block = SRC[i:i + 420]
+        assert "if _cp_ran else" in block, "blindness is still asserted unconditionally"
+        assert "ENTRY-CHECKPOINT" in block, "a covered window does not say so"
+
+    def test_the_message_uses_the_derived_clause(self):
+        i = SRC.index("MONITOR-STARVED: the trading loop blocked for")
+        tail = SRC[i:i + 300]
+        assert "{_cover}" in tail, "the message does not use the derived text"
+        assert "no stop check, MKT-046" not in tail, (
+            "the hardcoded blindness claim is still inline")
+
+    def test_the_counter_increments_in_the_checkpoint(self):
+        import inspect
+        from bots.hydra.base_strategy import MEICStrategy
+        src = inspect.getsource(MEICStrategy._entry_checkpoint)
+        assert "entry_checkpoints_run" in src
+
+    def test_a_strategy_without_the_counter_still_reports(self):
+        """getattr default 0 -> reads as blind, which is the safe reading for
+        a strategy that has no checkpoint at all."""
+        assert 'getattr(strategy, "entry_checkpoints_run", 0)' in SRC
