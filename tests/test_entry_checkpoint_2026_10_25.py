@@ -174,3 +174,67 @@ class TestItCannotCrashAStrategyThatLacksState:
         body = SRC[i:i + 1400]
         assert 'getattr(self, "daily_state", None)' in body, (
             "daily_state is reached directly — a strategy without it raises")
+
+class TestCheckpointTimeIsNotBilledToTheLeg:
+    """Found by AUDIT, not by the tests.
+
+    `_execute_stop_loss` runs synchronously and can take tens of seconds. The
+    per-leg budget (`_leg_budget_spent`, default 185s) measures wall-clock
+    since the leg started and aborts the leg when exceeded — flattening its
+    partial. So without discounting, time spent PROTECTING an existing
+    position is billed against a NEW entry's fill budget: the checkpoint could
+    cause the very entry it is interleaved with to be abandoned.
+
+    The entry WINDOW (8 min) is deliberately NOT discounted — that one is about
+    market timing, and an entry pushed past its window genuinely is too late.
+    """
+
+    def _leg_stub(self, spent_in_checkpoints, elapsed):
+        import time as _t
+        class S:
+            strategy_config = {"entry_leg_budget_s": 185.0}
+            _entry_leg_budget_s = MEICStrategy._entry_leg_budget_s
+            _leg_budget_spent = MEICStrategy._leg_budget_spent
+        s = S()
+        s._checkpoint_time_in_leg = spent_in_checkpoints
+        return s, _t.monotonic() - elapsed
+
+    def test_a_leg_grinding_past_its_budget_still_aborts(self):
+        s, started = self._leg_stub(0.0, 200.0)
+        assert s._leg_budget_spent(started) is True
+
+    def test_checkpoint_time_does_NOT_count_toward_the_budget(self):
+        # 200s elapsed, but 60s of it was a stop executing -> 140s grinding
+        s, started = self._leg_stub(60.0, 200.0)
+        assert s._leg_budget_spent(started) is False, (
+            "a stop firing mid-leg cost the entry its fill budget")
+
+    def test_it_still_aborts_once_GRINDING_exceeds_the_budget(self):
+        s, started = self._leg_stub(60.0, 260.0)   # 200s grinding
+        assert s._leg_budget_spent(started) is True
+
+    def test_a_missing_accumulator_degrades_to_the_old_behaviour(self):
+        class S:
+            strategy_config = {"entry_leg_budget_s": 185.0}
+            _entry_leg_budget_s = MEICStrategy._entry_leg_budget_s
+            _leg_budget_spent = MEICStrategy._leg_budget_spent
+        import time as _t
+        assert S()._leg_budget_spent(_t.monotonic() - 200.0) is True
+
+    def test_the_accumulator_resets_per_leg(self):
+        """Carrying it across legs would let one slow stop excuse every
+        subsequent leg from its budget."""
+        i = SRC.index("_leg_started_at = time.monotonic()")
+        assert "_checkpoint_time_in_leg = 0.0" in SRC[i:i + 220], (
+            "the accumulator is never reset at the start of a leg")
+
+    def test_the_checkpoint_actually_accumulates(self):
+        s = _Stub()
+        s._entry_checkpoint("rung 1")
+        assert getattr(s, "_checkpoint_time_in_leg", None) is not None
+        assert s._checkpoint_time_in_leg >= 0.0
+
+    def test_it_accumulates_even_when_the_stop_check_raises(self):
+        s = _Stub(raises=True)
+        s._entry_checkpoint("rung 1")
+        assert s._checkpoint_time_in_leg >= 0.0

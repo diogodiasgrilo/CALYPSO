@@ -3027,11 +3027,17 @@ class MEICStrategy(abc.ABC):
             return 185.0
 
     def _leg_budget_spent(self, leg_started_at: float) -> bool:
-        """True when this leg has been grinding longer than the budget allows."""
+        """True when this leg has been GRINDING longer than the budget allows.
+
+        Time spent inside an ENTRY-CHECKPOINT is discounted: a stop firing
+        mid-placement runs synchronously and is not this leg failing to fill.
+        """
         budget = self._entry_leg_budget_s()
         if budget <= 0:
             return False
-        return (time.monotonic() - leg_started_at) > budget
+        grinding = (time.monotonic() - leg_started_at) - getattr(
+            self, "_checkpoint_time_in_leg", 0.0)
+        return grinding > budget
 
     def _place_option_order(
         self,
@@ -3152,6 +3158,7 @@ class MEICStrategy(abc.ABC):
         self._in_entry_checkpoint = True
         self._last_entry_checkpoint_at = now
         saved_state = self.state
+        _cp_started = now
         try:
             action = self._check_stop_losses()
             if action:
@@ -3167,10 +3174,22 @@ class MEICStrategy(abc.ABC):
                 where, type(e).__name__, e
             )
         finally:
-            # The stop path may transition state; the entry IS still in
-            # progress, so restore it rather than letting the checkpoint
-            # strand the state machine mid-placement.
+            # The stop path DOES transition state (_execute_stop_loss sets
+            # STOP_TRIGGERED then MONITORING); the entry IS still in progress,
+            # so restore it rather than letting the checkpoint strand the
+            # state machine mid-placement.
             self.state = saved_state
+            # Time spent here is NOT time this leg spent grinding. A stop that
+            # fires mid-placement executes synchronously and can take tens of
+            # seconds, and _leg_budget_spent measures wall-clock since the leg
+            # started — so without this, time spent PROTECTING an existing
+            # position is billed against a NEW entry's 185s fill budget and can
+            # trip the PLACEMENT-BUDGET abort, abandoning the leg and
+            # flattening its partial. Found by audit, not by the tests.
+            self._checkpoint_time_in_leg = (
+                getattr(self, "_checkpoint_time_in_leg", 0.0)
+                + (time.monotonic() - _cp_started)
+            )
             self._in_entry_checkpoint = False
 
 
@@ -3306,6 +3325,7 @@ class MEICStrategy(abc.ABC):
 
         # B4: this leg's own clock. Per-leg, so nothing carries across entries.
         _leg_started_at = time.monotonic()
+        self._checkpoint_time_in_leg = 0.0   # discounted from the budget below
 
         # Progressive retry sequence (same as the Saxo path).
         for attempt, (slippage_percent, is_market) in enumerate(
