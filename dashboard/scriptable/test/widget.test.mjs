@@ -211,6 +211,7 @@ await t("the pre-2026-10-22 bare cache shape still loads", async () => {
 const FLEET = {
   date: "2026-10-22", market_open: false,
   next_entry: "12:15",
+  next_entry_day: null,
   as_of: "13:30",
   live: { id: "bl", name: "Brandon Late", today: 0.0, lifetime: -43.65, days: 9, live: true, status: "live", spark: [0,20,-10,-30,-44] },
   groups: [
@@ -618,10 +619,15 @@ await t("headings sit in the SAME fixed cells as their figures", async () => {
   assert.equal(n78, rows + 1, `LIFETIME cells: ${n78}, expected ${rows} rows + 1 heading`);
 });
 
-await t("group headers carry credit/debit, not a column name", async () => {
+await t("credit/debit is attached to the GROUP NAME, never a lone cell", async () => {
+  // Rendered top-right it sat directly above the money column and read as
+  // that column's header — the single most confusing thing on the tile.
   const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
-  assert.equal(r.texts.filter(x => x.text === "credit").length, 2);
-  assert.equal(r.texts.filter(x => x.text === "debit").length, 2);
+  assert.equal(r.texts.filter(x => x.text === "credit").length, 0,
+               "a bare 'credit' cell is back above the numbers");
+  assert.equal(r.texts.filter(x => x.text === "debit").length, 0);
+  assert.ok(r.all.includes("0DTE Iron Condor · credit"), r.all);
+  assert.ok(r.all.includes("Multi-day Calendar · debit"), r.all);
 });
 
 console.log("\n#18 sparklines carry SHAPE; the figure carries magnitude");
@@ -801,7 +807,64 @@ await t("a missing stamp degrades to just the market state", async () => {
   const r = await render({ family: "large", nowISO: MIDDAY,
                            fleetBody: f({ as_of: null }) });
   assert.ok(r.texts.some(x => x.text === "Closed"), r.all);
-  assert.ok(!r.all.includes("·"), "rendered a dangling separator");
+  // Scoped to the HEADER cell. A bare `!all.includes("·")` was correct until
+  // group names gained a "· credit" subtitle, after which it asserted
+  // something about an unrelated part of the tile.
+  assert.ok(!r.texts.some(x => /^(Open|Closed) ·/.test(x.text)),
+            "rendered a dangling separator in the header");
+});
+
+console.log("\n#22 weekend awareness + labelling the money column");
+
+await t("a bare time is NOT shown when the next entry is not today", async () => {
+  // Seen on the home screen at 20:30 on a SUNDAY: "12:15 / next entry".
+  // next_entry comes from the schedule index, which resets overnight and
+  // cannot see that the market is shut. Not vague — wrong.
+  const r = await render({ family: "large", nowISO: MIDDAY,
+                           fleetBody: f({ next_entry_day: "Mon" }) });
+  assert.ok(r.all.includes("Mon 12:15"), r.all);
+  assert.ok(!r.texts.some(x => x.text === "12:15"),
+            "a bare 12:15 survived on a non-trading day");
+});
+
+await t("a same-day entry still shows the bare time", async () => {
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.texts.some(x => x.text === "12:15"), r.all);
+  assert.ok(!r.all.includes("Mon 12:15"));
+});
+
+await t("the hero label names the strategy it belongs to", async () => {
+  // "LIVE Brandon Late" and a large bare time read as unrelated fragments.
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.all.includes("next entry · Brandon Late"), r.all);
+});
+
+await t("the same holds once it has traded", async () => {
+  const live = JSON.parse(JSON.stringify(FLEET));
+  live.live.today = 412.5;
+  const r = await render({ family: "large", fleetBody: live, nowISO: MIDDAY });
+  assert.ok(r.all.includes("today · Brandon Late"), r.all);
+});
+
+await t("the money column is labelled even on a QUIET day", async () => {
+  // The headings used to render only when something had traded, so on a
+  // weekend the figures sat unlabelled and the nearest word was "credit".
+  const r = await render({ family: "large", fleetBody: FLEET, nowISO: MIDDAY });
+  assert.ok(r.all.includes("LIFETIME"), "money column unlabelled when idle");
+  assert.ok(!r.all.includes("TODAY"), "TODAY labels a column that is not there");
+});
+
+await t("TODAY appears alongside it once something trades", async () => {
+  const live = JSON.parse(JSON.stringify(FLEET));
+  live.groups[0].rows[0].today = -5;
+  const r = await render({ family: "large", fleetBody: live, nowISO: MIDDAY });
+  assert.ok(r.all.includes("TODAY") && r.all.includes("LIFETIME"), r.all);
+});
+
+await t("the layout still fits with the headings always on", async () => {
+  const { estimateHeight, USABLE } = await import("./widget_layout_budget.mjs");
+  const rows = FLEET.groups.reduce((a, g) => a + g.rows.length, 0);
+  assert.ok(estimateHeight({ rows, groups: FLEET.groups.length }) <= USABLE);
 });
 
 console.log(`\n${pass} passed, ${fail} failed\n`);

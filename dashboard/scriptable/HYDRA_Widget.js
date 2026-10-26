@@ -426,13 +426,26 @@ function createFleetWidget(res, family, logo) {
     // guaranteed-zero hero this logic exists to prevent.
     const liveTraded = !!(d.live && d.live.today);
     const showNext = !liveTraded && d.next_entry;
-    const big = hero.addText(showNext ? d.next_entry : money(d.live.today));
+    // "Mon 12:15" when the next entry is not today. The tile read "12:15 /
+    // next entry" at 20:30 on a SUNDAY: next_entry comes from the schedule
+    // index, which resets overnight and cannot see that the market is shut.
+    // A bare time there is not vague, it is wrong.
+    const nextLabel = d.next_entry_day
+      ? `${d.next_entry_day} ${d.next_entry}` : d.next_entry;
+    const big = hero.addText(showNext ? nextLabel : money(d.live.today));
     big.font = mono(N.hero, "bold");
     big.textColor = new Color(showNext ? C.label : pnlColor(d.live.today));
     hero.addSpacer();
+    // Name the strategy in the label. "LIVE Brandon Late" and a large bare
+    // time read as three unrelated fragments; saying whose entry it is makes
+    // the connection without a second line.
+    const who = (d.live.name || "").split(" ")[0];
     label(hero,
-          showNext ? "next entry" : liveTraded ? "today" : "no entries today",
+          showNext ? `next entry · ${d.live.name}`
+                   : liveTraded ? `today · ${d.live.name}`
+                                : `no entries today · ${d.live.name}`,
           null, C.label3, T.caption2());
+    void who;
   }
 
   w.addSpacer(7);
@@ -441,10 +454,14 @@ function createFleetWidget(res, family, logo) {
   // describe. Putting them in each group header with a flexible spacer both
   // repeated them four times AND right-aligned them over the LIFETIME column,
   // so "TODAY" sat above the lifetime figures. Visible on the home screen.
-  if (anyActivity) {
+  // ALWAYS label the money column. The headings used to render only when
+  // something had traded, so on a quiet day — or a weekend — the figures sat
+  // there completely unlabelled and the only nearby word was "credit", which
+  // belongs to the group, not the column.
+  {
     const ch = row(w);
     ch.addSpacer();
-    numCell(ch, "TODAY", W_TODAY, C.label3, N.head);
+    if (anyActivity) numCell(ch, "TODAY", W_TODAY, C.label3, N.head);
     numCell(ch, "LIFETIME", W_LIFE, C.label3, N.head);
     w.addSpacer(2);
   }
@@ -458,11 +475,14 @@ function createFleetWidget(res, family, logo) {
   // and brings the content inside the box with the margins intact.
   groups.forEach((g, gi) => {
     if (gi > 0) { w.addSpacer(4); rule(w); w.addSpacer(4); }
+    // credit/debit is a property of the GROUP, not of the column it used to
+    // sit above. Rendered top-right it read as that column's header, which is
+    // the single most confusing thing on the tile. Attached to the name it
+    // reads as what it is: a subtitle.
     const gh = row(w);
-    label(gh, (g.label || g.id), null, C.label3, T.caption2());
-    gh.addSpacer();
-    label(gh, g.pnl_shape === "debit" ? "debit" : "credit",
+    label(gh, `${g.label || g.id} · ${g.pnl_shape === "debit" ? "debit" : "credit"}`,
           null, C.label3, T.caption2());
+    gh.addSpacer();
     w.addSpacer(1);
 
     const rows = compact ? (g.rows || []).slice(0, 1) : (g.rows || []);

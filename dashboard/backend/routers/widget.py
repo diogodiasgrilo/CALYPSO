@@ -1,5 +1,7 @@
 """Widget endpoint for iOS Scriptable and Siri shortcuts."""
 
+from typing import Optional
+
 from fastapi import APIRouter
 
 from dashboard.backend.config import settings
@@ -183,6 +185,34 @@ def _et_now_hhmm() -> str:
         return ""
 
 
+
+def _next_entry_day_label() -> Optional[str]:
+    """``None`` when the next entry is TODAY, else a short weekday ("Mon").
+
+    The widget showed "12:15 / next entry" at 8:30pm on a SUNDAY. `next_entry`
+    is read from `entry_schedule[next_entry_index]`, which resets to slot 0
+    overnight and has no idea the market is shut — so on a weekend or holiday
+    it confidently names a time that is a day or more away. That is a factually
+    wrong statement on the face of the tile, not merely an unclear one.
+
+    `get_next_market_open` already skips weekends and holidays, so it is the
+    single source of truth for when the bot can next trade.
+    """
+    try:
+        from shared.market_hours import (
+            get_us_market_time, get_next_market_open, is_market_open,
+        )
+        now = get_us_market_time()
+        if is_market_open(now):
+            return None                      # trading right now
+        nxt, _secs = get_next_market_open()
+        if nxt.date() == now.date():
+            return None                      # later today — a bare time is right
+        return nxt.strftime("%a")            # "Mon"
+    except Exception:  # noqa: BLE001
+        return None
+
+
 def _next_entry_time(vid: str):
     """The live seat's NEXT scheduled entry (ET "HH:MM"), or None.
 
@@ -344,6 +374,9 @@ async def get_widget_fleet():
         # honestly reports the age of the figures rather than of the request.
         "as_of": _et_now_hhmm(),
         "next_entry": _next_entry_time(seat),
+        # None when that entry is today; a weekday when it is not, so the tile
+        # can say "Mon 12:15" instead of a bare "12:15" on a Sunday evening.
+        "next_entry_day": _next_entry_day_label(),
         "market_open": market.get("is_open", False),
         "live": live_row,
         "groups": ordered,
