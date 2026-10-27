@@ -531,19 +531,57 @@ await t("during the session it asks for the fastest useful interval", async () =
   assert.equal(minsFromNow(r, MIDDAY), 2);
 });
 
-await t("overnight it backs right off — nothing can change", async () => {
-  // 02:00 ET on a Thursday. The bot is flat; the figures cannot move.
+// The wall-clock ET moment a refresh request lands on. Asserting this rather
+// than a raw minute count states the actual contract — "wake at the open" —
+// and would catch an off-by-an-hour that a minute count happily accepts.
+const etClock = (d) => new Intl.DateTimeFormat("en-US", {
+  timeZone: "America/New_York", hour: "2-digit", minute: "2-digit",
+  hourCycle: "h23" }).format(d);
+
+await t("overnight it waits for the OPEN, not an hourly nothing-report", async () => {
+  // 02:00 ET Thursday. iOS budgets reloads per CALENDAR DAY and ET midnight-to-
+  // open is the same day as the session, so an hourly overnight cadence spends
+  // the session's allowance on a flat bot. Measured 2026-10-27: five granted
+  // reloads, all burnt before the bell, nothing left for the session.
   const night = "2026-10-22T06:00:00Z";
   const r = await render({ family: "large", nowISO: night,
                            fleetBody: f({ market_open: false }) });
-  assert.equal(minsFromNow(r, night), 60);
+  assert.equal(etClock(r.refreshes[0]), "09:31", etClock(r.refreshes[0]));
+  assert.equal(minsFromNow(r, night), 451);
 });
 
-await t("pre-open it tightens again as entries approach", async () => {
-  const preopen = "2026-10-22T12:00:00Z";   // 08:00 ET
+await t("pre-open it also waits for the open — nothing trades before it", async () => {
+  // 08:00 ET. The old 10-minute bucket was justified as "entries approach", but
+  // the earliest entry in the fleet is 09:45 and the live seat's is 12:15, so
+  // every pre-open wake reported an identical flat bot.
+  const preopen = "2026-10-22T12:00:00Z";
   const r = await render({ family: "large", nowISO: preopen,
                            fleetBody: f({ market_open: false }) });
-  assert.equal(minsFromNow(r, preopen), 10);
+  assert.equal(etClock(r.refreshes[0]), "09:31", etClock(r.refreshes[0]));
+  assert.equal(minsFromNow(r, preopen), 91);
+});
+
+await t("closed DURING trading hours waits for settlement, not tomorrow", async () => {
+  // 13:30 ET on an early-close day: the session is over but settlement has not
+  // run. Skipping to the next open here would sleep through the 16:00-23:00
+  // window where the day's final numbers land, stranding the widget on
+  // mid-session figures until the following morning.
+  const earlyClose = "2026-10-22T17:30:00Z";
+  const r = await render({ family: "large", nowISO: earlyClose,
+                           fleetBody: f({ market_open: false }) });
+  assert.equal(etClock(r.refreshes[0]), "16:01", etClock(r.refreshes[0]));
+});
+
+await t("late evening rolls over to TOMORROW's open", async () => {
+  // 23:30 ET: past settlement, so nothing changes again until the next bell.
+  // This is the branch that has to add the minutes to midnight rather than
+  // subtracting, and a sign error here would ask for a wake in the past.
+  const late = "2026-10-23T03:30:00Z";
+  const r = await render({ family: "large", nowISO: late,
+                           fleetBody: f({ market_open: false }) });
+  assert.equal(etClock(r.refreshes[0]), "09:31", etClock(r.refreshes[0]));
+  assert.ok(minsFromNow(r, late) > 0, "asked to wake in the past");
+  assert.equal(minsFromNow(r, late), 601);
 });
 
 await t("the evening keeps a moderate cadence through settlement", async () => {

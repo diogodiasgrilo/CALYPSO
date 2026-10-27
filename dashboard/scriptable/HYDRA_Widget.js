@@ -260,22 +260,51 @@ function money(v, dp) {
 // 17.5 hours are provably static — the bot is flat, the numbers cannot move.
 //
 // So: concentrate the budget where the data actually changes.
+const ET_OPEN_MIN = 9 * 60 + 30;   // 09:30 ET, in minutes past ET midnight
+const ET_CLOSE_MIN = 16 * 60;      // 16:00 ET — settlement watch begins
+
 function refreshInterval(marketOpen) {
-  let hour = null, day = null;
+  let hour = null, minute = null, day = null;
   try {
     const f = new Intl.DateTimeFormat("en-US", {
-      timeZone: "America/New_York", hour: "numeric", hour12: false,
-      weekday: "short" }).formatToParts(new Date());
-    hour = Number(f.find((x) => x.type === "hour").value);
+      timeZone: "America/New_York", hour: "numeric", minute: "numeric",
+      hourCycle: "h23", weekday: "short" }).formatToParts(new Date());
+    hour = Number(f.find((x) => x.type === "hour").value) % 24;
+    minute = Number(f.find((x) => x.type === "minute").value);
     day = f.find((x) => x.type === "weekday").value;
   } catch (e) { /* fall through to the safe default */ }
 
   if (marketOpen) return 2;                       // the session: as fast as iOS allows
   if (day === "Sat" || day === "Sun") return 60;  // nothing can change
-  if (hour === null) return 15;                   // unknown clock: the old default
-  if (hour >= 7 && hour < 10) return 10;          // pre-open: entries approach
+  if (hour === null || minute === null ||
+      Number.isNaN(hour) || Number.isNaN(minute)) return 15;  // unknown clock
   if (hour >= 16 && hour < 23) return 15;         // settlement lands ~21:45-22:37 ET
-  return 60;                                      // overnight
+
+  // Everything still closed and BEFORE the bell: there is exactly one moment
+  // worth waking for, and it is the open. Asking for anything sooner does not
+  // merely waste a wake — iOS budgets reloads PER CALENDAR DAY, and ET
+  // midnight-to-open sits on the same day as the session, so every overnight
+  // wake is spent out of that session's allowance.
+  //
+  // Measured 2026-10-27: the widget was granted five reloads all day and burnt
+  // every one of them before the open (01:30, 02:30, 03:44, 05:01, 06:35 ET)
+  // under the old 60-minute overnight / 10-minute pre-open buckets. It then
+  // had nothing left and never refreshed during the session at all — the home
+  // screen showed pre-market numbers from 06:35 until past noon. The bot is
+  // flat and reports nothing new in that whole window, so all five carried
+  // identical data.
+  const nowET = hour * 60 + minute;
+  if (nowET < ET_OPEN_MIN) return ET_OPEN_MIN - nowET + 1;   // wake at the bell
+
+  // Closed during what are normally trading hours: an early-close day, a
+  // holiday, or a momentary false from the server. The next thing that can
+  // change is settlement, so wake for THAT rather than skipping to tomorrow —
+  // jumping straight to the next open here would sleep clean through the
+  // 16:00-23:00 settlement window and strand the day's final numbers.
+  if (nowET < ET_CLOSE_MIN) return ET_CLOSE_MIN - nowET + 1;
+
+  // 23:00-24:00 ET: settlement is in, nothing moves until the next bell.
+  return (24 * 60 - nowET) + ET_OPEN_MIN + 1;
 }
 
 // A fixed-width, right-aligned numeric cell. Without a fixed width the columns
