@@ -62,6 +62,10 @@ from shared import swallow_counter as _swallow
 # Configure module logger
 logger = logging.getLogger(__name__)
 
+# The documented sentinel meaning "no VIX entry cutoff". Every variant ships it;
+# CONFIG-001 must not flag the intended configuration as unusual.
+VIX_ENTRY_CUTOFF_DISABLED = 999
+
 # =============================================================================
 # PATH CONSTANTS
 # =============================================================================
@@ -1546,6 +1550,30 @@ class MEICStrategy(abc.ABC):
         finally:
             self._release_operation_lock()
 
+    def _state002_level(self, consistency_error: str) -> str:
+        """Severity for a STATE-002 inconsistency: info / warning / error.
+
+        Escalates on PERSISTENCE, not on occurrence. "MONITORING but no active
+        entries" is the normal tail of every skipped entry — the state machine
+        enters MONITORING to attempt one and a skip leaves nothing active — so
+        it fired 12 times across five variants on 2026-10-27, all routine. A
+        warning that fires on the system working stops being read.
+
+        Recovery runs on the SAME tick, so the same error still present on the
+        next check means recovery did not stick. That is a real divergence and
+        keeps WARNING. Registry position-count drift (no "active entries" in
+        the text) is live-only and stays ERROR, unchanged.
+
+        Stateful by design: it records the error it just saw so the next call
+        can tell a transient from a stuck one.
+        """
+        if "active entries" not in consistency_error:
+            self._state002_last_error = consistency_error
+            return "error"
+        repeat = getattr(self, "_state002_last_error", None) == consistency_error
+        self._state002_last_error = consistency_error
+        return "warning" if repeat else "info"
+
     def _run_strategy_check_internal(self) -> str:
         """Internal strategy check - called with operation lock held."""
 
@@ -1628,12 +1656,33 @@ class MEICStrategy(abc.ABC):
             # (auto-recovering); reserve ERROR for the genuinely-concerning
             # registry position-count drift (live-only), which does NOT contain
             # "active entries".
-            if "active entries" in consistency_error:
-                logger.warning(f"STATE-002 (auto-recovering): {consistency_error}")
-            else:
+            #
+            # DERIVED, not asserted (2026-10-28). WARNING was still too loud:
+            # "MONITORING but no active entries" is the NORMAL tail of every
+            # skipped entry — the state machine moves to MONITORING when an
+            # entry is attempted, and a skip leaves nothing active. It fired 12
+            # times on 2026-10-27 across five variants, every one of them a
+            # routine skip, which is how a warning stops being read.
+            #
+            # But blanket-downgrading would hide the case that MATTERS: a
+            # mismatch that does NOT clear. So escalate on PERSISTENCE instead
+            # of on occurrence. Recovery runs on this same tick, so the same
+            # error still being reported on the NEXT check means recovery did
+            # not stick — that is a real divergence and keeps WARNING.
+            _level = self._state002_level(consistency_error)
+            if _level == "error":
                 logger.error(f"STATE-002: {consistency_error}")
+            elif _level == "warning":
+                logger.warning(
+                    f"STATE-002 (did NOT clear on the previous tick): "
+                    f"{consistency_error}")
+            else:
+                logger.info(f"STATE-002 (auto-recovering): {consistency_error}")
             # Attempt to recover instead of halting
             self._attempt_state_recovery()
+        else:
+            # Cleared — the next occurrence is a fresh transient, not a repeat.
+            self._state002_last_error = None
 
         # POS-003: Periodic position reconciliation (hourly)
         self._check_hourly_reconciliation()
@@ -8780,9 +8829,16 @@ class MEICStrategy(abc.ABC):
             errors.append(f"min_credit ({min_credit}) > max_credit ({max_credit})")
 
         # VIX threshold validation
+        # 999 is the DOCUMENTED "VIX entry cutoff disabled" sentinel, not an
+        # unusual value: neither Tammy's MEIC nor Sandvand uses a VIX cutoff,
+        # and every variant in the fleet ships it. Warning on it fired NINE
+        # times per fleet restart — once per variant, forever — about a setting
+        # the operator chose deliberately. A warning that fires on the intended
+        # configuration trains the reader to ignore warnings (2026-10-28).
         max_vix = strategy.get("max_vix_entry", 25)
-        if max_vix < 10 or max_vix > 50:
-            warnings.append(f"Unusual max_vix_entry: {max_vix} (expected 10-50)")
+        if max_vix != VIX_ENTRY_CUTOFF_DISABLED and (max_vix < 10 or max_vix > 50):
+            warnings.append(f"Unusual max_vix_entry: {max_vix} (expected 10-50, "
+                            f"or {VIX_ENTRY_CUTOFF_DISABLED} to disable)")
 
         # Log results
         if errors:

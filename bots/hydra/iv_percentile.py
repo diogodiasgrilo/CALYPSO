@@ -119,3 +119,51 @@ def vix_history_from_db(db_path: Optional[str], before_date: str,
     except Exception as e:  # noqa: BLE001 — a filter must not break entry
         logger.warning("VIX history unavailable for the percentile: %s", e)
         return []
+
+
+def pick_longest_vix_history(candidates: Sequence[Optional[str]],
+                             before_date: str,
+                             lookback: int = 252):
+    """Choose the VIX source with the MOST usable history.
+
+    Returns ``(best_path, best_history, fallback_path)``. ``best_path`` is
+    ``None`` when no candidate yielded a single usable close; ``fallback_path``
+    is the first candidate that merely EXISTS, so a caller can still report
+    "n prior days" rather than "source unavailable".
+
+    WHY THIS IS SHARED. The identical selection bug has now been written twice,
+    independently, in two strategies: "return the first candidate that has any
+    history". VIX is market-wide and identical across variants, so there is no
+    correctness reason to prefer one recorder over another — only a
+    data-quantity one. But a *brand-new* variant's database exists and is
+    non-empty within a day of its first start, and the live seat sits first in
+    every candidate list, so "first non-empty" silently selects the shortest
+    history available.
+
+    It bit H on 2026-10-09 when the live seat moved to ``bl`` (252 days -> 7,
+    against a 60-day floor) and was fixed there on 2026-10-20. It was then
+    found still live in E on 2026-10-27, by which point E had been unable to
+    enter for 18 days and would not have recovered until roughly January:
+    E read bl's **12** days while variant A held **175** and E's own held 91.
+    E's own docstring cited H's incident as the reason for its design — the
+    reasoning had been copied, the implementation had not.
+
+    So the rule lives here once, and both strategies call it. A third strategy
+    that needs VIX history should call this rather than write the loop again.
+    """
+    best = None
+    best_hist: List[float] = []
+    fallback = None
+    seen = set()
+    for path in candidates:
+        if not path or path in seen or not os.path.exists(path):
+            continue
+        seen.add(path)
+        if fallback is None:
+            fallback = path
+        hist = vix_history_from_db(path, before_date, lookback) or []
+        if len(hist) > len(best_hist):
+            best, best_hist = path, hist
+    if best is None or not best_hist:
+        return None, [], fallback
+    return best, best_hist, fallback

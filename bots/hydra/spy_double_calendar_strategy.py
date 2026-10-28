@@ -93,7 +93,9 @@ from bots.hydra.calendar_chain import (
     trading_days_until,
 )
 from bots.hydra.calendar_strategy_base import CalendarStrategyBase
-from bots.hydra.iv_percentile import iv_percentile_with_n, vix_history_from_db
+from bots.hydra.iv_percentile import (iv_percentile_with_n,
+                                      pick_longest_vix_history,
+                                      vix_history_from_db)
 from bots.hydra.strategy import DATA_DIR, HYDRA_VARIANT_ID
 from bots.hydra.strategy import HydraStrategy  # noqa: F401  (re-exported for back-compat)
 from shared.market_hours import get_us_market_time
@@ -462,12 +464,15 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
     # ------------------------------------------------------------------
 
     def _spy_dc_vix_history(self) -> list:
-        """Prior daily VIX closes, newest last. Read from the LIVE SEAT's DB.
+        """Prior daily VIX closes, newest last, from the LONGEST available record.
 
-        VIX is market-wide, so it is read from whichever variant has recorded
-        longest rather than from E's own database — the same reasoning, and the
-        same bug, that H hit on its first live tick when its own brand-new DB was
-        empty and the filter skipped every entry.
+        VIX is market-wide and identical across variants, so there is no
+        correctness reason to prefer one recorder — only a data-quantity one.
+
+        ⚠️ This docstring previously said "Read from the LIVE SEAT's DB", which
+        is what the code did and was precisely the bug: the live seat is the
+        NEWEST recorder, not the longest. Selection now delegates to
+        `iv_percentile.pick_longest_vix_history`, shared with H.
         """
         root = os.path.dirname(DATA_DIR) if HYDRA_VARIANT_ID else DATA_DIR
         candidates = []
@@ -483,10 +488,32 @@ class SpyDoubleCalendarStrategy(CalendarStrategyBase):
         candidates.append(os.path.join(DATA_DIR, "backtesting.db"))
 
         today = get_us_market_time().strftime("%Y-%m-%d")
-        for db in candidates:
-            hist = vix_history_from_db(db, today, self.spy_dc_iv_lookback)
-            if hist:
-                return hist
+
+        # PICK THE LONGEST, NOT THE FIRST NON-EMPTY (fixed 2026-10-27).
+        # The loop here used to return the first candidate that yielded any
+        # history. The live seat sits FIRST in the candidate order, and a
+        # newly-created variant's database is non-empty within a day of its
+        # first start — so when the seat moved to `bl` on 2026-10-09 this
+        # selected bl's brand-new DB and E silently stopped entering.
+        #
+        # Measured 2026-10-27, E's 19th blocked day: bl held 12 usable closes,
+        # variant A held 175 and E's OWN held 91, against a 60-day minimum.
+        # Either of the other two would have passed. E's skip counter had been
+        # climbing 8, 9, 10, 11, 12 — tracking bl's age, not any market fact —
+        # and E would not have recovered until roughly January.
+        #
+        # This is H's 2026-10-20 incident, repeated verbatim in a second file:
+        # the docstring above already cited H as the reason for the design, but
+        # the implementation was "first non-empty" all along. The selection now
+        # lives in ONE place so it cannot be re-derived a third time.
+        best, hist, fallback = pick_longest_vix_history(
+            candidates, today, self.spy_dc_iv_lookback)
+        if best:
+            logger.debug("[SPYDC] VIX history: %d closes from %s", len(hist), best)
+            return hist
+        if fallback:
+            logger.debug("[SPYDC] no candidate held VIX history; last tried %s",
+                         fallback)
         return []
 
     def _spy_dc_low_iv_gate(self) -> Optional[str]:

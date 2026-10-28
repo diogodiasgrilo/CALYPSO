@@ -236,6 +236,11 @@ DEFAULT_PRIORITIES = {
     AlertType.VARIANT_COMPARISON_DAILY: AlertPriority.LOW,  # End-of-day A vs B summary
 }
 
+# Alert types that are RECORDED but never notified. See the gate in send_alert.
+ROUTINE_SUPPRESSED_TYPES = {
+    AlertType.ENTRY_SKIPPED,
+}
+
 
 class AlertService:
     """
@@ -288,6 +293,9 @@ class AlertService:
         # ran the suite in a container 33 seconds old.
         self._last_init_attempt: float = float("-inf")
         self._dry_run = os.environ.get("ALERT_DRY_RUN", "").lower() == "true"
+        # The bot's TRADING mode, not ALERT_DRY_RUN above. Used only to narrow
+        # the L-C2 severity bypass: see the comment at that gate in send_alert.
+        self._trading_dry_run = bool(config.get("dry_run", False))
 
         # Alert configuration from config file
         alert_config = config.get("alerts", {})
@@ -504,11 +512,47 @@ class AlertService:
         if priority is None:
             priority = DEFAULT_PRIORITIES.get(alert_type, AlertPriority.MEDIUM)
 
+        # ROUTINE, HIGH-VOLUME, ALREADY-RECORDED → no notification (2026-10-28).
+        # `bl` sent SIX "Entry #N Skipped" messages on 2026-10-27 — one per slot
+        # on a day it skipped every slot — out of 13 alerts fleet-wide. A skip
+        # is the system working, not an event to interrupt someone for.
+        #
+        # NOTHING IS LOST, which is the only reason this is a suppression and
+        # not a downgrade: the reason is in the log, the structured row is in
+        # `skipped_entries`, the safety event is recorded, and the end-of-day
+        # summary already prints "(N skipped)".
+        #
+        # Same principle as silencing APOLLO/CLIO on 2026-10-11: keep the data,
+        # drop the notification. Revert by emptying this set.
+        if alert_type in ROUTINE_SUPPRESSED_TYPES:
+            logger.debug(
+                f"Alert suppressed (routine, recorded elsewhere): "
+                f"{alert_type.value} - {title}"
+            )
+            return False
+
         # L-C2 severity bypass: when alerts are disabled we still publish
         # CRITICAL/HIGH. On the live-order (paper) variant, a naked short, a
         # failed emergency close, or a tripped breaker must never be silenced
         # just because alerts.enabled=false. LOW/MEDIUM stay suppressed.
-        if not self._enabled and priority not in (AlertPriority.CRITICAL, AlertPriority.HIGH):
+        # ⚠️ HIGH does NOT bypass for a DRY-RUN variant (2026-10-28). The
+        # bypass exists so a config with alerts off can never silence a naked
+        # short, a failed emergency close or a tripped breaker — all CRITICAL.
+        # A dry-run variant has no position to go naked and no order to fail:
+        # its HIGH events (stop_loss, max_loss) describe SIMULATED fills.
+        #
+        # Measured 2026-10-27: three HIGH `stop_loss` notifications were
+        # delivered from A, F and G — all dry-run, all alerts.enabled=false,
+        # none actionable — out of 13 alerts that day. POS-003 position
+        # mismatch, the other HIGH, is skipped outright in dry-run and so
+        # could never have fired anyway.
+        #
+        # CRITICAL still bypasses from ANY variant: a circuit breaker or a data
+        # fault is a real condition about the shared broker even when the
+        # strategy observing it is only simulating.
+        _bypass = ((AlertPriority.CRITICAL,) if self._trading_dry_run
+                   else (AlertPriority.CRITICAL, AlertPriority.HIGH))
+        if not self._enabled and priority not in _bypass:
             logger.debug(
                 f"Alert skipped (disabled, {priority.value}): {alert_type.value} - {title}"
             )

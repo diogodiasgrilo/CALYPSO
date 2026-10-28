@@ -760,20 +760,16 @@ class LongStrangleStrategy(HydraStrategy):
         if cfg_db and os.path.exists(cfg_db) and self._vix_history_len(cfg_db, want):
             return cfg_db
 
-        best = None
-        best_n = -1
-        fallback = None
-        seen = set()
-        for c in candidates:
-            if not c or c in seen or not os.path.exists(c):
-                continue
-            seen.add(c)
-            if fallback is None:
-                fallback = c
-            n = self._vix_history_len(c, want)
-            if n > best_n:
-                best, best_n = c, n
-        if best is not None and best_n > 0:
+        # The selection itself lives in `iv_percentile.pick_longest_vix_history`
+        # (2026-10-27). It was written here first; E then re-derived the same
+        # idea as "first non-empty" and reproduced H's exact incident, so the
+        # rule now has one home and both strategies call it. Behaviour here is
+        # unchanged — pinned by tests/test_h_vix_history_longest_2026_10_20.py.
+        from bots.hydra.iv_percentile import pick_longest_vix_history
+        from shared.market_hours import get_us_market_time
+        today = get_us_market_time().strftime("%Y-%m-%d")
+        best, _hist, fallback = pick_longest_vix_history(candidates, today, want)
+        if best is not None:
             return best
         # Nothing had history — return something readable rather than None so the
         # caller still reports "n prior days" instead of "source unavailable".
