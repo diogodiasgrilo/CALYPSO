@@ -298,17 +298,47 @@ is the governing window — mirrored by `base_strategy._confirm_window_seconds()
 > reader of the old line would have assumed 10s of protection B does not have.
 > Check `mkt046_confirm_seconds` in the variant config before assuming any window.
 
-**Stop-close slippage is the real cost at the stop, not the filter (measured 2026-10-02).**
-`trade_stops.slippage_on_close` over the live era: **n=17, mean +$195/stop, total
-$3,310** — roughly a third of B's lifetime net. It is **not** caused by confirmation
-delay (12s→$860, 66s→$890, 62s→**−$280**: no relationship). It is leg sequencing:
-`EMERGENCY-001` closes the short first (deliberately — never naked short), then the
-long 10–19s later, so a spike-then-revert pays the adverse side of both. On
-2026-10-01 the short legs filled at or better than their ask while the long legs sold
-**$0.80 and $1.50/share below their bid**. Most of that window is IBKR paper's own
-13–16s fill latency, so a meaningful share of the $3,310 may be a **paper artefact
-that a live account would not pay** — re-measure on live fills before re-engineering
-the exit path. Combos cannot fix it (not operable on IBKR paper; ICs must leg in).
+**Stop-close slippage is the real cost at the stop, not the filter.** Over the live
+era on B+bl: **n=88, mean +$68/stop, total $6,017.50**.
+
+> ⚠️ **Corrected 2026-11-02 — the leg-sequencing explanation this section gave is
+> NOT supported, and the fix it implied would not have worked.** Measured from
+> `close_leg_executions` on the LIVE seat (31 filled close legs), against the quoted
+> market at the moment each order was placed:
+>
+> | | legs | adverse cost beyond the touch |
+> |---|---|---|
+> | BUY (closing shorts) | 16 | **−$12.81** mean — *better* than the ask |
+> | SELL (closing longs) | 15 | **+$2.33** mean — at the bid |
+>
+> Net ≈ **−$170 across 31 legs**: placement is already favourable, the bot is not
+> being picked off, and `trigger → order placed` is **0.6s median**. The old claim
+> that the longs "sold $0.80 and $1.50/share below their bid" was a 2-leg
+> observation from one day, not the pattern.
+>
+> **Where it actually goes — adverse selection, not a defect:**
+>
+> | exit reason | n | mean | total |
+> |---|---|---|---|
+> | **`stop_loss`** | 36 | **+$160.07** | **+$5,762.50** |
+> | `early_close` (EOD flatten) | 52 | +$4.90 | +$255.00 |
+>
+> **96% of the cost sits in stop-loss exits, which are 33× dearer than EOD flattens
+> running the identical code path, identical leg sequencing and identical spread.**
+> The only difference is *when* they fire: a stop fires because the market is moving
+> against you, and you pay to leave into that same move. There is no engineering fix
+> for that.
+>
+> The inter-leg gap is real but symmetric: median **9.2s**, p90 19.5s (the old
+> "10–19s" holds for only 5 of 15 pairs). Closing the short first leaves a ~9s naked
+> LONG — which *gains* if the move continues and loses if it reverts. That adds
+> variance, not systematic cost, which is exactly what the at-the-touch fills show.
+>
+> Also corrected: *"not caused by confirmation delay (no relationship)"* rested on
+> **three** data points. Over n=36 the correlation is **+0.339** — modest, but
+> positive, not absent.
+
+Combos cannot fix it (not operable on IBKR paper; ICs must leg in).
 
 ### Session-Open Corroboration (stale-print guard, 2026-10-04)
 
@@ -882,6 +912,15 @@ SQLite populated live by HYDRA's `DataRecorder` + backfilled by HOMER. Current s
 | `market_ohlc_1min` | 1-min OHLC from ticks | ~390 |
 | `trade_entries` | Entries (strikes, credits, signals, OTM, Greeks, bid-ask, slippage, margin, contracts) | ~3 |
 | `trade_stops` | Stop events (debit, P&L, trigger, mid, slippage, salvage, contracts) | 0–3 |
+
+> ⚠️ **`trade_stops.cascade_gap_seconds` was measuring OVERNIGHT time, not a cascade
+> (fixed 2026-11-02).** `_last_stop_time` was set on every stop and never cleared at
+> the daily rollover, so the FIRST stop of each day reported the gap to the PREVIOUS
+> DAY's last stop. Measured on the live seat: n=9, max **86,433s = 24h 0m 33s**, with
+> 2 of 9 over an hour. Rows written before the fix are affected — treat any
+> `cascade_gap_seconds` above a few hundred seconds as an overnight artefact, not a
+> cascade. It nearly supported a wrong conclusion during the exit-path slippage
+> investigation that same day.
 | `daily_summaries` | EOD totals (SPX OHLC, VIX, P&L, entry/stop counts, contracts_per_entry) | 1 |
 | `spread_snapshots` | Per-entry cost-to-close every ~10s; leg-level mid/bid/ask | ~3,000 |
 | `skipped_entries` | Counterfactual (entries rejected by MKT-011) | 0–3 |

@@ -15035,6 +15035,18 @@ class HydraStrategy(MEICStrategy):
         if hasattr(self, "_emergency_close_alerted"):
             self._emergency_close_alerted.clear()
 
+        # `cascade_gap_seconds` measures how closely stops CASCADE — one stop
+        # triggering the next within seconds. Carrying `_last_stop_time` across
+        # the daily rollover made the first stop of each day report the gap to
+        # YESTERDAY's last stop, which is overnight time, not a cascade.
+        #
+        # Measured 2026-11-02 on the live seat: of 9 recorded gaps, the max was
+        # 86,433s — 24h 0m 33s — and 2 of 9 exceeded an hour. A column whose
+        # largest value is "one day" is not measuring what it is named after,
+        # and it nearly supported a wrong conclusion about stop-close slippage
+        # during the 2026-11-02 exit-path investigation.
+        self._last_stop_time = None
+
         # POS-003: a fresh day starts with no recently-closed conids (conids differ
         # day-to-day; this also bounds the dict's growth).
         self._recent_close_conids = {}
