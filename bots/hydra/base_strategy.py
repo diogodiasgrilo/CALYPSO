@@ -5549,10 +5549,30 @@ class MEICStrategy(abc.ABC):
 
         A context manager rather than plumbing through seven call sites. The
         chokepoint that records each leg (`_place_marketable_close`) does not
-        know the entry — but every caller does, and the whole point of the
-        telemetry is to compare STOP closes against EOD-flatten closes, which
-        needs `close_reason`. Absent context simply records NULLs rather than
-        refusing, so an un-tagged path still contributes timing and spread data.
+        know the entry — but every caller does. Absent context simply records
+        NULLs rather than refusing, so an un-tagged path still contributes
+        timing and spread data.
+
+        ⚠️ **NOTHING IN PRODUCTION CALLS THIS** (verified 2026-11-02; the only
+        references are two tests). The live IBKR close path sets `_close_ctx`
+        directly in `_close_position_with_retry_ib`, which is the one place
+        every close passes through and already holds `entry_number` and
+        `leg_name`. It deliberately leaves `reason=None`.
+
+        That is CORRECT, not an oversight: the close reason is recoverable by
+        joining `close_leg_executions` to `trade_stops` on
+        `(date, entry_number, side)` — measured 2026-11-02, it recovers 33 of
+        33 legs on the live seat.
+
+        This docstring previously said "the whole point of the telemetry is to
+        compare STOP closes against EOD-flatten closes, which NEEDS
+        close_reason". That sentence is false — the join supplies it — and it
+        directly caused a non-existent telemetry defect to be reported during
+        the 2026-11-02 exit-path investigation, because it contradicts the
+        comment on the live path 600 lines below.
+
+        Kept rather than deleted: the mechanism works and is tested, so it is
+        ready if a future close path ever wants to tag a reason inline.
         """
         from contextlib import contextmanager
 
