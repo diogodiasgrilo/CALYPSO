@@ -235,7 +235,7 @@
     "_comment": "OFF on E (scaffold/dry-run) \u2014 avoids alert spam and operator paging. NOTE: CRITICAL/HIGH alerts still publish via the L-C2 severity bypass even when disabled; E's dry-run path emits none, but keep this in mind before enabling real-order E.",
     "enabled": false,
     "phone_number": "+1XXXXXXXXXX",
-    "email": "your@email.com"
+    "email": "diogodiasgrilo@gmail.com"
   },
   "logging": {
     "log_level": "INFO",
