@@ -6793,6 +6793,14 @@ class MEICStrategy(abc.ABC):
             if (avail[:1] if avail else None) not in ("Z", "Y", "N"):
                 self.current_vix = vix
 
+        # DATA-002: refresh the degraded flag on EVERY tick, not only when an
+        # entry is attempted. Shipped 2026-11-09 setting it in the entry gate
+        # alone, which meant the dashboard showed "healthy" from the 09:30 open
+        # until the live seat's first slot at 12:15 — nearly three hours of a
+        # known-bad feed with a clean-looking dashboard, which is the exact
+        # thing the banner exists to prevent.
+        self._refresh_market_data_health()
+
     # P7-audit L4: removed dead Saxo-shaped `_extract_price` and
     # `_check_quote_freshness`. They read `quote["Quote"]["Bid"]` /
     # `quote["PriceInfo"]["LastUpdated"]` — Saxo response shapes that
@@ -7187,6 +7195,36 @@ class MEICStrategy(abc.ABC):
                 return (f"{name} feed is {kind} — refusing to OPEN new positions "
                         f"(exits unaffected)"), None
         return None, None
+
+    def _refresh_market_data_health(self) -> None:
+        """Keep `_md_degraded_reason` current from observation. Never raises.
+
+        REGULAR SESSION ONLY. Outside 09:30-close the broker legitimately
+        serves FROZEN ('Z') quotes, so evaluating then would paint the
+        dashboard red every night for correct behaviour — and a banner that is
+        always on is a banner nobody reads.
+
+        Outside the session the last value is left ALONE rather than cleared,
+        so an operator looking after the close still sees that the day ran
+        degraded. `_reset_for_new_day` clears it for the next session.
+        """
+        try:
+            if not self.market_data._is_regular_session_or_later():
+                return
+            reason, _ = self._market_data_degraded()
+            if reason:
+                if not getattr(self, "_md_degraded_since", None):
+                    self._md_degraded_since = get_us_market_time().strftime(
+                        "%Y-%m-%d %H:%M:%S")
+                self._md_degraded_reason = reason
+            elif getattr(self, "_md_degraded_reason", None):
+                logger.info("DATA-002: market data is real-time again "
+                            "(was degraded since %s)",
+                            getattr(self, "_md_degraded_since", "?"))
+                self._md_degraded_reason = None
+                self._md_degraded_since = None
+        except Exception as e:  # noqa: BLE001 — telemetry must not break the tick
+            logger.debug("DATA-002 refresh failed: %s", e)
 
     def _confirm_window_seconds(self) -> float:
         """The breach-confirmation window that is ACTUALLY governing, in seconds.

@@ -15135,6 +15135,14 @@ class HydraStrategy(MEICStrategy):
         # during the 2026-11-02 exit-path investigation.
         self._last_stop_time = None
 
+        # DATA-002: a new session starts with a clean feed-health verdict.
+        # Kept OUT of `_refresh_market_data_health` deliberately — that one
+        # does not clear outside the session, so after the close an operator
+        # can still see that the day ran degraded.
+        self._md_degraded_reason = None
+        self._md_degraded_since = None
+        self._md_alert_episode = None
+
         # POS-003: a fresh day starts with no recently-closed conids (conids differ
         # day-to-day; this also bounds the dict's growth).
         self._recent_close_conids = {}

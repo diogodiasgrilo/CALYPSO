@@ -180,3 +180,88 @@ class TestOnlyTheLiveSeatNotifies:
     def test_per_episode_dedup_still_applies_to_the_live_seat(self):
         seg = self._segment()
         assert "_md_alert_episode" in seg
+
+
+class TestTheFlagTracksOBSERVATION_NotEntryAttempts:
+    """The first version only set the flag when an entry was attempted.
+
+    Measured on the day it shipped: SPX was delayed from the 09:30 open, but
+    the live seat's first slot is 12:15 — so for nearly three hours the
+    dashboard showed a healthy bot on a known-bad feed. That is precisely what
+    the banner exists to prevent, so the flag now refreshes every tick.
+    """
+
+    @staticmethod
+    def _rig(spx=None, vix=None, in_session=True):
+        class _MD2(_MD):
+            @staticmethod
+            def _is_regular_session_or_later():
+                return in_session
+        s = _strat(spx, vix)
+        s.market_data = _MD2(spx, vix)
+        return s
+
+    def test_degraded_is_flagged_without_any_entry_attempt(self):
+        s = self._rig(spx="D", vix="R")
+        MEICStrategy._refresh_market_data_health(s)
+        assert s._md_degraded_reason and "DELAYED" in s._md_degraded_reason
+        assert s._md_degraded_since, "the operator needs a start time"
+
+    def test_healthy_data_clears_a_previous_degradation(self):
+        s = self._rig(spx="R", vix="R")
+        s._md_degraded_reason = "stale"
+        s._md_degraded_since = "2026-11-09 09:30:00"
+        MEICStrategy._refresh_market_data_health(s)
+        assert s._md_degraded_reason is None and s._md_degraded_since is None
+
+    def test_OUTSIDE_the_session_it_does_not_evaluate(self):
+        """Pre-market FROZEN is normal; a banner that is always on is unread."""
+        s = self._rig(spx="Z", vix="Z", in_session=False)
+        MEICStrategy._refresh_market_data_health(s)
+        assert getattr(s, "_md_degraded_reason", None) is None
+
+    def test_outside_the_session_it_PRESERVES_an_existing_verdict(self):
+        """After the close the operator must still see the day ran degraded."""
+        s = self._rig(spx="R", vix="R", in_session=False)
+        s._md_degraded_reason = "SPX feed is DELAYED"
+        MEICStrategy._refresh_market_data_health(s)
+        assert s._md_degraded_reason == "SPX feed is DELAYED"
+
+    def test_the_since_timestamp_is_not_rewritten_on_every_tick(self):
+        """'since' must be the FIRST sighting, not the latest tick.
+
+        ⚠️ The first version called refresh twice in a row and compared the
+        results. Both ran inside the same second, so the formatted timestamp
+        was identical whether or not the code rewrote it — the test passed
+        against the defect. Caught by its own mutation control.
+
+        Seeding a distinctly OLD value removes the clock from the question.
+        """
+        s = self._rig(spx="D", vix="R")
+        s._md_degraded_since = "2026-01-01 09:31:00"      # unmistakably earlier
+        MEICStrategy._refresh_market_data_health(s)
+        assert s._md_degraded_since == "2026-01-01 09:31:00", (
+            "'since' was overwritten — the operator loses when it started")
+
+    def test_it_never_raises_into_the_tick(self):
+        """Telemetry must not be able to break the trading loop."""
+        class _Boom:
+            @staticmethod
+            def _is_regular_session_or_later():
+                raise RuntimeError("boom")
+        s = _strat("D", "R")
+        s.market_data = _Boom()
+        MEICStrategy._refresh_market_data_health(s)   # must not raise
+
+    def test_it_is_called_from_the_per_tick_index_read(self):
+        src = open(os.path.join(ROOT, "bots/hydra/base_strategy.py")).read()
+        assert "self._refresh_market_data_health()" in src
+
+    def test_the_daily_reset_clears_it(self):
+        import ast
+        src = open(os.path.join(ROOT, "bots/hydra/strategy.py")).read()
+        fn = next(n for n in ast.walk(ast.parse(src))
+                  if isinstance(n, ast.FunctionDef) and n.name == "_reset_for_new_day")
+        seg = ast.get_source_segment(src, fn)
+        for k in ("_md_degraded_reason", "_md_degraded_since", "_md_alert_episode"):
+            assert k in seg, f"{k} survives into the next session"
