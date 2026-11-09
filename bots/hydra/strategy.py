@@ -13722,6 +13722,20 @@ class HydraStrategy(MEICStrategy):
                 # __new__() for testing/partial-construction may not have
                 # reached __init__ yet.
                 "critical_intervention": getattr(self, "_critical_intervention_required", False),
+                # DATA-002 (2026-11-09): why entries are blocked, so the
+                # dashboard can SAY so instead of showing a bot that merely
+                # never trades — which is how a delayed-feed incident ran for
+                # five sessions unnoticed.
+                #
+                # ⚠️ These MUST live here, in `_save_state_to_disk`'s own dict.
+                # They were first added to `get_dashboard_metrics()` — which
+                # reads plausibly but is a DIFFERENT dict that never reaches
+                # hydra_state.json, so the banner could never have fired. Caught
+                # by post-deploy verification, not by the tests, because those
+                # asserted the strings appeared somewhere in the file.
+                "market_data_degraded": bool(getattr(self, "_md_degraded_reason", None)),
+                "market_data_reason": getattr(self, "_md_degraded_reason", None),
+                "market_data_degraded_since": getattr(self, "_md_degraded_since", None),
                 # STATE-004 restart-gap backstop (2026-09-06). UNLIKE
                 # critical_intervention above, this one IS restored on
                 # restart (same-day only, see _load_state_file_history) —

@@ -27,9 +27,30 @@ FIELDS = ("market_data_degraded", "market_data_reason", "market_data_degraded_si
 
 
 def test_the_bot_writes_all_three_fields_to_the_state_file():
-    src = BASE.read_text()
+    """The fields must be inside `_save_state_to_disk`, not merely in a file.
+
+    ⚠️ THIS TEST WAS VACUOUS AND SHIPPED A BROKEN FEATURE. It originally read
+    `assert '"market_data_degraded"' in BASE.read_text()` — which passed
+    because the strings existed SOMEWHERE in base_strategy.py. They were in
+    `get_dashboard_metrics()`, a different dict that never reaches
+    hydra_state.json, so the banner could never have rendered. Caught by
+    post-deploy verification of the real state file, not by this test.
+
+    Parsing the actual function is the difference between "the string exists"
+    and "the writer writes it".
+    """
+    import ast
+    strat = (ROOT / "bots" / "hydra" / "strategy.py").read_text()
+    tree = ast.parse(strat)
+    writer = next((n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name == "_save_state_to_disk"), None)
+    assert writer is not None, "the state-file writer has been renamed"
+    seg = ast.get_source_segment(strat, writer) or ""
     for f in FIELDS:
-        assert f'"{f}"' in src, f"{f} never reaches the state file"
+        assert f'"{f}"' in seg, (
+            f"{f} is not written by _save_state_to_disk — the dashboard "
+            f"reads hydra_state.json and would never see it")
 
 
 def test_the_frontend_type_declares_them():
