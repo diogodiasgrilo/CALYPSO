@@ -108,13 +108,13 @@ class TestTheWiring:
         from shared.alert_service import DEFAULT_PRIORITIES, AlertPriority, AlertType
         assert DEFAULT_PRIORITIES[AlertType.CRITICAL_INTERVENTION] == AlertPriority.CRITICAL
         src = open(os.path.join(ROOT, "bots/hydra/strategy.py")).read()
-        seg = src[src.index("DATA-002: a feed we trade on is not real-time"):][:3000]
+        seg = src[src.index("DATA-002: a feed we trade on is not real-time"):][:6000]
         assert "AlertPriority.CRITICAL" in seg
 
     def test_the_alert_is_deduped_per_episode(self):
         """20,000 skips a day must not be 20,000 emails."""
         src = open(os.path.join(ROOT, "bots/hydra/strategy.py")).read()
-        seg = src[src.index("DATA-002: a feed we trade on is not real-time"):][:3000]
+        seg = src[src.index("DATA-002: a feed we trade on is not real-time"):][:6000]
         assert "_md_alert_episode" in seg
 
     def test_exits_are_untouched(self):
@@ -127,3 +127,56 @@ class TestTheWiring:
         for k in ("market_data_degraded", "market_data_reason",
                   "market_data_degraded_since"):
             assert f'"{k}"' in src
+
+
+class TestOnlyTheLiveSeatNotifies:
+    """Nine variants, one shared feed — and the first version emailed per variant.
+
+    Measured on 2026-11-09, the morning DATA-002 shipped: variants A and C
+    both alerted at their 10:45 slot about the SAME delayed feed, and the
+    remaining seven would have followed at theirs. Up to nine CRITICAL emails
+    for one fact.
+
+    They sent despite `alerts.enabled=False` because CRITICAL bypasses that
+    gate deliberately — so a safety property became a spam multiplier. One
+    bounced outright: variant C still carries the `your@email.com` placeholder.
+
+    Every variant must still BLOCK (a shadow recording 15-minute-old prices is
+    producing garbage data), but only the seat holding real orders notifies.
+    """
+
+    @staticmethod
+    def _segment():
+        src = open(os.path.join(ROOT, "bots/hydra/strategy.py")).read()
+        i = src.index("DATA-002: a feed we trade on is not real-time")
+        return src[i:i + 6000]
+
+    def test_dry_run_variants_do_not_alert(self):
+        """⚠️ Match the CALL, not the kwarg.
+
+        The first version asserted on `seg.index("send_alert")`, which matched
+        `_record_skipped_entry(..., send_alert=False)` — a kwarg that appears
+        BEFORE the gate — so it failed against correct code.
+        """
+        seg = self._segment()
+        assert "if self.dry_run:" in seg, "the dry-run gate is gone"
+        gate = seg.index("if self.dry_run:")
+        send = seg.index("self.alert_service.send_alert")
+        assert gate < send, "the dry-run gate must precede the send"
+
+    def test_the_block_itself_is_NOT_gated_on_dry_run(self):
+        """Blocking is for everyone; only the notification is scoped."""
+        seg = self._segment()
+        assert "if self.dry_run:" in seg, "the dry-run gate is gone"
+        assert seg.index("entries_skipped += 1") < seg.index("if self.dry_run:"), (
+            "a dry-run variant must still refuse to open on stale data")
+
+    def test_the_safety_event_is_still_recorded_for_every_variant(self):
+        """The record must survive even where the email does not."""
+        seg = self._segment()
+        assert "if self.dry_run:" in seg, "the dry-run gate is gone"
+        assert seg.index("DATA-002_DEGRADED_FEED") < seg.index("if self.dry_run:")
+
+    def test_per_episode_dedup_still_applies_to_the_live_seat(self):
+        seg = self._segment()
+        assert "_md_alert_episode" in seg

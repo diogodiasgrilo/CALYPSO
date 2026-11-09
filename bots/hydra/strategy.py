@@ -8234,7 +8234,24 @@ class HydraStrategy(MEICStrategy):
             # condition produced ~20,000 log lines a day in the 2026-11-02
             # incident; an alert channel cannot survive that, and an operator
             # who is paged 20,000 times is not paged at all.
-            if getattr(self, "_md_alert_episode", None) != self._md_degraded_since:
+            # ONLY THE LIVE SEAT NOTIFIES (2026-11-09). The feed is a SHARED
+            # resource — one calypso-broker, one IBKR session, one set of
+            # subscriptions — but every variant evaluates it independently, so
+            # the first version sent one CRITICAL per variant per episode.
+            # Measured live the morning it shipped: A and C both alerted at
+            # their 10:45 slot and the remaining seven would have followed at
+            # theirs, for up to NINE emails about one fact. Worse, they email
+            # despite alerts.enabled=False, because CRITICAL bypasses that gate
+            # by design — the safety property became a multiplier. And one of
+            # them bounced: variant C still carries the `your@email.com`
+            # placeholder.
+            #
+            # Every variant still BLOCKS — a dry-run shadow trading on 15-minute
+            # old prices records garbage, which is its own kind of damage. Only
+            # the seat holding real orders tells the operator about it.
+            if self.dry_run:
+                pass
+            elif getattr(self, "_md_alert_episode", None) != self._md_degraded_since:
                 self._md_alert_episode = self._md_degraded_since
                 try:
                     self.alert_service.send_alert(
