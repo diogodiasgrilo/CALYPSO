@@ -122,6 +122,13 @@ export interface HydraState {
   // dry_run_force_normal_day are true, FOMC date-based skips (T+1, announcement,
   // MKT-038) are bypassed at runtime. The FOMCBanner uses this to show
   // "trading normally" instead of "ALL ENTRIES SKIPPED" on T+1 dry-run days.
+  // DATA-002 (2026-11-09): entries are blocked because a feed we trade on is
+  // not real-time. Surfaced so the dashboard can say WHY the bot stopped
+  // taking entries, instead of showing one that mysteriously never trades —
+  // which is exactly how a delayed-data incident ran for a week unnoticed.
+  market_data_degraded?: boolean;
+  market_data_reason?: string | null;
+  market_data_degraded_since?: string | null;
   dry_run?: boolean;
   dry_run_force_normal_day?: boolean;
   [key: string]: unknown;

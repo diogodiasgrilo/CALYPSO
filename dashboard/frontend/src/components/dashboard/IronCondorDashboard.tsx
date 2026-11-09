@@ -34,6 +34,7 @@ import { PositionHeatmap } from "../market/PositionHeatmap";
 import {
   MarketContextBanner,
   FOMCBanner,
+
   OffDaySummaryCards,
 } from "../market/MarketContextBanner";
 import { useHydraStore, type HydraEntry, type OHLCBar } from "../../store/hydraStore";
@@ -41,6 +42,7 @@ import { BufferBar } from "./icEntryView";
 import { UndefinedRiskCard } from "../pnl/UndefinedRiskCard";
 import { capitalBasisConfig } from "../../lib/pnlShape";
 import { useSelectedStrategy } from "../../hooks/useSelectedStrategy";
+import { DataFeedBanner } from "./DataFeedBanner";
 import type {
   ICSnapshotBody,
   ICSnapshotEntry,
@@ -87,6 +89,7 @@ function PrimaryICView() {
       )}
 
       <div className="relative space-y-3">
+        <DataFeedBanner />
         <FOMCBanner />
         {unbounded && (
           <UndefinedRiskCard

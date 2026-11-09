@@ -8214,6 +8214,63 @@ class HydraStrategy(MEICStrategy):
             )
             return f"Entry #{entry_num} skipped - {bp_message}"
 
+        # DATA-002: a feed we trade on is not real-time → do not OPEN anything.
+        #
+        # FIRST in the chain on purpose: every gate below reasons about prices,
+        # so if the prices are 15-20 minutes old there is nothing downstream
+        # worth evaluating. Exits are untouched — see `_market_data_degraded`.
+        md_reason, _ = self._market_data_degraded()
+        if md_reason:
+            if not getattr(self, "_md_degraded_since", None):
+                self._md_degraded_since = get_us_market_time().strftime(
+                    "%Y-%m-%d %H:%M:%S")
+            self._md_degraded_reason = md_reason
+            self.daily_state.entries_skipped += 1
+            self._next_entry_index += 1
+            self._record_skipped_entry(entry_num, md_reason, send_alert=False)
+            self._log_safety_event("DATA-002_DEGRADED_FEED",
+                                   f"Entry #{entry_num}: {md_reason}")
+            # ONE alert per degradation episode, not one per skip. The same
+            # condition produced ~20,000 log lines a day in the 2026-11-02
+            # incident; an alert channel cannot survive that, and an operator
+            # who is paged 20,000 times is not paged at all.
+            if getattr(self, "_md_alert_episode", None) != self._md_degraded_since:
+                self._md_alert_episode = self._md_degraded_since
+                try:
+                    self.alert_service.send_alert(
+                        alert_type=AlertType.CRITICAL_INTERVENTION,
+                        title="Trading HALTED — market data is not real-time",
+                        message=(
+                            f"{md_reason}\n\n"
+                            f"New positions are blocked; exits still work.\n"
+                            f"Degraded since: {self._md_degraded_since} ET\n\n"
+                            f"Most likely cause: the IBKR market-data "
+                            f"subscription has lapsed. IBKR turns market data "
+                            f"OFF when the account cannot cover the monthly "
+                            f"fee, and a paper account mirrors its parent's "
+                            f"subscriptions. Check Account Management → "
+                            f"Market Data Subscriptions."
+                        ),
+                        # CRITICAL so it EMAILS: _should_send_email is a pure
+                        # priority check and emails CRITICAL only. A halt the
+                        # operator does not see is a halt that lasts a week.
+                        priority=AlertPriority.CRITICAL,
+                        details={"entry_number": entry_num,
+                                 "reason": "market_data_degraded",
+                                 "since": self._md_degraded_since},
+                        contracts=self.contracts_per_entry,
+                    )
+                except Exception as e:  # noqa: BLE001 — never break the skip path
+                    logger.error("DATA-002: alert failed: %s", e)
+            return f"Entry #{entry_num} skipped - {md_reason}"
+        # Recovered: clear the episode so a future degradation alerts again.
+        if getattr(self, "_md_degraded_reason", None):
+            logger.info("DATA-002: market data is real-time again — entries "
+                        "re-enabled (was degraded since %s)",
+                        getattr(self, "_md_degraded_since", "?"))
+            self._md_degraded_reason = None
+            self._md_degraded_since = None
+
         # Anti-whipsaw filter: skip if SPX range > mult × expected daily move
         whipsaw_reason = self._check_whipsaw_filter()
         if whipsaw_reason:

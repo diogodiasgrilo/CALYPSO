@@ -7146,6 +7146,48 @@ class MEICStrategy(abc.ABC):
             "capital_deployed": self._calculate_capital_deployed(),
         }
 
+    # DATA-002: feeds whose staleness must stop NEW positions.
+    #
+    # IBKR field 6509's first character is the timeline: "R" real-time,
+    # "D" delayed (IBKR documents 15-20 MINUTES), "Z" frozen, "P"/"p" snapshot
+    # variants. Anything that is not "R" is not safe to OPEN a 0DTE position on.
+    MARKET_DATA_REALTIME = "R"
+
+    def _market_data_degraded(self):
+        """`(reason, None)` when a feed we trade on is not real-time.
+
+        Returns `(None, None)` when every known feed is real-time.
+
+        ⚠️ WHY THIS BLOCKS ENTRIES BUT NOT EXITS. On 2026-11-02 the whole fleet
+        silently dropped to delayed SPX and VIX and kept trading on it for a
+        week — 24 entries failed mid-leg because limits were computed from
+        prices 15-20 minutes old, costing $736 in commission and tripping a
+        critical intervention. The old behaviour logged
+        "proceeding but data may lag real-time" ~20,000 times a day and then
+        stamped the stale price as FRESH, walking straight past the staleness
+        gate that already existed for FROZEN quotes.
+        You must always be able to CLOSE a position, so exits are deliberately
+        untouched: a stale price is a bad reason to open risk and a terrible
+        reason to be unable to shed it.
+
+        FAILS OPEN ON UNKNOWN, deliberately. A feed that reports no
+        availability at all is handled by the existing freshness gate
+        (`last_spx_update`); treating "unreported" as "degraded" would halt
+        trading on a missing field rather than on bad data.
+        """
+        md = self.market_data
+        for name, avail in (("SPX", getattr(md, "last_spx_availability", None)),
+                            ("VIX", getattr(md, "last_vix_availability", None))):
+            if not avail:
+                continue                      # unknown -> the freshness gate owns it
+            first = str(avail)[:1].upper()
+            if first != self.MARKET_DATA_REALTIME:
+                kind = {"D": "DELAYED (IBKR: 15-20 min)", "Z": "FROZEN"}.get(
+                    first, f"NOT real-time (6509={avail!r})")
+                return (f"{name} feed is {kind} — refusing to OPEN new positions "
+                        f"(exits unaffected)"), None
+        return None, None
+
     def _confirm_window_seconds(self) -> float:
         """The breach-confirmation window that is ACTUALLY governing, in seconds.
 
@@ -8216,6 +8258,12 @@ class MEICStrategy(abc.ABC):
             "dry_run": self.dry_run,
             "circuit_breaker_open": self._circuit_breaker_open,
             "critical_intervention": self._critical_intervention_required,
+
+            # DATA-002: surfaced so the dashboard can SAY WHY entries stopped,
+            # rather than showing a bot that simply never trades.
+            "market_data_degraded": bool(getattr(self, "_md_degraded_reason", None)),
+            "market_data_reason": getattr(self, "_md_degraded_reason", None),
+            "market_data_degraded_since": getattr(self, "_md_degraded_since", None),
 
             # Market data
             "spx_price": self.current_price,

@@ -96,6 +96,14 @@ class TestEveryPrimaryStoreWidgetIsEitherScopedOrLabelled:
         "agents/AgentStatusPanel.tsx", "shared/CommandPalette.tsx",
         "shared/ToastContainer.tsx", "shared/StrategySwitcher.tsx",
         "pnl/PerformanceMetrics.tsx",
+        # DATA-002 (2026-11-09). Genuinely global, and this one is not a
+        # judgement call: market data arrives through ONE `calypso-broker`
+        # holding ONE IBKR session with ONE set of subscriptions. When SPX went
+        # delayed on 2026-11-02 it was delayed for all nine variants
+        # simultaneously — measured, not assumed. So the live seat's
+        # availability IS the fleet's, and scoping this per-strategy would
+        # invent nine readings of a single shared fact.
+        "dashboard/DataFeedBanner.tsx",
     }
     #: Reads the primary but shows another strategy's page — must LABEL itself.
     LABELLED = {"logs/LiveLogFeed.tsx", "market/MarketContextBanner.tsx"}
