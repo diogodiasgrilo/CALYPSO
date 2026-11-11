@@ -193,9 +193,21 @@ class TestTheFlagTracksOBSERVATION_NotEntryAttempts:
 
     @staticmethod
     def _rig(spx=None, vix=None, in_session=True):
+        # ⚠️ 2026-11-11: this stubbed `_is_regular_session_or_later`, which was
+        # the gate until that helper was found to mean "at-or-after 9:30 TODAY"
+        # — true all evening, so after every close the refresh evaluated
+        # legitimately FROZEN quotes and painted "Trading HALTED" on the
+        # dashboard. The gate is now `_session_is_live`.
+        #
+        # Worth noting how this fixture failed: once the production gate was
+        # renamed, the stub no longer provided it, the AttributeError was
+        # swallowed by the refresh's own try/except, and the two
+        # "outside the session" tests PASSED VACUOUSLY on the early return
+        # while the two in-session ones failed loudly. A stub that lags the
+        # code under test can assert the opposite of what it reads.
         class _MD2(_MD):
             @staticmethod
-            def _is_regular_session_or_later():
+            def _session_is_live():
                 return in_session
         s = _strat(spx, vix)
         s.market_data = _MD2(spx, vix)
@@ -247,7 +259,7 @@ class TestTheFlagTracksOBSERVATION_NotEntryAttempts:
         """Telemetry must not be able to break the trading loop."""
         class _Boom:
             @staticmethod
-            def _is_regular_session_or_later():
+            def _session_is_live():
                 raise RuntimeError("boom")
         s = _strat("D", "R")
         s.market_data = _Boom()

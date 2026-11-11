@@ -75,6 +75,14 @@ def _entry(reason, ok=False):
 
 
 class _Stub:
+
+    # DATA-002b (2026-11-11): the credit gate now vetoes a non-real-time OPRA
+    # feed immediately after the estimate. Real strategies inherit this from
+    # MEICStrategy; this stub is hand-rolled, so it needs it explicitly.
+    # Returning None = feed healthy, which keeps every assertion below about
+    # MKT-011C's own branch unchanged.
+    def option_feed_degraded(self):
+        return None
     """Only what the estimation-failure branch of the gate touches."""
     min_viable_credit_per_side = 10.0
     min_viable_credit_put_side = 15.0

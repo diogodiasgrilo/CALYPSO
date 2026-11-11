@@ -815,6 +815,13 @@ class MarketData:
     # as "fresh" just because the bot keeps polling.
     last_spx_availability: Optional[str] = None
     last_vix_availability: Optional[str] = None
+    # DATA-002b: the OPRA feed, observed from whatever option we last quoted.
+    # Timestamped because option reads are SPORADIC (only during an entry
+    # attempt or while a position is monitored), unlike SPX/VIX which refresh
+    # every tick — so an observation has to be able to go stale rather than
+    # assert forever.
+    last_option_availability: Optional[str] = None
+    last_option_availability_at: Optional[datetime] = None
 
     # Intraday OHLC tracking
     spx_open: float = 0.0
@@ -849,6 +856,29 @@ class MarketData:
         """
         now = get_us_market_time()
         return (now.hour, now.minute) >= (9, 30)
+
+    @staticmethod
+    def _session_is_live() -> bool:
+        """True only while the regular session is actually TRADING.
+
+        Distinct from `_is_regular_session_or_later`, which means "at-or-after
+        9:30 TODAY" and therefore stays True all evening. That distinction
+        caused a real defect: DATA-002's observation refresh was gated on the
+        at-or-after helper, so every night after the close it evaluated the
+        broker's legitimately FROZEN quotes, flagged the feed degraded and
+        painted "Trading HALTED" across the dashboard until the next day's
+        reset cleared it. A banner that is on every night is a banner nobody
+        reads, which would have cost us the one signal it exists to carry.
+
+        Weekends, holidays and the 1:00 PM ET early closes are all excluded —
+        `is_market_open` covers the first two and the explicit close-time
+        comparison covers the third (`is_within_market_hours` hardcodes 4:00
+        PM, so an early-close afternoon would otherwise read as live).
+        """
+        now = get_us_market_time()
+        if not is_market_open(now):
+            return False
+        return now.time() < get_market_close_time(now)
 
     def update_spx(self, price: float, availability: Optional[str] = None):
         """Update SPX price with timestamp and track open/high/low.
@@ -7185,6 +7215,65 @@ class MEICStrategy(abc.ABC):
     # variants. Anything that is not "R" is not safe to OPEN a 0DTE position on.
     MARKET_DATA_REALTIME = "R"
 
+    # DATA-002b: how old an option-feed observation may be and still be
+    # believed. Option quotes are read only during an entry attempt or while
+    # monitoring an open position, so between bl's 30-minute slots there is
+    # legitimately no observation at all. 20 minutes keeps a within-attempt
+    # read authoritative without letting a morning reading speak for the
+    # afternoon.
+    OPTION_FEED_OBSERVATION_MAX_AGE_S = 1200.0
+
+    def note_option_feed_availability(self, availability) -> None:
+        """Record field 6509 from an option quote we just read. Never raises.
+
+        Called from both option-quote readers (single and batch) so the
+        observation reflects the OPRA feed as the trading paths actually see
+        it, rather than a separate probe that could disagree with them.
+
+        An absent/empty flag is NOT recorded — IBKR does not always populate
+        6509, and overwriting a known-bad reading with "unknown" would clear
+        the very signal this exists to carry.
+        """
+        try:
+            if not availability:
+                return
+            self.market_data.last_option_availability = str(availability)
+            self.market_data.last_option_availability_at = get_us_market_time()
+        except Exception:  # noqa: BLE001 — observation must never break a quote read
+            pass
+
+    def option_feed_degraded(self) -> Optional[str]:
+        """Reason string when the LAST option quote we read was not real-time.
+
+        ``None`` when real-time, unobserved, or observed too long ago to
+        believe (see OPTION_FEED_OBSERVATION_MAX_AGE_S).
+
+        ⚠️ This is DISPLAY + diagnosis, NOT the entry gate. Putting the option
+        feed in the DATA-002 entry gate would DEADLOCK: a blocked entry never
+        reads an option quote, so the observation could never refresh and the
+        halt could never lift. The authoritative veto is inline in the credit
+        gate, where a FRESH quote is read on every attempt — so it self-heals
+        the moment the feed recovers. SPX/VIX are safe in the entry gate
+        precisely because they refresh every tick regardless.
+        """
+        try:
+            avail = self.market_data.last_option_availability
+            seen_at = self.market_data.last_option_availability_at
+            if not avail or seen_at is None:
+                return None
+            age = (get_us_market_time() - seen_at).total_seconds()
+            if age > self.OPTION_FEED_OBSERVATION_MAX_AGE_S:
+                return None
+            first = str(avail)[:1].upper()
+            if first == self.MARKET_DATA_REALTIME:
+                return None
+            kind = {"D": "DELAYED (IBKR: 15-20 min)", "Z": "FROZEN"}.get(
+                first, f"NOT real-time (6509={avail!r})")
+            return (f"OPTION (OPRA) feed is {kind} — order prices cannot be "
+                    f"trusted; refusing to OPEN new positions (exits unaffected)")
+        except Exception:  # noqa: BLE001
+            return None
+
     def _market_data_degraded(self):
         """`(reason, None)` when a feed we trade on is not real-time.
 
@@ -7223,17 +7312,19 @@ class MEICStrategy(abc.ABC):
     def _refresh_market_data_health(self) -> None:
         """Keep `_md_degraded_reason` current from observation. Never raises.
 
-        REGULAR SESSION ONLY. Outside 09:30-close the broker legitimately
-        serves FROZEN ('Z') quotes, so evaluating then would paint the
-        dashboard red every night for correct behaviour — and a banner that is
-        always on is a banner nobody reads.
+        LIVE SESSION ONLY (`_session_is_live`, NOT
+        `_is_regular_session_or_later` — see that helper for the defect the
+        distinction fixes). Outside 09:30-close the broker legitimately serves
+        FROZEN ('Z') quotes, so evaluating then would paint the dashboard red
+        every night for correct behaviour — and a banner that is always on is
+        a banner nobody reads.
 
         Outside the session the last value is left ALONE rather than cleared,
         so an operator looking after the close still sees that the day ran
         degraded. `_reset_for_new_day` clears it for the next session.
         """
         try:
-            if not self.market_data._is_regular_session_or_later():
+            if not self.market_data._session_is_live():
                 return
             reason, _ = self._market_data_degraded()
             if reason:

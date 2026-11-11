@@ -8,6 +8,61 @@ Broker: Interactive Brokers Web API (ibind OAuth 1.0a, no gateway).
 Account: paper only on this branch. Saxo Bank has been removed end-to-end
 — see Version History 2.0.0-rc.1 and `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 
+
+### 2026-11-11 — DATA-002b: the OPTION feed blocks entries, and the halt stops crying wolf
+
+TWO defects, found while root-causing why `bl` completed 0 of 6 entries on 11-10.
+
+**1. The halt watched SPX and VIX but NOT option quotes.** The account's OPRA
+subscription lapsed on 2026-11-02 alongside the CBOE index one. The index half
+was restored 11-09; options were not. Measured from `bl`'s own logs, controlling
+for entry attempts:
+
+    Oct 20-27   15 attempts    0 failed     0 delayed-option reads
+    Nov 02-10   30 attempts   30 failed   343 delayed-option reads
+
+Zero failures in 15 attempts before the lapse; **30 of 30 after**, flipping on
+the exact day. Mechanism: every short leg sat unfilled at a limit computed from
+a 15-20-minute-old quote while the real market moved away from it, the
+protective longs DID fill, and each attempt unwound at a loss (-$1,865 on 11-10
+plus a stranded orphan leg). `_option_quote_is_realtime` already existed but
+only skipped individual STRIKES (MKT-020/022), so the entry proceeded on
+whatever strike survived.
+
+Added `note_option_feed_availability` / `option_feed_degraded` on MEICStrategy,
+recorded from BOTH option-quote readers (the entry path prices off the batch
+one), and a veto in `_check_credit_gate` returning `option_feed_not_realtime`.
+
+⚠️ **The veto is in the credit gate, NOT the DATA-002 entry gate, and that
+placement is load-bearing.** A cached option flag in the entry gate DEADLOCKS:
+a blocked entry never reads an option quote, so the observation can never
+refresh and the halt can never lift. The credit gate runs immediately after
+`_estimate_entry_credit`, which is what reads the quotes — so the observation
+is milliseconds old and self-heals the moment the feed recovers. SPX/VIX are
+safe in the entry gate only because they refresh every tick regardless.
+Observations also EXPIRE (20 min), because option reads are sporadic and a
+morning reading must not speak for the afternoon.
+
+**2. The DATA-002 halt flagged a healthy feed every evening.**
+`_refresh_market_data_health` was gated on `_is_regular_session_or_later()`,
+which means "at-or-after 9:30 TODAY" — still true at 22:00. So after every
+close it evaluated the broker's legitimately FROZEN quotes and latched
+"Trading HALTED" until the next day's reset. Observed live on `bl`:
+`md_degraded: True`, "SPX feed is FROZEN", since 22:02:03. New
+`MarketData._session_is_live()` is a true during-session check (weekends,
+holidays and the 1:00 PM early closes all excluded — `is_within_market_hours`
+hardcodes 4:00 PM, so an early-close afternoon would otherwise read as live).
+
+The banner now also lights on the OPRA reason, with SPX/VIX taking precedence
+in the message when both are degraded.
+
+Tests: `tests/test_data002b_option_feed_2026_11_11.py` (23), all six mutation
+controls caught. Two fixtures in
+`test_data002_degraded_feed_halt_2026_11_09.py` stubbed the OLD helper name;
+once the gate was renamed the AttributeError was swallowed by the refresh's own
+try/except and the two "outside the session" tests PASSED VACUOUSLY on the
+early return while the in-session ones failed loudly — a stub that lags the
+code under test can assert the opposite of what it reads.
 Before each entry, checks 20 EMA vs 40 EMA on SPX 1-minute bars.
 The EMA signal (BULLISH/BEARISH/NEUTRAL) is logged and stored for analysis
 but is informational only — base entries are full iron condors or put-only via MKT-011.

@@ -1853,6 +1853,7 @@ class HydraStrategy(MEICStrategy):
             # entitlement problem stays visible; expected to be silent in
             # steady state, so the volume itself signals a problem.
             avail = raw.get("availability")
+            self.note_option_feed_availability(avail)   # DATA-002b
             if avail and str(avail)[:1].upper() != "R":
                 logger.warning(
                     "DATA_QUALITY: option %s quote NOT real-time (6509=%r) — "
@@ -1961,6 +1962,10 @@ class HydraStrategy(MEICStrategy):
                         # single-quote _read_option_quote path).
                         "availability": row.get("availability"),
                     }
+                    # DATA-002b: the entry path prices off THIS reader, so the
+                    # OPRA observation has to be taken here too — the
+                    # single-quote reader is not on the entry critical path.
+                    self.note_option_feed_availability(row.get("availability"))
                 # P7-audit L3: surface row drops. Two distinct shapes:
                 # (a) rows we got but couldn't key (no `conid` field) —
                 # signals an ibind response-shape change. (b) chunk size
@@ -4981,6 +4986,41 @@ class HydraStrategy(MEICStrategy):
               one-sided-disabled skips where only one side had actually failed.
         """
         estimated_call, estimated_put = self._estimate_entry_credit(entry)
+
+        # DATA-002b (2026-11-11): VETO on a non-real-time OPTION (OPRA) feed.
+        #
+        # Placed HERE, immediately after the estimate, because the estimate is
+        # what reads the option quotes — so the observation behind this veto is
+        # at most milliseconds old and refreshes on EVERY attempt. That is what
+        # makes it self-healing: unlike a cached flag in the entry gate, a feed
+        # that recovers is seen on the next attempt rather than staying latched.
+        #
+        # Why a veto at all. On 2026-11-02 the account's OPRA subscription
+        # lapsed alongside the CBOE index one and option quotes went
+        # 6509='DPBd' (delayed 15-20 min). The index half was restored on
+        # 11-09; options were not, and the measured effect is total:
+        #
+        #   Oct 20-27   15 entry attempts   0 failed    0 delayed-option reads
+        #   Nov 02-10   30 entry attempts  30 failed  343 delayed-option reads
+        #
+        # Every short leg sat unfilled at a limit computed from a stale quote
+        # while the real market had moved away from it, the protective longs
+        # DID fill, and each attempt unwound at a loss — -$1,865 on 11-10 alone
+        # plus a stranded orphan. The pre-existing per-candidate check
+        # (_option_quote_is_realtime, MKT-020/022) only skipped individual
+        # STRIKES, so the entry still proceeded on whatever strike survived.
+        # This is the entry-level stop that was missing.
+        #
+        # Exits are deliberately untouched, matching DATA-002: a stale price is
+        # a bad reason to open risk and a terrible reason to be unable to shed
+        # it.
+        _opra_reason = self.option_feed_degraded()
+        if _opra_reason:
+            logger.warning(
+                f"DATA-002b: Entry #{entry.entry_number} SKIPPED — "
+                f"{_opra_reason}"
+            )
+            return ("skip", False, 0.0, 0.0, "option_feed_not_realtime")
 
         # MKT-011B (2026-09-18): fall back to MKT-010 only when estimation genuinely
         # FAILED — not merely because it returned zero.
@@ -13707,6 +13747,19 @@ class HydraStrategy(MEICStrategy):
                 pass
             raise
 
+    def _state_option_feed_reason(self):
+        """`option_feed_degraded()` for the state file, guaranteed non-raising.
+
+        The state write happens every heartbeat and must never fail over a
+        display field, so this swallows everything. Kept separate from
+        `option_feed_degraded` so the trading-path veto keeps its own,
+        unswallowed behaviour.
+        """
+        try:
+            return self.option_feed_degraded()
+        except Exception:  # noqa: BLE001
+            return None
+
     def _save_state_to_disk(self):
         """
         Save current daily state to disk for crash recovery.
@@ -13750,8 +13803,18 @@ class HydraStrategy(MEICStrategy):
                 # hydra_state.json, so the banner could never have fired. Caught
                 # by post-deploy verification, not by the tests, because those
                 # asserted the strings appeared somewhere in the file.
-                "market_data_degraded": bool(getattr(self, "_md_degraded_reason", None)),
-                "market_data_reason": getattr(self, "_md_degraded_reason", None),
+                # DATA-002b: the OPTION (OPRA) feed counts too. It blocks new
+                # entries through the credit-gate veto, so the banner must say
+                # so — the 2026-11-02 incident was invisible for five sessions
+                # precisely because a blocked bot and an idle bot looked the
+                # same. SPX/VIX take precedence in the message when both are
+                # degraded (they are the more fundamental failure); the OPRA
+                # reason is reported when it is the only one.
+                "market_data_degraded": bool(
+                    getattr(self, "_md_degraded_reason", None)
+                    or self._state_option_feed_reason()),
+                "market_data_reason": (getattr(self, "_md_degraded_reason", None)
+                                       or self._state_option_feed_reason()),
                 "market_data_degraded_since": getattr(self, "_md_degraded_since", None),
                 # STATE-004 restart-gap backstop (2026-09-06). UNLIKE
                 # critical_intervention above, this one IS restored on
