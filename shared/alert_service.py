@@ -789,31 +789,73 @@ class AlertService:
         # entries) for the full numbers and the deploy/*.service values.
         max_attempts = 2 if priority in (AlertPriority.CRITICAL, AlertPriority.HIGH) else 1
         last_error: Optional[Exception] = None
+        # ALERT-DUP (2026-11-11): the retry must NOT re-publish after a WAIT
+        # timeout — that is what sent duplicate emails.
+        #
+        # `future.result(timeout=5)` raises `concurrent.futures.TimeoutError`
+        # (the builtin `TimeoutError` on 3.11) purely because OUR WAIT expired.
+        # The publish is still in flight, the library is still retrying it
+        # internally, and — as the comment below already established — the
+        # future CANNOT be cancelled. So calling `publisher.publish()` again
+        # does not replace the first message, it adds a SECOND one. Pub/Sub
+        # then delivers both, each with its own message id, and the Cloud
+        # Function (which has no idempotency, and no shared state to build it
+        # on) sends two identical emails.
+        #
+        # Measured, 2026-11-09 10:45 ET: the fleet logged TWO alert sends while
+        # the alert function recorded THREE invocations at 15:45:11.712,
+        # 15:45:11.726 and 15:45:13.023 UTC — three DISTINCT cloud_event_ids,
+        # which rules out a Pub/Sub redelivery (a redelivery reuses the id).
+        # The third was ours, and `bl`'s log names it:
+        #   "Pub/Sub publish attempt 1/2 failed (TimeoutError) — retrying"
+        #
+        # So a wait timeout now RE-WAITS on the SAME future, and only a real
+        # publish error starts a new one. The wall-clock budget documented
+        # above is unchanged: still at most `max_attempts` waits of 5s.
+        future = None
         for attempt in range(1, max_attempts + 1):
             try:
-                data = json.dumps(payload).encode("utf-8")
-                future = publisher.publish(self._topic_path, data)
+                if future is None:
+                    data = json.dumps(payload).encode("utf-8")
+                    future = publisher.publish(self._topic_path, data)
                 message_id = future.result(timeout=5)  # Wait up to 5 seconds per attempt
 
                 logger.debug(f"Alert published to Pub/Sub with message ID: {message_id}")
                 return True
 
+            except TimeoutError as e:
+                # OUR WAIT expired; the message is probably already accepted.
+                # Keep `future` so the next attempt waits on it again rather
+                # than duplicating the alert.
+                #
+                # 2026-08-18 shutdown-hang investigation (kept — it is the
+                # evidence that re-waiting is the ONLY option here): this
+                # branch originally also called future.cancel(), on the theory
+                # that an abandoned publish RPC stays "in flight" and
+                # contributes to the process's slow exit. Round-1 adversarial
+                # review caught that this doesn't hold —
+                # google.cloud.pubsub_v1.publisher.futures.Future.cancel() is
+                # hard-overridden to always `return False` and do nothing,
+                # verified against the installed library source. So the first
+                # publish can be neither cancelled nor withdrawn, which is
+                # precisely why re-publishing duplicates instead of replacing.
+                # See AlertService.close() for what IS achievable here.
+                last_error = e
+                if attempt < max_attempts:
+                    logger.warning(
+                        f"Pub/Sub publish attempt {attempt}/{max_attempts} timed out "
+                        f"waiting for the message id — re-waiting on the SAME "
+                        f"publish (NOT re-publishing; the message may already be "
+                        f"accepted and a second publish would duplicate the alert)"
+                    )
+                    time.sleep(1)
+                continue
+
             except Exception as e:
                 last_error = e
-                # 2026-08-18 shutdown-hang investigation: a future.result()
-                # timeout here originally also called future.cancel(), on
-                # the theory that an abandoned publish RPC stays "in
-                # flight" and contributes to the process's slow/hung exit.
-                # Round-1 adversarial review caught that this doesn't hold:
-                # google.cloud.pubsub_v1.publisher.futures.Future.cancel()
-                # is hard-overridden to always `return False` and do
-                # nothing — verified against the actual installed library
-                # source, confirmed to be a no-op in every case, not just
-                # the already-completed one the removed comment hedged
-                # about. Removed rather than left in place inert — a
-                # future reader trusting that comment would wrongly rule
-                # out "abandoned publish future" as already handled. See
-                # AlertService.close() for what IS achievable here.
+                # A genuine publish error (serialization, permissions, topic
+                # gone). Nothing is in flight, so a fresh publish is correct.
+                future = None
                 if attempt < max_attempts:
                     logger.warning(
                         f"Pub/Sub publish attempt {attempt}/{max_attempts} failed "

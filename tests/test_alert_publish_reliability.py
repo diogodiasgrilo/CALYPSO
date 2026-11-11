@@ -110,9 +110,38 @@ def test_describe_exception_with_message_includes_type_and_text():
 # ─── Retry: CRITICAL/HIGH get 2 attempts, MEDIUM/LOW get 1 ───────────────
 
 def test_critical_alert_retries_once_and_succeeds_on_second_attempt(monkeypatch):
+    # ⚠️ 2026-11-11: this test asserted `publish.call_count == 2` on a
+    # TimeoutError — i.e. it PINNED the duplicate-email defect. A
+    # `future.result(timeout=5)` TimeoutError means only that OUR WAIT expired;
+    # the publish is still in flight and cannot be cancelled, so a second
+    # `publish()` adds a second message rather than replacing the first.
+    # Measured on 2026-11-09: two logged alerts produced THREE Cloud Function
+    # invocations with three distinct cloud_event_ids. A timeout now RE-WAITS on
+    # the same future, so ONE publish is correct. See
+    # tests/test_alert_duplicate_publish_2026_11_11.py.
+    svc = _live_svc(monkeypatch)
+    fut = _mock_future()
+    fut.result.side_effect = [TimeoutError(), "mid-ok"]   # times out, then lands
+    svc._publisher.publish.side_effect = [fut, _mock_future(result="mid-DUPLICATE")]
+    result = svc.send_alert(
+        AlertType.CIRCUIT_BREAKER, "Circuit Breaker", "halted",
+        priority=AlertPriority.CRITICAL,
+    )
+    assert result is True
+    assert svc._publisher.publish.call_count == 1, "a 2nd publish duplicates the alert"
+    assert fut.result.call_count == 2, "the retry must RE-WAIT on the same future"
+    assert _read_dead_letters() == []
+
+
+def test_a_GENUINE_publish_error_still_gets_a_second_publish(monkeypatch):
+    """The other half of the 2026-11-11 change, kept explicit.
+
+    Only a WAIT timeout is ambiguous. A real publish error means nothing is in
+    flight, so re-publishing is correct and must not have been lost.
+    """
     svc = _live_svc(monkeypatch)
     svc._publisher.publish.side_effect = [
-        _mock_future(exc=TimeoutError()),
+        _mock_future(exc=ValueError("topic gone")),
         _mock_future(result="mid-ok"),
     ]
     result = svc.send_alert(
@@ -127,7 +156,7 @@ def test_critical_alert_retries_once_and_succeeds_on_second_attempt(monkeypatch)
 def test_critical_alert_exhausts_retry_and_writes_dead_letter(monkeypatch):
     svc = _live_svc(monkeypatch)
     svc._publisher.publish.side_effect = [
-        _mock_future(exc=TimeoutError()),
+        _mock_future(exc=TimeoutError()),     # raises on EVERY wait
         _mock_future(exc=TimeoutError()),
     ]
     result = svc.send_alert(
@@ -135,7 +164,9 @@ def test_critical_alert_exhausts_retry_and_writes_dead_letter(monkeypatch):
         priority=AlertPriority.CRITICAL,
     )
     assert result is False
-    assert svc._publisher.publish.call_count == 2
+    # ONE publish, two waits (2026-11-11). Exhausting the retry still
+    # dead-letters, which is what this test is actually for.
+    assert svc._publisher.publish.call_count == 1
 
     records = _read_dead_letters()
     assert len(records) == 1

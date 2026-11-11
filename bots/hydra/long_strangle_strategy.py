@@ -1520,12 +1520,44 @@ class LongStrangleStrategy(HydraStrategy):
             logger.error("LS: restart recovery failed (non-fatal): %s", e)
         return ok
 
+    @staticmethod
+    def _is_skip_placeholder(entry) -> bool:
+        """True for the synthetic row ``_record_skipped_entry`` leaves behind.
+
+        The shared skip recorder DELIBERATELY appends a minimal
+        ``HydraIronCondorEntry`` to ``daily_state.entries`` so the dashboard can
+        display a skip (strategy.py ~6216). It is not a position: both sides are
+        flagged skipped and it carries a reason string.
+
+        H has to know the difference because its restore path upgrades anything
+        that is not a ``LongStrangleEntry`` and demands an ``ls_entries`` row for
+        it — and a SKIP is recorded in ``ls_skipped``, so no such row exists, by
+        design. Without this, every skip produced a false CRITICAL on the next
+        restart claiming an entry's P&L was not computable.
+
+        Measured on 2026-11-10: H vetoed entry #1 on skew (39.5% vs 35.0%) at
+        09:45:33, the placeholder persisted, and the 22:01 restart reported
+        "entry #1 restored with NO ls_entries row". Three restarts (09-30,
+        10-01, 11-10) each follow a skip the same way, and H has only ever
+        opened two real positions (09-24, 09-25) — so every one of those
+        CRITICALs was false.
+
+        Requires BOTH sides skipped AND a reason: a genuine one-sided IC entry
+        sets a single ``*_side_skipped`` flag, so either test alone would
+        misread one as a placeholder.
+        """
+        return bool(getattr(entry, "call_side_skipped", False)
+                    and getattr(entry, "put_side_skipped", False)
+                    and getattr(entry, "skip_reason", ""))
+
     def _restore_long_strangle_entries(self) -> None:
         """Upgrade restored base entries back to ``LongStrangleEntry`` + debits."""
         entries = getattr(self.daily_state, "entries", None)
         if not entries:
             return
-        stale = [e for e in entries if not isinstance(e, LongStrangleEntry)]
+        stale = [e for e in entries
+                 if not isinstance(e, LongStrangleEntry)
+                 and not self._is_skip_placeholder(e)]
         if not stale:
             return
         # getattr, not attribute access: this runs from inside the base
@@ -1540,12 +1572,18 @@ class LongStrangleStrategy(HydraStrategy):
             )
             return
 
+        # ``ls_entries`` is keyed by (date, entry_number), so the lookup must use
+        # the date the RESTORED entries belong to — the state file's own — not
+        # today's. Identical on a same-day restart (the common case); a restart
+        # that crosses midnight with the previous session's state would
+        # otherwise look up a date with no rows and report a false CRITICAL.
+        as_of = (getattr(self.daily_state, "date", None)
+                 or get_us_market_time().strftime("%Y-%m-%d"))
         rows = {r.get("entry_number"): r
-                for r in recorder.fetch_entries(
-                    get_us_market_time().strftime("%Y-%m-%d"))}
+                for r in recorder.fetch_entries(as_of)}
 
         for i, old in enumerate(entries):
-            if isinstance(old, LongStrangleEntry):
+            if isinstance(old, LongStrangleEntry) or self._is_skip_placeholder(old):
                 continue
             row = rows.get(old.entry_number)
             if not row:

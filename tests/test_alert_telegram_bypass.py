@@ -271,9 +271,12 @@ def test_retry_success_on_second_pubsub_attempt_never_triggers_bypass(monkeypatc
     """CRITICAL gets a Pub/Sub retry BEFORE the bypass is even considered —
     confirms the bypass is truly last-resort, not a parallel/racing path."""
     svc = _live_svc(monkeypatch)
-    svc._publisher.publish.side_effect = [
-        _mock_future(exc=TimeoutError()), _mock_future(),
-    ]
+    # 2026-11-11: a wait timeout RE-WAITS on the same future rather than
+    # publishing a second message (which duplicated emails). The point of this
+    # test — that the bypass is last-resort, not a parallel path — is unchanged.
+    fut = _mock_future()
+    fut.result.side_effect = [TimeoutError(), "mid-1"]
+    svc._publisher.publish.side_effect = [fut, _mock_future()]
     with patch("shared.telegram_direct.send_telegram_direct") as bypass:
         result = svc.send_alert(
             AlertType.CIRCUIT_BREAKER, "Circuit Breaker", "halted",

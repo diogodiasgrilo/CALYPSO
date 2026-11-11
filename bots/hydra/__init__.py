@@ -9,6 +9,66 @@ Account: paper only on this branch. Saxo Bank has been removed end-to-end
 — see Version History 2.0.0-rc.1 and `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 
 
+### 2026-11-11 — two false alarms: H's phantom CRITICAL, and duplicate alert emails
+
+**1. H reported a false CRITICAL on every restart that followed a skip.** The
+shared `_record_skipped_entry` deliberately appends a minimal
+`HydraIronCondorEntry` to `daily_state.entries` so the dashboard can show a
+skip. H's restart recovery upgrades anything that is not a `LongStrangleEntry`
+by reading its cost basis out of `ls_entries` — and a SKIP is recorded in
+`ls_skipped`, so no `ls_entries` row exists, by design. The placeholder hit the
+"no row" branch:
+
+    CRITICAL  LS: entry #1 restored with NO ls_entries row — its debit is
+              unknown, so its P&L is not computable.
+
+H has opened exactly two real positions (09-24, 09-25). The CRITICAL fired on
+three restarts — 09-30, 10-01, 11-10 — each following a skip, so all three were
+false. Reconstructed in full from the pre-restart snapshot for 11-10:
+`date=2026-11-10, entries=1`, entry #1 at 09:45:33 (the skew-veto timestamp)
+with `long_call_strike=0.0`. New `_is_skip_placeholder` requires BOTH sides
+skipped AND a reason — either test alone would misread a genuine one-sided IC
+entry as a placeholder. The genuine "missing cost basis" alarm is unchanged and
+test-pinned.
+
+Second, LATENT defect in the same function: the `ls_entries` lookup keyed on
+TODAY rather than on the date the restored entries belong to. Invisible on a
+same-day restart; a restart crossing midnight with a live position would have
+produced the same false CRITICAL for a real entry. Now keys on
+`daily_state.date` with a fallback to today.
+
+**2. A publish WAIT timeout re-published, sending duplicate alert emails.**
+`send_alert` waited with `future.result(timeout=5)`, which raises
+`concurrent.futures.TimeoutError` (the builtin `TimeoutError` on 3.11) purely
+because OUR WAIT expired — the publish is still in flight, and this file's own
+2026-08-18 note already established the future CANNOT be cancelled. So the
+retry's second `publisher.publish()` did not replace the first message, it added
+one. Pub/Sub delivered both, and the alert Cloud Function has no idempotency and
+no shared state to build it on (the duplicates landed on different instances),
+so two identical emails went out.
+
+Measured, 2026-11-09 10:45 ET: the fleet logged TWO alert sends while the alert
+function recorded THREE invocations at 15:45:11.712 / 15:45:11.726 /
+15:45:13.023 UTC with three DISTINCT `cloud_event_id`s — which RULES OUT a
+Pub/Sub redelivery, because a redelivery reuses the id. `bl`'s log named the
+third: "Pub/Sub publish attempt 1/2 failed (TimeoutError) — retrying".
+
+A wait timeout now RE-WAITS on the same future; only a genuine publish error
+starts a new one. The wall-clock budget is unchanged (still at most
+`max_attempts` waits of 5s), so no `TimeoutStopSec` implications.
+
+⚠️ **Four existing tests asserted `publish.call_count == 2` on a TimeoutError —
+they PINNED this defect.** Updated to the correct behaviour with the reasoning
+recorded inline, and a new sibling test keeps the genuine-error re-publish path
+explicit. Also noted while diagnosing: the alert Cloud Function emits NO
+application logs to Cloud Logging at all (138 system + 97 request entries over
+14 days, zero stdout), which is why this needed the request log to crack. Not
+fixed here — logged as a separate observability gap.
+
+Tests: `tests/test_h_skip_placeholder_false_critical_2026_11_11.py` (18),
+`tests/test_alert_duplicate_publish_2026_11_11.py` (6); all seven mutation
+controls caught, including the two that silence the real alarms.
+
 ### 2026-11-11 — DATA-002b: the OPTION feed blocks entries, and the halt stops crying wolf
 
 TWO defects, found while root-causing why `bl` completed 0 of 6 entries on 11-10.

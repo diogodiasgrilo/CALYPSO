@@ -210,14 +210,20 @@ class TestNoIneffectiveFutureCancel:
         # covers this in depth) must still work correctly now that the
         # cancel() call is gone from the except branch.
         svc = _live_svc(monkeypatch)
-        f1 = _mock_future(exc=TimeoutError())
-        f2 = _mock_future(result="mid-ok")
+        # 2026-11-11: a wait timeout now re-waits on the SAME future instead of
+        # publishing again — which is this test's own finding taken to its
+        # conclusion. cancel() is a no-op, so the first publish can be neither
+        # withdrawn nor replaced; re-publishing merely duplicated the alert.
+        f1 = _mock_future()
+        f1.result.side_effect = [TimeoutError(), "mid-ok"]
+        f2 = _mock_future(result="mid-DUPLICATE")
         svc._publisher.publish.side_effect = [f1, f2]
         result = svc.send_alert(
             AlertType.CIRCUIT_BREAKER, "Circuit Breaker", "halted",
             priority=AlertPriority.CRITICAL,
         )
         assert result is True
+        assert svc._publisher.publish.call_count == 1
         f1.cancel.assert_not_called()
         f2.cancel.assert_not_called()
 
