@@ -103,7 +103,12 @@ def _stub_at(hh, mm):
 
 @pytest.mark.parametrize("flag,should_flag,label", [
     ("R", False, "real-time"),
-    ("DPBd", True, "THE INCIDENT: delayed snapshot+book, 11-02 onward"),
+    # The two strings the broker ACTUALLY returned, read live either side of the
+    # 2026-11-11 subscription fix. Only the first character carries the timeline,
+    # and these differ in nothing else — which is exactly why a substring or
+    # equality check on the whole flag would have failed to tell them apart.
+    ("RpBd", False, "REAL live string AFTER the OPRA fix (2026-11-11 06:32 ET)"),
+    ("DPBd", True, "REAL live string DURING the incident (11-02 to 11-10)"),
     ("D", True, "delayed"),
     ("Z", True, "frozen"),
     ("N", True, "not subscribed"),
