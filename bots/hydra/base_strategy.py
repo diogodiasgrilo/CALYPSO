@@ -3971,9 +3971,33 @@ class MEICStrategy(abc.ABC):
             qty = self._extract_filled_quantity(status)
             if qty is not None:
                 saw_any = True
-                if qty != last:
-                    moved = True
-                last = qty
+                # MONOTONIC. A cumulative fill count cannot DECREASE — you
+                # cannot un-fill — so a lower reading is an artefact of IBKR's
+                # reporting, never new information.
+                #
+                # 🔴 THIS COST $410.83 LIVE on 2026-11-10, entry #5:
+                #     14:16:40  Cancelling working order ...702 (5/7 filled)
+                #     14:16:46  ⚠ Put 7460.0 not filled (0/7) — retrying
+                #     14:16:49  ✓ Filled Put 7460.0 7/7
+                #   A2 confirmed the broker really held +5. The cancelled
+                #   order reported 0, this line overwrote the observed 5 with
+                #   it, the retry sized a FULL 7 instead of the remaining 2,
+                #   and the surplus was left to expire worthless.
+                #
+                # IBKR documents the field semantics changing on completed
+                # orders (on a cancel-after-partial, totalQuantity becomes the
+                # UNFILLED remainder, and resubmission can reset the filled
+                # count to 0), so the post-cancel read is simply not
+                # authoritative about what already executed.
+                #
+                # The asymmetry matters: UNDER-counting makes us re-buy the
+                # whole leg → untracked exposure with no stop on it. OVER-
+                # counting makes us buy too little → the leg stays short, the
+                # entry fails, and the unwind cleans up. Clamp toward the
+                # safe error.
+                if qty > last:
+                    moved = True        # only a RISE is real movement
+                    last = qty
             state = str(
                 status.get("status") or status.get("order_status") or ""
             ).strip().lower()
