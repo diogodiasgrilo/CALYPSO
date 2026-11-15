@@ -9,6 +9,74 @@ Account: paper only on this branch. Saxo Bank has been removed end-to-end
 — see Version History 2.0.0-rc.1 and `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 
 
+### 2026-11-15 — the broker drift was never one number: IBKR excludes EXPIRED legs
+
+`BROKER-RECONCILE` has logged an "unexplained" drift between IBKR's ledger
+`realizedpnl` and our gross at **every settlement since 2026-09-24**, and the
+drift FLIPS SIGN (+$622 on 09-23, −$543 on 09-24, −$123 on 11-12, −$791 on
+11-13). That sign flip was read, repeatedly, as evidence of a defect, and the
+hunt was pinned first on commission conventions and then on orphan legs.
+
+**It is neither. The two numbers do not measure the same thing.** IBKR's
+per-position `realizedPnl` contains ONLY positions closed or offset by an
+opposing **TRADE**; a leg that runs to cash settlement never appears in it at
+all. Our gross books every leg. So
+
+    ours_gross − IBKR = (our gross on legs that EXPIRED)
+                      + (IBKR commission on the legs that TRADED)
+
+The first term carries either sign — that IS the sign flip — and the second is
+always positive.
+
+**Both halves measured on the live seat, not asserted:**
+
+* **CATEGORICAL, 2026-11-13.** Of our 16 (right, strike) positions, 9 were
+  predicted present in IBKR's realized list and 7 predicted absent. **All 16
+  correct, zero false positives either way.** That includes `7595 C`, whose
+  absence had itself been carried as an open question — it is E#5's long call,
+  never offset, so IBKR never realized it. Not a data gap; the mechanism.
+* **ARITHMETIC, 2026-11-12** (no orphan, no over-fill): expired legs −$245.00
+  plus implied commission +$121.68 = **−$123.32** against a logged drift of
+  **−$123.31**. To the cent. Implied commission came out $1.242/contract-side,
+  and three individual legs matched $1.235 exactly.
+
+**NEW — `_classify_legs_vs_expiry` + the EXPIRY-SPLIT and LEG-FATE lines.** The
+reconcile now splits our own legs into offset-by-trade and ran-to-expiry
+(keyed on (right, strike), since `trade_entries` stores strikes and
+`close_leg_executions` stores conids), names both halves, and reports the
+implied commission per contract-side — a clean day measures ~$1.24, so a figure
+far from it says the day does not reconcile rather than inviting another
+convention theory.
+
+⚠️ "Traded" is **min(bought, sold) > 0**, NOT "has a close row". `7670 C` on
+11-12 had no closing order at all: E#2 sold it and E#3 bought it, the conid
+netted flat intraday, and IBKR realized it (+$577.71, which is our +$595 gross
+less exactly 14 × $1.235).
+
+**The part that is an ALARM, not a diagnostic.** The dollars are
+informational; the two SETS are not. IBKR realizing a position we booked as
+EXPIRED means we booked a traded close as a worthless expiry — the same family
+as the 2026-10-14 settlement defect (OTM expiries booked ITM off a day-stale
+SPX, −$12,710 of phantom record) — and it is the **only check of that family
+whose evidence comes from the broker rather than from our own price feed.** The
+converse set catches a close we recorded that never executed. Both log ERROR.
+
+**Confirmed in passing, no action needed:** the 11-13 over-fill is fully
+priced — conid 935332834 is `7595 C` LONG, broker 9 against a tracked 7, so 2
+extra at $0.6285714 = **$125.71** paid and never booked, which independently
+reproduces the ~$127 figure. Because it expired, it is absent from IBKR's
+realized too, so it is **not** part of the broker drift. And the $315 by which
+11-13's `daily_summaries.gross_pnl` ($1,205) sits below the per-entry sum
+($1,520) is the already-tracked `unattributed_overlay_pnl`, which the existing
+`RECONCILE realized_pnl` line names — not a new defect.
+
+**STILL OPEN, narrowed.** 11-13 does not fully close: −$157.30 on `7580 C` and
+−$85.63 on `7585 C` beyond commission, i.e. **exactly the two call conids shared
+by multiple entries**, plus FIFO ambiguity on the partially-offset `7590 C`.
+Deliberately NOT modelled — fitting a FIFO attribution to two observations
+would be overfitting, and the implied-commission figure now flags such a day by
+itself ($3.32/side on 11-13 against $1.24 on 11-12).
+
 ### 2026-11-15 — the over-fill, at all three layers (prevent / record / observe)
 
 2026-11-13 left **2 untracked long calls** in the live account (conid 935332834,

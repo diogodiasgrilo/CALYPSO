@@ -7386,6 +7386,143 @@ class HydraStrategy(MEICStrategy):
         except Exception as ex:
             _swallow.note("recorder.per_entry_pnl", ex, logger, "per-entry realized_pnl record/reconcile failed")
 
+    def _classify_legs_vs_expiry(self, date_str: str) -> Optional[dict]:
+        """Per-(right, strike): offset by an opposing TRADE, or ran to EXPIRY.
+
+        WHY. IBKR's per-position ``realizedPnl`` — the independent anchor that
+        ``_reconcile_pnl_against_broker`` compares our gross against — contains
+        ONLY positions closed or offset by an opposing TRADE. A leg that runs
+        to cash settlement NEVER appears in it. Verified CATEGORICALLY on
+        2026-11-15 against 2026-11-13: of our 16 (right, strike) positions the
+        9 predicted present were present and the 7 predicted absent were
+        absent — 16/16, no false positive either way.
+
+        That one fact explains the "unexplained" drift this reconcile has
+        reported at every settlement since 2026-09-24, and explains why it
+        FLIPS SIGN. Our gross books every leg; IBKR's realized books only the
+        traded ones, so
+
+            ours_gross - IBKR = (our gross on legs that EXPIRED)
+                              + (IBKR commission on the legs that TRADED)
+
+        The first term carries either sign; the second is always positive. On
+        2026-11-12 — no orphan, no over-fill — that identity closes TO THE
+        CENT: expired legs -$245.00 plus commission +$121.68 = -$123.32,
+        against a logged drift of -$123.31.
+
+        The lesson is the cost of the two months: the drift was never evidence
+        of a defect, and the orphan hypothesis it had been pinned on was ONE
+        contributor of three (orphans, expiries, commission). A number that is
+        merely unexplained invites whichever story is told first.
+
+        WHAT IT IS FOR. The dollars are secondary. The valuable output is
+        CATEGORICAL, and it is a genuine alarm:
+
+          * IBKR realized a position we believe EXPIRED -> we booked a traded
+            close as a worthless expiry. Same family as the 2026-10-14
+            settlement defect (OTM expiries booked ITM off a day-stale SPX,
+            -$12,710 of phantom record) and the first check of that family
+            that does not come from our own price feed.
+          * we believe a position TRADED and IBKR realized nothing -> a close
+            we recorded never actually executed.
+
+        Keyed on (right, strike) because ``trade_entries`` stores strikes;
+        ``close_leg_executions`` stores conids, so closes map back through
+        (entry_number, leg_name). Strikes we never traded at all are NOT
+        classified here — those are the existing orphan bucket.
+
+        Returns None when the tables cannot be read. Never raises: this is a
+        diagnostic inside a diagnostic, and must not disturb settlement.
+        """
+        legs_spec = (
+            ("short_call", "C", -1), ("long_call", "C", +1),
+            ("short_put", "P", -1), ("long_put", "P", +1),
+        )
+        try:
+            with self._data_recorder._connect() as conn:
+                rows = conn.execute(
+                    "SELECT entry_number, contracts, "
+                    "short_call_strike, long_call_strike, "
+                    "short_put_strike, long_put_strike, "
+                    "short_call_fill_price, long_call_fill_price, "
+                    "short_put_fill_price, long_put_fill_price "
+                    "FROM trade_entries WHERE date = ?", (date_str,)
+                ).fetchall()
+                closes = conn.execute(
+                    "SELECT entry_number, leg_name, order_side, "
+                    "filled_qty, fill_price "
+                    "FROM close_leg_executions WHERE date = ?", (date_str,)
+                ).fetchall()
+        except Exception:  # noqa: BLE001 — diagnostic inside a diagnostic
+            return None
+        if not rows:
+            return None
+
+        flow: dict = {}
+        strike_of: dict = {}
+
+        def _bucket(right, strike):
+            key = (right, round(float(strike), 2))
+            return key, flow.setdefault(
+                key, {"bought": 0, "sold": 0, "cost": 0.0, "proceeds": 0.0})
+
+        for row in rows:
+            number, contracts = row[0], int(row[1] or 0)
+            strikes = {"short_call": row[2], "long_call": row[3],
+                       "short_put": row[4], "long_put": row[5]}
+            fills = {"short_call": row[6], "long_call": row[7],
+                     "short_put": row[8], "long_put": row[9]}
+            for leg, right, sign in legs_spec:
+                strike, price = strikes[leg], fills[leg]
+                # A skipped side has no strike, and an unfilled one no price.
+                # Either way there is no position to classify.
+                if not strike or price is None or contracts <= 0:
+                    continue
+                key, bucket = _bucket(right, strike)
+                strike_of[(number, leg)] = key
+                notional = float(price) * contracts * 100.0
+                if sign < 0:
+                    bucket["sold"] += contracts
+                    bucket["proceeds"] += notional
+                else:
+                    bucket["bought"] += contracts
+                    bucket["cost"] += notional
+
+        for number, leg, side, qty, price in closes or []:
+            key = strike_of.get((number, leg))
+            if key is None or price is None or not qty:
+                continue
+            bucket = flow[key]
+            notional = float(price) * int(qty) * 100.0
+            if str(side).upper() == "SELL":
+                bucket["sold"] += int(qty)
+                bucket["proceeds"] += notional
+            else:
+                bucket["bought"] += int(qty)
+                bucket["cost"] += notional
+
+        traded, expired = set(), set()
+        offset_gross = expired_gross = 0.0
+        offset_sides = 0
+        for key, bucket in flow.items():
+            net = bucket["proceeds"] - bucket["cost"]
+            # Offset in BOTH directions is exactly what makes IBKR realize a
+            # position. One-directional flow can only have gone to settlement.
+            if min(bucket["bought"], bucket["sold"]) > 0:
+                traded.add(key)
+                offset_gross += net
+                offset_sides += bucket["bought"] + bucket["sold"]
+            else:
+                expired.add(key)
+                expired_gross += net
+        return {
+            "traded_keys": traded,
+            "expired_keys": expired,
+            "offset_gross": round(offset_gross, 2),
+            "expired_gross": round(expired_gross, 2),
+            "offset_contract_sides": offset_sides,
+        }
+
     def _reconcile_pnl_against_broker(self, date_str: str) -> Optional[dict]:
         """INDEPENDENT P&L check — the only one here that is not circular.
 
@@ -7552,11 +7689,21 @@ class HydraStrategy(MEICStrategy):
                         except (TypeError, ValueError):
                             return None
 
+                    def _leg_right(desc: str):
+                        """C or P from the OCC symbol, or None."""
+                        m = _re_occ.search(str(desc))
+                        return m.group(2) if m else None
+
                     ours_total = orphan_total = 0.0
                     n_orphan = 0
                     tagged = []
+                    # (right, strike) -> realized, for the expiry-split below.
+                    ibkr_by_key: dict = {}
                     for d, v, q in legs:
                         k = _leg_strike(d)
+                        _r = _leg_right(d)
+                        if k is not None and _r is not None:
+                            ibkr_by_key[(_r, k)] = ibkr_by_key.get((_r, k), 0.0) + v
                         is_ours = (k is not None and k in ours_strikes) if ours_strikes else None
                         if is_ours:
                             ours_total += v
@@ -7650,6 +7797,74 @@ class HydraStrategy(MEICStrategy):
                             float(self.daily_state.total_realized_pnl or 0.0),
                             residual, orphan_total, qty_over - qty_under,
                         )
+                    # EXPIRY-AWARE COMPARISON (2026-11-15). Everything above
+                    # compares our full-day gross against IBKR's realized as
+                    # though the two measured the same thing. They do not —
+                    # IBKR realizes only a position offset by a TRADE, never
+                    # one that ran to cash settlement. See
+                    # _classify_legs_vs_expiry: splitting on that is what makes
+                    # the drift DECOMPOSE rather than merely be large.
+                    fate = self._classify_legs_vs_expiry(date_str)
+                    if fate:
+                        ibkr_on_traded = sum(
+                            v for key, v in ibkr_by_key.items()
+                            if key in fate["traded_keys"])
+                        sides = fate["offset_contract_sides"]
+                        implied = fate["offset_gross"] - ibkr_on_traded
+                        per_side = (implied / sides) if sides else None
+                        out["expired_leg_gross"] = fate["expired_gross"]
+                        out["offset_leg_gross"] = fate["offset_gross"]
+                        out["implied_commission_total"] = round(implied, 2)
+                        out["implied_commission_per_side"] = (
+                            round(per_side, 4) if per_side is not None else None)
+                        logger.warning(
+                            "BROKER-RECONCILE %s EXPIRY-SPLIT: legs OFFSET by "
+                            "trade $%+.2f (IBKR $%+.2f on those same legs) | "
+                            "legs that ran to EXPIRY $%+.2f — IBKR realizes "
+                            "NOTHING on those, so they are the structural half "
+                            "of the drift and carry EITHER sign. The difference "
+                            "on the traded legs is $%.2f over %d contract-side(s) "
+                            "= $%s/side of implied commission; a clean day "
+                            "measures ~$1.24 (2026-11-12 closed TO THE CENT). "
+                            "Far from that means the day does NOT reconcile — "
+                            "look for an over-fill or a partially-offset conid, "
+                            "never for a commission convention.",
+                            date_str, fate["offset_gross"], ibkr_on_traded,
+                            fate["expired_gross"], implied, sides,
+                            "n/a" if per_side is None else f"{per_side:.3f}",
+                        )
+                        # THE ALARM. The dollars above are informational; these
+                        # two sets are not. A disagreement means we booked a
+                        # leg's FATE wrongly — the 2026-10-14 family (-$12,710
+                        # of phantom record from OTM expiries booked ITM off a
+                        # day-stale SPX) — and it is the only check of that
+                        # family sourced from the broker rather than from our
+                        # own price feed.
+                        mis_expired = sorted(
+                            k for k in ibkr_by_key if k in fate["expired_keys"])
+                        mis_traded = sorted(
+                            k for k in fate["traded_keys"] if k not in ibkr_by_key)
+                        if mis_expired or mis_traded:
+                            logger.error(
+                                "BROKER-RECONCILE %s LEG-FATE MISMATCH: IBKR "
+                                "realized %d position(s) we booked as EXPIRED "
+                                "%s, and realized nothing on %d we booked as "
+                                "TRADED %s. Expected: zero of each. The first "
+                                "means a traded close was booked as a worthless "
+                                "expiry; the second means a close we recorded "
+                                "never actually executed. This predicted 16/16 "
+                                "on 2026-11-13, so a non-empty set here is a "
+                                "real booking error, not noise.",
+                                date_str, len(mis_expired), mis_expired,
+                                len(mis_traded), mis_traded,
+                            )
+                        else:
+                            logger.info(
+                                "BROKER-RECONCILE %s LEG-FATE OK: all %d traded "
+                                "and %d expired position(s) agree with IBKR.",
+                                date_str, len(fate["traded_keys"]),
+                                len(fate["expired_keys"]),
+                            )
             except Exception as _be:  # noqa: BLE001 — diagnostic only
                 logger.info(
                     "BROKER-RECONCILE %s: per-leg breakdown unavailable (%s)",
