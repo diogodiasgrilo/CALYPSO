@@ -45,9 +45,30 @@ import requests
 # US Eastern timezone (handles EST/EDT automatically)
 US_EASTERN = pytz.timezone('America/New_York')
 
-# Configure logging
+# Configure logging.
+#
+# ⚠️ `logging.basicConfig()` IS A NO-OP when the root logger already has a
+# handler — and under functions_framework it always does, because the
+# framework installs one before user code is imported. So the basicConfig
+# call below silently failed to set the level, and EVERY INFO record this
+# function emits has been discarded since deployment. Verified 2026-11-15:
+# 60 days of Cloud Logging hold ZERO "Processing alert" lines — a record that
+# fires on every single invocation — while alerts delivered daily.
+#
+# ERROR was never affected (it clears a WARNING root level), so this was
+# blindness to every SUCCESSFUL invocation, not to failures. That is why the
+# 2026-11-11 duplicate-email investigation could not confirm from the
+# function's own side that it had been invoked twice, and had to be settled
+# from the request log instead.
+#
+# basicConfig is KEPT for the case where root has no handler at all (local
+# runs, unit tests); the levels are then set EXPLICITLY, which is correct
+# either way. Do NOT replace this with `basicConfig(force=True)` — that tears
+# out the platform's own handler and takes structured logging with it.
 logging.basicConfig(level=logging.INFO)
+logging.getLogger().setLevel(logging.INFO)
 logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
 
 def get_secret(secret_name: str) -> Optional[str]:

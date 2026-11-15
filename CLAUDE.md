@@ -813,6 +813,44 @@ gcloud pubsub subscriptions describe "$SUB" --project=calypso-trading-bot --form
 > watches; the DLQ is FORENSIC). The delivery subscription is **eventarc-managed**,
 > so **re-check `deadLetterPolicy` after any eventarc / Cloud Function redeploy.**
 
+> ⚠️ **`gcloud functions logs read` shows you NOTHING but platform noise, and
+> that is not a symptom — it is the only stream there was.** `process-trading-alert`
+> is **GEN_2** (a Cloud Run service), and until 2026-11-15 its application logs
+> were being discarded at the source: the module configured logging with
+> `logging.basicConfig(level=INFO)`, which **does nothing when the root logger
+> already has a handler** — and `functions_framework` installs one before user
+> code is imported. Measured: **60 days of Cloud Logging held ZERO "Processing
+> alert" lines**, a record that fires on *every* invocation, while alerts
+> delivered daily.
+>
+> ℹ️ **ERROR and WARNING were never affected** (they clear a WARNING root
+> level). So this was blindness to every *successful* invocation, not to
+> failures — which is why the 2026-11-11 duplicate-email investigation had to
+> be settled from the request log instead of the function's own output. Fixed by
+> setting the root level explicitly; pinned by
+> `tests/test_alert_function_logging_2026_11_15.py`, whose tests **execute** the
+> real config block rather than grepping it (the broken version contained
+> `logging.INFO` too). Do **not** "simplify" it to `basicConfig(force=True)` —
+> that tears out the platform's own structured handler.
+>
+> Read the logs either way; both streams are the same records:
+> ```bash
+> gcloud logging read 'resource.labels.service_name="process-trading-alert"' \
+>   --project=calypso-trading-bot --limit=20 --freshness=1d \
+>   --format="value(timestamp,severity,textPayload)"
+> ```
+
+> ⚠️ **The function had also NOT been redeployed since 2026-05-29**, while
+> commit `9f9e7ad4` (2026-06-16) changed it — so its friendly `display_name`
+> alert headers sat undeployed for five months. Harmless (the old code simply
+> ignored the additive wire fields) but it is why alerts read `HYDRA_BL` rather
+> than a display label. **`cloud_functions/` is NOT covered by the VM `git pull`
+> deploy path** — it needs its own `gcloud functions deploy`, so a commit
+> touching it is not live until someone runs that. Redeploy with NO trigger
+> flags (`--source`, `--runtime`, `--entry-point` only): passing
+> `--trigger-topic` can mint a SECOND eventarc trigger and double every alert.
+> Re-check `deadLetterPolicy` afterwards (see the DLQ note above).
+
 Full deployment guide: [`docs/ALERTING_SETUP.md`](docs/ALERTING_SETUP.md).
 
 ---
