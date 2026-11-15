@@ -3709,13 +3709,50 @@ class MEICStrategy(abc.ABC):
                     #
                     # So wait for a genuinely TERMINAL status before trusting
                     # the count, and fail closed if it never arrives.
-                    # Scoped to a PARTIAL fill. The over-fill arises only when
-                    # we size a REMAINDER from a count that is still moving; a
-                    # rung that filled nothing has no remainder to mis-size, and
-                    # making the whole retry ladder wait (and fail closed) would
-                    # cost entries for no safety gain. A zero-fill rung keeps
-                    # the original behaviour: trust the confirmed cancel.
-                    if snapshot > 0:
+                    # Scoped to sizing a REMAINDER. The reasoning here was
+                    # right and the TEST for it was wrong.
+                    #
+                    # It read `snapshot > 0` — "did THIS rung fill?" — when the
+                    # hazard is `filled_so_far > 0`: "do we already hold a
+                    # partial that the next rung will complete?" Those differ
+                    # in exactly the case that cost money.
+                    #
+                    # 🔴 LIVE, 2026-11-13, entry #5 / Call 7595 / conid 935332834:
+                    #     14:16:22  cancel order ...522 (5/7 filled)   partial banked
+                    #     14:16:33  Attempt 2 @ $0.55                  sized for 2
+                    #     14:17:08  cancel order ...523 (0/2 filled)   <-- read 0, FILLED 2
+                    #     14:17:12  Attempt 3 @ $0.70                  sized for 2 AGAIN
+                    #     14:17:14  "Filled 7/7"       the broker held NINE
+                    #   snapshot was 0, so the old test sent it down the
+                    #   trust-the-cancel branch — but filled_so_far was 5, so a
+                    #   remainder WAS being sized, from a count that had lied.
+                    #   Same category error as the monotonic fix of 2026-11-10
+                    #   (`c43f4cfe`): believing a post-cancel count. It recurred
+                    #   three days later in the branch that fix did not cover.
+                    #
+                    # Measured 2026-11-14 over every retained log:
+                    #   * zero-read cancels on a REMAINDER rung .....  11
+                    #   * zero-read cancels on a FULL leg ...........  255
+                    #   * partial-snapshot cancels (already strict) ..  66
+                    #   * over-fills to date: 7 incidents, +29 contracts
+                    # So widening to `filled_so_far > 0` covers the hazardous
+                    # population at ~11 extra waits, where dropping the scope
+                    # entirely would have added 255 — and each wait costs the
+                    # full ORDER_SETTLE_TIMEOUT_S, because a cancelled order
+                    # rarely reaches terminal inside it (the strict path's
+                    # cancel-to-next-rung median IS 6.0s, the whole budget).
+                    # At up to 16 cancellable rungs an entry, that is the
+                    # difference between ~1 minute and ~1.5 minutes of added
+                    # blocking on the thread the STOP MONITOR shares — against a
+                    # measured 54s stop warning time. Breadth here is not free
+                    # safety; it trades one hazard for another.
+                    #
+                    # A full-leg rung keeps the old behaviour deliberately: with
+                    # no partial banked there is no remainder to mis-size, and a
+                    # terse status read (no quantity field => saw_any False =>
+                    # settled False) would abort the leg. That is the cost the
+                    # original comment named, and it still stands for that case.
+                    if snapshot > 0 or filled_so_far > 0:
                         terminal, settled = self._await_terminal_fill(
                             order_id, snapshot, cancel_confirmed=bool(cancelled)
                         )
@@ -6130,6 +6167,36 @@ class MEICStrategy(abc.ABC):
             # entry would re-park itself forever.
             if allow_defer:
                 self._defer_fill_check(uic, side, qty_before, intended_qty, leg_name)
+            else:
+                # THE DEFERRED PASS JUST DECLINED, AND THAT IS THE FINAL ANSWER
+                # (it must be, or the entry re-parks itself forever — see the
+                # comment above). So say so distinctly instead of repeating the
+                # first pass's INFO line verbatim.
+                #
+                # 2026-11-13, conid 935332834: the immediate pass read +5 at
+                # 14:17:14 and the deferred pass read +5 AGAIN at 14:19:16 —
+                # 121s later, against a true NINE. POS-003 saw 9 at 14:32. Both
+                # A2 passes logged the identical "Not acting", so nothing in the
+                # log distinguished "confirmed fine" from "gave up unresolved",
+                # and the surplus went unexamined until settlement.
+                #
+                # ⚠️ DELIBERATELY NOT raising the 120s settle window. That would
+                # be fitting a constant to a SINGLE observation (we know the lag
+                # exceeded 121s once and was resolved by 15 minutes; we have no
+                # distribution), and the design above requires the deferred
+                # decline to be terminal. The durable record is the fix: POS-003
+                # runs hourly, detects this reliably, and its finding now lands
+                # in the QTY-LEDGER (strategy.py) where it gets priced.
+                logger.warning(
+                    "  A2-UNRESOLVED: %s (conid %s) read %+d against an expected "
+                    "%+d on BOTH the immediate and the deferred pass — the book "
+                    "never caught up inside the settle window, so A2 is standing "
+                    "down for good on this leg. NOT a confirmation that the "
+                    "quantity is right: if the broker really holds more, POS-003 "
+                    "will find it on a later cycle and the QTY-LEDGER will price "
+                    "it. Do not read this as 'fine'.",
+                    leg_name, uic, qty_after, expected,
+                )
             return
 
         # REQUIRE A SETTLED BOOK (2026-10-20). A corrective TRADE must never be

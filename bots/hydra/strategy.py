@@ -7582,6 +7582,27 @@ class HydraStrategy(MEICStrategy):
                             f"={v:+.2f}"
                             for d, v, q, _k, o in tagged[:12]),
                     )
+                    # QTY-LEDGER (2026-11-14): over-fills at a strike we DO
+                    # trade, which the orphan split structurally cannot see.
+                    qty_ledger = list(
+                        (getattr(self, "_qty_mismatch_ledger", None) or {}).values())
+                    # SPLIT BY DIRECTION. `est_unbooked` is a MAGNITUDE
+                    # (abs(excess) x avgPrice x 100), so summing it and printing
+                    # a minus sign would assert a cost the data cannot support:
+                    # an OVER-fill means premium paid and never booked, an
+                    # UNDER-fill means we booked contracts we do not hold. They
+                    # pull opposite ways and must not be netted into one signed
+                    # number.
+                    qty_over = sum(
+                        e["est_unbooked"] for e in qty_ledger
+                        if e.get("est_unbooked") is not None and e["excess"] > 0)
+                    qty_under = sum(
+                        e["est_unbooked"] for e in qty_ledger
+                        if e.get("est_unbooked") is not None and e["excess"] < 0)
+                    out["qty_mismatch_ledger"] = qty_ledger
+                    out["qty_mismatch_over_premium"] = round(qty_over, 2)
+                    out["qty_mismatch_under_premium"] = round(qty_under, 2)
+
                     if ours_strikes:
                         logger.warning(
                             "BROKER-RECONCILE %s DECOMPOSED: our recorded "
@@ -7589,8 +7610,45 @@ class HydraStrategy(MEICStrategy):
                             "— orphans are partial fills that were unwound; they "
                             "realize at the broker and appear in neither "
                             "trade_entries nor trade_stops, so our gross cannot "
-                            "see them. This is the drift.",
+                            "see them.",
                             date_str, ours_total, orphan_total, n_orphan,
+                        )
+                        # ⚠️ This line used to end "This is the drift." It is
+                        # NOT, and 2026-11-12 is the control that proves it:
+                        # ZERO orphan legs that day, the per-leg sum matched
+                        # IBKR to ONE CENT (-$1066.68 vs -$1066.69), and our
+                        # recorded gross was still $123.31 adrift. Orphans are
+                        # ONE contributor, so claiming they are the whole story
+                        # sent the investigation down a blind alley. Two named
+                        # contributors now print; whatever remains is still open.
+                        if qty_ledger:
+                            logger.warning(
+                                "BROKER-RECONCILE %s QTY-MISMATCH: %d conid(s) "
+                                "held a quantity we never booked — $%.2f of "
+                                "premium on OVER-fills (held, unbooked) and "
+                                "$%.2f on UNDER-fills (booked, not held). "
+                                "INVISIBLE to the orphan split above, which "
+                                "classifies a leg by STRIKE membership only, so "
+                                "a surplus at one of our OWN strikes reads as "
+                                "'ours'. Signs are per-conid in the detail — the "
+                                "two directions are NOT netted. Detail: %s",
+                                date_str, len(qty_ledger), qty_over, qty_under,
+                                [{k: e[k] for k in
+                                  ("conid", "expected", "actual", "est_unbooked")}
+                                 for e in qty_ledger],
+                            )
+                        residual = ours_total + orphan_total - float(
+                            self.daily_state.total_realized_pnl or 0.0)
+                        logger.warning(
+                            "BROKER-RECONCILE %s RESIDUAL: broker per-leg total "
+                            "$%+.2f vs our realized $%+.2f = $%+.2f unexplained "
+                            "after orphans ($%+.2f) and qty-mismatch premium ($%.2f over, "
+                            "net of under). "
+                            "This residual is the OPEN part — do not attribute "
+                            "it to orphans.",
+                            date_str, ours_total + orphan_total,
+                            float(self.daily_state.total_realized_pnl or 0.0),
+                            residual, orphan_total, qty_over - qty_under,
                         )
             except Exception as _be:  # noqa: BLE001 — diagnostic only
                 logger.info(
@@ -13816,6 +13874,12 @@ class HydraStrategy(MEICStrategy):
                 "market_data_reason": (getattr(self, "_md_degraded_reason", None)
                                        or self._state_option_feed_reason()),
                 "market_data_degraded_since": getattr(self, "_md_degraded_since", None),
+                # QTY-LEDGER: contracts the broker holds that we never booked.
+                # Persisted because POS-003 sees them INTRADAY and the figure is
+                # unobservable after expiry (every leg reads q=0.0), so a restart
+                # between detection and settlement would lose it outright.
+                "qty_mismatch_ledger": list(
+                    (getattr(self, "_qty_mismatch_ledger", None) or {}).values()),
                 # STATE-004 restart-gap backstop (2026-09-06). UNLIKE
                 # critical_intervention above, this one IS restored on
                 # restart (same-day only, see _load_state_file_history) —
@@ -14293,6 +14357,65 @@ class HydraStrategy(MEICStrategy):
                 expected[uic] = expected.get(uic, 0) + sign * contracts
         return expected
 
+    def _record_qty_mismatch(self, discrepant, actual_positions, now) -> None:
+        """Log a confirmed POS-003 quantity mismatch into a day-scoped ledger.
+
+        Priced from the broker's own ``avgPrice`` on the surplus contracts, so
+        the figure is what was actually paid rather than a mid-based guess. A
+        positive ``est_unbooked`` means contracts we hold and never booked; the
+        sign is informational only — nothing trades off this.
+
+        Keyed by conid and kept at the FIRST sighting's excess, because POS-003
+        re-runs hourly and must not inflate the ledger on every pass. Never
+        raises: this is bookkeeping beside a safety check, and must not be able
+        to break reconciliation.
+        """
+        try:
+            ledger = getattr(self, "_qty_mismatch_ledger", None)
+            if ledger is None:
+                ledger = self._qty_mismatch_ledger = {}
+            for conid, (exp_qty, act_qty) in (discrepant or {}).items():
+                key = str(conid)
+                if key in ledger:
+                    continue                      # first sighting wins
+                excess = int(act_qty) - int(exp_qty)
+                avg = None
+                for pos in (actual_positions or []):
+                    if pos.get("instrument_id") != conid:
+                        continue
+                    raw = pos.get("raw") or {}
+                    for f in ("avgPrice", "avg_price", "baseAvgPrice"):
+                        if raw.get(f) not in (None, ""):
+                            try:
+                                avg = float(raw[f])
+                            except (TypeError, ValueError):
+                                avg = None
+                            break
+                    if avg is not None:
+                        break
+                ledger[key] = {
+                    "conid": key,
+                    "expected": int(exp_qty),
+                    "actual": int(act_qty),
+                    "excess": excess,
+                    "avg_price": avg,
+                    "est_unbooked": (round(abs(excess) * avg * 100.0, 2)
+                                     if avg is not None else None),
+                    "first_seen": now.strftime("%Y-%m-%d %H:%M:%S"),
+                }
+                logger.warning(
+                    "  QTY-LEDGER conid %s: %+d contract(s) beyond expected "
+                    "(%d vs %d) at avg $%s — est $%s of premium is OUTSIDE the "
+                    "booked record. Carried to the settlement reconciliation.",
+                    key, excess, act_qty, exp_qty,
+                    "?" if avg is None else f"{avg:.4f}",
+                    "?" if ledger[key]["est_unbooked"] is None
+                    else f"{ledger[key]['est_unbooked']:.2f}",
+                )
+        except Exception as exc:  # noqa: BLE001 — bookkeeping must not break recon
+            logger.warning("  QTY-LEDGER: could not record mismatch (%s: %s)",
+                           type(exc).__name__, exc)
+
     @staticmethod
     def _actual_position_quantities(
         positions: List[Dict[str, Any]],
@@ -14746,6 +14869,34 @@ class HydraStrategy(MEICStrategy):
                         logger.warning(
                             "    POS-003-RAW conid %s: could not dump rows "
                             "(%s: %s)", conid, type(_raw_exc).__name__, _raw_exc)
+                # QTY-LEDGER (2026-11-14): carry the mismatch into the P&L
+                # record, costed.
+                #
+                # POS-003 already DETECTS an over-fill reliably — on 2026-11-13
+                # it read conid 935332834 at 9 against an expected 7 at 14:32,
+                # the only check that ever saw the truth. But detection stopped
+                # at "manual review": nothing priced the surplus, so the 2 extra
+                # long calls (~$127 of premium, paid and expired worthless) sat
+                # outside the books and the day still reported +$866.90.
+                #
+                # Why not compare quantities at settlement instead: by then every
+                # leg reads q=0.0 (post-expiry), so the surplus is unobservable
+                # there. The intraday reading is the ONLY place the number exists,
+                # which is why it has to be captured when seen.
+                # Defensive at the CALL SITE, not only inside the method.
+                # `_record_qty_mismatch` guards its own body, but resolving
+                # `self._record_qty_mismatch` can itself raise AttributeError on
+                # a partially-built object — and that fires OUTSIDE the method's
+                # try, taking the POS-003 alert and the discrepancy resolution
+                # down with it. Four existing dedup tests caught exactly that:
+                # send_alert.call_count went 1 -> 0. Bookkeeping beside a safety
+                # check must not be able to break it, which is what this method
+                # claims; this makes the claim true.
+                try:
+                    self._record_qty_mismatch(discrepant, actual_positions, now)
+                except Exception as _ql_exc:  # noqa: BLE001
+                    logger.warning("  QTY-LEDGER: recorder unavailable (%s: %s)",
+                                   type(_ql_exc).__name__, _ql_exc)
                 # De-dup the ALERT only — see _recon_latch_key. A mismatch that
                 # `_handle_position_discrepancies` cannot resolve ("STILL REFUSES
                 # TO GUESS" — ties and unexplainable quantities go to manual
@@ -15202,6 +15353,10 @@ class HydraStrategy(MEICStrategy):
         # Kept OUT of `_refresh_market_data_health` deliberately — that one
         # does not clear outside the session, so after the close an operator
         # can still see that the day ran degraded.
+        # QTY-LEDGER is day-scoped: a surplus is attributed to the session
+        # that created it, and carrying it over would double-count it against
+        # tomorrow's reconciliation.
+        self._qty_mismatch_ledger = {}
         self._md_degraded_reason = None
         self._md_degraded_since = None
         self._md_alert_episode = None

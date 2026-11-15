@@ -9,6 +9,89 @@ Account: paper only on this branch. Saxo Bank has been removed end-to-end
 — see Version History 2.0.0-rc.1 and `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 
 
+### 2026-11-15 — the over-fill, at all three layers (prevent / record / observe)
+
+2026-11-13 left **2 untracked long calls** in the live account (conid 935332834,
+broker 9 against a tracked 7). Root-caused and fixed at each layer. All figures
+below were measured across every retained log on 2026-11-14, not estimated.
+
+**THE MECHANISM.** Entry #5, Call 7595:
+
+    14:16:22  cancel order ...522 (5/7 filled)   partial banked
+    14:16:33  Attempt 2 @ $0.55                  sized for 2
+    14:17:08  cancel order ...523 (0/2 filled)   <-- read 0; it FILLED 2
+    14:17:12  Attempt 3 @ $0.70                  sized for 2 AGAIN
+    14:17:14  "Filled Call 7595.0 7/7"           broker held NINE
+
+**(1) PREVENT — `base_strategy`, one line.** The terminal-fill wait was scoped
+to `snapshot > 0`. The reasoning behind that scope was RIGHT ("the over-fill
+arises only when we size a REMAINDER") and the TEST for it was wrong: it asked
+"did THIS rung fill?" when the hazard is "do we already hold a partial the next
+rung will complete?". Those differ in exactly the case that cost money —
+snapshot 0, `filled_so_far` 5. Now `snapshot > 0 or filled_so_far > 0`.
+
+Same category error as the monotonic clamp of 2026-11-10 (`c43f4cfe`) —
+believing a post-cancel count — in the one branch that fix did not cover, and
+it recurred three days later.
+
+⚠️ **I first removed the scope ENTIRELY and that was wrong twice over.** Each
+wait costs the whole `ORDER_SETTLE_TIMEOUT_S`, because a cancelled order rarely
+reaches terminal inside it (the strict path's cancel-to-next-rung median IS
+6.0s, the full budget). Dropping the scope would have added that to **255**
+full-leg rungs that cannot over-fill, lengthening the window in which entry
+placement BLOCKS the stop monitor — against a measured 54s stop warning time —
+and on a terse status read it aborted legs, breaking `test_order010_settle`'s
+pinned "unsettled is treated as a FAILED CANCEL". Breadth is not free safety.
+Scoping to the hazard covers it at **11** extra waits instead of 255.
+
+Measured: 11 zero-read remainder rungs · 255 zero-read full-leg rungs · 66
+already-strict partial rungs · 7 over-fill incidents, **+29 contracts**
+(+7, +6, +6, +5, +2, +2, +1) · strict path has run 66 times with ZERO
+`ORDER-010-SETTLE` and ZERO `L-C3`, so IBKR does populate the count in practice.
+
+**(2) RECORD — new QTY-LEDGER.** POS-003 already detected this reliably (it read
+9 at 14:32, the only check that ever saw the truth) but stopped at "manual
+review", so ~$127 of premium sat outside the books and the day still reported
++$866.90. A confirmed mismatch is now priced from the broker's own `avgPrice`,
+kept at its FIRST sighting, persisted (the figure is unobservable after expiry —
+every leg reads `q=0.0`) and cleared daily.
+
+Also corrected: BROKER-RECONCILE's `is_ours` split is by **STRIKE membership
+only**, so a surplus at one of our own strikes reads as "ours" and is invisible
+to the orphan category — which is why the 7595 call never appeared as an orphan.
+And the DECOMPOSED line claimed orphans "**is** the drift"; **2026-11-12 is the
+control that falsifies it** — zero orphan legs, per-leg sum matching IBKR to ONE
+CENT (−1066.68 vs −1066.69), and our gross still $123.31 adrift. It now names
+two contributors and prints the remainder as an explicit RESIDUAL.
+
+**(3) OBSERVE — A2.** A deferred decline now logs `A2-UNRESOLVED` instead of
+repeating the first pass's line verbatim. On 11-13 both passes read +5 (the
+second 121s later, against a true 9) and logged identically, so nothing
+distinguished "confirmed fine" from "gave up". ⚠️ The 120s settle window is
+**deliberately NOT tuned**: that would fit a constant to a single observation,
+and the design requires the deferred decline to be terminal.
+
+**Three defects of my own, caught in the loop and worth recording:**
+
+* A `@staticmethod` THEFT. The new method was inserted directly above
+  `_actual_position_quantities`, landing between its decorator and its def —
+  so the new method silently became a staticmethod and the neighbour lost its
+  decorator, breaking 7 settlement tests. Every one of my own tests still
+  passed, because they called it UNBOUND. There are now two controls that call
+  it through an instance and assert the neighbour kept its decorator.
+* The call site resolved `self._record_qty_mismatch` OUTSIDE the method's own
+  try, so an AttributeError on a partial object took the POS-003 alert and the
+  discrepancy resolution down with it (4 dedup tests: `send_alert` 1 -> 0). The
+  docstring promised it could not break reconciliation; now it cannot.
+* `est_unbooked` is a MAGNITUDE, and the aggregate printed `-abs(...)` —
+  asserting a cost for UNDER-fills too, which pull the other way. Over and
+  under are reported separately and never netted.
+
+Tests: `tests/test_overfill_hardening_2026_11_14.py` (19). Nine mutation
+controls on the final design, all caught; two of my first-draft tests PASSED
+against their own mutation and were rewritten, and one brittle
+digits-in-a-comment test was deleted rather than contorted. 6,471 pass.
+
 ### 2026-11-11 — two false alarms: H's phantom CRITICAL, and duplicate alert emails
 
 **1. H reported a false CRITICAL on every restart that followed a skip.** The
