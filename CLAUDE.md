@@ -813,6 +813,37 @@ gcloud pubsub subscriptions describe "$SUB" --project=calypso-trading-bot --form
 > watches; the DLQ is FORENSIC). The delivery subscription is **eventarc-managed**,
 > so **re-check `deadLetterPolicy` after any eventarc / Cloud Function redeploy.**
 
+> ⚠️ **Corrected 2026-11-15 — the DLQ CANNOT engage on a delivery failure, and
+> "retried for the 24h retention window" above never happened.** Established by
+> probe (one alert, Gmail forced to reject the recipient with `553 5.1.3`):
+> **exactly one invocation, no retry at the subscription's 10s minimum backoff nor
+> in the 150s after, DLQ still empty.**
+>
+> The cause is our own code, not any retry setting. `process_alert` wraps its
+> entire body in `except Exception` and **returns normally on every input**, so
+> functions_framework always answers the push 2xx, Pub/Sub acks, and
+> `deliveryAttempt` never leaves 1. `maxDeliveryAttempts=50` is therefore
+> unreachable from any **application** failure — including the one you would most
+> want retried, Telegram or Gmail being down. Such an alert is logged and
+> **dropped**, both now and before 2026-10-07.
+>
+> What CAN still reach the DLQ is a failure where the function never returns 2xx:
+> container start failure, OOM, timeout past `ackDeadlineSeconds: 600`, or a
+> no-instance 5xx. For those the wiring is live and coherent — the
+> eventarc-managed subscription carries `retryPolicy` 10s-600s backoff plus the
+> 50-attempt dead-letter policy, and 50 attempts fit inside the 86400s retention.
+>
+> ℹ️ The function's `eventTrigger.retryPolicy: RETRY_POLICY_DO_NOT_RETRY` is a red
+> herring: it is **not** what stops the retry (the backing subscription *does*
+> retry), and the Eventarc trigger itself carries no retry field at all.
+>
+> 🔴 **Every application log line lands at severity DEFAULT in
+> `run.googleapis.com/stderr` — the records carry no `severity` field at all.** So
+> a `severity>=WARNING` filter matches **nothing this function logs**, which is a
+> query I ran during this very audit and briefly believed. Match
+> `textPayload:"..."` instead. Measured that way: **zero real delivery failures in
+> the 30 days to 2026-11-15** (the only hits were the probe's own).
+
 > ⚠️ **`gcloud functions logs read` shows you NOTHING but platform noise, and
 > that is not a symptom — it is the only stream there was.** `process-trading-alert`
 > is **GEN_2** (a Cloud Run service), and until 2026-11-15 its application logs
