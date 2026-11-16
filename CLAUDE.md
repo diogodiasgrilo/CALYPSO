@@ -674,12 +674,35 @@ D and E both subclass `bots/hydra/calendar_strategy_base.py` (`CalendarStrategyB
 > and **hedging** as the adverse-move response. B has **no VIX floor, 7 entry slots, a fixed 40%-of-width
 > stop, and both hedges disabled.**
 >
-> 🔴 **B has traded 0 of 53 live days at VIX ≥ 19.** It has now *seen* his regime once
-> (max VIX **20.25**, one day ≥ 19) and did **not** trade it, so his 22.5%/"40% in a
-> quarter" results are **NOT evidence for B** and must not be cited at any go-live gate.
-> Applying his VIX filter retroactively still yields **zero trades**, so "make B faithful"
-> would delete the strategy, not fix it. B is HYDRA's IC engine using three of his ideas
-> (8δ strikes, GEX adjuster, 80% TP) on a MEIC grid he never proposed.
+> B is HYDRA's IC engine using three of his ideas (8δ strikes, GEX adjuster, 80% TP) on a
+> MEIC grid he never proposed. **His 22.5% / "40% in a quarter" results are still NOT
+> evidence for B and must not be cited at any go-live gate** — but as of 2026-11-16 the
+> *reason* is no longer "B never trades his regime", and the paragraph that said so is
+> below.
+>
+> ⚠️ **Corrected 2026-11-16: this said in bold red "B has traded 0 of 53 live days at
+> VIX ≥ 19 … max VIX 20.25, one day ≥ 19 … applying his VIX filter retroactively still
+> yields zero trades". Every one of those numbers is now false, and the claim inverted
+> somewhere around 2026-10-22.** Measured from `daily_summaries` on B-A's own live era
+> (81 days since the 2026-07-24 swap), VIX taken as max(open, close):
+>
+> | B-A, live era | |
+> |---|---|
+> | max VIX seen | **26.84** (not 20.25) |
+> | days **traded** at VIX ≥ 19 | **10** (not 0) — 10-16, 10-22, 10-23, 10-26, 10-30, 11-02, 11-03, 11-05, 11-06, 11-10 |
+> | record in his regime | **−$1,168.30**, mean −$116.83/day, **t = −0.15** |
+> | record below VIX 19 | −$2,433.05 over 51 traded days, mean −$47.71, **t = −0.22** |
+>
+> So B now **does** trade Brandon's stated VIX band, and has done for about a month. The
+> conclusion survives — it just rests on a measurement instead of an absence: **inside his
+> regime B's edge is still indistinguishable from zero (t = −0.15) and no better than
+> outside it.** "Make B faithful" would no longer delete the strategy, so that argument is
+> retired too; the open question is now the ordinary one of whether a VIX floor helps, and
+> at n=10 this record cannot answer it.
+>
+> 🔴 **The operator lesson is the file's own: a red warning that has gone stale is worse
+> than no warning.** This one was quoted at go-live gates for three weeks after it stopped
+> being true. Re-measure before citing — the query is four lines against `daily_summaries`.
 >
 > ⚠️ **Corrected 2026-10-06: this said "0 of 45 days (max seen 18.97). Its entire
 > +$6,476.60 … Judge it on our own record (t = 0.83)". All three figures are now wrong,
