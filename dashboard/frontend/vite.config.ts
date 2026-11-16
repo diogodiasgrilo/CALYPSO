@@ -9,7 +9,16 @@ export default defineConfig({
     tailwindcss(),
     VitePWA({
       registerType: "autoUpdate",
-      includeAssets: ["favicon.ico", "hydra-logo.png"],
+      // hydra-logo-192.png, NOT the 960px master: `includeAssets` is a
+      // PRECACHE list, so leaving the 571,778-byte original here would
+      // have kept downloading it on every service-worker update even
+      // after no <img> referenced it any more.
+      //
+      // hydra-logo-120.png is deliberately NOT here: the iOS Scriptable
+      // widget fetches it directly (dashboard/scriptable/HYDRA_Widget.js),
+      // so it must keep being SERVED, but the web app never shows it and
+      // has no reason to precache it.
+      includeAssets: ["favicon.ico", "hydra-logo-192.png"],
       manifest: {
         name: "CALYPSO — HYDRA Dashboard",
         short_name: "CALYPSO",

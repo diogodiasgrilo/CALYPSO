@@ -195,8 +195,17 @@ export function Header() {
       {/* Left: Logo + title + connection + strategy picker */}
       <div className="flex items-center gap-3 max-sm:gap-2 min-w-0">
         <img
-          src="/hydra-logo.png"
+          // 192px, not the 960px master. This rendered a 571,778-byte 960x960
+          // PNG into a 32px box (24px on mobile) — on its own LARGER than all
+          // the eager JavaScript on the page put together, and downloaded on
+          // every cold load. 192px covers 56px at 3x DPR, which is the biggest
+          // box this logo appears in (the login screen). The master is still
+          // in public/ and still served, it is simply no longer referenced or
+          // precached. Don't "simplify" this back to hydra-logo.png.
+          src="/hydra-logo-192.png"
           alt="HYDRA"
+          width={32}
+          height={32}
           className="h-8 w-8 max-sm:h-6 max-sm:w-6 rounded"
           onError={(e) => {
             (e.target as HTMLImageElement).style.display = "none";

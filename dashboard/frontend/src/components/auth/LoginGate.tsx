@@ -189,8 +189,14 @@ export function LoginGate({ children }: { children: ReactNode }) {
       >
         <div className="flex flex-col items-center text-center">
           <img
-            src="/hydra-logo.png"
+            // 192px, not the 960px master — see Header.tsx. This one mattered
+            // most: the login screen is the FIRST thing loaded, so a half-
+            // megabyte image competed with the JavaScript needed to render the
+            // form itself.
+            src="/hydra-logo-192.png"
             alt="HYDRA"
+            width={56}
+            height={56}
             className="h-14 w-14 rounded-xl mb-3"
             onError={(e) => ((e.target as HTMLImageElement).style.display = "none")}
           />
