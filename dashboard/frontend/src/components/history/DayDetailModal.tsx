@@ -6,6 +6,7 @@ import { DayDetailChart } from "./DayDetailChart";
 import { DayDetailEntries } from "./DayDetailEntries";
 import { SessionReplay } from "./SessionReplay";
 import type { DaySummary, DayEntry, DayStop, OHLCBar } from "./types";
+import { apiFetch } from "../../lib/apiFetch";
 
 type DetailTab = "overview" | "replay";
 
@@ -45,8 +46,8 @@ export function DayDetailModal({
     // only its entry/stop markers — which ride on `entries`/`stops` — need scoping.
     const sid = encodeURIComponent(strategyId);
     Promise.all([
-      fetch(`/api/hydra/entries?date_str=${date}&strategy_id=${sid}`).then((r) => r.json()),
-      fetch(`/api/market/ohlc?date_str=${date}`).then((r) => r.json()),
+      apiFetch(`/api/hydra/entries?date_str=${date}&strategy_id=${sid}`).then((r) => r.json()),
+      apiFetch(`/api/market/ohlc?date_str=${date}`).then((r) => r.json()),
     ])
       .then(([entryData, ohlcData]) => {
         setEntries(entryData.entries ?? []);

@@ -27,6 +27,8 @@ import type {
   CalendarComparisonPayload,
   CalendarAggregatePayload,
 } from "../components/comparison/CalendarComparison";
+import { apiFetch } from "../lib/apiFetch";
+import { startPolling } from "../lib/startPolling";
 
 const POLL_MS = 2000;
 const AGG_POLL_MS = 30_000;
@@ -62,7 +64,7 @@ interface GroupAggregateEnvelope {
 
 async function fetchJSON<T>(url: string): Promise<T | null> {
   try {
-    const r = await fetch(url);
+    const r = await apiFetch(url);
     if (!r.ok) return null;
     return (await r.json()) as T;
   } catch {
@@ -112,13 +114,16 @@ export function GroupComparison() {
       if (mounted && json) setAggregate(json);
     };
 
-    tick();
+    // The 2s poller is guarded against overlapping itself (a 10s request
+    // deadline at a 2s cadence can stack). The 30s aggregate cannot overlap —
+    // its deadline is shorter than its interval — so it stays a plain
+    // interval rather than carrying a guard that can never fire.
+    const stop = startPolling(tick, POLL_MS);
     aggTick();
-    const id = setInterval(tick, POLL_MS);
     const aggId = setInterval(aggTick, AGG_POLL_MS);
     return () => {
       mounted = false;
-      clearInterval(id);
+      stop();
       clearInterval(aggId);
     };
   }, [groupId]);

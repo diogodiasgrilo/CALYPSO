@@ -13,6 +13,7 @@ import {
 import { formatPnL } from "../../lib/formatters";
 import { colors, pnlColor } from "../../lib/tradingColors";
 import { Skeleton } from "../shared/Skeleton";
+import { apiFetch } from "../../lib/apiFetch";
 
 interface MetricCardProps {
   label: string;
@@ -59,7 +60,7 @@ export function PerformanceMetrics({ dailyPnls: dailyPnlsProp }: PerformanceMetr
     // variant's OWN performance), so DON'T fetch the primary's endpoint.
     if (usingProps) return;
     let cancelled = false;
-    fetch("/api/metrics/performance")
+    apiFetch("/api/metrics/performance")
       .then((r) => {
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
         return r.json();

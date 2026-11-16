@@ -31,6 +31,7 @@ import { markersForStrategy } from "../lib/strategyMarkers";
 import { CorrelationHeatmap } from "../components/market/CorrelationHeatmap";
 import { Download, CalendarRange } from "lucide-react";
 import { exportEntriesCSV } from "../lib/exportUtils";
+import { apiFetch } from "../lib/apiFetch";
 
 // ── Interfaces ──────────────────────────────────────────────────────────────
 
@@ -219,9 +220,9 @@ export function Analytics() {
   useEffect(() => {
     const sid = `strategy_id=${strategyId}`;
     Promise.all([
-      fetch(`/api/metrics/entries?${sid}`).then((r) => r.json()),
-      fetch(`/api/metrics/stops?${sid}`).then((r) => r.json()),
-      fetch(`/api/metrics/daily?days=365&${sid}`).then((r) => r.json()),
+      apiFetch(`/api/metrics/entries?${sid}`).then((r) => r.json()),
+      apiFetch(`/api/metrics/stops?${sid}`).then((r) => r.json()),
+      apiFetch(`/api/metrics/daily?days=365&${sid}`).then((r) => r.json()),
     ])
       .then(([entryData, stopData, summaryData]) => {
         setEntries(entryData.entries ?? []);

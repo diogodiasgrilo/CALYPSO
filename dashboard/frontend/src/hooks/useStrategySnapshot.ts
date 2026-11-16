@@ -14,6 +14,8 @@
 import { useEffect, useState } from "react";
 import type { DataKind, PnlShape } from "./useStrategyMeta";
 import type { BrandonOverlay } from "../store/hydraStore";
+import { apiFetch } from "../lib/apiFetch";
+import { startPolling } from "../lib/startPolling";
 
 const POLL_MS = 2000;
 
@@ -259,7 +261,7 @@ export function useStrategySnapshot(
 
     const tick = async () => {
       try {
-        const r = await fetch(`/api/strategies/${strategyId}/snapshot`);
+        const r = await apiFetch(`/api/strategies/${strategyId}/snapshot`);
         if (!mounted) return;
         if (!r.ok) {
           setError(`HTTP ${r.status}`);
@@ -280,11 +282,13 @@ export function useStrategySnapshot(
       }
     };
 
-    tick();
-    const handle = setInterval(tick, POLL_MS);
+    // Non-overlapping: every /api call carries a 10s deadline, so at a 2s
+    // cadence a slow link could otherwise have five snapshots in flight at
+    // once, landing out of order.
+    const stop = startPolling(tick, POLL_MS);
     return () => {
       mounted = false;
-      clearInterval(handle);
+      stop();
     };
   }, [strategyId, enabled]);
 

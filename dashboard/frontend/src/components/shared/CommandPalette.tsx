@@ -5,6 +5,7 @@ import { useHydraStore } from "../../store/hydraStore";
 import { useStrategyMeta } from "../../hooks/useStrategyMeta";
 import { useSelectedStrategy } from "../../hooks/useSelectedStrategy";
 import { exportDailySummariesCSV } from "../../lib/exportUtils";
+import { apiFetch } from "../../lib/apiFetch";
 
 interface Command {
   id: string;
@@ -112,7 +113,7 @@ export function CommandPalette({ open, onClose }: CommandPaletteProps) {
       label: "Export CSV",
       icon: <Download size={14} />,
       action: () => {
-        fetch(
+        apiFetch(
           `/api/metrics/daily?year=${new Date().getFullYear()}` +
             (exportStrategy?.id ? `&strategy_id=${encodeURIComponent(exportStrategy.id)}` : ""),
         )

@@ -38,6 +38,8 @@ import {
 import { colors, pnlColor, cushionColor } from "../lib/tradingColors";
 import { formatPnL, isRegularSessionTime } from "../lib/formatters";
 import { accentForStrategy } from "../lib/pnlShape";
+import { apiFetch } from "../lib/apiFetch";
+import { startPolling } from "../lib/startPolling";
 
 const POLL_MS = 2000;
 
@@ -250,7 +252,7 @@ interface Health {
 
 async function fetchJSON<T>(url: string): Promise<T | null> {
   try {
-    const r = await fetch(url);
+    const r = await apiFetch(url);
     if (!r.ok) return null;
     return (await r.json()) as T;
   } catch {
@@ -302,13 +304,14 @@ export function Comparison() {
       }
     };
 
-    tick();
+    // See GroupComparison: the 2s poller is guarded, the 30s one cannot
+    // overlap (10s deadline < 30s interval) and so is left plain.
+    const stop = startPolling(tick, POLL_MS);
     aggTick();
-    const id = setInterval(tick, POLL_MS);
     const aggId = setInterval(aggTick, 30_000);
     return () => {
       mounted = false;
-      clearInterval(id);
+      stop();
       clearInterval(aggId);
     };
   }, []);

@@ -8,10 +8,12 @@
 // none of the app's other ~dozens of `fetch("/api/...")` call sites need any
 // change.
 
+import { apiFetch } from "./lib/apiFetch";
+
 const BASE = "/api/auth";
 
 async function postJson(path: string, body: unknown) {
-  const r = await fetch(`${BASE}${path}`, {
+  const r = await apiFetch(`${BASE}${path}`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     credentials: "same-origin",
@@ -69,13 +71,13 @@ export async function verifyTotp(pendingToken: string, code: string): Promise<Ve
 }
 
 export async function logout(): Promise<void> {
-  await fetch(`${BASE}/logout`, { method: "POST", credentials: "same-origin" }).catch(() => {});
+  await apiFetch(`${BASE}/logout`, { method: "POST", credentials: "same-origin" }).catch(() => {});
 }
 
 /** Returns the signed-in username, or null if not authenticated. */
 export async function getCurrentUser(): Promise<string | null> {
   try {
-    const r = await fetch(`${BASE}/me`, { credentials: "same-origin" });
+    const r = await apiFetch(`${BASE}/me`, { credentials: "same-origin" });
     if (!r.ok) return null;
     const data = await r.json();
     return data.username ?? null;

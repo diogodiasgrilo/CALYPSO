@@ -51,6 +51,7 @@ import {
   todayInNewYork,
   valueStrangleAt,
 } from "../lib/strangleVerdict";
+import { apiFetch } from "../lib/apiFetch";
 
 interface Mark {
   timestamp: string;
@@ -580,7 +581,7 @@ export function LongStrangle() {
   useEffect(() => {
     let cancelled = false;
     const load = () =>
-      fetch("/api/long-strangle/status")
+      apiFetch("/api/long-strangle/status")
         .then((r) => (r.ok ? r.json() : Promise.reject(new Error(String(r.status)))))
         .then((d: Status) => {
           if (!cancelled) {
@@ -592,7 +593,7 @@ export function LongStrangle() {
           if (!cancelled) setFailed(true);
         });
     const loadRecent = () =>
-      fetch("/api/long-strangle/recent?limit=30")
+      apiFetch("/api/long-strangle/recent?limit=30")
         .then((r) => (r.ok ? r.json() : { rows: [] }))
         .then((d: { rows: RecentRow[] }) => {
           if (!cancelled) setRecent(d.rows ?? []);

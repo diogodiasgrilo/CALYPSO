@@ -22,9 +22,40 @@
  * panels is NOT gated on the log.)
  */
 
-import { SPXChart } from "../market/SPXChart";
+// ── THE TWO CHARTS ARE DEFERRED ───────────────────────────────────────────
+// recharts (341.9 kB) + lightweight-charts (170.7 kB) are 512.6 kB — about
+// half the pre-split bundle — and BOTH are reachable from this, the landing
+// view, so route splitting could not move them. Static imports meant a phone
+// parsed all of it before it could paint the header, the entry grid or the
+// P&L: the numbers an operator actually opens this page for.
+//
+// Deferred, the page becomes readable first and the charts fill in a beat
+// later. The Suspense fallbacks are SIZED to the real chart boxes (SPXChart
+// sets height:300 plus its header; PnLCurve's ResponsiveContainer is 150) so
+// nothing reflows when they arrive — CI's responsive sweep fails the build on
+// any horizontal overflow, and a zero-height placeholder is how you get a
+// layout shift instead of a load.
+
+/** Placeholder with the same box as the chart it stands in for. */
+function ChartSkeleton({ height, label }: { height: number; label: string }) {
+  return (
+    <div>
+      <div className="flex items-center justify-between mb-2">
+        <h3 className="label-upper">{label}</h3>
+      </div>
+      <div
+        className="rounded-lg border border-border-dim bg-bg-elevated/30 animate-pulse"
+        style={{ height }}
+        aria-label={`${label} loading`}
+      />
+    </div>
+  );
+}
+
+const SPXChart = lazy(() => import("../market/SPXChart").then((m) => ({ default: m.SPXChart })));
+import { lazy, Suspense } from "react";
 import { DailyPnLCard } from "../pnl/DailyPnLCard";
-import { PnLCurve } from "../pnl/PnLCurve";
+const PnLCurve = lazy(() => import("../pnl/PnLCurve").then((m) => ({ default: m.PnLCurve })));
 import { EntryGrid } from "../entries/EntryGrid";
 import { EntryTimeline } from "../entries/EntryTimeline";
 import { AgentStatusPanel } from "../agents/AgentStatusPanel";
@@ -104,13 +135,17 @@ function PrimaryICView() {
           <>
             <div className="grid grid-cols-12 gap-3 max-lg:grid-cols-1">
               <div className="col-span-8 max-lg:col-span-1">
-                <SPXChart />
+                <Suspense fallback={<ChartSkeleton height={300} label="SPX 1-Min" />}>
+                  <SPXChart />
+                </Suspense>
               </div>
               <div className="col-span-4 max-lg:col-span-1">
                 <DailyPnLCard />
               </div>
             </div>
-            <PnLCurve />
+            <Suspense fallback={<ChartSkeleton height={150} label="P&L Curve" />}>
+              <PnLCurve />
+            </Suspense>
             <EntryGrid />
             <PositionHeatmap />
             <PerformanceMetrics />
@@ -277,7 +312,9 @@ function PolledICView({ body, strategyId }: { body: ICSnapshotBody; accent: stri
         {/* SPX candle chart (this variant's OWN bars) + Today/Cumulative cards */}
         <div className="grid grid-cols-12 gap-3 max-lg:grid-cols-1">
           <div className="col-span-8 max-lg:col-span-1">
-            <SPXChart ohlc={ohlc} entries={entries} date={body.date ?? null} />
+            <Suspense fallback={<ChartSkeleton height={300} label="SPX 1-Min" />}>
+              <SPXChart ohlc={ohlc} entries={entries} date={body.date ?? null} />
+            </Suspense>
           </div>
           <div className="col-span-4 max-lg:col-span-1">
             <DailyPnLCard summary={body.summary} cumulative={body.cumulative ?? {}} entries={entries} />
@@ -293,7 +330,9 @@ function PolledICView({ body, strategyId }: { body: ICSnapshotBody; accent: stri
           />
         )}
 
-        <PnLCurve pnlHistory={body.pnl_history ?? []} />
+        <Suspense fallback={<ChartSkeleton height={150} label="P&L Curve" />}>
+          <PnLCurve pnlHistory={body.pnl_history ?? []} />
+        </Suspense>
         <EntryGrid entries={entries} />
         <PositionHeatmap entries={entries} spx={spx} />
         <PerformanceMetrics dailyPnls={body.performance?.daily_pnls ?? []} />

@@ -67,8 +67,20 @@ jobs:
         # A plain `eslint .` would be red every run and get ignored.
         working-directory: .
         run: python3 -m scripts.check_eslint_baseline
+      - name: Unit tests
+        # Added 2026-11-16 with the runner itself. The dashboard had six
+        # Playwright specs and no unit runner, so the one thing nothing could
+        # assert was component BEHAVIOUR — above all re-render counts, which a
+        # screenshot cannot see. That is precisely the class of defect this
+        # step was introduced to pin.
+        run: npm test
       - name: Production build
         run: npm run build
+      - name: First-parse JS budget
+        # Fails if a heavy static import rejoins the entry chunk. The split it
+        # guards took the eager bundle from 1,057,495 B to 416,025 B; undoing
+        # it is a one-line change that breaks nothing and no test would notice.
+        run: node scripts/check-bundle-budget.mjs
 
   visual:
     name: 42-surface visual audit

@@ -17,11 +17,16 @@
 import { useSelectedStrategy } from "../../hooks/useSelectedStrategy";
 import { useStrategySnapshot } from "../../hooks/useStrategySnapshot";
 import { IronCondorDashboard } from "./IronCondorDashboard";
-import { LongStrangle } from "../../pages/LongStrangle";
+// Lazy: this file is reached from the EAGER landing route, so a static import
+// would drag H's whole long-gamma page (and its recharts usage) into the
+// first parse for every visitor, to render it for exactly one strategy.
+const LongStrangle = lazy(() =>
+  import("../../pages/LongStrangle").then((m) => ({ default: m.LongStrangle })),
+);
 import { CalendarDashboard } from "./CalendarDashboard";
 import { accentForStrategy } from "../../lib/pnlShape";
 import { useSelectedSnapshotStore } from "./selectedSnapshotStore";
-import { useEffect } from "react";
+import { useEffect, lazy, Suspense } from "react";
 import type {
   ICSnapshotBody,
   DCSnapshotBody,
@@ -67,7 +72,11 @@ export function StrategyDashboard() {
   // so it would show credit, cushion bars and a spread width H does not have.
   // This is the case the old two-way `data_kind` switch silently mis-rendered.
   if (strategy.data_kind === "long_gamma") {
-    return <LongStrangle />;
+    return (
+      <Suspense fallback={<div className="p-6 text-text-secondary">Loading {strategy.display_name}…</div>}>
+        <LongStrangle />
+      </Suspense>
+    );
   }
 
   // 3. Calendar strategy → polled calendar view.

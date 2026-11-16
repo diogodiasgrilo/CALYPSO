@@ -8,6 +8,7 @@ import { PeriodSummary } from "../components/history/PeriodSummary";
 import { exportDailySummariesCSV } from "../lib/exportUtils";
 import type { DaySummary } from "../components/history/types";
 import { useSelectedStrategy } from "../hooks/useSelectedStrategy";
+import { apiFetch } from "../lib/apiFetch";
 
 export function History() {
   const [summaries, setSummaries] = useState<DaySummary[]>([]);
@@ -28,7 +29,7 @@ export function History() {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- reset-then-load when the year or strategy changes; the extra render IS the loading state
     setLoading(true);
-    fetch(`/api/metrics/daily?year=${selectedYear}&strategy_id=${strategyId}`)
+    apiFetch(`/api/metrics/daily?year=${selectedYear}&strategy_id=${strategyId}`)
       .then((r) => r.json())
       .then((data) => {
         setSummaries(data.summaries ?? []);

@@ -15,7 +15,15 @@ import { StrategySwitcher } from "../shared/StrategySwitcher";
 import type { ICSnapshotBody } from "../../hooks/useStrategySnapshot";
 
 export function Header() {
-  const { connectionStatus, hydraState, market, todayOHLC } = useHydraStore();
+  // Scoped selectors, not a bare `useHydraStore()`. Calling the hook with no
+  // selector subscribes to the WHOLE store, so this component re-rendered on
+  // every unrelated push (~1.5/s from the backend's 1s state + 2s log loops).
+  // One selector per field: each re-renders only when the field it reads
+  // actually changes. Pinned by src/__tests__/storeSubscriptions.test.tsx.
+  const connectionStatus = useHydraStore((s) => s.connectionStatus);
+  const hydraState = useHydraStore((s) => s.hydraState);
+  const market = useHydraStore((s) => s.market);
+  const todayOHLC = useHydraStore((s) => s.todayOHLC);
   const [muted, setMuted] = useState(isMuted());
   const cfg = useBotConfig();
   const meta = useStrategyMeta();

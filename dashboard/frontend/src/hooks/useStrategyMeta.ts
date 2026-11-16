@@ -10,6 +10,7 @@
  */
 
 import { useEffect, useState } from "react";
+import { apiFetch } from "../lib/apiFetch";
 
 /** A strategy's data renderer kind — drives StrategyDashboard's dispatch.
  *
@@ -135,7 +136,7 @@ function buildMeta(p: StrategyMetaPayload): StrategyMeta {
 function fetchMeta(): void {
   if (_inFlight || _cached) return;
   _inFlight = true;
-  fetch("/api/strategies/meta")
+  apiFetch("/api/strategies/meta")
     .then((r) => (r.ok ? r.json() : null))
     .then((data: StrategyMetaPayload | null) => {
       if (!data || !Array.isArray(data.strategies)) {

@@ -1,18 +1,47 @@
-import { useState, useCallback } from "react";
+import { useState, useCallback, lazy, Suspense } from "react";
 import { Routes, Route, NavLink, Navigate, useLocation } from "react-router-dom";
 import { LayoutDashboard, CalendarDays, BarChart3, Scale, CalendarRange } from "lucide-react";
 import { DashboardLayout } from "./components/layout/DashboardLayout";
 import { ErrorBoundary } from "./components/shared/ErrorBoundary";
 import { Dashboard } from "./pages/Dashboard";
-import { History } from "./pages/History";
-import { Analytics } from "./pages/Analytics";
-import { GroupComparison } from "./pages/GroupComparison";
-import { LongStrangle } from "./pages/LongStrangle";
 import { useWebSocket } from "./hooks/useWebSocket";
 import { useStrategyMeta } from "./hooks/useStrategyMeta";
-import { CommandPalette } from "./components/shared/CommandPalette";
 import { ToastContainer } from "./components/shared/ToastContainer";
 import { useKeyboardShortcuts } from "./hooks/useKeyboardShortcuts";
+
+// ── ROUTE-LEVEL CODE SPLITTING ────────────────────────────────────────────
+// Until 2026-11-16 every page was a static import, so the build produced ONE
+// 1,057,495-byte chunk (313 kB gzipped) and the browser had to parse all of it
+// before it could render anything at all — including the login form, which is
+// the first thing a visitor sees and needs none of this.
+//
+// `Dashboard` stays eager ON PURPOSE: it is the landing route, so making it
+// lazy would only trade parse time for an extra network round trip on the one
+// view every visit starts at. The four routes below are each reached by an
+// explicit click, which is exactly when their chunk can be fetched.
+//
+// These are named exports, hence the `.then(m => ({ default: m.X }))` — React's
+// `lazy` requires a module whose `default` is the component.
+const History = lazy(() => import("./pages/History").then((m) => ({ default: m.History })));
+const Analytics = lazy(() => import("./pages/Analytics").then((m) => ({ default: m.Analytics })));
+const GroupComparison = lazy(() =>
+  import("./pages/GroupComparison").then((m) => ({ default: m.GroupComparison })),
+);
+const LongStrangle = lazy(() =>
+  import("./pages/LongStrangle").then((m) => ({ default: m.LongStrangle })),
+);
+// Reachable only by keyboard shortcut, so it has no business in the first
+// parse. It renders null while closed, which is also a fine Suspense fallback.
+const CommandPalette = lazy(() =>
+  import("./components/shared/CommandPalette").then((m) => ({ default: m.CommandPalette })),
+);
+
+/** Shown while a route chunk is in flight. Deliberately plain text rather than
+ *  a spinner: a route chunk is a few tens of KB on a warm connection, and a
+ *  spinner that flashes for 80ms reads as jank. */
+function RouteFallback() {
+  return <div className="p-6 text-text-secondary text-sm">Loading…</div>;
+}
 
 // Tabs are now data-driven: one comparison tab per COMPARABLE group from the
 // taxonomy (/api/strategies/meta), no hardcoded variant letters. The single
@@ -154,6 +183,11 @@ function App() {
     <DashboardLayout>
       <NavTabs />
       <div className="mt-3">
+        {/* One boundary around the whole switch: only one route is mounted at
+            a time, so a per-route boundary would be the same thing written
+            five times. ErrorBoundary stays INSIDE each route so a chunk that
+            loads but then throws is still attributed to its own page. */}
+        <Suspense fallback={<RouteFallback />}>
         <Routes>
           <Route path="/" element={<ErrorBoundary label="Dashboard"><Dashboard /></ErrorBoundary>} />
           <Route path="/history" element={<ErrorBoundary label="History"><History /></ErrorBoundary>} />
@@ -169,8 +203,11 @@ function App() {
           <Route path="/comparison" element={<LegacyComparisonRedirect />} />
           <Route path="/dc" element={<LegacyDcRedirect />} />
         </Routes>
+        </Suspense>
       </div>
-      <CommandPalette open={cmdPaletteOpen} onClose={() => setCmdPaletteOpen(false)} />
+      <Suspense fallback={null}>
+        <CommandPalette open={cmdPaletteOpen} onClose={() => setCmdPaletteOpen(false)} />
+      </Suspense>
       <ToastContainer />
     </DashboardLayout>
   );

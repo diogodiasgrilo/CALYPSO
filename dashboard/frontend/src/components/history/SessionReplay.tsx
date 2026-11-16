@@ -11,6 +11,7 @@ import {
   Tooltip,
 } from "recharts";
 import { colors } from "../../lib/tradingColors";
+import { apiFetch } from "../../lib/apiFetch";
 
 interface Tick {
   timestamp: string;
@@ -85,9 +86,9 @@ export function SessionReplay({ date, strategyId = "" }: { date: string; strateg
     // the picked variant so the replay matches the strategy shown in History.
     const sid = encodeURIComponent(strategyId);
     Promise.all([
-      fetch(`/api/market/ticks?date_str=${date}`).then((r) => r.json()),
-      fetch(`/api/hydra/entries?date_str=${date}&strategy_id=${sid}`).then((r) => r.json()),
-      fetch(`/api/market/replay_pnl?date_str=${date}&strategy_id=${sid}`).then((r) => r.json()),
+      apiFetch(`/api/market/ticks?date_str=${date}`).then((r) => r.json()),
+      apiFetch(`/api/hydra/entries?date_str=${date}&strategy_id=${sid}`).then((r) => r.json()),
+      apiFetch(`/api/market/replay_pnl?date_str=${date}&strategy_id=${sid}`).then((r) => r.json()),
     ])
       .then(([tickData, entryData, pnlData]) => {
         const t = (tickData.ticks ?? []) as Tick[];

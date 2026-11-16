@@ -73,7 +73,14 @@ interface DailyPnLCardProps {
 export function DailyPnLCard({ summary, cumulative, entries: entriesProp }: DailyPnLCardProps = {}) {
   // Hooks always called; props (when present) override the WS-store reads so the
   // primary path is unchanged when no prop is passed.
-  const { hydraState, metrics: wsMetrics, comparisons: wsComparisons } = useHydraStore();
+  // Scoped selectors, not a bare `useHydraStore()`. Calling the hook with no
+  // selector subscribes to the WHOLE store, so this component re-rendered on
+  // every unrelated push (~1.5/s from the backend's 1s state + 2s log loops).
+  // One selector per field: each re-renders only when the field it reads
+  // actually changes. Pinned by src/__tests__/storeSubscriptions.test.tsx.
+  const hydraState = useHydraStore((s) => s.hydraState);
+  const wsMetrics = useHydraStore((s) => s.metrics);
+  const wsComparisons = useHydraStore((s) => s.comparisons);
 
   const usingProps = summary !== undefined || cumulative !== undefined;
   // Off-primary there is no historical-comparison stream (avg/best/worst) — it's

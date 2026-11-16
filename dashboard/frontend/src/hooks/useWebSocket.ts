@@ -22,21 +22,25 @@ export function useWebSocket() {
   const reconnectTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
   const heartbeatTimer = useRef<ReturnType<typeof setTimeout> | undefined>(undefined);
 
-  const {
-    setConnectionStatus,
-    applySnapshot,
-    applyStateUpdate,
-    applyMetricsUpdate,
-    applyMarketStatus,
-    applyOHLCUpdate,
-    applyLogLines,
-    applyStopEvents,
-    applyAgentsUpdate,
-    applyComparisons,
-    applyPerformanceUpdate,
-    addToast,
-    setClientCount,
-  } = useHydraStore();
+  // ── READ THE ACTIONS, SUBSCRIBE TO NOTHING ──────────────────────────────
+  // This used to be `const { ...13 actions } = useHydraStore()`. Calling the
+  // Zustand hook with no selector subscribes to the WHOLE store, and this hook
+  // is mounted in `App` — so every store mutation re-rendered the entire routed
+  // tree. The backend pushes `state_update` every 1.0s and `log_lines` every
+  // 2.0s, which made that roughly 1.5 full-app re-renders per second for as
+  // long as the page stayed open. On a phone it presented as "stuck loading"
+  // while the network showed every request answering 200 in ~3ms.
+  //
+  // The subscription was never needed. These are ACTIONS, not state: Zustand
+  // defines them once inside `create(...)`, so their identities are stable for
+  // the store's lifetime and nothing here renders from them. `getState` reads
+  // the current actions at call time without registering a listener.
+  //
+  // `getState` is itself a stable function reference, so it is safe in the
+  // dependency arrays below — which is what lets `connect` stay stable and the
+  // mount effect run exactly once instead of re-running (and tearing down a
+  // live socket) on every push.
+  const store = useHydraStore.getState;
 
   /** Reset heartbeat timeout — called on every received message. */
   const resetHeartbeatTimer = useCallback(() => {
@@ -44,15 +48,15 @@ export function useWebSocket() {
     heartbeatTimer.current = setTimeout(() => {
       // No message for 60s — connection is zombie
       console.warn("[WS] Heartbeat timeout — reconnecting");
-      setConnectionStatus("disconnected");
+      store().setConnectionStatus("disconnected");
       wsRef.current?.close();
     }, HEARTBEAT_TIMEOUT_MS);
-  }, [setConnectionStatus]);
+  }, [store]);
 
   const connect = useCallback(() => {
     if (wsRef.current?.readyState === WebSocket.OPEN) return;
 
-    setConnectionStatus("connecting");
+    store().setConnectionStatus("connecting");
 
     const protocol = window.location.protocol === "https:" ? "wss:" : "ws:";
     const host = window.location.host;
@@ -65,7 +69,7 @@ export function useWebSocket() {
     wsRef.current = ws;
 
     ws.onopen = () => {
-      setConnectionStatus("connected");
+      store().setConnectionStatus("connected");
       reconnectDelay.current = 1000; // Reset backoff
       resetHeartbeatTimer(); // Start heartbeat monitoring
     };
@@ -79,25 +83,25 @@ export function useWebSocket() {
 
         switch (msg.type) {
           case "snapshot":
-            applySnapshot(msg);
+            store().applySnapshot(msg);
             break;
           case "state_update":
-            applyStateUpdate(msg.data);
+            store().applyStateUpdate(msg.data);
             break;
           case "metrics_update":
-            applyMetricsUpdate(msg.data);
+            store().applyMetricsUpdate(msg.data);
             break;
           case "market_status":
-            applyMarketStatus(msg.data);
+            store().applyMarketStatus(msg.data);
             break;
           case "ohlc_update":
-            applyOHLCUpdate(msg.data);
+            store().applyOHLCUpdate(msg.data);
             break;
           case "log_lines":
-            applyLogLines(msg.data);
+            store().applyLogLines(msg.data);
             break;
           case "stop_events":
-            applyStopEvents(msg.data);
+            store().applyStopEvents(msg.data);
             // Toast notification for new stops — the WS stream tracks the
             // PRIMARY strategy only. Suppress these toasts while the user is
             // viewing a DIFFERENT strategy on the dashboard, so a primary-C
@@ -107,7 +111,7 @@ export function useWebSocket() {
             if (!isViewingNonPrimary()) {
               for (const stop of msg.data) {
                 if (stop.stop_time) {
-                  addToast({
+                  store().addToast({
                     type: "stop",
                     title: `Stop Triggered`,
                     message: `Entry #${stop.entry_number} ${stop.side} side stopped`,
@@ -117,16 +121,16 @@ export function useWebSocket() {
             }
             break;
           case "agents_update":
-            applyAgentsUpdate(msg.data);
+            store().applyAgentsUpdate(msg.data);
             break;
           case "performance_update":
-            if (msg.data?.daily_pnls) applyPerformanceUpdate(msg.data.daily_pnls);
+            if (msg.data?.daily_pnls) store().applyPerformanceUpdate(msg.data.daily_pnls);
             break;
           case "comparisons_update":
-            applyComparisons(msg.data);
+            store().applyComparisons(msg.data);
             break;
           case "heartbeat":
-            if (msg.clients != null) setClientCount(msg.clients);
+            if (msg.clients != null) store().setClientCount(msg.clients);
             // Respond with pong to keep alive
             if (ws.readyState === WebSocket.OPEN) {
               ws.send("pong");
@@ -147,34 +151,22 @@ export function useWebSocket() {
       // stale tab did this for hours). Stop and let LoginGate re-check auth
       // and send the user back through login instead.
       if (event.code === 4001) {
-        setConnectionStatus("auth_expired");
+        store().setConnectionStatus("auth_expired");
         return;
       }
-      setConnectionStatus("disconnected");
+      store().setConnectionStatus("disconnected");
       // eslint-disable-next-line react-hooks/immutability -- a socket event handler, which by definition runs after render — that is what an event handler IS
       scheduleReconnect();
     };
 
     ws.onerror = () => {
-      setConnectionStatus("error");
+      store().setConnectionStatus("error");
       ws.close();
     };
-  }, [
-    setConnectionStatus,
-    applySnapshot,
-    applyStateUpdate,
-    applyMetricsUpdate,
-    applyMarketStatus,
-    applyOHLCUpdate,
-    applyLogLines,
-    applyStopEvents,
-    applyAgentsUpdate,
-    applyComparisons,
-    applyPerformanceUpdate,
-    addToast,
-    setClientCount,
-    resetHeartbeatTimer,
-  ]);
+    // Was a 13-action list. Every one of those came from a whole-store
+    // subscription; they are read through `store()` now, so `connect` depends
+    // only on two stable references and is itself stable.
+  }, [store, resetHeartbeatTimer]);
 
   const scheduleReconnect = useCallback(() => {
     if (reconnectTimer.current) clearTimeout(reconnectTimer.current);

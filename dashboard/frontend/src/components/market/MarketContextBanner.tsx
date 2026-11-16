@@ -7,6 +7,7 @@ import { capitalBasisConfig } from "../../lib/pnlShape";
 import { useSelectedStrategy } from "../../hooks/useSelectedStrategy";
 import { pnlColor, colors } from "../../lib/tradingColors";
 import { Calendar, Clock, AlertTriangle, Sun, Coffee } from "lucide-react";
+import { apiFetch } from "../../lib/apiFetch";
 
 /** Format next_open ISO string as readable date/time. */
 function formatNextOpen(isoStr: string | undefined): string {
@@ -383,7 +384,7 @@ export function OffDaySummaryCards({
   const sidParam = strategyId ? `&strategy_id=${strategyId}` : "";
 
   useEffect(() => {
-    fetch(`/api/metrics/daily?days=10${sidParam}`)
+    apiFetch(`/api/metrics/daily?days=10${sidParam}`)
       .then((r) => r.json())
       .then((data) => {
         if (data.summaries) {
@@ -391,7 +392,7 @@ export function OffDaySummaryCards({
           // Fetch entries for the most recent day
           if (data.summaries.length > 0) {
             const lastDate = data.summaries[0].date;
-            fetch(`/api/hydra/entries?date_str=${lastDate}${sidParam}`)
+            apiFetch(`/api/hydra/entries?date_str=${lastDate}${sidParam}`)
               .then((r) => r.json())
               .then((eData) => {
                 if (eData.entries && eData.entries.length > 0) {

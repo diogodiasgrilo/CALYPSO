@@ -18,6 +18,7 @@
 
 import { useEffect, useState } from "react";
 import { useSelectedStrategy } from "./useSelectedStrategy";
+import { apiFetch } from "../lib/apiFetch";
 
 interface BotConfig {
   conditional_e6_enabled: boolean;
@@ -61,6 +62,18 @@ const DEFAULT_CONFIG: BotConfig = {
 /** Per-strategy cache. A single shared slot was half the bug this hook had. */
 const _cache = new Map<string, BotConfig>();
 
+/** Per-strategy IN-FLIGHT requests, so concurrent callers share one fetch.
+ *
+ *  The cache above is only populated when a response ARRIVES, so three
+ *  components mounting in the same tick (Header, EntryGrid, EntryTimeline all
+ *  call this hook) each saw an empty cache and each issued its own request.
+ *  Measured on a real page load: `/api/hydra/bot-config` was fetched twice
+ *  before this map existed. `useStrategyMeta` already guarded this with an
+ *  `_inFlight` flag — which is exactly why `/api/strategies/meta` appeared
+ *  once in the same log — so this is that proven pattern, keyed per strategy
+ *  rather than global because the request differs by `strategy_id`. */
+const _inFlight = new Map<string, Promise<void>>();
+
 /** Returns the selected strategy's bot config (cached per strategy id). */
 export function useBotConfig(): BotConfig {
   const { strategy } = useSelectedStrategy();
@@ -79,16 +92,32 @@ export function useBotConfig(): BotConfig {
   useEffect(() => {
     if (_cache.has(id)) return;          // already resolved — render has it
     let cancelled = false;
-    const qs = id ? `?strategy_id=${encodeURIComponent(id)}` : "";
-    fetch(`/api/hydra/bot-config${qs}`)
-      .then((r) => r.json())
-      .then((data: BotConfig) => {
-        _cache.set(id, data);
-        if (!cancelled) bump((n) => n + 1);   // re-render; render reads the cache
-      })
-      .catch(() => {
-        // On error, keep defaults (show nothing hidden unintentionally)
-      });
+
+    // Join the request another component already started for this id instead
+    // of opening a second one.
+    let request = _inFlight.get(id);
+    if (!request) {
+      const qs = id ? `?strategy_id=${encodeURIComponent(id)}` : "";
+      request = apiFetch(`/api/hydra/bot-config${qs}`)
+        .then((r) => r.json())
+        .then((data: BotConfig) => {
+          _cache.set(id, data);
+        })
+        .catch(() => {
+          // On error, keep defaults (show nothing hidden unintentionally).
+        })
+        .finally(() => {
+          // Clear the slot either way, so a failed load can be retried by a
+          // later mount rather than being cached as "already requested".
+          _inFlight.delete(id);
+        });
+      _inFlight.set(id, request);
+    }
+
+    void request.then(() => {
+      if (!cancelled) bump((n) => n + 1);   // re-render; render reads the cache
+    });
+
     return () => {
       cancelled = true;
     };
