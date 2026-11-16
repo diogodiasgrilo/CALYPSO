@@ -1088,11 +1088,28 @@ exit code is the unit's).
 
 First green run, 2026-11-16: `ok BL OK — 26 summary days, 42 entries — all identities hold`.
 
-ℹ️ **Known, unfixed (found 2026-11-16):** `audit_telemetry_health` passes `alert_type="data_quality"` as a **string**
-where `AlertService` expects the `AlertType` enum, so every run logs
-`Alert gate error (failing open, alert sent): AttributeError: 'str' object has no attribute 'value'`. It fails
-open — the alert is still delivered — but the **anti-spam chokepoint is bypassed**, so this check can alert daily
-without dedup, including on `[HEALED] … no action` findings.
+> 🔴 **FIXED 2026-11-16, and the impact was worse than first recorded: this check's `--alert` had never
+> delivered a single alert.** `audit_telemetry_health` passed `alert_type="data_quality"` as a **string** where
+> `AlertService` expects the `AlertType` enum, and every run logged
+> `Alert gate error (failing open, alert sent): AttributeError: 'str' object has no attribute 'value'`.
+>
+> **That log line was false, and believing it is what hid the bug.** The gate did fail open — but the send then
+> reached the Pub/Sub payload build, hit `.value` on the same string, and **raised again, out of `send_alert`
+> entirely**. Verified against the pre-fix code: `RAISED: AttributeError`, nothing published. The script catches
+> that into `(alert failed, non-fatal: …)` printed to a systemd unit nobody reads. So the real finding is not
+> "alerts daily without dedup" (what this note said for most of a day) — it is **silence**.
+>
+> Three fixes, because one would have left the class open:
+> 1. the call site passes `AlertType.DATA_QUALITY`;
+> 2. **`send_alert` coerces a str at the boundary** — by value, then by member name, else the new
+>    `AlertType.UNCLASSIFIED` — so the next call site that does this is delivered AND gated instead of lost;
+> 3. the gate's log line now **derives** ("gate SKIPPED for this alert … delivery continues below") instead of
+>    asserting an outcome it cannot know. Same defect class as the 2026-10-07 "log lines must derive" finding,
+>    in a line whose wording actively misdirected this investigation.
+>
+> ℹ️ The **gating** sibling `audit_fleet_correctness` passes the enum and was never affected — only the
+> non-gating telemetry check was silent. Pinned by `tests/test_alert_type_coercion_2026_11_16.py` (12 tests,
+> including controls that reproduce BOTH failures — the gate's and the publish path's).
 
 ### Backtesting Database (`data/backtesting.db`)
 
@@ -1237,29 +1254,87 @@ breaks nothing and no screenshot can see:**
 can reference a missing file), then delete anything in `dist/assets/` the new build does not
 contain.
 
-ℹ️ **Measured and deliberately NOT changed** (report, don't tune):
-- **`/api/strategies/{id}/snapshot` re-sends everything every 2s with no `ETag`/`304` anywhere in
-  the backend**, and the payload carries the day's accumulating 1-min OHLC — 7,516 B measured at
-  12:11 ET and still growing, i.e. **~13 MB/hour on cellular**, more later in the session. This is
-  the next real mobile win and it is a backend change with cache-correctness implications on a
-  live trading view, so it wants its own pass.
-- `routers/strategies.py:_run_coro` spawns a **throwaway `ThreadPoolExecutor(max_workers=1)` per
-  call** and `.result()` blocks the event loop thread (1 uvicorn worker), so snapshot DB reads
-  serialise against every other request. Fine at the measured ~3ms; a structural ceiling, not a
-  bug.
-- The WS broadcaster polls **regardless of client count** (state 1.0s, logs 2.0s, metrics 10s, DB
-  30s) — it never checks `client_count`, so it keeps working with nobody connected. Mostly a
-  `stat()` per second via `read_if_changed()`, hence low severity.
-- `PerformanceMetrics` fetches `/api/metrics/performance` **twice** on load because its effect
-  deps (`market.is_open`, `metrics.last_updated`) transition `null → value` on the first WS push.
-  210 B, and the re-run is deliberate — not worth weakening a real refresh trigger.
-
 Checked and found **clean**, so don't re-audit from scratch: `index.html` already has both font
 preconnects + `display=swap`; every `addEventListener` has a matching `removeEventListener`;
 `logLines` is capped at 500 and `toasts` at 5, and `stopEvents` is bounded by its dedup key;
 every query against the growing tables (`market_ticks`, `spread_snapshots`, `market_ohlc_1min`)
 is day-scoped; and every trading-DB connection really is `mode=ro` (the one writable SQLite
 handle is `services/auth_db.py`, the dashboard's **own** accounts database, which is correct).
+
+### Conditional polling (ETag / 304) — 2026-11-16, same evening
+
+The three backend items the performance pass had deferred were done after the close that day. Measured first,
+with the market shut so nothing was moving:
+
+| | before | after |
+|---|---|---|
+| `/api/strategies/{id}/snapshot` (2s poll) | 64,521 B raw / **11,481 B gzip** every poll → **20.7 MB/h** | `304` while unchanged |
+| `/api/strategies/groups/ic_0dte/comparison` (2s poll) | 93,511 B raw / **11,720 B gzip** → **21.1 MB/h** | `304` while unchanged |
+| snapshot re-renders | a freshly parsed object handed to React **30×/min** regardless of content | only when content changes |
+
+**The number that made the case:** diffing two polls 2.5s apart found **exactly one** differing field in the
+snapshot and five in the group payload — every one of them the same key, **`state_file_age_seconds`**, a clock
+reading taken at response-build time. After the close *nothing* changes, so a dashboard left open overnight was
+re-downloading ~20 MB/hour of byte-identical data. (The "7,516 B / ~13 MB/hour" figure this section used to
+carry was a midday gzip reading; the payload grows all session because it carries the accumulating 1-min
+OHLC — 41 kB of the snapshot's 64 kB by the close.)
+
+- **The validator is a hash of the content** (`dashboard/backend/services/http_cache.py`), so its only failure
+  mode is an unnecessary `200`, never a wrong `304`. That property is the whole safety case for putting a cache
+  validator on a live trading view: no TTL to tune, no invalidation to forget.
+- **`state_file_age_seconds` is pruned from the validator by KEY NAME at any depth** (the group payload carries
+  one per member, so a fixed dotted path would silently miss a new member) and **re-surfaced in an
+  `X-State-Age-Seconds` header that rides on the 304 too** — the optimisation withholds nothing. No component
+  reads the field today; the header keeps that from becoming a constraint.
+- ⚠️ **`W/` handling is load-bearing, not boilerplate.** nginx gzips `application/json` here, and on-the-fly
+  gzip **downgrades a strong ETag to weak**, so the validator the browser echoes really does arrive as `W/"…"`.
+  Without stripping it, every revalidation through the real proxy would miss — dead in production, green
+  locally.
+- **The client sends `If-None-Match` itself** (`src/lib/conditionalJson.ts`) instead of leaving it to the
+  browser's HTTP cache, because that makes "unchanged" *observable* to the page — worth more than the bytes,
+  since a 304 now skips the state update entirely. Both endpoints are **`NetworkOnly`** in the service worker: a
+  caching handler in front of a validator the page owns is wrong twice over, and its offline fallback would hand
+  a live trading view a cached body as if it were current.
+- **`_run_coro`'s throwaway executor is gone.** The routes offload their sync builders with
+  `asyncio.to_thread`, so the nested reader calls find no running loop and take the cheap `asyncio.run` path.
+  That also stopped `build_comparison` — the backend's biggest builder — from blocking the single uvicorn
+  worker's event loop for the duration of every 2s poll.
+- **The WS broadcaster now skips its work with nobody connected, SELECTIVELY.** `_poll_logs` is deliberately
+  NOT gated: it advances the log tailer's file offset and feeds `live_ohlc`, the last-resort chart series, so
+  gating it would put a hole in that series and then dump the idle backlog at the next client. `_heartbeat` is
+  not gated either (already free, and it keeps live connections from being reaped). The gated loops' trackers
+  are left deliberately stale while idle — the first round after a client connects sees "changed" and
+  broadcasts once, which is the state that client needs, and its first payload always comes from a fresh
+  `get_snapshot()` regardless.
+
+- ⚠️ **The routes now return a `Response`, so anything that wants the PAYLOAD must use the builder seam** —
+  `strategies.build_snapshot_payload` / `build_group_comparison_payload` (public names, for one external
+  caller). `scripts/make_synthetic_fixtures.py` is that caller; it serialises these into the Playwright fixture
+  set and broke the instant the routes stopped returning dicts. A test pins route-200 == builder output so the
+  CI fixtures cannot drift from what the dashboard is actually served.
+- 🔴 **Two self-inflicted regressions, both found by gates rather than review, both worth knowing:**
+  (1) a **gated poll loop HANGS** a caller that drives it directly with zero clients — it broke a pre-existing
+  `_poll_state` test into a **17-minute hang, not a failure** (fix: a sentinel in `manager._connections`; the
+  trap is documented in `_skip_while_idle`'s docstring); (2) making a builder **sync** meant `_run_coro` took
+  its `asyncio.run` branch on MainThread, and `asyncio.run` **closes its loop and unsets it**, which wiped the
+  fixture generator's loop so **128 of 148 fixtures were silently dropped into a `save()` catch-all while the
+  generator still exited 0**. The gate only asserted "wrote something"; it now names the two fixtures that must
+  exist.
+
+Pinned by `tests/test_dashboard_conditional_get_2026_11_16.py` (31 tests, incl. the real app through the real
+auth guard), `tests/test_broadcaster_idle_gating_2026_11_16.py` (7), and vitest
+`conditionalJson` + `useStrategySnapshot` (14). The invariant to read first if any of this is revisited is
+**`test_a_real_content_change_is_never_masked_by_a_304`**. Mutation-verified both ways: removing the pruning,
+the `W/` strip or the 304 branch fails 3–7 tests, and **over-gating the broadcaster's log poll fails too**.
+
+ℹ️ **Measured and deliberately NOT changed** (report, don't tune):
+- `PerformanceMetrics` fetches `/api/metrics/performance` **twice** on load because its effect
+  deps (`market.is_open`, `metrics.last_updated`) transition `null → value` on the first WS push.
+  210 B, and the re-run is deliberate — not worth weakening a real refresh trigger.
+- The snapshot's unchanged branch can still cost **one** React render on the transition (a State Hook set to
+  its current value "may render once more before bailing out"). Bounded, not per-poll — measured 1 across five
+  consecutive 304s and **0** across the next five. Chasing zero would mean carrying refs that re-derive state
+  the hook already has.
 
 ### Safety guarantees
 - 100% read-only — never writes to state, metrics, DB, or logs
