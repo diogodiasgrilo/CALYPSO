@@ -9,6 +9,55 @@ Account: paper only on this branch. Saxo Bank has been removed end-to-end
 — see Version History 2.0.0-rc.1 and `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 
 
+### 2026-11-16 — a str `alert_type` did not bypass the gate, it LOST the alert
+
+**What was wrong.** `scripts/audit_telemetry_health.py` passed
+`alert_type="data_quality"` — the STRING — where `AlertService.send_alert`
+expects the `AlertType` enum. Every gate downstream reads `alert_type.value` or
+tests membership in a set of enum members, so the string raised
+`AttributeError` inside the anti-spam gate, which fails open and logged:
+
+    Alert gate error (failing open, alert sent): AttributeError:
+    'str' object has no attribute 'value'
+
+**That log line was false, and believing it is what hid the bug for a day.** The
+gate did fail open — but the send then reached the Pub/Sub payload build, hit
+`.value` on the same string, and **raised again, out of `send_alert` entirely**.
+Verified against the pre-fix code: `RAISED: AttributeError`, nothing published.
+The script catches that into `(alert failed, non-fatal: ...)` printed to a
+`oneshot` systemd unit's output, which nobody reads. So the finding is not
+"alerts daily without dedup" — it is that **this check's `--alert` had never
+delivered a single alert**.
+
+**Three fixes, because any one alone leaves the class open.**
+
+1. The call site passes `AlertType.DATA_QUALITY` (the member already existed,
+   with the exact matching value).
+2. **`send_alert` normalises a str AT THE BOUNDARY** — by value, then by member
+   name, else the new terminal fallback `AlertType.UNCLASSIFIED`. Fixing only
+   the call site would leave the next one free to do the same thing silently,
+   and no test could see it; the gate is a chokepoint, so the normalisation
+   belongs there. The `UNCLASSIFIED` member exists so an unknown type is still
+   DELIVERED (and still gated) rather than lost — losing the message is the one
+   outcome an alerting path must never have.
+3. The gate's error log now **derives** instead of asserting: "gate SKIPPED for
+   this alert (no dedup/rate limit applied); delivery continues below". It
+   cannot know that the alert was sent — the send happens afterwards and had its
+   own way of dying. Same defect class as the 2026-10-07 "log lines must derive,
+   not assert" finding, this time in a line that actively misdirected the
+   investigation into it.
+
+**Scope.** The GATING sibling `audit_fleet_correctness` passes the enum and was
+never affected; only the non-gating telemetry check was silent. No strategy code
+path passes a string (checked repo-wide: the only other hit was a docstring
+example).
+
+**Tests.** `tests/test_alert_type_coercion_2026_11_16.py` — 12 tests, with
+controls that reproduce BOTH failures: `_alert_fingerprint` raising on a str
+(the gate's) and `.value` being unavailable on a str (the publish path's). The
+decisive pin is that 20 identical alerts sent with the STRING now collapse to
+one, exactly as the enum does.
+
 ### 2026-11-15 — a failed alert delivery is now retried instead of dropped
 
 **What was wrong.** `cloud_functions/alert_processor/main.py:process_alert`

@@ -162,6 +162,13 @@ class AlertType(Enum):
     SLIPPAGE_ALERT = "slippage_alert"        # Fill price slippage detected
     EMERGENCY_CLOSE = "emergency_close"      # Emergency position close event
     DATA_QUALITY = "data_quality"            # Data quality issue (stale quotes, invalid P&L)
+    # Terminal fallback for a caller that passed an alert_type this enum does
+    # not know (see the str coercion in send_alert). It exists so such an
+    # alert can still be DELIVERED: every gate and the Pub/Sub payload read
+    # `.value`, so without a real member the send raised and the message was
+    # lost — which is the one outcome an alerting path must never have. The
+    # label is honest rather than a guess at what the caller meant.
+    UNCLASSIFIED = "unclassified"
 
     # Market Status Events (Telegram only — none of these are CRITICAL, see _should_send_email)
     MARKET_OPENING_SOON = "market_opening_soon"  # 1h, 30m, 15m countdown
@@ -493,7 +500,10 @@ class AlertService:
         Send an alert via Pub/Sub.
 
         Args:
-            alert_type: Type of alert (from AlertType enum)
+            alert_type: Type of alert (from AlertType enum). The annotation is
+                deliberately the enum so static tooling keeps pushing callers to
+                it; at runtime a str is coerced (with a WARNING) rather than
+                silently bypassing the dedup/rate-limit gates.
             title: Short alert title (shown in Telegram header and email subject)
             message: Alert message body
             priority: Priority level (defaults to DEFAULT_PRIORITIES mapping)
@@ -508,6 +518,56 @@ class AlertService:
         Returns:
             bool: True if alert was published successfully
         """
+        # NORMALISE alert_type AT THE BOUNDARY (2026-11-16).
+        #
+        # Every gate downstream — the fingerprint dedup, the per-type token
+        # bucket, the routine-suppression set, the email check — reads
+        # `alert_type.value` or tests membership in a set of AlertType members.
+        # A caller passing the bare STRING therefore raised AttributeError
+        # inside the gate, which FAILS OPEN: the alert went out, but with no
+        # dedup and no rate limit. `scripts/audit_telemetry_health.py` did
+        # exactly that on every nightly run, so the one check that is supposed
+        # to be quiet could alert daily, unthrottled.
+        #
+        # Fixing only that call site would leave the NEXT one free to do it
+        # again, silently and with no test able to see it, so the coercion
+        # lives here where every caller passes through. A string that maps to a
+        # member (by value, then by name) is upgraded and the gates work
+        # normally; one that maps to nothing keeps today's fail-open delivery
+        # but says so at WARNING instead of surfacing as an AttributeError
+        # from somewhere deep in the gate.
+        if isinstance(alert_type, str):
+            _raw = alert_type
+            try:
+                alert_type = AlertType(_raw)
+            except ValueError:
+                try:
+                    alert_type = AlertType[_raw.upper()]
+                except KeyError:
+                    # Fall back to a real member rather than leaving the str in
+                    # place. Leaving it was what the pre-fix code effectively
+                    # did, and it did NOT "fail open": the gate raised, the
+                    # error was logged as if the alert had gone out, and then
+                    # the Pub/Sub payload build hit `.value` and raised again,
+                    # so the message was never published at all. Delivering it
+                    # under an honest label is strictly better than losing it.
+                    alert_type = AlertType.UNCLASSIFIED
+                    logger.warning(
+                        f"send_alert got alert_type={_raw!r} as a str with no "
+                        f"matching AlertType member — delivering it as "
+                        f"{alert_type.value!r} so it is not lost. Pass an AlertType."
+                    )
+                else:
+                    logger.warning(
+                        f"send_alert got alert_type={_raw!r} as a str; coerced to "
+                        f"{alert_type}. Pass the AlertType enum."
+                    )
+            else:
+                logger.warning(
+                    f"send_alert got alert_type={_raw!r} as a str; coerced to "
+                    f"{alert_type}. Pass the AlertType enum."
+                )
+
         # Resolve priority FIRST so the disabled-gate can honor a severity bypass.
         if priority is None:
             priority = DEFAULT_PRIORITIES.get(alert_type, AlertPriority.MEDIUM)
@@ -589,8 +649,17 @@ class AlertService:
                 alert_type, priority, title, details, send_email
             )
         except Exception as e:  # pragma: no cover - defensive
+            # DERIVED, NOT ASSERTED. This used to read "failing open, alert
+            # sent" — which it cannot know, because the send happens below and
+            # had its own way of dying. On the `alert_type`-as-str bug it was
+            # actively false: the gate failed, logged "alert sent", and then the
+            # payload build raised on `.value` so nothing was ever published.
+            # Say what happened here (the gate was skipped), not what is hoped
+            # to happen next.
             logger.error(
-                "Alert gate error (failing open, alert sent): %s", describe_exception(e)
+                "Alert gate error — gate SKIPPED for this alert (no dedup/rate "
+                "limit applied); delivery continues below: %s",
+                describe_exception(e),
             )
             allow, gate_note = True, ""
         if not allow:

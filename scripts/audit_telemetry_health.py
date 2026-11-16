@@ -303,9 +303,16 @@ def main(argv=None):
 
     if a.alert and rows:
         try:
-            from shared.alert_service import AlertService
+            from shared.alert_service import AlertService, AlertType
+            # The ENUM, not the string "data_quality". send_alert's dedup /
+            # rate-limit gate does `alert_type.value`, so a str raised
+            # AttributeError inside the gate, which fails OPEN — the alert was
+            # still delivered, but the anti-spam chokepoint was bypassed, so
+            # this check could alert every single night with no dedup,
+            # including on `[HEALED] ... no action` findings. Every run logged
+            # `Alert gate error (failing open, alert sent)`.
             AlertService({"alerts": {"enabled": True}}, "TELEMETRY").send_alert(
-                alert_type="data_quality",
+                alert_type=AlertType.DATA_QUALITY,
                 title=f"Telemetry health: {len(rows)} finding(s)",
                 message="\n".join(f"{v} [{k}] {w}" for v, k, w, _ in rows[:12]),
             )
