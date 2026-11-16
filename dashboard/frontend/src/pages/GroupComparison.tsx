@@ -28,6 +28,7 @@ import type {
   CalendarAggregatePayload,
 } from "../components/comparison/CalendarComparison";
 import { apiFetch } from "../lib/apiFetch";
+import { createConditionalFetcher } from "../lib/conditionalJson";
 import { startPolling } from "../lib/startPolling";
 
 const POLL_MS = 2000;
@@ -95,17 +96,33 @@ export function GroupComparison() {
     setAggregate(null);
     setNotFound(false);
 
+    // Conditional: the ic_0dte comparison payload is 93,511 B raw / 11,720 B
+    // gzip and was re-sent in full every 2s, differing only in one
+    // `state_file_age_seconds` per member. A 304 now skips both the transfer
+    // and the state update.
+    const fetchComparison = createConditionalFetcher<GroupComparisonEnvelope>();
+
     const tick = async () => {
-      const json = await fetchJSON<GroupComparisonEnvelope>(
-        `/api/strategies/groups/${groupId}/comparison`,
-      );
+      let res;
+      try {
+        res = await fetchComparison(`/api/strategies/groups/${groupId}/comparison`);
+      } catch {
+        return; // transient; the next tick retries (unconditionally)
+      }
       if (!mounted) return;
-      if (!json) {
+      if (!res.ok) {
         setNotFound(true);
         return;
       }
+      if (res.unchanged) {
+        // Same object identity, no re-render. Clear a stale not-found: a 304
+        // can only follow a successful 200.
+        setNotFound(false);
+        return;
+      }
+      if (!res.data) return;
       setNotFound(false);
-      setComparison(json);
+      setComparison(res.data);
     };
     const aggTick = async () => {
       const json = await fetchJSON<GroupAggregateEnvelope>(

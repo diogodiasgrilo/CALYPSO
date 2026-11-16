@@ -277,6 +277,49 @@ class Broadcaster:
 
     # -- Polling loops --
 
+    async def _skip_while_idle(self, interval: float) -> bool:
+        """Sleep one round and return True when NO client is connected.
+
+        The broadcast loops used to do their full read-and-compare work whether
+        or not anyone was listening — ``manager.broadcast`` early-returns with
+        zero connections, so the sends were already free, but the READS were not:
+        a ``stat()`` per second plus two SQLite queries every 30s, forever, on a
+        VM that also runs nine trading processes.
+
+        Applied ONLY to the loops whose work is recomputed from scratch each
+        round, so skipping it loses nothing. Two loops are deliberately NOT
+        gated:
+
+          * ``_poll_logs`` — it is not just a broadcast source. It advances the
+            log tailer's FILE OFFSET and feeds ``live_ohlc.process_log_lines``,
+            which is the last-resort chart series when the market-data DB has
+            nothing. Gating it would put a hole in that series and then dump the
+            whole idle backlog at the next client. The cost of leaving it is one
+            read every 2s.
+          * ``_heartbeat`` — already free (a no-op broadcast), and it is what
+            keeps a live connection from being reaped, so it must not depend on
+            connection state.
+
+        ⚠️ A TEST (or any caller) that drives one of these loops directly must
+        present at least one client, or the loop sleeps its interval forever and
+        the caller HANGS rather than fails. That is not hypothetical: it is
+        exactly what happened to
+        ``test_dashboard_brandon_overlay_wiring_2026_08_15.py``'s
+        ``_poll_state`` test when this gate landed, turning a 14-second file
+        into a 17-minute hang. Add a sentinel to ``manager._connections``.
+
+        Each gated loop's per-round trackers (``_last_stop_count``,
+        ``_last_ohlc_bar_count``, ``read_if_changed``'s mtime memo) are left
+        deliberately stale while idle: the first round after a client connects
+        then sees "changed" and broadcasts once, which is exactly the state that
+        client needs. Its FIRST payload never depends on any of this — it comes
+        from a fresh ``get_snapshot()`` in the WS handler.
+        """
+        if self.manager.client_count:
+            return False
+        await asyncio.sleep(interval)
+        return True
+
     def _check_day_rollover(self) -> None:
         """Reset day-scoped counters when the ET date changes."""
         today = get_today_et()
@@ -290,6 +333,8 @@ class Broadcaster:
     async def _poll_state(self) -> None:
         """Poll hydra_state.json for changes."""
         while True:
+            if await self._skip_while_idle(settings.state_poll_interval):
+                continue
             try:
                 self._check_day_rollover()
                 data = self.state_reader.read_if_changed()
@@ -327,6 +372,8 @@ class Broadcaster:
         _sent_today_augmented = False
 
         while True:
+            if await self._skip_while_idle(settings.metrics_poll_interval):
+                continue
             try:
                 data = self.metrics_reader.read_if_changed()
                 if data is not None:
@@ -416,6 +463,8 @@ class Broadcaster:
     async def _poll_ohlc(self) -> None:
         """Periodically broadcast merged OHLC (SQLite + live bars)."""
         while True:
+            if await self._skip_while_idle(settings.db_poll_interval):
+                continue
             try:
                 ohlc = await self._get_merged_ohlc()
                 if len(ohlc) > self._last_ohlc_bar_count:
@@ -463,6 +512,8 @@ class Broadcaster:
     async def _poll_market_status(self) -> None:
         """Broadcast market status periodically."""
         while True:
+            if await self._skip_while_idle(settings.market_status_interval):
+                continue
             try:
                 status = get_current_status()
                 await self.manager.broadcast({
@@ -478,6 +529,8 @@ class Broadcaster:
     async def _poll_agents(self) -> None:
         """Poll agent report directories for status changes (every 60s)."""
         while True:
+            if await self._skip_while_idle(60):
+                continue
             try:
                 agents = self.agent_reader.get_all_agent_status()
                 # Only broadcast if status changed (compare last_run timestamps)

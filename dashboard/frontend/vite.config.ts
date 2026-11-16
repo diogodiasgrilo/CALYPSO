@@ -35,6 +35,26 @@ export default defineConfig({
       workbox: {
         runtimeCaching: [
           {
+            // ── THE TWO CONDITIONAL 2s POLLS: NETWORK ONLY ────────────────
+            // Workbox routes match in registration order, so this must stay
+            // ABOVE the general /api/ rule below.
+            //
+            // These two endpoints answer 304 when nothing has changed, and the
+            // client sends `If-None-Match` itself so it can tell "unchanged"
+            // from "changed" and skip the re-render. A caching handler in front
+            // of that is wrong twice over: it puts a Workbox response between
+            // the page and a validator the page owns, and its offline fallback
+            // would hand a live trading view a cached body as if it were
+            // current — at a 2s cadence the cache can only ever be a worse copy
+            // of what the 304 already told us we have.
+            //
+            // Nothing is lost by not caching them: the page keeps the last
+            // payload it parsed, and the header already renders the WebSocket
+            // connection state, so a reader can see the feed is down.
+            urlPattern: /\/api\/strategies\/(?:[^/]+\/snapshot|groups\/[^/]+\/comparison)$/i,
+            handler: "NetworkOnly",
+          },
+          {
             urlPattern: /\/api\/.*/i,
             handler: "NetworkFirst",
             options: {

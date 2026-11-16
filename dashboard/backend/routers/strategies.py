@@ -25,12 +25,13 @@ never 500). No write path anywhere.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import time
 from pathlib import Path
 from typing import Optional
 
-from fastapi import APIRouter, HTTPException
+from fastapi import APIRouter, HTTPException, Request, Response
 
 from shared import strategy_taxonomy as tax
 
@@ -38,6 +39,10 @@ from dashboard.backend.config import settings
 from dashboard.backend.routers import variants as variants_router
 from dashboard.backend.services.dc_db_reader import DCDBReader
 from dashboard.backend.services.dc_reader import read_dc_status
+from dashboard.backend.services.http_cache import (
+    SNAPSHOT_VOLATILE_KEYS,
+    conditional_json,
+)
 from dashboard.backend.services.market_status import get_today_et
 
 logger = logging.getLogger("dashboard.strategies")
@@ -57,6 +62,17 @@ def _run_coro(coro):
     thread (the reads are tiny one-day queries on a 2s poll — cheap). With no
     running loop (e.g. unit tests calling the helper directly) we use
     ``asyncio.run`` directly.
+
+    NOTE (2026-11-16): the no-loop branch is now the NORMAL one for the request
+    path. The routes offload their sync builders with ``asyncio.to_thread``, so
+    by the time this runs there is no loop on the thread and it costs one
+    ``asyncio.run`` with no extra thread. The running-loop branch below is kept
+    because it is still reachable (any future caller that invokes a builder
+    directly from the event loop), but it is no longer the per-call cost it was:
+    it used to create and tear down a ``ThreadPoolExecutor`` for EVERY nested
+    reader call on every 2s poll, and block the loop thread on the result, so
+    snapshot DB reads serialised against every other request on the single
+    uvicorn worker.
     """
     import asyncio
 
@@ -694,15 +710,19 @@ def _dc_snapshot(vid: str, m: tax.StrategyMeta) -> dict:
     }
 
 
-@router.get("/{strategy_id}/snapshot")
-async def get_snapshot(strategy_id: str):
-    """Per-strategy main-page payload. The envelope carries ``data_kind`` + the
-    full header chrome (display_name/label/dry_run/underlying_symbol) so the
-    frontend can re-bind the WHOLE header to the selection (audit AUD-3-F1).
+def build_snapshot_payload(strategy_id: str) -> dict:
+    """The whole snapshot payload, built SYNCHRONOUSLY.
 
-    Body shape depends on ``data_kind``: ``ic_state`` (state/summary/entries) vs
-    ``dc_calendar`` (open calendars/outcomes). A missing state file →
-    ``available:false`` in the body, never a 500.
+    Split out of the route for two reasons: the route hands it to a worker
+    thread (every reader it touches is blocking — state file, metrics file,
+    SQLite — and on a single-worker uvicorn, running them inline on the event
+    loop serialised all other requests behind each 2s poll), and the route now
+    returns a conditional ``Response`` rather than a dict, so anything that
+    wants the PAYLOAD must have a seam that still gives it one.
+    ``scripts/make_synthetic_fixtures.py`` is that caller — it serialises these
+    payloads into the Playwright fixture set, and it broke the moment the route
+    started returning a Response. Public name, deliberately: it has an external
+    consumer, matching ``variants.build_comparison``.
     """
     vid = (strategy_id or "").strip().lower()
     m = tax.meta(vid)  # unknown letter → safe sentinel (never KeyError)
@@ -722,6 +742,39 @@ async def get_snapshot(strategy_id: str):
         **_header_chrome(vid, m),
         "body": body,
     }
+
+
+@router.get("/{strategy_id}/snapshot")
+async def get_snapshot(strategy_id: str, request: Request) -> Response:
+    """Per-strategy main-page payload. The envelope carries ``data_kind`` + the
+    full header chrome (display_name/label/dry_run/underlying_symbol) so the
+    frontend can re-bind the WHOLE header to the selection (audit AUD-3-F1).
+
+    Body shape depends on ``data_kind``: ``ic_state`` (state/summary/entries) vs
+    ``dc_calendar`` (open calendars/outcomes). A missing state file →
+    ``available:false`` in the body, never a 500.
+
+    CONDITIONAL (2026-11-16): answers ``304`` when the payload is unchanged. This
+    is the highest-traffic endpoint in the product — polled every 2s, 64,521 B
+    raw / 11,481 B gzip at the close, growing all session because it carries the
+    accumulating 1-min OHLC — and two polls 2.5s apart differed in exactly ONE
+    field, a clock reading. See ``services/http_cache`` for the measurements and
+    why a content hash is the safe validator on a live view.
+    """
+    payload = await asyncio.to_thread(build_snapshot_payload, strategy_id)
+
+    # The state-file age is excluded from the validator (it changes every poll)
+    # and re-surfaced as a header, which rides on the 304 as well as the 200 —
+    # so the optimisation withholds nothing. No component reads the field today;
+    # the header keeps that from becoming a constraint on future ones.
+    body = payload.get("body")
+    age = body.get("state_file_age_seconds") if isinstance(body, dict) else None
+    return conditional_json(
+        request,
+        payload,
+        volatile_keys=SNAPSHOT_VOLATILE_KEYS,
+        extra_headers={"X-State-Age-Seconds": age} if age is not None else None,
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -747,16 +800,11 @@ def _group_baseline_id(group_id: str) -> str:
     return mids[0] if mids else ""
 
 
-@router.get("/groups/{group_id}/comparison")
-async def get_group_comparison(group_id: str):
-    """Group-scoped head-to-head. Returns ONE ``family``/``pnl_shape`` per group
-    + a ``baseline_id`` from group metadata. The payload SHAPE differs by family:
-
-      * ``ic_0dte`` (credit) — delegates to variants.build_comparison scoped to
-        the group's members (the IC leaderboard/strikes/buffer payload).
-      * ``calendar_multiday`` (debit) — a SHAPE-DISTINCT calendar payload built
-        from DCDBReader; carries NO IC keys (no total_credit/buffer/width).
-    """
+async def build_group_comparison_payload(group_id: str) -> dict:
+    """The group-comparison payload. Same split as ``build_snapshot_payload``
+    and for the same two reasons (worker-thread offload + a seam that still
+    returns a dict now that the route returns a conditional ``Response``).
+    Public name: ``scripts/make_synthetic_fixtures.py`` calls it."""
     g = _resolve_group(group_id)
     member_ids = _group_member_ids(group_id)
     baseline_id = _group_baseline_id(group_id)
@@ -776,12 +824,37 @@ async def get_group_comparison(group_id: str):
     if g.pnl_shape == "debit":
         envelope["calendars"] = await _calendar_group_comparison(member_ids)
     else:
-        ic = variants_router.build_comparison(member_ids, baseline_id=baseline_id or "a")
+        # build_comparison is fully sync (file + SQLite reads) and is the biggest
+        # builder in the backend — 93,511 B of payload for ic_0dte. Running it
+        # inline blocked the event loop for the whole 2s poll.
+        ic = await asyncio.to_thread(
+            variants_router.build_comparison, member_ids, baseline_id=baseline_id or "a"
+        )
         # Merge the IC payload (variants/leaderboard) under the group envelope.
         envelope["leaderboard"] = ic.get("leaderboard")
         envelope["variants"] = ic.get("variants")
 
     return envelope
+
+
+@router.get("/groups/{group_id}/comparison")
+async def get_group_comparison(group_id: str, request: Request) -> Response:
+    """Group-scoped head-to-head. Returns ONE ``family``/``pnl_shape`` per group
+    + a ``baseline_id`` from group metadata. The payload SHAPE differs by family:
+
+      * ``ic_0dte`` (credit) — delegates to variants.build_comparison scoped to
+        the group's members (the IC leaderboard/strikes/buffer payload).
+      * ``calendar_multiday`` (debit) — a SHAPE-DISTINCT calendar payload built
+        from DCDBReader; carries NO IC keys (no total_credit/buffer/width).
+
+    CONDITIONAL for the same reason as the snapshot: a 2s poll of 93,511 B raw /
+    11,720 B gzip whose only difference between consecutive polls was one
+    ``state_file_age_seconds`` PER MEMBER — which is why the volatile rule prunes
+    by key NAME at any depth rather than by a fixed path. No surface reads those
+    ages, so unlike the snapshot there is no header to echo.
+    """
+    envelope = await build_group_comparison_payload(group_id)
+    return conditional_json(request, envelope, volatile_keys=SNAPSHOT_VOLATILE_KEYS)
 
 
 @router.get("/groups/{group_id}/aggregate")

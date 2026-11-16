@@ -14,7 +14,7 @@
 import { useEffect, useState } from "react";
 import type { DataKind, PnlShape } from "./useStrategyMeta";
 import type { BrandonOverlay } from "../store/hydraStore";
-import { apiFetch } from "../lib/apiFetch";
+import { createConditionalFetcher } from "../lib/conditionalJson";
 import { startPolling } from "../lib/startPolling";
 
 const POLL_MS = 2000;
@@ -259,17 +259,33 @@ export function useStrategySnapshot(
     // strategy for a frame.
     setSnapshot((prev) => (prev && prev.id === strategyId ? prev : null));
 
+    // One validator per effect instance, so switching strategies cannot send
+    // the previous strategy's ETag against the new strategy's URL.
+    const fetchSnapshot = createConditionalFetcher<StrategySnapshot>();
+
     const tick = async () => {
       try {
-        const r = await apiFetch(`/api/strategies/${strategyId}/snapshot`);
+        const res = await fetchSnapshot(`/api/strategies/${strategyId}/snapshot`);
         if (!mounted) return;
-        if (!r.ok) {
-          setError(`HTTP ${r.status}`);
+        if (!res.ok) {
+          setError(`HTTP ${res.status}`);
           setLoading(false);
           return;
         }
-        const json = (await r.json()) as StrategySnapshot;
-        if (!mounted) return;
+        if (res.unchanged) {
+          // 304: the server says nothing moved. Keeping the SAME snapshot
+          // object means React does no work at all — this poller used to hand
+          // down a brand-new object 30 times a minute whether or not a single
+          // value had changed, re-rendering the whole strategy view each time.
+          // A 304 is still a successful round-trip, so it clears a prior error
+          // and resolves loading (both are no-ops at their current values, so
+          // they cost nothing when already settled).
+          setError(null);
+          setLoading(false);
+          return;
+        }
+        const json = res.data;
+        if (!json) return;
         // Guard against a late response for a previous id.
         if (json.id !== strategyId) return;
         setSnapshot(json);
