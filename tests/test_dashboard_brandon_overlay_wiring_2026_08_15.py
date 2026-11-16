@@ -307,6 +307,16 @@ class TestBroadcasterPollStateMergesOverlays:
 
         broadcaster.manager.broadcast = fake_broadcast
 
+        # A LISTENER MUST EXIST or the loop never does any work (2026-11-16):
+        # the poll loops are gated on `client_count`, so with nobody connected
+        # `_poll_state` sleeps its interval forever and this test hangs rather
+        # than fails. Nothing about the behaviour under test changed — this
+        # still pins that a mid-day overlay reaches the `state_update`
+        # broadcast — it just has to be driven in the state where the loop
+        # runs. A bare sentinel is enough: `broadcast` is replaced above, so
+        # the fake connection is never used.
+        broadcaster.manager._connections.add(object())
+
         async def run_one_iteration():
             try:
                 await broadcaster._poll_state()

@@ -264,7 +264,23 @@ def main() -> int:
     out.mkdir(parents=True)
 
     def run(c):
-        return asyncio.get_event_loop().run_until_complete(c) if asyncio.iscoroutine(c) else c
+        # `asyncio.run` PER COROUTINE, not a long-lived module loop.
+        #
+        # The old form was `asyncio.get_event_loop().run_until_complete(c)`
+        # against one loop installed once below. That is fragile in a way that
+        # bit on 2026-11-16: any SYNC payload builder in the chain may call
+        # `asyncio.run` internally (the dashboard's `_run_coro` does, whenever
+        # it finds no running loop), and `asyncio.run` CLOSES its loop and
+        # leaves `set_event_loop(None)` behind. One such call on MainThread
+        # therefore destroyed this script's loop, and every coroutine fixture
+        # after it failed with "There is no current event loop" — straight into
+        # `save()`'s catch-all, which prints SKIP and returns False. The
+        # generator still exited 0, having written **20 of 148 fixtures**.
+        #
+        # Nothing is running a loop here, so `asyncio.run` is always valid and
+        # is self-contained: it cannot be poisoned by what the coroutine does
+        # internally.
+        return asyncio.run(c) if asyncio.iscoroutine(c) else c
 
     def save(name, coro):
         try:
@@ -274,7 +290,6 @@ def main() -> int:
             print(f"  SKIP {name}: {type(e).__name__}: {str(e)[:80]}")
             return False
 
-    asyncio.set_event_loop(asyncio.new_event_loop())
     n = 0
     n += save("strategies_meta", S.get_meta())
     n += save("market_status", MK.get_status())
@@ -286,7 +301,11 @@ def main() -> int:
     n += save("agents_status", AG.get_agent_status())
     n += save("variants_health", V.get_health())
     for vid in ids:
-        n += save(f"snapshot_{vid}", S.get_snapshot(vid))
+        # The BUILDERS, not the routes: /snapshot and /groups/*/comparison now
+        # answer 304 when unchanged, so their handlers return a conditional
+        # Response rather than a dict and json.dump cannot serialise one.
+        # The builders are the seam kept for exactly this caller.
+        n += save(f"snapshot_{vid}", S.build_snapshot_payload(vid))
         n += save(f"hydra_state_{vid}", H.get_state(strategy_id=vid))
         n += save(f"hydra_summary_{vid}", H.get_summary(strategy_id=vid))
         n += save(f"hydra_entries_{vid}", H.get_entries(strategy_id=vid))
@@ -304,7 +323,7 @@ def main() -> int:
         if tax.group(vid).pnl_shape == "debit":
             n += save(f"dc_status_{vid}", DC.dc_status(strategy_id=vid))
     for g in {tax.group(v).id for v in ids}:
-        n += save(f"group_comparison_{g}", S.get_group_comparison(g))
+        n += save(f"group_comparison_{g}", S.build_group_comparison_payload(g))
         n += save(f"group_aggregate_{g}", S.get_group_aggregate(g))
 
     # The PRIMARY strategy renders from the live WebSocket, not /snapshot, so a

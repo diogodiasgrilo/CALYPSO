@@ -121,6 +121,25 @@ def test_the_synthetic_fixture_generator_actually_RUNS(tmp_path, monkeypatch):
     written = [p for p in out.rglob("*") if p.is_file()]
     assert written, "generator reported success but wrote nothing"
 
+    # "Wrote something" is too weak, and 2026-11-16 showed why: `save()` wraps
+    # every fixture in `except Exception -> print SKIP -> return False`, so a
+    # broken call DROPS that fixture and the generator still exits 0 with the
+    # rest of the set intact. The Playwright suite then renders a blank page
+    # against a fixture that isn't there — a failure one job removed from its
+    # cause. These two are named because they are the ones the strategy picker
+    # and the comparison page cannot render without, and because they are the
+    # two whose handlers now return a conditional Response (304-capable), so
+    # the generator must keep calling the PAYLOAD BUILDERS and not the routes.
+    names = {p.name for p in written}
+    assert any(n.startswith("snapshot_") for n in names), (
+        "no snapshot_* fixture — the generator must call "
+        "strategies.build_snapshot_payload, not the route (which returns a Response)"
+    )
+    assert any(n.startswith("group_comparison_") for n in names), (
+        "no group_comparison_* fixture — the generator must call "
+        "strategies.build_group_comparison_payload, not the route"
+    )
+
 
 # ─────────────────────────────────────────────────────────────────────────────
 # Test isolation — what CI's first real failure exposed
