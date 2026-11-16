@@ -1,5 +1,5 @@
 [Unit]
-Description=CALYPSO daily correctness + governance checks. Runs the fleet correctness audit (GATING — a P&L identity break fails this unit and publishes a DATA_QUALITY alert) and reports the measurement clock, the 15-clean-trading-day gate that decides when real money may start. Read-only: it opens every database mode=ro, writes nothing, and imports neither IBClient nor BrokerClient, so it cannot place, cancel or modify an order. It exists because both checks previously depended on someone remembering to run a script — which is how three telemetry columns sat empty for ten weeks and were found by hand on 2026-09-30, and how the go-live gate stayed prose that nobody could compute.
+Description=CALYPSO daily correctness + governance checks. Runs the fleet correctness audit (GATING — a P&L identity break fails this unit and publishes a DATA_QUALITY alert) and reports the measurement clock, the 15-clean-trading-day gate that decides when real money may start. Read-only: it opens every database mode=ro and imports neither IBClient nor BrokerClient, so it cannot place, cancel or modify an order. The one thing it writes is SQLite's own -shm sidecar, which ANY reader of a WAL database must be able to create. It exists because both checks previously depended on someone remembering to run a script — which is how three telemetry columns sat empty for ten weeks and were found by hand on 2026-09-30, and how the go-live gate stayed prose that nobody could compute.
 After=network-online.target
 
 [Service]
@@ -31,7 +31,30 @@ ExecStart=/opt/calypso/.venv/bin/python -m scripts.audit_fleet_correctness --ale
 StandardOutput=journal
 StandardError=journal
 
-# Read-only sandbox. No ReadWritePaths: neither check writes anything.
+# Read-only sandbox, with ONE exception, added 2026-11-16 after measuring that
+# this unit had crashed on 8 of its last 13 runs (10-31, 11-03..06, 11-11,
+# 11-13, 11-14) with
+#
+#     sqlite3.OperationalError: unable to open database file
+#
+# and that each crash presented as the unit's gating exit 1 — i.e. "a P&L
+# identity break" — for a fleet whose identities were in fact all holding.
+#
+# WHY A WRITE IS NEEDED TO READ. Every variant database is WAL-mode. A
+# read-only SQLite connection to a WAL database still has to open the `-shm`
+# sidecar, and when the last writer closes cleanly SQLite DELETES `-wal`/`-shm`
+# — so a reader arriving after that has to CREATE the shm. Under
+# ProtectSystem=strict the whole of /opt/calypso is read-only, so it could not,
+# and the audit died. `mode=ro` still forbids writing the databases themselves,
+# which is the guarantee that actually matters; this grants only the sidecar.
+#
+# The scripts ALSO handle the failure now (an unreadable database reports
+# UNAUDITABLE and exits 2, distinct from a break's 1, and no longer aborts the
+# remaining variants). That belt stays: this line makes the audit actually RUN,
+# the code change makes a future failure honest instead of silent. Neither one
+# substitutes for the other.
+ReadWritePaths=/opt/calypso/data
+
 NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=strict

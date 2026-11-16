@@ -30,6 +30,18 @@ break, so an after-close run does not cry wolf every evening.
 
 Read-only. Opens every database with mode=ro.
 
+EXIT CODES (what systemd and the operator gate on):
+
+    0  every variant was audited and every identity holds
+    1  an identity BREAK was found — the data disagrees with itself
+    2  at least one variant could NOT be audited, and no break was found
+       elsewhere. The fleet's numbers are not proven, which is not a pass.
+
+    1 and 2 were the same code until 2026-11-16, and a crash exited 1 too, so
+    "the data is wrong" and "we never looked" were indistinguishable — the
+    2026-11-13 run died on one variant's unreadable WAL sidecar, never audited
+    the variants after it, and presented as an identity break for three days.
+
 Usage:
     .venv/bin/python -m scripts.audit_fleet_correctness
 """
@@ -43,14 +55,42 @@ import sqlite3
 from pathlib import Path
 
 TOL = 0.01
-VARIANTS = ["", "b", "c", "d", "e", "f", "g", "h"]
+
+# "" is variant A. `bl` MUST be here: it has held the live paper seat since
+# 2026-10-09, so it is the only variant whose numbers are the money path this
+# audit exists to gate. It was absent until 2026-11-16 — the gating check that
+# decides when real money may start was auditing eight variants and skipping
+# the one that trades. That is the third time a fleet list in this project has
+# been written without the live seat (the emergency stop, 2026-09-19; the GCS
+# DB backup, ab63407), so: when a variant is added, grep for every list that
+# names the others and add it to ALL of them.
+VARIANTS = ["", "bl", "b", "c", "d", "e", "f", "g", "h"]
 
 
 def _ro(p: Path):
+    """A read-only connection, or None if the database cannot be READ.
+
+    The probe query is load-bearing, not a sanity check. `sqlite3.connect` is
+    lazy: it returns a handle without touching the file, so a database that
+    cannot actually be read fails later, on the first execute. For a WAL
+    database that is the normal case rather than a corner one — a read-only
+    connection still needs the `-shm` sidecar, and when the last writer closes
+    cleanly SQLite DELETES `-wal`/`-shm`, so a reader arriving in that window
+    must create them. Under the nightly unit's `ProtectSystem=strict` sandbox
+    /opt/calypso is read-only, so it cannot, and SQLite raises
+
+        sqlite3.OperationalError: unable to open database file
+
+    which is what killed the 2026-11-13 run outright. Probing HERE moves that
+    failure to the one place already designed to handle it, so the caller gets
+    None and reports a row instead of taking the whole fleet down with it.
+    """
     if not p.exists():
         return None
     try:
-        return sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+        con.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        return con
     except sqlite3.Error:
         return None
 
@@ -68,7 +108,15 @@ def audit(root: Path, vid: str, today: str):
     db = data / "backtesting.db"
     con = _ro(db)
     if con is None:
-        return [(name, "SKIP", f"no backtesting.db at {db}")]
+        if not db.exists():
+            return [(name, "SKIP", f"no backtesting.db at {db}")]
+        # Present but unreadable is NOT the same as absent, and conflating them
+        # is how a real failure wore a benign label: SKIP is a "nothing to do
+        # here" row that does not gate, so an unreadable live-seat database
+        # would have reported as routine.
+        return [(name, "UNAUDITABLE", f"{db} exists but could not be read "
+                                      "(WAL sidecar unavailable under a "
+                                      "read-only mount?) — NOT audited")]
 
     out = []
     have_unattr = "unattributed_overlay_pnl" in _cols(con, "daily_summaries")
@@ -232,9 +280,11 @@ def _alert_breaks(rows, today):
         body = "\n".join(f"{n} {tag}: {msg}" for n, tag, msg in rows[:12])
         if len(rows) > 12:
             body += f"\n… and {len(rows) - 12} more"
+        # "finding(s)", not "break(s)": this now also carries UNAUDITABLE rows,
+        # and a variant nobody could audit is not a break in the data.
         AlertService({"alerts": {"enabled": True}}, "AUDIT").send_alert(
             alert_type=AlertType.DATA_QUALITY,
-            title=f"Fleet correctness: {len(rows)} break(s)",
+            title=f"Fleet correctness: {len(rows)} finding(s)",
             message=f"{today} (ET)\n{body}",
             details={"break_count": len(rows), "date": today})
     except Exception as exc:  # noqa: BLE001 — never mask the exit code
@@ -323,9 +373,21 @@ def main(argv=None):
     today = os.popen("TZ=America/New_York date +%Y-%m-%d").read().strip()
     print(f"FLEET CORRECTNESS AUDIT — {today} (ET)\n")
     worst = 0
-    breaks = []
+    unauditable = 0
+    findings = []
     for vid in VARIANTS:
-        for name, tag, msg in audit(root, vid, today):
+        try:
+            rows = audit(root, vid, today)
+        except Exception as exc:  # noqa: BLE001
+            # Defence in depth behind _ro()'s probe, and the actual lesson of
+            # the 2026-11-13 failure: audit() raised, which aborted THIS loop,
+            # so every variant after the failing one was never audited and the
+            # only trace was an exit code identical to a real identity break.
+            # One variant's bad day must not void the fleet's audit, and must
+            # never be able to impersonate a finding about the data.
+            rows = [((vid or "a").upper(), "UNAUDITABLE",
+                     f"audit raised {type(exc).__name__}: {exc} — NOT audited")]
+        for name, tag, msg in rows:
             if tag.startswith("I") and _is_pre_fix(vid, msg):
                 tag = "PRE-FIX"
             elif tag.startswith("I") and _is_known_irreparable(vid, msg):
@@ -338,11 +400,29 @@ def main(argv=None):
             print(f"{marker}{name:<3} {tag:<8} {msg}")
             if tag in ("I1", "I2", "I3", "I4", "I5"):
                 worst = 1
-                breaks.append((name, tag, msg))
-    print("\nVERDICT:", "BREAKS FOUND — see !! rows" if worst else "all identities hold")
-    if worst and a.alert:
-        _alert_breaks(breaks, today)
-    return worst
+                findings.append((name, tag, msg))
+            elif tag == "UNAUDITABLE":
+                unauditable += 1
+                findings.append((name, tag, msg))
+
+    if worst:
+        verdict = "BREAKS FOUND — see !! rows"
+    elif unauditable:
+        verdict = (f"NOT PROVEN — {unauditable} variant(s) could not be audited; "
+                   "every variant that WAS audited holds")
+    else:
+        verdict = "all identities hold"
+    print("\nVERDICT:", verdict)
+    if (worst or unauditable) and a.alert:
+        _alert_breaks(findings, today)
+    # 0 clean · 1 identity break · 2 could not audit (and found no break).
+    #
+    # A break keeps 1: systemd gates the nightly unit on it and two tests pin
+    # it. An unauditable variant must ALSO fail the unit — silence about the
+    # live seat is not a pass — but with its own code, so that "the data is
+    # wrong" and "we did not look" can never again arrive as the same signal.
+    # A break outranks a gap: it is the actionable one.
+    return 1 if worst else (2 if unauditable else 0)
 
 
 if __name__ == "__main__":

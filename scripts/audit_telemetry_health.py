@@ -41,7 +41,14 @@ from pathlib import Path
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-VARIANTS = ["", "b", "c", "d", "e", "f", "g", "h"]
+# "" is variant A. `bl` MUST be here — it has held the live paper seat since
+# 2026-10-09, so it is the only variant whose telemetry describes real orders.
+# It was absent until 2026-11-16, the same omission found the same day in
+# scripts/audit_fleet_correctness.py: both lists were written before `bl`
+# existed and neither was revisited when the seat moved. Pinned by
+# tests/test_fleet_audit_live_seat_and_crash_isolation_2026_11_16.py, which
+# asserts the live seat from the taxonomy rather than the string "bl".
+VARIANTS = ["", "bl", "b", "c", "d", "e", "f", "g", "h"]
 
 # Set when the dashboard baseline cannot be read, so a skipped check is
 # reported rather than passing silently as 'ok'.
@@ -72,7 +79,28 @@ INSTRUMENTS = [
 
 
 def _ro(p: Path):
-    return sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+    """A read-only connection, or None if the database cannot be READ.
+
+    The probe is load-bearing for the same reason as in
+    audit_fleet_correctness._ro (see that docstring): `sqlite3.connect` is
+    lazy, so a WAL database whose `-shm` sidecar cannot be created raises
+    `OperationalError: unable to open database file` on the FIRST EXECUTE, not
+    at connect. That crashed the fleet audit on 8 of 13 nightly runs between
+    2026-10-31 and 2026-11-14.
+
+    This function was worse than that one: no `exists()` check and no `try` at
+    all. Its crashes were merely INVISIBLE rather than loud, because the unit
+    prefixes this check with `-`, so it failed silently and the operator saw a
+    green-ish unit with one audit missing from it.
+    """
+    if not p.exists():
+        return None
+    try:
+        con = sqlite3.connect(f"file:{p}?mode=ro", uri=True)
+        con.execute("SELECT 1 FROM sqlite_master LIMIT 1").fetchone()
+        return con
+    except sqlite3.Error:
+        return None
 
 
 def _is_live(root: Path, vid: str) -> bool:
@@ -125,6 +153,12 @@ def audit_variant(root: Path, vid: str, days: int):
     live = _is_live(root, vid)
     out = []
     con = _ro(db)
+    if con is None:
+        # Reported, not swallowed: "we could not look" must not read as "we
+        # looked and the telemetry is fine".
+        return [("UNAUDITABLE", str(db),
+                 "database exists but could not be read (WAL sidecar "
+                 "unavailable under a read-only mount?) — NOT audited")]
     try:
         have = {r[0] for r in con.execute(
             "SELECT name FROM sqlite_master WHERE type='table'")}
@@ -243,7 +277,15 @@ def main(argv=None):
     rows = []
     for vid in VARIANTS:
         name = (vid or "a").upper()
-        found = audit_variant(root, vid, a.days)
+        try:
+            found = audit_variant(root, vid, a.days)
+        except Exception as exc:  # noqa: BLE001
+            # Same containment as audit_fleet_correctness.main, for the same
+            # reason: an exception here aborted the loop, so variants after the
+            # failing one were never audited. Worse here than there, because
+            # the unit prefixes this check with `-` — so the abort was silent.
+            found = [("UNAUDITABLE", f"variant {name}",
+                      f"audit raised {type(exc).__name__}: {exc} — NOT audited")]
         if not found:
             print(f"  {name:<2} ok")
             continue
