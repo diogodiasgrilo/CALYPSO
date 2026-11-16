@@ -873,6 +873,30 @@ gcloud pubsub subscriptions describe "$SUB" --project=calypso-trading-bot --form
 > results, so a long message whose first chunk sent and second failed counts as
 > total failure and the retry re-sends chunk 1. Bounded and rare.
 
+> 🔴 **The raise alone did NOTHING until `--retry` was set — and this is the
+> operator fact that matters most here.** `RETRY_POLICY_DO_NOT_RETRY` does not
+> work at the Pub/Sub layer: **functions_framework catches the unhandled
+> exception and answers the push HTTP 200.** Probed on the deployed fix — the
+> full `AlertDeliveryFailed` traceback was in the log *and* the request log
+> recorded **200**, one attempt, no retry. The subscription's `retryPolicy`
+> (10s–600s) and dead-letter policy were live the whole time and simply could
+> not be reached.
+>
+> The function therefore now runs `eventTrigger.retryPolicy:
+> **RETRY_POLICY_RETRY**` (`gcloud functions deploy … --retry`). Re-probed after:
+> **5 attempts, growing backoff, HTTP 500 each**, then purged with
+> `gcloud pubsub subscriptions seek --time=now` before it could exhaust 50.
+>
+> Enabling retry is only safe **because the raise is narrow** — the catch-all
+> still returns for unexpected internal errors, so a code bug cannot retry 50
+> times; only a genuine total delivery failure raises.
+>
+> ℹ️ `--retry` **is sticky** (tested: a redeploy omitting it left
+> `RETRY_POLICY_RETRY` in place), so a later deploy will not silently revert the
+> fix. Pass it anyway and re-read it after any deploy — it is the one setting the
+> whole fix rests on and no test can observe it:
+> `gcloud functions describe process-trading-alert --gen2 --region=us-east1 --format="value(eventTrigger.retryPolicy)"`
+
 > ⚠️ **`gcloud functions logs read` shows you NOTHING but platform noise, and
 > that is not a symptom — it is the only stream there was.** `process-trading-alert`
 > is **GEN_2** (a Cloud Run service), and until 2026-11-15 its application logs

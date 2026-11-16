@@ -68,6 +68,33 @@ long message whose first chunk sent and second failed counts as total failure an
 the retry re-sends chunk 1. Bounded and rare; chunk-level state is not worth the
 complexity.
 
+🔴 **The raise alone did NOTHING — `RETRY_POLICY_DO_NOT_RETRY` swallows it at
+the FRAMEWORK layer and answers 200.** Found by probing the deployed fix rather
+than trusting it: `raise AlertDeliveryFailed` propagated all the way through
+functions_framework and flask (full traceback in the log) and the request log
+still recorded **HTTP 200**, so Pub/Sub acked and there was exactly ONE attempt.
+That is the actual mechanism of `DO_NOT_RETRY` on gen2 — not a Pub/Sub-level
+setting, but the framework converting an unhandled exception into a success
+response. The subscription's own `retryPolicy` (10s-600s) and dead-letter policy
+were live the whole time and could never be reached.
+
+So the fix required **`gcloud functions deploy --retry`** (`eventTrigger.retryPolicy`
+→ `RETRY_POLICY_RETRY`). Re-probed after: **5 delivery attempts with growing
+backoff (20s, 19s, 23s, 26s), HTTP 500 each**, then purged with
+`gcloud pubsub subscriptions seek --time=now` before it could exhaust 50 and
+dead-letter. Enabling retry is only safe BECAUSE the fix is narrow: the catch-all
+still returns for unexpected internal errors, so a code bug cannot now retry 50
+times — only a genuine total delivery failure raises.
+
+ℹ️ **`--retry` IS sticky — tested, because the opposite was worth fearing.** A
+redeploy that deliberately OMITTED `--retry` left `eventTrigger.retryPolicy` at
+`RETRY_POLICY_RETRY`, so a future deploy cannot silently revert the fix. (This
+paragraph first claimed the reverse, as a warning; it was checked and the claim
+was false.) Still pass it explicitly, and still re-read it after any deploy,
+because it is the single setting the whole fix depends on and no test can see it:
+`gcloud functions deploy process-trading-alert --gen2 --region=us-east1 --source=cloud_functions/alert_processor --runtime=python312 --entry-point=process_alert --retry`
+then `gcloud functions describe ... --format="value(eventTrigger.retryPolicy)"`.
+
 ⚠️ `cloud_functions/` is NOT in the VM `git pull` deploy path — it needs its own
 `gcloud functions deploy` with NO trigger flags (`--trigger-topic` can mint a
 SECOND eventarc trigger and double every alert). Re-check `deadLetterPolicy`
