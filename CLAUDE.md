@@ -1195,6 +1195,72 @@ Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
 | `GET /api/widget/fleet` | All 9 strategies for the **Medium/Large** widget, grouped by comparability with per-row `days` of history. Deliberately **no global ranking** — cross-group P&L is not comparable, raw dollars rank by position size, lifetimes span different eras (bl 9 days vs c 94), and 8 of 9 are dry-run. Same widget-token scope. |
 | `WS /ws/dashboard` | Real-time updates |
 
+### Front-end performance budget (2026-11-16)
+
+Three independent client-side faults made the dashboard feel "stuck on loading" on a phone.
+None of them was the server: in the nginx access log for the reported session **every request
+was answered 200 in ~3ms**, one WebSocket connected and stayed up, no reconnect loop, no
+backend error. Read that order of elimination first next time — `/var/log/nginx/access.log`
+gives you per-request status and bytes, and nginx logs a **WebSocket at CLOSE, not at open**
+(the byte count is cumulative), which is easy to misread as a 69-second connect delay.
+
+| fault | was | now |
+|---|---|---|
+| single JS chunk | **1,057,495 B** (313 kB gzip) parsed before *anything* rendered, login form included | **416,025 B** eager (133 kB gzip) — **−61%**; measured live over TLS at **153,856 B gzip vs 367,366 B** |
+| whole-app re-render | 7 components called `useHydraStore()` with **no selector** = subscribe to the whole store; the worst was `useWebSocket()` in **`App`**, so every push reconciled the entire routed tree, at ~**1.5 pushes/s** (backend state 1.0s + logs 2.0s) | `useWebSocket` reads ACTIONS via `getState()` and subscribes to **nothing**; the other six use scoped selectors |
+| no request deadline | **all 23** `fetch("/api/...")` sites had no timeout/AbortController/signal, **and** the service worker's `NetworkFirst` for `/api/*` had **no `networkTimeoutSeconds`** — an unbounded wait with a good cached response sitting there | every call goes through `src/lib/apiFetch.ts` (10s deadline); SW falls back to cache at **5s** |
+
+Also fixed: the **2s** pollers could stack five requests under a 10s deadline (`src/lib/startPolling.ts`
+skips a tick while one is in flight — deliberately **not** applied to the 30s pollers, where the
+deadline is shorter than the interval so overlap is impossible); and `useBotConfig` fetched
+`/api/hydra/bot-config` **twice** because its cache was written only on arrival while three
+components call it on the same mount tick (`useStrategyMeta` already had the in-flight guard,
+which is why `/api/strategies/meta` appeared once in the same log).
+
+**Two gates now protect this, because every one of these regressions is a one-line change that
+breaks nothing and no screenshot can see:**
+
+- `npm test` — **vitest**, added with the fixes. The dashboard had six Playwright specs and
+  **no unit runner**, so the one unassertable thing was component behaviour, above all
+  re-render counts. 24 tests, and **every group carries a control that reproduces the original
+  defect** so none can go vacuously green.
+- `node scripts/check-bundle-budget.mjs` — sums only the JS `dist/index.html` references
+  **eagerly** and fails over budget or if either chart vendor rejoins the eager path. Verified by
+  mutation (static charts → 937,170 B, exit 1).
+  ⚠️ It carries a **staleness guard** (fails if `dist/` is older than `src/`) because while
+  writing that mutation control the mutant did not compile, the build failed, and the checker
+  read the **previous** `dist` and printed a confident green with identical byte counts. **A size
+  gate that measures the last successful build is worse than no gate.**
+
+**Deploying the frontend prunes stale assets.** `cp -r` over `dist/` only ADDS, which is how a
+1,054,800-byte orphan chunk from 2026-10-21 was still being served. Copy in first (so no request
+can reference a missing file), then delete anything in `dist/assets/` the new build does not
+contain.
+
+ℹ️ **Measured and deliberately NOT changed** (report, don't tune):
+- **`/api/strategies/{id}/snapshot` re-sends everything every 2s with no `ETag`/`304` anywhere in
+  the backend**, and the payload carries the day's accumulating 1-min OHLC — 7,516 B measured at
+  12:11 ET and still growing, i.e. **~13 MB/hour on cellular**, more later in the session. This is
+  the next real mobile win and it is a backend change with cache-correctness implications on a
+  live trading view, so it wants its own pass.
+- `routers/strategies.py:_run_coro` spawns a **throwaway `ThreadPoolExecutor(max_workers=1)` per
+  call** and `.result()` blocks the event loop thread (1 uvicorn worker), so snapshot DB reads
+  serialise against every other request. Fine at the measured ~3ms; a structural ceiling, not a
+  bug.
+- The WS broadcaster polls **regardless of client count** (state 1.0s, logs 2.0s, metrics 10s, DB
+  30s) — it never checks `client_count`, so it keeps working with nobody connected. Mostly a
+  `stat()` per second via `read_if_changed()`, hence low severity.
+- `PerformanceMetrics` fetches `/api/metrics/performance` **twice** on load because its effect
+  deps (`market.is_open`, `metrics.last_updated`) transition `null → value` on the first WS push.
+  210 B, and the re-run is deliberate — not worth weakening a real refresh trigger.
+
+Checked and found **clean**, so don't re-audit from scratch: `index.html` already has both font
+preconnects + `display=swap`; every `addEventListener` has a matching `removeEventListener`;
+`logLines` is capped at 500 and `toasts` at 5, and `stopEvents` is bounded by its dedup key;
+every query against the growing tables (`market_ticks`, `spread_snapshots`, `market_ohlc_1min`)
+is day-scoped; and every trading-DB connection really is `mode=ro` (the one writable SQLite
+handle is `services/auth_db.py`, the dashboard's **own** accounts database, which is correct).
+
 ### Safety guarantees
 - 100% read-only — never writes to state, metrics, DB, or logs
 - SQLite opened `query_only=TRUE`
