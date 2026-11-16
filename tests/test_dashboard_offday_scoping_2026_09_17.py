@@ -30,6 +30,7 @@ reader, so the whole file runs in the normal suite with no VM.
 from __future__ import annotations
 
 import ast
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -137,8 +138,19 @@ def test_offday_card_fetches_are_scoped(endpoint):
     src = BANNER.read_text()
     # Anchor on the FETCH, not the first textual mention — the endpoint is also
     # named in a type comment, and matching that made this test pass vacuously.
-    idx = src.index(f"fetch(`{endpoint}")
-    window = src[idx: idx + 200]
+    #
+    # The call is `apiFetch(` since 2026-11-16, when every /api call was routed
+    # through a timeout wrapper (dashboard/frontend/src/lib/apiFetch.ts). This
+    # anchor said `fetch(` and so broke on a pure RENAME, while the scoping it
+    # actually guards was untouched. Matching an optional `api` prefix keeps the
+    # test pinned to the real invariant — "this endpoint is fetched WITH a
+    # strategy_id" — rather than to the name of the function doing the fetching.
+    m = re.search(rf"(?:api)?[Ff]etch\(`{re.escape(endpoint)}", src)
+    assert m, (
+        f"no fetch of {endpoint} found in {BANNER.name} — the call was renamed "
+        f"or removed; update this anchor deliberately, do not delete the check."
+    )
+    window = src[m.start(): m.start() + 200]
     assert "sidParam" in window, (
         f"{endpoint} is fetched without a strategy_id, so the off-day card shows "
         f"the live seat's last day under whichever strategy is selected."
