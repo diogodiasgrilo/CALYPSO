@@ -618,6 +618,25 @@ Details:
     return html, text
 
 
+class AlertDeliveryFailed(RuntimeError):
+    """Every channel this alert ASKED for failed to deliver.
+
+    Raised so functions_framework answers the Pub/Sub push non-2xx, which is the
+    only way the subscription's retry (10s-600s backoff) and its 50-attempt
+    dead-letter policy can ever engage. Established 2026-11-15: because
+    `process_alert` wrapped its whole body in `except Exception` and returned
+    normally on every input, the push was ALWAYS acked, `deliveryAttempt` never
+    left 1, and an alert lost to a Telegram or Gmail outage was dropped with only
+    a log line. Probed: one invocation, no retry, DLQ empty.
+
+    ONLY total failure raises. A partial failure (one channel delivered, the
+    other did not) must NOT raise: the retry would redeliver the whole message
+    and re-send the channel that already succeeded, which is the duplicate-alert
+    defect of 2026-11-11. Non-retriable inputs (empty message, bad JSON) must not
+    raise either -- a retry cannot fix malformed data.
+    """
+
+
 @functions_framework.cloud_event
 def process_alert(cloud_event):
     """
@@ -625,7 +644,15 @@ def process_alert(cloud_event):
 
     Sends alerts via Telegram + Email. Supports both legacy "sms" key
     and new "telegram" key in delivery payload for backwards compatibility.
+
+    Raises:
+        AlertDeliveryFailed: every requested channel failed -- see that class.
     """
+    # Initialised HERE, outside the try, for two reasons: the catch-all below
+    # must not be able to swallow the decision to retry, and the post-try check
+    # must not be able to read an unbound name on an early exception path.
+    total_delivery_failure = False
+    failure_detail = ""
     try:
         # Decode the Pub/Sub message
         pubsub_message = cloud_event.data.get("message", {})
@@ -666,6 +693,12 @@ def process_alert(cloud_event):
                 results["telegram"] = False
 
         # Send email if requested and configured (isolated — failure doesn't block Telegram)
+        if send_email_flag and not email_address:
+            # Requested but unconfigured was previously INVISIBLE: no attempt,
+            # no log, results["email"] left None. A CRITICAL asking for email
+            # and silently not getting one must leave a trace.
+            logger.warning(
+                "Email requested but no recipient configured - not attempted")
         if send_email_flag and email_address:
             try:
                 subject = format_email_subject(alert)
@@ -676,6 +709,14 @@ def process_alert(cloud_event):
                 logger.error(f"Email delivery exception: {e}")
                 results["email"] = False
 
+        # Did EVERY channel we actually attempted fail? `results` holds None for
+        # a channel that was never requested, so filtering None is what makes
+        # this "all REQUESTED channels" rather than "all channels".
+        attempted = {k: v for k, v in results.items() if v is not None}
+        if attempted and not any(attempted.values()):
+            total_delivery_failure = True
+            failure_detail = ", ".join(sorted(attempted))
+
         # Log final result
         logger.info(f"Alert processed: {json.dumps(results)}")
 
@@ -683,6 +724,15 @@ def process_alert(cloud_event):
         logger.error(f"Failed to parse alert JSON: {e}")
     except Exception as e:
         logger.error(f"Error processing alert: {e}")
+
+    # OUTSIDE the try/except ON PURPOSE. Raising inside it would be caught by
+    # the catch-all above and silently acked -- which is the very defect this
+    # fixes, so the placement is load-bearing, not stylistic.
+    if total_delivery_failure:
+        logger.error(
+            f"ALERT DELIVERY FAILED on every requested channel "
+            f"({failure_detail}) - raising so Pub/Sub retries")
+        raise AlertDeliveryFailed(failure_detail)
 
 
 # For local testing

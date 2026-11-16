@@ -844,6 +844,35 @@ gcloud pubsub subscriptions describe "$SUB" --project=calypso-trading-bot --form
 > `textPayload:"..."` instead. Measured that way: **zero real delivery failures in
 > the 30 days to 2026-11-15** (the only hits were the probe's own).
 
+> ✅ **CLOSED 2026-11-15 — delivery failures now retry, and a human is told.**
+> Two halves, both deployed:
+>
+> 1. **`process_alert` re-raises `AlertDeliveryFailed` when every *requested*
+>    channel failed**, so the push answers non-2xx and the subscription's retry +
+>    50-attempt dead-letter policy finally engage. **Only TOTAL failure raises** —
+>    a partial failure must not, because the retry redelivers the whole message
+>    and would re-send the channel that already succeeded (the 2026-11-11
+>    duplicate-alert defect). Email is CRITICAL-only, so most alerts are
+>    Telegram-only and "all failed" simply *is* "Telegram failed" there. Empty
+>    message, bad JSON and unexpected internal errors still return without
+>    raising — a retry cannot fix malformed data.
+>    ⚠️ **The raise sits OUTSIDE the try/except and that is load-bearing**: inside
+>    it the catch-all swallows it and acks, which is the original bug. Pinned by
+>    `tests/test_alert_delivery_retry_2026_11_15.py` (23 tests, 8 mutation
+>    controls).
+> 2. **A log-based alert policy** (`deploy/monitoring/`, applied by
+>    `setup_alert_delivery_monitor.sh`) — this project's **first** alert policy and
+>    notification channel, there having been zero of each. Retry alone would only
+>    move the silence later, since the DLQ is forensic and nobody watches it.
+>    Its filter matches `textPayload`, **not `severity`**, for the reason above.
+>
+> Also now logged: **email requested but no recipient configured**, previously
+> invisible (no attempt, no log, `results["email"]` left `None`).
+>
+> ℹ️ Known wart, deliberately unfixed: `_split_telegram_message` ANDs its chunk
+> results, so a long message whose first chunk sent and second failed counts as
+> total failure and the retry re-sends chunk 1. Bounded and rare.
+
 > ⚠️ **`gcloud functions logs read` shows you NOTHING but platform noise, and
 > that is not a symptom — it is the only stream there was.** `process-trading-alert`
 > is **GEN_2** (a Cloud Run service), and until 2026-11-15 its application logs

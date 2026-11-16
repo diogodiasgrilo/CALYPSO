@@ -1,0 +1,22 @@
+{
+  "displayName": "Alert delivery failure (process-trading-alert)",
+  "documentation": {
+    "mimeType": "text/markdown",
+    "content": "The alert Cloud Function logged a delivery failure.\n\n**Why this policy exists.** Until 2026-11-15 a failed alert delivery was silent: `process_alert` swallowed every exception, Pub/Sub acked, and the alert was dropped with nothing but a log line nobody read. The 50-attempt dead-letter policy could not engage. Delivery failures now re-raise (total failure only) so Pub/Sub retries and eventually dead-letters -- but **the DLQ is forensic and nobody watches it**, so without this policy a retry exhaustion would still be silent. This policy is the part that tells a human.\n\n**Note the filter matches `textPayload`, not severity.** Every application log line from this function lands at severity DEFAULT in `run.googleapis.com/stderr` with no `severity` field at all, so a `severity>=WARNING` condition would match nothing.\n\n**Triage.** Check the DLQ for what was lost:\n`gcloud pubsub subscriptions pull calypso-alerts-dlq-sub --project=calypso-trading-bot --limit=10 --auto-ack`\nThen the function's own records:\n`gcloud logging read 'resource.labels.service_name=\"process-trading-alert\"' --project=calypso-trading-bot --freshness=1d`"
+  },
+  "combiner": "OR",
+  "enabled": true,
+  "conditions": [
+    {
+      "displayName": "process-trading-alert logged a delivery failure",
+      "conditionMatchedLog": {
+        "filter": "resource.type=\"cloud_run_revision\" AND resource.labels.service_name=\"process-trading-alert\" AND (textPayload:\"ALERT DELIVERY FAILED\" OR textPayload:\"Failed to send email\" OR textPayload:\"Telegram send failed\" OR textPayload:\"Failed to send Telegram message\" OR textPayload:\"Telegram delivery exception\" OR textPayload:\"Email delivery exception\" OR textPayload:\"Error processing alert\" OR textPayload:\"no recipient configured\" OR textPayload:\"not configured\")"
+      }
+    }
+  ],
+  "alertStrategy": {
+    "notificationRateLimit": { "period": "300s" },
+    "autoClose": "604800s"
+  },
+  "notificationChannels": ["__NOTIFICATION_CHANNEL__"]
+}

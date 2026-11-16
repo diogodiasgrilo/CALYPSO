@@ -9,6 +9,71 @@ Account: paper only on this branch. Saxo Bank has been removed end-to-end
 — see Version History 2.0.0-rc.1 and `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 
 
+### 2026-11-15 — a failed alert delivery is now retried instead of dropped
+
+**What was wrong.** `cloud_functions/alert_processor/main.py:process_alert`
+wrapped its whole body in `except Exception` and returned normally on EVERY
+input. functions_framework therefore always answered the Pub/Sub push 2xx,
+Pub/Sub acked, and `deliveryAttempt` never left 1 — so the subscription's retry
+policy (10s–600s backoff) and its `maxDeliveryAttempts=50` dead-letter policy
+**could never engage on an application failure.** An alert lost to a Telegram or
+Gmail outage was dropped with nothing but a log line, both before and after the
+2026-10-07 DLQ wiring. So CLAUDE.md's "a persistently-failing alert retried for
+the 24h retention window" was wrong about the retried half: it was acked on
+attempt 1.
+
+**Measured, not inferred.** One alert published with Gmail forced to reject the
+recipient (`553 5.1.3`): exactly ONE invocation, no retry at the 10s minimum
+backoff nor in the 150s after, DLQ still empty.
+
+**The fix is deliberately narrow — only TOTAL failure raises.** A blanket
+re-raise would be a duplicate-alert bug: the handler delivers Telegram and email
+in one invocation with no per-channel state, so if Telegram succeeded and email
+failed, the retry would redeliver the whole message and send Telegram AGAIN —
+the duplicate-notification defect of 2026-11-11. Raising only when every
+*requested* channel failed means there is nothing to duplicate. `results` holds
+`None` for a channel never requested, so filtering `None` is what makes the
+predicate "all REQUESTED" rather than "all". Email is CRITICAL-only, so most
+alerts are Telegram-only and for those "all failed" simply *is* "Telegram
+failed" — full retry coverage for the common case.
+
+**The raise sits OUTSIDE the try/except, and that placement is load-bearing.**
+Inside it, the catch-all would swallow it and ack — the very defect being fixed.
+`tests/test_alert_delivery_retry_2026_11_15.py::test_raise_is_outside_the_try`
+pins the position, backed by behavioural `pytest.raises` tests so it is not a
+blind grep; mutation M2 (raise moved inside) is caught.
+
+**Non-retriable inputs still do NOT raise** — empty message, bad JSON, and
+unexpected internal errors return as before, because a retry cannot fix
+malformed data (and per GCP's own guidance a non-retriable failure should return
+without throwing).
+
+**Also added:** a `logger.warning` when email is requested but no recipient is
+configured. That state was previously invisible — no attempt, no log,
+`results["email"]` left `None` — so a CRITICAL asking for email and silently not
+getting one left no trace.
+
+**Retry alone would only move the silence later**, because the DLQ is forensic
+and nobody watches it. So the companion half is a log-based alert policy
+(`deploy/monitoring/`) — the project's FIRST alert policy and notification
+channel, there having been zero of each. Its filter matches `textPayload`, not
+`severity`, because every application log line from this function lands at
+severity **DEFAULT** in `run.googleapis.com/stderr` with no `severity` field —
+a `severity>=WARNING` query matches nothing it logs, which produced a false
+"zero errors in 30 days" reading during this very audit until the probe's own
+ERROR line came back with a blank severity column.
+
+**Known wart, not fixed:** `_split_telegram_message` ANDs its chunk results, so a
+long message whose first chunk sent and second failed counts as total failure and
+the retry re-sends chunk 1. Bounded and rare; chunk-level state is not worth the
+complexity.
+
+⚠️ `cloud_functions/` is NOT in the VM `git pull` deploy path — it needs its own
+`gcloud functions deploy` with NO trigger flags (`--trigger-topic` can mint a
+SECOND eventarc trigger and double every alert). Re-check `deadLetterPolicy`
+after.
+
+
 ### 2026-11-15 — the broker drift was never one number: IBKR excludes EXPIRED legs
 
 `BROKER-RECONCILE` has logged an "unexplained" drift between IBKR's ledger
