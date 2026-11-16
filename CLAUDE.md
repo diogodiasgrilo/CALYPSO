@@ -1021,6 +1021,56 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash
 gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso bash -c 'cd /opt/calypso && .venv/bin/python -m services.homer.main --backfill'"
 ```
 
+### Daily correctness + governance checks (`calypso_health_checks`)
+
+A `oneshot` unit on a timer at **03:45 UTC Mon–Fri** (= 22:45 ET the prior trading day, after settlement). It runs
+three scripts in a deliberate order: `measurement_clock` (non-gating, `-` prefixed — the 15-clean-trading-day
+real-money gate), `audit_telemetry_health` (non-gating), then `audit_fleet_correctness --alert` (**GATING** — its
+exit code is the unit's).
+
+**Read the exit code, not just red/green:**
+
+| code | meaning |
+|---|---|
+| 0 | every variant audited, every identity holds |
+| 1 | an identity **BREAK** — the data disagrees with itself |
+| 2 | at least one variant **could not be audited**; no break found elsewhere |
+
+> ⚠️ **Code 2 did not exist until 2026-11-16, and the gap it names had been active for over two weeks.** The unit
+> had crashed on **8 of its last 13 runs** (10-31, 11-03→06, 11-11, 11-13, 11-14) with
+> `sqlite3.OperationalError: unable to open database file` — and because a crash also exits 1, each one presented
+> as a **P&L identity break** on a fleet whose identities were all holding. Nobody saw it because a failed systemd
+> unit is invisible unless you run `systemctl --failed`. Four defects, two scripts, one unit:
+>
+> 1. 🔴 **`VARIANTS` did not contain `bl` — in EITHER audit.** The live paper seat since 2026-10-09 was not audited
+>    at all by the check that gates real money. **Third** time a fleet list here was written without the live seat
+>    (emergency stop 2026-09-19; GCS DB backup `ab63407`). Now pinned against
+>    `strategy_taxonomy` — every `PAPER` strategy must appear in both lists — not against the string `"bl"`.
+> 2. **`_ro()` returned a handle it had not proven readable.** `sqlite3.connect` is lazy, so a WAL database whose
+>    `-shm` sidecar cannot be created fails on the first **execute**. It now probes at open time.
+>    `audit_telemetry_health._ro` was worse (no `exists()`, no `try`) and its crashes were **silent**, since that
+>    check is `-` prefixed.
+> 3. **A crash aborted the variant loop**, so every variant after the failing one was never audited and nothing
+>    said so. Both audits now contain failures per variant.
+> 4. **An unreadable DB reports `UNAUDITABLE`, never `SKIP`.** `SKIP` does not gate, so an unreadable live-seat
+>    database read as routine.
+>
+> **Why the unit now carries `ReadWritePaths=/opt/calypso/data`.** A read-only connection to a **WAL** database
+> must be able to **create** the `-shm` sidecar, and when the last writer closes cleanly SQLite deletes
+> `-wal`/`-shm` — so a reader arriving after that has to make one. Under `ProtectSystem=strict` the whole tree is
+> read-only, so it could not. `mode=ro` still forbids writing the databases themselves. **The code fix alone was
+> not enough**: without this line those 8 of 13 crashes would simply have become 8 of 13 honest non-audits. Proven
+> by an A/B under the real sandbox against a staged WAL-with-no-shm: without the grant → exit 2 `BL UNAUDITABLE`;
+> with it → exit 0 `BL OK`. The unit's `Description` no longer claims it "writes nothing", because that is now false.
+
+First green run, 2026-11-16: `ok BL OK — 26 summary days, 42 entries — all identities hold`.
+
+ℹ️ **Known, unfixed (found 2026-11-16):** `audit_telemetry_health` passes `alert_type="data_quality"` as a **string**
+where `AlertService` expects the `AlertType` enum, so every run logs
+`Alert gate error (failing open, alert sent): AttributeError: 'str' object has no attribute 'value'`. It fails
+open — the alert is still delivered — but the **anti-spam chokepoint is bypassed**, so this check can alert daily
+without dedup, including on `[HEALED] … no action` findings.
+
 ### Backtesting Database (`data/backtesting.db`)
 
 SQLite populated live by HYDRA's `DataRecorder` + backfilled by HOMER. Current schema: **v20** (read from `schema_info` on the live VM, 2026-10-14 — every variant is on v20).
