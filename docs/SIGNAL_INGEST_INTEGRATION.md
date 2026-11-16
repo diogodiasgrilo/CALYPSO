@@ -1,7 +1,11 @@
 # signal-ingest — integration + runbook (TradingView → recorded trade intents)
 
-**Status 2026-10-21: built, tested (49 tests), NOT deployed.** Localhost-only by
-operator choice; the systemd unit is not installed and no public URL exists.
+**Status 2026-11-16: built, tested (49 tests still green), STILL NOT DEPLOYED.**
+Localhost-only by operator choice; the systemd unit is not installed and no public
+URL exists. Re-verified on the VM 2026-11-16: no unit, nothing on :8002, no
+`config.json`, no secret drop-in, no `data/signal_ingest/`, no nginx webhook
+location. Unchanged in four weeks. See `docs/INVESTANSWERS_TRADINGVIEW_PLAN.md`
+§0-ter — the October research that fed gate 2 was WRONG and has been corrected.
 
 What it does: receives a TradingView webhook, validates it, de-duplicates it,
 applies caps, records it, and updates a **simulated** position book so the run
@@ -210,12 +214,12 @@ the service is only the instrument.
 
 | # | Question | Status |
 |---|---|---|
-| 1 | Can a signal leave TradingView? | ✅ **PASSED** — Pro+ confirmed 2026-10-21 |
-| 2 | Is it a signal or commentary? | ❌ **OPEN.** The one inspectable script (`IA-SOL-Upside-Model`) is an `indicator()` with **no alerts** — a projection overlay. IADSS ($175/mo) is sold as "trading signals" and is the only candidate; it cannot be inspected without paying |
+| 1 | Can a signal leave TradingView? | ✅ **PASSED.** Webhooks need a paid tier; "Pro+" is retired, the tiers are now Essential/Plus/Premium/Ultimate and webhooks start at Essential. ⚠️ **On Essential and Plus, alerts EXPIRE after two months** — budget Premium or add an expiry watchdog |
+| 2 | Is it a signal or commentary? | ✅ **STRONG PASS (re-researched 2026-11-16).** Two independent third-party receivers exist for IADSS alerts; one documents four — **BUY/SELL Early Warning** (notify only) and **BUY/SELL Sequence Complete** (executes) — with the indicator sequencing internally and alerts set **"Once per bar close"**. Third-party evidence; InvestAnswers' own pages still document no alerts. ⚠️ Our contract has ONE `action` slot, so the Early-Warning pair currently has nowhere to go |
 | 3 | Whose IBKR account trades? | ❌ **OPEN.** Dad's user is read-only *by design*; ours is paper. No real-money account exists for this |
 | 4 | Frequency ≥ ~50 signals/yr? | ❌ **OPEN** — below that nothing resolves in useful time. This is what the ledger measures |
 | 5 | Does the account clear the subscription drag? | ❌ **OPEN.** $1,788–2,748/yr is **8.9–13.7% at $20k**, 1.8–2.7% at $100k |
-| 6 | Does IBKR **paper** support crypto? | ❌ **UNVERIFIED.** IBKR added SOL/BTC/ETH + more via Paxos/Zero Hash, but paper support is unconfirmed and permissions must be enabled |
+| 6 | Does IBKR **paper** support crypto? | ⬇️ **DEMOTED 2026-11-16.** IADSS officially covers "All including Equities, …", and the original ask was equities — for which `qualify_contract(sec_type="STK")` + `place_order` already work. Only relevant if the target is crypto |
 
 ### Not designed at all (deliberately)
 

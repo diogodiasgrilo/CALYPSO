@@ -1,6 +1,8 @@
 # Plan — InvestAnswers TradingView indicators → IBKR stock orders
 
-**Status:** PLANNED, nothing built. Written 2026-10-20 at the operator's request.
+**Status 2026-11-16:** the RECEIVER IS BUILT (`services/signal_ingest/`, 49 tests,
+**not deployed** — see `docs/SIGNAL_INGEST_INTEGRATION.md`), and **§0-bis below is
+WRONG and must not be quoted.** Written 2026-10-20 at the operator's request:
 Ruben (dad) asked whether InvestAnswers' TradingView buy/sell indicators for
 ordinary stocks (Tesla, Apple and similar) could drive real orders on Interactive
 Brokers.
@@ -11,7 +13,47 @@ fact, and this plan is deliberately shaped the same way.
 
 ---
 
-## 0-bis. 🔴 RESEARCHED 2026-10-21 — the premise does not match the product
+## 0-ter. 🔴 CORRECTION 2026-11-16 — §0-bis refuted a premise that is real
+
+Re-researched at the operator's request. §0-bis below concluded "the premise does
+not match the product … not possible, no such product". **That is false**, and the
+two errors are worth more than the conclusion was:
+
+1. **IADSS's own product page states its coverage is "All including Equities,
+   Crypto, Commodities, FX and pairs."** §0-bis read the *catalogue blurbs* —
+   where most products are crypto-flavoured — and never opened the product page
+   of the one item it had itself named "the only real candidate". It then filed a
+   verdict contradicting its own caveat.
+2. **IADSS demonstrably emits webhook-capable alerts.** Two independent
+   third-party receivers exist (`ballzac81/IADSS-Signal-Tracker`,
+   `IADSS-Rotation-Tracker`). The first documents four alerts — **BUY/SELL Early
+   Warning** (notification only) and **BUY/SELL Sequence Complete** (which it
+   uses to execute) — states the indicator "handles signal sequencing
+   internally", and creates them **"Once per bar close"**, the repainting-safe
+   setting this plan asks for. Third-party, not first-party: InvestAnswers' own
+   pages still say nothing about alerts or webhooks.
+
+**What did NOT change: the drag, and the blockers.** Current sale prices are
+IADSS **$149/mo** (list $175) and the Pro Bundle **$229/mo** (list $250), plus
+TradingView itself — so ~$1,950–2,600/yr all-in, **~10–13% at $20k** and
+~2–2.6% at $100k. ⚠️ "Pro+" no longer exists (Essential/Plus/Premium/Ultimate),
+and on **Essential and Plus alerts EXPIRE AFTER TWO MONTHS** — an unattended
+trigger that silently lapses is this project's recurring failure shape, so
+budget Premium or build an expiry watchdog.
+
+**Gate 2 is now a strong pass; gates 3 and 4 are the whole decision.** No source
+anywhere gives a signal RATE, which is still the one free number that can end
+this (≥ ~50/yr or nothing resolves in useful time), and no real-money IBKR
+account exists for it — dad's user is read-only by design, ours is paper.
+
+**Concrete gap, newly visible:** our contract carries one `action: buy|sell`
+slot; IADSS emits four alerts, so the Early-Warning pair has nowhere to go.
+Record them as a non-trading outcome or wire only the Sequence-Complete pair —
+an unmade decision, not a defect.
+
+---
+
+## 0-bis. ⚠️ SUPERSEDED (2026-10-21) — see §0-ter above before reading this
 
 The plan below was written from reasoning alone. Four facts gathered since, each
 free, change the picture before any of its checks are reached.
