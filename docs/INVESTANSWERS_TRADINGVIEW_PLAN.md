@@ -99,7 +99,39 @@ inspected without paying.**
 
 ### C. The subscription imposes a MINIMUM ACCOUNT SIZE — the new decisive bar
 
-This is arithmetic, and it can be done before anything else:
+> 🔴 **LARGELY MOOT as of 2026-11-17: the operator reports his father ALREADY
+> HOLDS the IADSS subscription.** Every drag figure below assumed we would buy
+> it. We would not. The IADSS fee is a **sunk cost already being paid**, so the
+> marginal cost of this project is only the TradingView tier needed for
+> non-expiring alerts — about **$840/yr** (Premium), and less if he already holds
+> a paid tier, which IADSS effectively requires.
+>
+> | account | marginal drag (TradingView Premium only) |
+> |---|---|
+> | $20,000 | **4.2%** |
+> | $50,000 | 1.7% |
+> | $100,000 | **0.84%** |
+>
+> **So the economic objection is no longer decisive**, and the "needs ~$100k"
+> conclusion I drew from the table below is wrong on the real cost base. Two
+> consequences:
+>
+> 1. **The evidence question became FREE.** The subscription is live, so the
+>    Strategy Tester and a real signal count are available today at zero cost.
+>    The measurement in "The frequency question" below bounded the rate from
+>    public descriptions; it can now be replaced with the real thing.
+> 2. **The best available evidence is not a backtest — it is HIS OWN TRADING
+>    RECORD using it.** Same lead as the sibling Patreon investigation, where the
+>    answer turned out to be the back-catalogue rather than any code. Ask for the
+>    trade history first.
+>
+> **The binding constraint is now §D (the licence) and Check 3 (the account),
+> not the money.** His IBKR user is read-only by design; automating into his
+> account means new credentials and his consent, and routing *his* entitled
+> signals into *our* account is the redistribution question §D raises.
+
+The original arithmetic, which assumed WE buy the subscription — kept because it
+still applies if the subscription ever has to be bought:
 
 | account | IADSS $1,788/yr | Pro Bundle $2,748/yr |
 |---|---|---|
