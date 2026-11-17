@@ -216,18 +216,77 @@ Treat its output sceptically, for reasons that apply to any vendor backtest:
 - the tester reports the strategy *as coded*, which may not be what the
   newsletter actually recommends.
 
-### The frequency question, which may be decisive
+### The frequency question — MEASURED 2026-11-17, no longer unknown
 
-Our own measurability finding (`memory/measurability_scoring_inverts_the_backlog.md`):
-**below roughly 50 trades per year, nothing resolves in useful time.** A
-buy/sell indicator on a handful of megacaps may fire two to six times a year per
-ticker. Ten tickers might reach 20–60/yr — borderline at best.
+> ⚠️ **This section used to say the rate was unknowable without asking the vendor
+> ("ask pre-sales how many signals it fires"). That was wrong — it is derivable
+> from the published mechanism, and the answer changes the gate from a blocker
+> into a configuration choice.**
 
-So record, before looking at any P&L: **how many signals has it fired per ticker
-per year?** If the answer is small, no amount of engineering makes the result
-measurable, and that is an argument for a manual allocation rather than
-automation — the same conclusion the Patreon analysis reached for a different
-reason.
+Nobody publishes an IADSS signal rate: not the product page, not the two
+third-party reviews, not either of the two third-party webhook receivers. But the
+reviews describe the **mechanism** precisely enough to measure its base rate:
+
+| component | described as |
+|---|---|
+| Confluence Model | arrows on a Bollinger-band **break followed by a re-integration** |
+| Mean Reversion | dots at overbought / oversold extremes |
+| BUY/SELL **Early Warning** | "MR + Confluence aligned" |
+| BUY/SELL **Sequence Complete** | "all conditions met" (adds the Trend flip) |
+
+Those are **nested**, so `count(re-integration) >= count(aligned) >= count(Sequence
+Complete)`: each extra condition can only remove events. So a proxy of the two
+loosest components gives a hard **upper bound** on the rate of the alert that
+actually executes.
+
+`scripts/measure_signal_base_rate.py` — 8 liquid tickers, 80 ticker-years of
+daily bars, BB(20, 2) + RSI(14):
+
+| | per ticker-year |
+|---|---|
+| band re-integration events | **16.0** |
+| …with Mean Reversion aligned | **6.2** |
+
+**On daily bars one ticker fires ~6 times a year.** Our own measurability finding
+([`memory/measurability_scoring_inverts_the_backlog.md`](../memory)) puts the
+resolution floor near **50 trades/yr**, so a daily-bar setup needs **~8 tickers**
+to become measurable at all — and that is the *upper bound*, with the real
+Sequence Complete rate lower still.
+
+**But the rate is a timeframe choice, not a property of the product.** IADSS runs
+"all timeframes (eg down to 1 second and up to 1 day or week)", and the rate
+scales roughly with bar count (`scripts/measure_signal_base_rate_by_timeframe.py`,
+SPY / NVDA, aligned events per ticker-year):
+
+| timeframe | 1wk | 1d | 1h | 30m | 15m | 5m |
+|---|---|---|---|---|---|---|
+| SPY | 1 | 6 | **41** | 100 | 196 | 452 |
+| NVDA | 2 | 6 | **47** | 91 | 174 | 448 |
+
+So **hourly bars on one or two tickers is the cheapest configuration that clears
+the 50/yr floor** — and that is the first concrete design answer this project has
+had. Note what it costs: hourly-or-faster is exactly where repainting, alert
+expiry and execution cost bite hardest, and where a 3-second webhook timeout
+stops being generous.
+
+Two consequences that follow from the rate, not from taste:
+
+1. **Alert slots become binding on the daily path.** 8 tickers x 4 IADSS alerts =
+   **32 alerts**, over Essential's 20. The hourly path needs 4–8 and fits any
+   paid tier.
+2. **Essential and Plus expire alerts after ~2 months.** An unattended trigger
+   that silently lapses is precisely how variant H sat dead for a month and E for
+   eighteen days. That argues for **Premium** (open-ended alerts) rather than the
+   cheap tier — which raises the drag to ~$149 + ~$70 = **$219/mo ≈ $2,630/yr**,
+   i.e. **~13% at $20k** and ~2.6% at $100k.
+
+⚠️ **What this is and is not.** It is a measurement of the *published mechanism*
+on real data, and it bounds the answer by construction. It is **not** the real
+script: the actual thresholds, the Optimized Trend component and the Trend flip
+are not public, and the proxy's own trend filter is reported as 0/yr because
+"mean-revert against the trend" and "trend agrees" are near-disjoint as defined —
+a definitional artefact, not a finding. Use the `aligned` column as the bound and
+ignore the trend column.
 
 ---
 
@@ -314,7 +373,10 @@ systemd unit. Deliberately small, and deliberately outside `bots/hydra/`.
 
 1. Check 1 (alert + webhook tier) — free.
 2. Check 2 (defined event, stated in one sentence) — free.
-3. Frequency count per ticker per year — free, and may be decisive on its own.
+3. ~~Frequency count per ticker per year~~ — **DONE 2026-11-17 without a
+   subscription**, by measuring the published mechanism: ~6/ticker-yr daily,
+   ~44 hourly. See "The frequency question" above. It did not end the
+   investigation; it sized it.
 4. TradingView Strategy Tester with realistic commission/slippage, and a
    repainting check — free.
 5. **Decide: manual allocation, automation, or neither.** Pre-register the two
@@ -326,7 +388,21 @@ systemd unit. Deliberately small, and deliberately outside `bots/hydra/`.
 7. Only then: build the ingest service, dry-run for weeks, review, and go live
    on a size that cannot matter.
 
-**The single cheapest fact that could end this investigation:** how many signals
-the indicator actually fires per year. Ask that first — on the Patreon service
-the equivalent question ("how many closed trades exist?") turned out to be
-**one**, and no amount of code would have fixed it.
+> ⚠️ **This used to read "the single cheapest fact that could end this
+> investigation: how many signals it fires per year. **Ask that** first."** The
+> instinct to compare it to the Patreon question was right; the instruction was
+> not. That fact did not need a vendor, a subscription or an email — it was
+> derivable from the mechanism the public reviews already describe, and it took
+> one script against free daily bars (2026-11-17).
+>
+> **The lesson is the general one: before recording something as a question for
+> someone else, check whether it is a measurement.** The Patreon question really
+> was unanswerable from a desk, because a track record that is not published
+> cannot be derived. A *signal rate* is not like that — a rule has a base rate,
+> and a base rate can be counted.
+
+**What remains genuinely un-derivable** (and so is a real question for the vendor
+or for a one-month subscription): the *edge*, which no mechanism description
+bounds, and whether the equity coverage runs the same scripts as the crypto
+flagship. The account question (Check 3) stays blocked on the operator, not on
+research.
