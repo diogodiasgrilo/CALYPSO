@@ -9,6 +9,74 @@ Account: paper only on this branch. Saxo Bank has been removed end-to-end
 — see Version History 2.0.0-rc.1 and `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 
 
+### 2026-11-20 (second same-day change) — "SPX quote is DELAYED" about a SPY quote, 9,114 times
+
+**What was wrong.** `MarketData.update_spx` / `update_vix` are SPX-shaped NAMES
+on a parameterized fleet. Variants **E and H both run `underlying_symbol:
+"SPY"`** (`sec_type: "STK"`) and call the same `update_spx`, so every freshness
+warning they emitted named the wrong instrument:
+
+| session | E | H |
+|---|---|---|
+| 2026-11-16 | 855 | 580 |
+| 2026-11-17 | 1,692 | 1,044 |
+| 2026-11-18 | 1,739 | 1,088 |
+| 2026-11-19 | 1,299 | 817 |
+| **total** | **5,585** | **3,529** |
+
+**A/B/C/bl emitted ZERO**, which is the control that makes it a mechanism and
+not a coincidence: the live seat trades SPX and its quotes are real-time.
+
+**The lag itself is real and already understood** — this account holds the index
+real-time subscription but not a US-equity one, so SPY returns `DP` by design
+(CLAUDE.md Troubleshooting "Cause 2"). Only the SYMBOL was wrong, which is the
+worse half: an operator grepping for a delayed SPX feed would find 9,114 hits
+belonging to two dry-run variants trading a different instrument. Same class as
+the 2026-10-07 "log lines must DERIVE, not assert" finding.
+
+**Second defect in the same line: no dedup.** The `Z/Y/N` branch twenty lines
+above has a 5-minute rate limit whose own comment says *"this would otherwise
+flood every ~10s tick"*. The `D` branch had none — and unlike `Z/Y/N` it does
+NOT `return`, because a permanently-delayed feed is a steady state here rather
+than an incident. So it logged on every tick for the whole session: **25% of E's
+entire log output and 23% of H's.** The comment was right one branch up and
+nobody had looked one branch down.
+
+**FIX.** Both labels now come from `MarketData.underlying_symbol` /
+`volatility_symbol`, new dataclass fields defaulting to the SPX/VIX literals the
+call sites used to hardcode (so a MarketData built without them logs exactly as
+before). `MEICStrategy.__init__` passes the configured values in — it runs
+`_load_instrument_params()` at line ~1390, well before it constructs MarketData
+at ~1490, so the labels are known at construction and nothing mutates them
+later. Both `D` branches gained the same 5-minute dedup, and the surviving line
+DISCLOSES the suppression.
+
+🔴 **THE FIRST VERSION OF THIS FIX DID NOTHING, and the lesson is the one worth
+keeping.** It read `getattr(self, "underlying_symbol", None)` inside the
+helper — but `update_spx` is a **MarketData** method and MarketData has no such
+field, so it silently took the `"SPX"` default on every variant. It parsed, it
+looked right, it was reviewed, and it changed not one log line. **The tests
+caught it, review did not** — and only the tests that drove the REAL constructor
+could, which is why a wiring test now exists alongside the isolated ones.
+
+**CONTROL FLOW DELIBERATELY UNCHANGED.** On a `D` flag the price is still
+accepted and the freshness clock still advances; only the log is rate-limited. A
+test pins that 50 suppressed ticks still produce 50 `price_history` entries and
+an advanced `last_spx_update`, because suppressing a warning must never become
+suppressing the data it describes — that would make DATA-001 trip on a feed that
+was working. A paired test pins that `Z/Y/N` still refuses the price, proving the
+edit did not blur the two branches together.
+
+**Tests:** `tests/test_delayed_quote_label_2026_11_20.py` — 19 across 3 groups
+(label, flood, wiring), each with a control reproducing the original defect.
+**Six mutations verified to fail them**, including `__init__` ceasing to forward
+the labels (the bug that shipped) and the dedup swallowing the price.
+
+ℹ️ **Deployed to E and H only.** They account for 9,114 of 9,114 occurrences;
+A/B/C/bl/D/F/G emit none, so restarting them mid-session for a cosmetic log
+change would be pure risk for no benefit. They pick it up on their next restart.
+
+
 ### 2026-11-20 — a day on which EVERY entry attempt failed was recorded as a quiet day
 
 **What was wrong.** Five days since `bl`'s 2026-10-09 epoch — 10-27, 11-02,

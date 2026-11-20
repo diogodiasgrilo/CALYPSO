@@ -1546,6 +1546,16 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u h
 
 **Cause 1:** `_iserver_primed` flag bug. Verify `_ensure_iserver_primed()` is called before `live_marketdata_snapshot`. (P7-audit C2 fixed this in commit c5f43b3; should not recur.)
 
+> ⚠️ **If you grepped for a delayed SPX feed and found thousands of hits, read the SYMBOL
+> (fixed 2026-11-20).** Until then `MarketData.update_spx` hardcoded "SPX" in its freshness
+> warnings, but **E and H trade SPY** (`underlying_symbol: "SPY"`, `sec_type: "STK"`) and call the
+> same method — so they logged **"DATA: SPX quote is DELAYED" about a SPY quote 9,114 times over
+> 2026-11-16..19** (E 5,585, H 3,529) while A/B/C/bl logged **zero**. The lag was real and is
+> Cause 2 below; only the label was wrong. The line also had **no dedup** (its `Z/Y/N` sibling
+> does), so it fired every ~10s tick — **25% of E's entire log**. Both now derive the symbol and
+> rate-limit to one line per 5 min, disclosing the suppression. Control flow is unchanged: a `D`
+> flag still accepts the price and advances the freshness clock.
+
 **Cause 2:** IBKR data-sharing toggle hasn't propagated. Run `scripts/probe_ibkr_market_data.py` — it dumps SPY and SPX/VIX side by side. **Current account reality (as of 2026-07-06):** SPX + VIX return **real-time** (6509 first char `R`) while SPY returns **delayed** (`6509='DP'`) — this account holds the index real-time subscription but NOT a US-equity one. So a SPY `DP` alongside SPX/VIX on `R` is the **expected steady state**, not a fault; SPY is NOT a free-real-time control on this account (the inverse of the probe's original premise). If SPX/VIX themselves go metadata-only/`DP`, that's the real regression to chase.
 
 **Cause 3:** No real-time entitlement for the conid (or stale conid). The `_snapshot_with_preflight` warmup-exhaustion WARNING logs distinguish: "metadata-only" = entitlement/conid issue, "empty list" = service outage (P7-audit M17).

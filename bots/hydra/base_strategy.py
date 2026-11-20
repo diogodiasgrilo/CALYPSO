@@ -832,6 +832,20 @@ class MarketData:
     last_option_availability: Optional[str] = None
     last_option_availability_at: Optional[datetime] = None
 
+    # The instruments these feeds actually carry, for LOG LINES ONLY — no
+    # decision reads them (2026-11-20). `update_spx`/`update_vix`/`is_spx_stale`
+    # are SPX-shaped NAMES on a parameterized fleet, and variants E and H run
+    # `underlying_symbol: "SPY"`: their freshness warnings named SPX about a SPY
+    # quote 9,114 times in four sessions while A/B/C/bl named it 0 times.
+    #
+    # Defaults are the SPX/VIX literals every call site used to hardcode, so a
+    # MarketData built without them (tests, bare instances) logs exactly as
+    # before. MEICStrategy.__init__ passes the configured values in — it runs
+    # `_load_instrument_params()` well before it constructs this, so the labels
+    # are known at construction and nothing has to mutate them later.
+    underlying_symbol: str = "SPX"
+    volatility_symbol: str = "VIX"
+
     # Intraday OHLC tracking
     spx_open: float = 0.0
     spx_high: float = 0.0
@@ -889,6 +903,47 @@ class MarketData:
             return False
         return now.time() < get_market_close_time(now)
 
+    def _underlying_label(self) -> str:
+        """The underlying's symbol as the OPERATOR knows it, for log lines.
+
+        `update_spx`/`is_spx_stale` are SPX-shaped NAMES on a parameterized
+        fleet: variants E and H trade **SPY** (`underlying_symbol: "SPY"`,
+        `sec_type: "STK"`), and they call the same `update_spx`. So every
+        freshness warning they emitted read "SPX quote is DELAYED" about a SPY
+        quote — measured 2026-11-20 at **2,116 occurrences in one week**, all
+        from E (1,299) and H (817), while A/B/C/bl emitted none.
+
+        The lag itself is REAL and already understood (this account holds the
+        index real-time subscription but not a US-equity one, so SPY returns
+        'DP' by design — see the Troubleshooting section's "Cause 2"). Only the
+        SYMBOL was wrong, which is the worse half: an operator grepping for a
+        delayed SPX feed on the live seat would find 2,116 hits belonging to two
+        dry-run variants trading a different instrument.
+
+        Same defect class as the 2026-10-07 "log lines must DERIVE, not assert"
+        finding.
+
+        The label lives on MarketData (set at construction from the strategy's
+        config) rather than being read off the strategy: `update_spx` is a
+        MarketData method, and the strategy's `underlying_symbol` is NOT
+        reachable from here. The first version of this fix read
+        `getattr(self, "underlying_symbol")` and therefore silently returned the
+        "SPX" default on every variant — a fix that changed nothing, caught by
+        the tests rather than by review. getattr-defensive regardless, because a
+        label lookup must never be able to break a data-freshness warning.
+        """
+        return str(getattr(self, "underlying_symbol", None) or "SPX")
+
+    def _volatility_label(self) -> str:
+        """As `_underlying_label`, for the volatility instrument.
+
+        VIX is a real cash index on every variant today, so this returns "VIX"
+        fleet-wide — it exists so the pair cannot drift apart if a future
+        variant sets `volatility_symbol`, which is already a live config knob.
+        (H sets none at all and must still read VIX; pinned by test.)
+        """
+        return str(getattr(self, "volatility_symbol", None) or "VIX")
+
     def update_spx(self, price: float, availability: Optional[str] = None):
         """Update SPX price with timestamp and track open/high/low.
 
@@ -924,15 +979,32 @@ class MarketData:
                 if _now - getattr(self, "_last_spx_notrt_warn_at", 0.0) >= 300:
                     self._last_spx_notrt_warn_at = _now
                     logger.warning(
-                        "DATA-001: SPX quote is NOT real-time (6509=%r); not "
-                        "refreshing freshness timestamp", avail
+                        "DATA-001: %s quote is NOT real-time (6509=%r); not "
+                        "refreshing freshness timestamp",
+                        self._underlying_label(), avail
                     )
                 return
             if first == "D":
-                logger.warning(
-                    "DATA: SPX quote is DELAYED (6509=%r) — proceeding but data "
-                    "may lag real-time", avail
-                )
+                # DEDUP, matching the Z/Y/N branch above (2026-11-20). This
+                # branch had none, and unlike Z/Y/N it does NOT return — a
+                # permanently-delayed feed is a steady state here, not an
+                # incident, so it logged on EVERY tick for the whole session.
+                # Measured over 2026-11-16..19: 5,585 lines from E and 3,529
+                # from H, which is 25% and 23% of their ENTIRE log output. The
+                # Z/Y/N comment already said "this would otherwise flood every
+                # ~10s tick"; the same was true one branch down and nobody had
+                # looked. Control flow is deliberately UNCHANGED — the price is
+                # still accepted and the freshness clock still advances; only
+                # the log line is rate-limited.
+                import time as _t
+                _now = _t.monotonic()
+                if _now - getattr(self, "_last_spx_delayed_warn_at", 0.0) >= 300:
+                    self._last_spx_delayed_warn_at = _now
+                    logger.warning(
+                        "DATA: %s quote is DELAYED (6509=%r) — proceeding but "
+                        "data may lag real-time (further occurrences suppressed "
+                        "for 5 min)", self._underlying_label(), avail
+                    )
             self.spx_price = price
             self.last_spx_update = get_us_market_time()
 
@@ -1034,12 +1106,21 @@ class MarketData:
                 if _now - getattr(self, "_last_vix_notrt_warn_at", 0.0) >= 300:
                     self._last_vix_notrt_warn_at = _now
                     logger.warning(
-                        "DATA-001: VIX quote is NOT real-time (6509=%r); not "
-                        "refreshing freshness timestamp", avail
+                        "DATA-001: %s quote is NOT real-time (6509=%r); not "
+                        "refreshing freshness timestamp",
+                        self._volatility_label(), avail
                     )
                 return
             if first == "D":
-                logger.warning("DATA: VIX quote is DELAYED (6509=%r)", avail)
+                # Deduped for the same reason as the SPX branch above.
+                import time as _t
+                _now = _t.monotonic()
+                if _now - getattr(self, "_last_vix_delayed_warn_at", 0.0) >= 300:
+                    self._last_vix_delayed_warn_at = _now
+                    logger.warning(
+                        "DATA: %s quote is DELAYED (6509=%r) — further "
+                        "occurrences suppressed for 5 min",
+                        self._volatility_label(), avail)
             self.vix = vix
             self.last_vix_update = get_us_market_time()
 
@@ -1428,7 +1509,14 @@ class MEICStrategy(abc.ABC):
         # State
         self.state = MEICState.IDLE
         self.daily_state = MEICDailyState()
-        self.market_data = MarketData()
+        # Labels for the freshness log lines (see MarketData.underlying_symbol).
+        # getattr-defensive: a subclass that reaches __init__ by an unusual
+        # route must not be able to break market-data construction over a
+        # cosmetic label.
+        self.market_data = MarketData(
+            underlying_symbol=str(getattr(self, "underlying_symbol", None) or "SPX"),
+            volatility_symbol=str(getattr(self, "volatility_symbol", None) or "VIX"),
+        )
 
         # For backwards compatibility
         self.current_price = 0.0
