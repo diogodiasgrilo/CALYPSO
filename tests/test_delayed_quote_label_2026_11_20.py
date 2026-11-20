@@ -466,3 +466,96 @@ class TestTheCaptureSurvivesAmbientLoggingState:
         finally:
             lg.disabled = prev_disabled
             lg.removeHandler(h)
+
+
+# ════════════════════════ 5. the REAL cause of three red CI runs
+class TestTheFirstWarningAfterBoot:
+    """`time.monotonic()` is seconds since BOOT, and 0.0 is not "never".
+
+    THE ACTUAL BUG, found only because CI kept failing. The dedup compared
+    `monotonic() - getattr(self, attr, 0.0) >= 300`. On a freshly-started host
+    that subtraction is the machine's UPTIME, so under 300 seconds it reads as
+    "warned recently" and the FIRST warning is silently swallowed — the one
+    that matters most, a bot coming up against a bad feed.
+
+    This is why three CI runs went red while the full local suite passed:
+    this laptop had 23 days of uptime (monotonic 1,989,553) and a GitHub runner
+    has seconds. Every test expecting a warning failed; every test expecting
+    none passed; and `test_it_logs_again_after_the_window` failed with
+    `AttributeError: no attribute '_last_spx_delayed_warn_at'` — the timestamp
+    was never even set, which should have pointed here immediately instead of
+    at three successive theories about the logging framework.
+
+    ⚠️ Those three theories were ALL WRONG (caplog's root handler, the logger's
+    level/`disabled`/filters, LoggerService clearing handlers). The log capture
+    was never broken. Recorded because the wrong diagnoses were each plausible
+    and each cost a push.
+    """
+
+    @staticmethod
+    def _at_uptime(seconds, fn):
+        """Run `fn` with the clock pinned to a machine `seconds` old."""
+        import time as _time
+        real = _time.monotonic
+        _time.monotonic = lambda: float(seconds)
+        try:
+            return fn()
+        finally:
+            _time.monotonic = real
+
+    def test_the_first_delayed_warning_fires_on_a_FRESH_BOOT(self, warns):
+        """150s of uptime — a CI runner, or our own VM right after a reboot."""
+        md = _strat(underlying="SPY")
+        self._at_uptime(150.0, lambda: MarketData.update_spx(
+            md, 684.21, availability="DP"))
+        assert any("SPY quote is DELAYED" in m for m in warns), (
+            "swallowed on a fresh boot — the exact shape of three red CI runs")
+        assert md._last_spx_delayed_warn_at is not None
+
+    def test_the_first_NOT_real_time_warning_fires_on_a_fresh_boot(self, warns):
+        """The Z/Y/N branch carried the same defect and PREDATES today — so a
+        bot restarted into a frozen or unsubscribed feed stayed silent about it
+        for five minutes. That is the branch whose dedup this one was modelled
+        on, which is how the flaw was inherited."""
+        md = _strat(underlying="SPY")
+        self._at_uptime(150.0, lambda: MarketData.update_spx(
+            md, 684.21, availability="Z"))
+        assert any("SPY quote is NOT real-time" in m for m in warns)
+
+    def test_both_VIX_branches_fire_on_a_fresh_boot(self, warns):
+        md = _strat()
+        self._at_uptime(150.0, lambda: MarketData.update_vix(
+            md, 19.6, availability="DP"))
+        md2 = _strat()
+        self._at_uptime(150.0, lambda: MarketData.update_vix(
+            md2, 19.6, availability="Z"))
+        assert sum("VIX quote is DELAYED" in m for m in warns) == 1
+        assert sum("VIX quote is NOT real-time" in m for m in warns) == 1
+
+    def test_it_still_SUPPRESSES_inside_the_window_after_boot(self, warns):
+        """The guard rail: fixing the first-warning case must not disable the
+        throttle. 100 ticks at 150s uptime still log exactly once."""
+        md = _strat(underlying="SPY")
+        self._at_uptime(150.0, lambda: [
+            MarketData.update_spx(md, 684.21, availability="DP")
+            for _ in range(100)])
+        assert sum("quote is DELAYED" in m for m in warns) == 1
+
+    def test_zero_uptime_is_handled(self, warns):
+        """The degenerate case: `monotonic()` of exactly 0.0. With a 0.0
+        default this compared as `0.0 - 0.0 = 0 < 300` and suppressed."""
+        md = _strat(underlying="SPY")
+        self._at_uptime(0.0, lambda: MarketData.update_spx(
+            md, 684.21, availability="DP"))
+        assert any("SPY quote is DELAYED" in m for m in warns)
+
+    # ---------------------------------------------------------------- CONTROL
+    def test_CONTROL_the_zero_default_swallows_it(self, warns):
+        """Reproduces the defect exactly: `0.0` as "never warned" means any
+        machine with under 5 minutes of uptime loses its first warning."""
+        uptime, window, never_warned_default = 150.0, 300, 0.0
+        assert uptime - never_warned_default < window, (
+            "this inequality IS the bug: 150 - 0.0 = 150 < 300, so the code "
+            "concluded it had warned recently when it had never warned at all")
+        # and with None there is nothing to subtract, so the branch cannot lie
+        assert None is not never_warned_default

@@ -73,64 +73,65 @@ original defect. **Nine mutations verified to fail them**, including `__init__`
 ceasing to forward the labels (the bug that shipped), the dedup swallowing the
 price, and each of the three lines that make the log capture robust.
 
-🔴 **CI WENT RED ON 13 OF THE FIRST 19 WHILE THE FULL LOCAL SUITE WAS GREEN
-(6,666).** The product fix was correct and already verified in production — what
-failed was the MEASURING INSTRUMENT. pytest's log-capture fixture only sees a
-record that reaches a handler on the ROOT logger, and the failure mode is the
-worst kind: the record list is simply EMPTY, so all 13 assertions read as "the
-code logged nothing" and pointed at product code that was fine.
+🔴 **CI WENT RED THREE TIMES while the full local suite passed (6,666, then
+6,674, then 6,673). The cause was a REAL BUG IN THIS DEDUP, and all three of my
+diagnoses were wrong.**
 
-⚠️ **The first diagnosis was WRONG, and is recorded because it is the plausible
-one.** I blamed `LoggerService._setup_logging()`, which genuinely does call
-`logging.getLogger().handlers.clear()`. But pytest re-installs its capture
-handler around every test phase, so clearing root handlers does NOT blind it —
-proven by running the pre-fix file under exactly that condition: 19/19 passed.
+**The bug: `time.monotonic()` is seconds since BOOT, and `0.0` is not "never".**
+The throttle read `monotonic() - getattr(self, attr, 0.0) >= 300`, so on a
+freshly-started host that subtraction is the machine's **UPTIME**: under 300 it
+compares as "warned recently" and the FIRST warning is silently swallowed — the
+one that matters most, a bot coming up against a bad feed.
 
-What DOES blind it, each reproduced against the pre-fix file and each producing
-**CI's exact signature of 13 failed / 6 passed**:
+This laptop had **23 days** of uptime (`monotonic` = 1,989,553) so it always
+fired; a GitHub runner has seconds. **Reproduced exactly**: pinning
+`monotonic()` to 150.0 against the pre-fix tree gives **19 failed / 7 passed**,
+which is CI's number to the test, and the same tree at this laptop's uptime
+gives 26 passed.
 
-* the module logger's own level raised above WARNING — `caplog.at_level()` sets
-  ROOT's level, not the logger's, so it is no defence at all;
-* an ancestor logger with `propagate = False`;
-* `logger.disabled = True`, which short-circuits `Logger.handle()` before any
-  handler runs.
+🔴 **The evidence was in the first CI log and I walked past it.**
+`test_it_logs_again_after_the_window` failed with `AttributeError: 'MarketData'
+object has no attribute '_last_spx_delayed_warn_at'` — the timestamp was never
+even SET, which can only mean the branch never ran. Instead of following that,
+I spent three pushes on the log-capture mechanism:
 
-Which one CI hit is **still unidentified**: nothing in product code does any of
-them, so it is ambient state left by one of ~6,600 tests whose ORDER differs
-between CI and local (CI skips 8 that a local run executes). Chasing the
-individual culprit is worth less than making the instrument immune to the class,
-which also stops the next one.
+| attempt | theory | verdict |
+|---|---|---|
+| 1 | `LoggerService` clears root handlers, blinding `caplog` | **WRONG** — pytest re-installs its handler per phase; the pre-fix file passes 19/19 under that condition |
+| 2 | the module logger's level / `disabled` / a `Filter` | **WRONG** — an attached handler would have seen the record |
+| 3 | the logging framework is unmeasurable here; swap the logger | **UNNECESSARY** — the capture was never broken |
 
-**ATTEMPT 2 ALSO FAILED CI**, and its failure is what settled the approach. It
-attached a handler directly to `bots.hydra.base_strategy` with the logger's
-level, its `disabled` flag and the global `logging.disable()` all neutralised.
-Locally that survived every stressor I could construct — each of which had
-reproduced CI's signature against attempt 1 — and CI failed it anyway. **An
-attached handler seeing nothing rules out all of those mechanisms**, so the
-reasoning behind attempt 2 was incomplete, not merely unlucky.
+Attempt 3's logger-swap fixture is KEPT, because it is strictly more hermetic
+and the fresh-boot tests need deterministic capture. But it fixed nothing: the
+product code was swallowing the warning, exactly as the tests reported.
 
-**THE CI CAUSE REMAINS UNIDENTIFIED, and that is the honest position.** Nothing
-in product code touches logger state; the suite has ~6,600 tests; CI skips 8
-that a local run executes, so ordering differs. Rather than guess a fourth
-time, attempt 3 removes the dependency on the thing that varies.
+**FIX: `None` means never-warned, at all FOUR freshness sites.** Two were mine;
+**the `Z/Y/N` branches PREDATE today and carried the identical flaw** — the
+branch mine was modelled on, which is how it was inherited. So a bot restarted
+into a frozen or unsubscribed feed stayed silent about it for five minutes,
+and had done all along. Mutation-verified per site (reverting any one fails
+1–3 tests), and the whole file passes with `monotonic()` pinned to 150.0.
 
-**FIX (attempt 3):** a `warns` fixture that `monkeypatch`es the module's
-`logger` attribute with a recorder. It does not touch the logging framework at
-all, so no ambient state can reach it — verified against six stressors
-individually (raised level, `propagate=False`, global `disable`, `disabled`
-flag, cleared root handlers, a drop-all `Filter`) **and all six applied at
-once**: 26/26 each time. It still drives the REAL `update_spx` / `update_vix`
-bodies, the REAL format strings, the REAL `_underlying_label()` and the REAL
-dedup window, and renders `msg % args` exactly as logging would — a test pins
-that, because an unrendered `%s` would satisfy a label assertion while the real
-line said literally "%s". Two mutations confirm it: dropping the rendering
-fails 15 tests, removing the swap fails 21.
+⚠️ **TWO MORE SITES CARRY THIS EXACT DEFECT AND ARE DELIBERATELY NOT TOUCHED
+HERE** — both pre-existing, both reported rather than changed mid-session:
 
-🔑 **The lesson, in three parts.** When every assertion in a NEW file fails on
-"nothing was logged", suspect the instrument before the subject. When a fix for
-the instrument also fails, stop diagnosing the environment and remove the
-dependency on it. And a green local suite is not evidence about CI — this one
-was green at 6,666 and then 6,674 across two red runs.
+* `base_strategy.py:~3344` `_last_entry_checkpoint_at` — the ENTRY-CHECKPOINT
+  stop-check throttle. On a fresh boot the first checkpoint is SKIPPED, so the
+  blind-window protection added 2026-10-25 is absent for its first interval.
+  Safety-adjacent, so it wants its own change and its own tests.
+* `strategy.py:~5344` `_last_rate_penalty_alert_at` — a HIGH operator alert on
+  IBKR rate-penalty. On a fresh boot the first one inside 120s is swallowed.
+
+Both are harmless on the production VM, whose uptime is enormous — which is
+precisely why neither would ever surface there, and why this one needed a CI
+runner to find.
+
+🔑 **Three lessons, all paid for.** (1) `monotonic() - 0.0` is UPTIME, never
+"long ago"; a never-happened sentinel must be `None`. (2) When a test reports
+an attribute was never set, the branch never ran — follow that before
+theorising about anything downstream. (3) A green local suite is not evidence
+about CI, and when the difference is environmental, the environment may be
+telling you about a real bug rather than hiding one.
 
 ℹ️ **Deployed to E and H only.** They account for 9,114 of 9,114 occurrences;
 A/B/C/bl/D/F/G emit none, so restarting them mid-session for a cosmetic log

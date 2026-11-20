@@ -976,7 +976,22 @@ class MarketData:
                 # a long frozen window. Log once, then at most every 5 min.
                 import time as _t
                 _now = _t.monotonic()
-                if _now - getattr(self, "_last_spx_notrt_warn_at", 0.0) >= 300:
+                # NEVER-WARNED is None, not 0.0 (2026-11-20). `time.monotonic()`
+                # is seconds since BOOT on Linux, so on a freshly-started host
+                # `monotonic() - 0.0` is the machine's UPTIME: under 300 it
+                # compares as "warned recently" and the FIRST warning — the one
+                # that matters most, a bot coming up against a bad feed — is
+                # silently swallowed for the first five minutes.
+                #
+                # Not hypothetical, and not found by review: it turned CI red
+                # three times while the full local suite passed, because this
+                # laptop had 23 DAYS of uptime (monotonic 1,989,553) and a
+                # GitHub runner has seconds. Reproduced exactly by pinning
+                # monotonic() to 150.0 — zero warnings, and the timestamp
+                # attribute never even set, which is the AttributeError CI
+                # reported.
+                _last = getattr(self, "_last_spx_notrt_warn_at", None)
+                if _last is None or (_now - _last) >= 300:
                     self._last_spx_notrt_warn_at = _now
                     logger.warning(
                         "DATA-001: %s quote is NOT real-time (6509=%r); not "
@@ -998,7 +1013,9 @@ class MarketData:
                 # the log line is rate-limited.
                 import time as _t
                 _now = _t.monotonic()
-                if _now - getattr(self, "_last_spx_delayed_warn_at", 0.0) >= 300:
+                # See the None-vs-0.0 note in the Z/Y/N branch above.
+                _last = getattr(self, "_last_spx_delayed_warn_at", None)
+                if _last is None or (_now - _last) >= 300:
                     self._last_spx_delayed_warn_at = _now
                     logger.warning(
                         "DATA: %s quote is DELAYED (6509=%r) — proceeding but "
@@ -1103,7 +1120,9 @@ class MarketData:
                 # I-Low: dedup (see update_spx) — at most one warning per 5 min.
                 import time as _t
                 _now = _t.monotonic()
-                if _now - getattr(self, "_last_vix_notrt_warn_at", 0.0) >= 300:
+                # See the None-vs-0.0 note in update_spx's Z/Y/N branch.
+                _last = getattr(self, "_last_vix_notrt_warn_at", None)
+                if _last is None or (_now - _last) >= 300:
                     self._last_vix_notrt_warn_at = _now
                     logger.warning(
                         "DATA-001: %s quote is NOT real-time (6509=%r); not "
@@ -1115,7 +1134,9 @@ class MarketData:
                 # Deduped for the same reason as the SPX branch above.
                 import time as _t
                 _now = _t.monotonic()
-                if _now - getattr(self, "_last_vix_delayed_warn_at", 0.0) >= 300:
+                # See the None-vs-0.0 note in update_spx's Z/Y/N branch.
+                _last = getattr(self, "_last_vix_delayed_warn_at", None)
+                if _last is None or (_now - _last) >= 300:
                     self._last_vix_delayed_warn_at = _now
                     logger.warning(
                         "DATA: %s quote is DELAYED (6509=%r) — further "
