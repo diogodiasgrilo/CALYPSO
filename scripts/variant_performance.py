@@ -196,12 +196,28 @@ def render(res: dict, title: str) -> str:
         L.append(f"      ones; that is exactly what the gates exist to avoid. Unknown")
         L.append(f"      until scripts/analyze_skipped_entry_outcomes.py has data.")
 
+    # The caption is per-bucket, because they are not the same kind of day.
+    # FAILED is emphatically NOT "not a bot decision": the bot decided to
+    # trade, reached the broker, and the order path let it down — and unlike
+    # the other two buckets these days MOVED REAL MONEY. Captioning them
+    # together is how five days that cost -$2,556 net read as inert.
+    _CAPTION = {
+        FAILED: ("the bot DID decide to trade and the order path failed — "
+                 "real money moved on these days"),
+        NO_ATTEMPT: "not a bot decision",
+        CLOSED: "not a bot decision",
+    }
     for t in (FAILED, NO_ATTEMPT, CLOSED):
         if bt[t]:
             L.append("")
-            L.append(f"  {t} ({len(bt[t])}) — not a bot decision:")
+            L.append(f"  {t} ({len(bt[t])}) — {_CAPTION[t]}:")
             for d in bt[t]:
                 L.append(f"    {d['date']}  {d['why']}")
+            if t == FAILED:
+                _net = sum((d.get("net") or 0.0) for d in bt[t])
+                if _net:
+                    L.append(f"    net across these days: ${_net:,.2f} — this is "
+                             f"a cost, not a decline")
     return "\n".join(L)
 
 
