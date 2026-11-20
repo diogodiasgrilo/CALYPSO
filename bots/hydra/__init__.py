@@ -67,10 +67,52 @@ suppressing the data it describes — that would make DATA-001 trip on a feed th
 was working. A paired test pins that `Z/Y/N` still refuses the price, proving the
 edit did not blur the two branches together.
 
-**Tests:** `tests/test_delayed_quote_label_2026_11_20.py` — 19 across 3 groups
-(label, flood, wiring), each with a control reproducing the original defect.
-**Six mutations verified to fail them**, including `__init__` ceasing to forward
-the labels (the bug that shipped) and the dedup swallowing the price.
+**Tests:** `tests/test_delayed_quote_label_2026_11_20.py` — 27 across 4 groups
+(label, flood, wiring, capture robustness), each with a control reproducing the
+original defect. **Nine mutations verified to fail them**, including `__init__`
+ceasing to forward the labels (the bug that shipped), the dedup swallowing the
+price, and each of the three lines that make the log capture robust.
+
+🔴 **CI WENT RED ON 13 OF THE FIRST 19 WHILE THE FULL LOCAL SUITE WAS GREEN
+(6,666).** The product fix was correct and already verified in production — what
+failed was the MEASURING INSTRUMENT. pytest's log-capture fixture only sees a
+record that reaches a handler on the ROOT logger, and the failure mode is the
+worst kind: the record list is simply EMPTY, so all 13 assertions read as "the
+code logged nothing" and pointed at product code that was fine.
+
+⚠️ **The first diagnosis was WRONG, and is recorded because it is the plausible
+one.** I blamed `LoggerService._setup_logging()`, which genuinely does call
+`logging.getLogger().handlers.clear()`. But pytest re-installs its capture
+handler around every test phase, so clearing root handlers does NOT blind it —
+proven by running the pre-fix file under exactly that condition: 19/19 passed.
+
+What DOES blind it, each reproduced against the pre-fix file and each producing
+**CI's exact signature of 13 failed / 6 passed**:
+
+* the module logger's own level raised above WARNING — `caplog.at_level()` sets
+  ROOT's level, not the logger's, so it is no defence at all;
+* an ancestor logger with `propagate = False`;
+* `logger.disabled = True`, which short-circuits `Logger.handle()` before any
+  handler runs.
+
+Which one CI hit is **still unidentified**: nothing in product code does any of
+them, so it is ambient state left by one of ~6,600 tests whose ORDER differs
+between CI and local (CI skips 8 that a local run executes). Chasing the
+individual culprit is worth less than making the instrument immune to the class,
+which also stops the next one.
+
+**FIX:** a `warns` fixture that attaches its own handler to
+`bots.hydra.base_strategy` and explicitly neutralises all four mechanisms,
+restoring each afterwards so it cannot become the next test's version of this
+bug. The pollution has to be applied BEFORE fixture setup to be realistic — a
+test body cannot express that, since its fixtures are already built — so three
+cases drive the fixture's generator by hand over pre-polluted state. The first
+version of the fixture did NOT survive `disabled = True` (18 of 24 failed),
+which is why that one is pinned.
+
+🔑 **The lesson: when every assertion in a new file fails on "nothing was
+logged", suspect the instrument before the subject** — and prefer a handler on
+the logger under test over any fixture that depends on ambient root state.
 
 ℹ️ **Deployed to E and H only.** They account for 9,114 of 9,114 occurrences;
 A/B/C/bl/D/F/G emit none, so restarting them mid-session for a cosmetic log
