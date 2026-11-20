@@ -259,8 +259,9 @@ def audit(root: Path, vid: str, today: str):
                 f"WHERE date IN ({','.join('?' * len(residue_days))})",
                 [d for d, _ in residue_days]).fetchone()[0] or 0
         out.append((name, "NOTE", (
-            f"{len(residue_days)} day(s) with P&L but no entry rows, totalling "
-            f"{tot:,.2f} — reconciled as day-level residue (failed-entry unwind "
+            f"{len(residue_days)} day(s) with P&L but no entry rows, GROSS "
+            f"{tot:,.2f} (net is worse — commission was paid) — reconciled as "
+            f"day-level residue (failed-entry unwind "
             f"/ aggregate-only overlay), NOT missing detail"
             + (f"; {nf} recorded failed attempt(s)" if have_failed and nf
                else "; attempt count not recorded (pre-v21 rows)" if have_failed
