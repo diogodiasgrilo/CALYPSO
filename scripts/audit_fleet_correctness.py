@@ -20,6 +20,14 @@ not a rounding artifact; it means one of the writers disagrees with another.
   I3  daily_summaries.entries_placed == count(trade_entries)
       The summary's own count must match the rows it summarises.
 
+      NOT a break, and reported as a NOTE instead (2026-11-20): a day whose
+      whole gross IS the day-level residue — every entry attempt failed and was
+      unwound — legitimately has zero entry rows. It reconciles, so it must not
+      gate. But it is also not nothing: five such days on the live seat lost up
+      to $2,203 each while being recorded in the exact shape of a day the bot
+      sat out, and this check printed nothing at all about them. Read
+      `entries_failed` (schema v21) to tell the two apart.
+
   I4  metrics file lifetime total == sum(daily_summaries.net_pnl)
       The cumulative file drifts silently when it accumulates incrementally
       instead of re-deriving; that has happened before (metrics_db_drift).
@@ -216,6 +224,8 @@ def audit(root: Path, vid: str, today: str):
     # A day with real gross and NO trade_entries rows at all is a different
     # animal from a pre-backfill NULL: the detail is genuinely missing, so any
     # per-entry analysis of that day is silently incomplete.
+    have_failed = "entries_failed" in _cols(con, "daily_summaries")
+    residue_days = []
     for d, g in (con.execute(
             "SELECT date, gross_pnl FROM daily_summaries ds WHERE gross_pnl IS NOT NULL "
             "AND gross_pnl != 0 AND NOT EXISTS "
@@ -227,9 +237,36 @@ def audit(root: Path, vid: str, today: str):
                               "WHERE date=?", (d,)).fetchone()
             unattr_d = (row[0] or 0.0) if row else 0.0
         if abs(g - unattr_d) <= TOL:
-            continue  # gross IS the day-level residue — correct, not missing
+            # The day reconciles: its whole gross IS the day-level residue
+            # (a failed entry attempt's unwind, or an aggregate-only overlay),
+            # so no per-entry detail is missing and this is NOT a break.
+            #
+            # But it is not nothing either, and skipping it silently is how the
+            # Nov 2-11 OPRA option-feed lapse stayed invisible for five
+            # sessions: on five live-seat days EVERY slot failed, the books
+            # recorded `entries_placed=0` with real money lost, and the audit
+            # printed nothing at all. Collected into one non-gating NOTE below.
+            residue_days.append((d, g))
+            continue
         out.append((name, "I5", f"{d}: gross {g:,.2f} but ZERO trade_entries rows "
                                 "— per-entry detail lost"))
+    if residue_days:
+        tot = sum(g for _, g in residue_days)
+        nf = 0
+        if have_failed:
+            nf = con.execute(
+                "SELECT COALESCE(SUM(entries_failed), 0) FROM daily_summaries "
+                f"WHERE date IN ({','.join('?' * len(residue_days))})",
+                [d for d, _ in residue_days]).fetchone()[0] or 0
+        out.append((name, "NOTE", (
+            f"{len(residue_days)} day(s) with P&L but no entry rows, totalling "
+            f"{tot:,.2f} — reconciled as day-level residue (failed-entry unwind "
+            f"/ aggregate-only overlay), NOT missing detail"
+            + (f"; {nf} recorded failed attempt(s)" if have_failed and nf
+               else "; attempt count not recorded (pre-v21 rows)" if have_failed
+               else "")
+            + f". Days: {', '.join(d for d, _ in residue_days[:8])}"
+            + (" …" if len(residue_days) > 8 else ""))))
 
     # days with entries but no summary row
     summary_dates = {r[0] for r in days}

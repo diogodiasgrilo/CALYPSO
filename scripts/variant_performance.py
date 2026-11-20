@@ -22,11 +22,21 @@ THE FOUR DAY TYPES, classified rather than lumped:
               to skip and no skip row to find. Absence of skip rows here is
               CORRECT, not a telemetry gap; it looked like one until the
               `economic_events` column explained it.
+  FAILED      0 entries placed, but entry attempts were MADE and aborted
+              part-way (ORDER-010 unwind). Added 2026-11-20 after five live-seat
+              days — 10-27, 11-02, 11-04, 11-06 and 11-10 — were being reported
+              as GATED, i.e. as the bot declining to trade, when in fact every
+              slot was attempted, every one failed, and one of them lost $2,203.
+              Those days DO carry real P&L and real commission, so counting them
+              as "declined" is the same class of error this script was written
+              to prevent — in the opposite direction.
   CLOSED      no market ticks at all — a holiday. Not a bot decision.
 
 The distinction between GATED and NO-ATTEMPT is the one that carries information:
 the first is the bot exercising judgement (auditable, possibly wrong), the second
-is policy (not up for debate).
+is policy (not up for debate). FAILED is a third thing again: the bot decided to
+trade, tried, and the ORDER PATH let it down — which is neither judgement nor
+policy but a cost, and on the live seat's epoch it was 67% of the recorded loss.
 
 EXECUTION DRAG is reported alongside, because an edge is only what survives it.
 B's entry fill gap runs ~$79/day against ~$185/day net — about 30% of the edge —
@@ -49,6 +59,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from bots.hydra.analysis_eras import LIVE_ERA_SINCE, era_banner  # noqa: E402
 
 TRADED, GATED, NO_ATTEMPT, CLOSED = "TRADED", "GATED", "NO-ATTEMPT", "CLOSED"
+FAILED = "FAILED"
 
 
 def classify(con, row) -> tuple[str, str]:
@@ -56,6 +67,23 @@ def classify(con, row) -> tuple[str, str]:
     if (row["entries_placed"] or 0) > 0:
         return TRADED, ""
     d = row["date"]
+    # FAILED before GATED, because these days ALSO carry skip rows (6, 6, 6, 3
+    # and 6 on the five known days) and would otherwise be read as the bot
+    # declining to trade. An attempt that aborted part-way is the opposite of a
+    # decline: it reached the broker and cost money.
+    nf = row["entries_failed"] if "entries_failed" in row.keys() else None
+    gross = row["gross_pnl"] or 0.0
+    if nf:
+        return FAILED, (f"{int(nf)} entry attempt(s) failed and unwound; "
+                        f"gross {gross:+,.2f}")
+    if nf is None and gross:
+        # Pre-v21 row: the count was never recorded, but a day with zero
+        # entries placed and non-zero gross can only be day-level residue —
+        # which on an IC variant means a failed attempt. Labelled INFERRED so
+        # it is never mistaken for a recorded fact.
+        return FAILED, (f"gross {gross:+,.2f} with 0 entries placed — "
+                        f"failed attempt(s) INFERRED (pre-v21 row, count "
+                        f"not recorded)")
     ticks = con.execute(
         "SELECT COUNT(*) FROM market_ticks WHERE date(timestamp)=?", (d,)
     ).fetchone()[0]
@@ -89,7 +117,8 @@ def analyze(db: str, since: str | None) -> dict:
         q += " WHERE date >= ?"
         args = (since,)
     rows = [dict(r) for r in con.execute(q + " ORDER BY date", args)]
-    out = {"days": [], "by_type": {TRADED: [], GATED: [], NO_ATTEMPT: [], CLOSED: []}}
+    out = {"days": [], "by_type": {TRADED: [], FAILED: [], GATED: [],
+                                  NO_ATTEMPT: [], CLOSED: []}}
     for r in rows:
         t, why = classify(con, r)
         rec = {"date": r["date"], "type": t, "why": why,
@@ -111,6 +140,7 @@ def render(res: dict, title: str) -> str:
     traded = bt[TRADED]
     L.append(f"  {len(days)} sessions   "
              f"{len(traded)} traded · {len(bt[GATED])} gated · "
+             f"{len(bt[FAILED])} failed · "
              f"{len(bt[NO_ATTEMPT])} no-attempt · {len(bt[CLOSED])} closed")
     L.append(f"  [{days[0]['date']} .. {days[-1]['date']}]")
 
@@ -166,7 +196,7 @@ def render(res: dict, title: str) -> str:
         L.append(f"      ones; that is exactly what the gates exist to avoid. Unknown")
         L.append(f"      until scripts/analyze_skipped_entry_outcomes.py has data.")
 
-    for t in (NO_ATTEMPT, CLOSED):
+    for t in (FAILED, NO_ATTEMPT, CLOSED):
         if bt[t]:
             L.append("")
             L.append(f"  {t} ({len(bt[t])}) — not a bot decision:")

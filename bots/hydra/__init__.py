@@ -9,6 +9,91 @@ Account: paper only on this branch. Saxo Bank has been removed end-to-end
 — see Version History 2.0.0-rc.1 and `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 
 
+### 2026-11-20 — a day on which EVERY entry attempt failed was recorded as a quiet day
+
+**What was wrong.** Five days since `bl`'s 2026-10-09 epoch — 10-27, 11-02,
+11-04, 11-06 and 11-10 — carry real P&L and real commission with
+`entries_placed=0`, `entries_stopped=0`, zero `trade_entries` rows and zero
+`trade_stops` rows. The recorded shape is byte-for-byte that of a day the
+strategy chose to sit out.
+
+**Nothing was lost and no identity was broken.** The money was always booked:
+a failed attempt's round-trip price P&L goes to `unattributed_overlay_pnl`
+(ORDER-010) and its fees to `commission`, and the I5 audit *correctly* treats a
+day whose whole gross IS that residue as reconciled rather than as missing
+per-entry detail. The totals were right the whole time. What no column held was
+**the fact that it happened**.
+
+**Measured on the live seat over its epoch** (from its own rotated logs plus
+`daily_summaries`):
+
+| | |
+|---|---|
+| failed attempts | **43** across 14 days |
+| cost | **-$3,954.80** (price P&L -$2,515.00 + commission $1,439.80) |
+| epoch total for comparison | -$5,882.75 |
+| share of the recorded loss | **67%**, from entries that never became positions |
+
+By leg: **22 at leg 3 (short call), 14 at leg 4 (short put)**, 5 at leg 1, 2 at
+leg 2. The protective longs are bought first *by design* (the alternative
+leaves a naked short), so 84% of failures leave the bot holding the two legs it
+paid for and selling them back into the same spread. **That ordering is not a
+defect and was NOT changed** — flipping it would trade a known cost for an
+unbounded one. Its cost was simply invisible.
+
+$3,434 of the total was the 2026-11-02 to 11-11 **OPRA option-feed lapse**,
+already diagnosed and fixed. That is the argument for this change rather than a
+mitigation of it: that incident took five sessions to find, and its own
+post-mortem concluded *"a blocked bot and an idle bot look identical on the
+dashboard"*. At the summary level they still did.
+
+**FIX — `daily_summaries.entries_failed` (schema v21).**
+
+* Counted at `base_strategy._execute_entry`'s except handler, the single site
+  that detects a failed attempt, and incremented **before** the naked-short
+  check and the unwind — the whole value of the counter is that it is recorded
+  even when the handling that follows goes wrong.
+* **A COUNT, not just the dollars**, because the dollars can legitimately be
+  $0.00: both 2026-10-12 and 2026-10-21 failed an attempt for exactly nothing
+  (leg 1, nothing filled). The money channel therefore cannot be read as a
+  presence flag, which is why five years of looking at it would never have
+  shown this.
+* `getattr` + `try/except`, never a bare `+=`. Same lesson as the 2026-09-10
+  Brandon accumulator: an attribute access added to a handler that must not
+  raise is not a small change. A control test drives a `__slots__` state object
+  through the real handler and asserts the unwind still runs.
+* **Persisted with the dollars it accompanies**, in the same save/restore. A
+  restart that preserved the amount but reset the count would write a summary
+  asserting money was lost on zero failed attempts — the exact contradiction
+  the column exists to rule out.
+* **Nullable INTEGER, not `NOT NULL DEFAULT 0`.** A historical row genuinely
+  does not know its failure count, and 0 would assert it was clean. NULL says
+  "not recorded"; 0 says "recorded, and there were none". The five known days
+  predate the column and must keep saying so.
+* `audit_fleet_correctness` no longer hits a silent `continue` on these days:
+  it emits one aggregated **non-gating NOTE** per variant naming the days, the
+  total and the attempt count. Non-gating is deliberate — the day reconciles,
+  and turning a reconciled day red would make the gate that guards real money
+  cry wolf. A separate test pins that a gross which does NOT equal its residue
+  is **still I5**, so the note cannot swallow a real break.
+
+**Tests:** `tests/test_failed_entry_visibility_2026_11_20.py` — 28 tests across
+6 groups, every group carrying a control that reintroduces the original defect.
+**Ten mutations verified to fail them**, including the two that matter most:
+reverting the audit to its silent `continue` (3 failures) and letting the NOTE
+swallow a real mismatch (1 failure). The payload test drives the REAL
+`_record_daily_summary_to_db` and asserts the recorder was reached, so it
+cannot pass by mocking the body away.
+
+**NOT done, deliberately:** HOMER's own `insert_daily_summary` does not write
+the new column. It is `INSERT OR IGNORE` and the bot writes first, so HOMER's
+row only ever lands when the bot crashed before settlement — in which case the
+count is unknown and NULL is the correct value. Backfilling the five known days
+from the rotated logs was also not done: the logs rotate, the amounts are
+already right, and a hand-written count is indistinguishable from a recorded
+one once it is in the column.
+
+
 ### 2026-11-16 — a str `alert_type` did not bypass the gate, it LOST the alert
 
 **What was wrong.** `scripts/audit_telemetry_health.py` passed

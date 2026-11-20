@@ -1113,7 +1113,7 @@ First green run, 2026-11-16: `ok BL OK — 26 summary days, 42 entries — all i
 
 ### Backtesting Database (`data/backtesting.db`)
 
-SQLite populated live by HYDRA's `DataRecorder` + backfilled by HOMER. Current schema: **v20** (read from `schema_info` on the live VM, 2026-10-14 — every variant is on v20).
+SQLite populated live by HYDRA's `DataRecorder` + backfilled by HOMER. Current schema: **v21** (`daily_summaries.entries_failed`, added 2026-11-20). The live VM was on **v20** on every variant as of 2026-10-14; each one migrates itself on its next start.
 
 > ⚠️ **This said v8 until 2026-10-14**, twelve versions stale, with a date (2026-04-21) that made it look current. Read the version from the database, not from here:
 > `SELECT value FROM schema_info WHERE key='version';` — note the table is a **key/value** pair, so `SELECT version FROM schema_info` fails (a mistake made twice while writing this).
@@ -1133,7 +1133,29 @@ SQLite populated live by HYDRA's `DataRecorder` + backfilled by HOMER. Current s
 > `cascade_gap_seconds` above a few hundred seconds as an overnight artefact, not a
 > cascade. It nearly supported a wrong conclusion during the exit-path slippage
 > investigation that same day.
-| `daily_summaries` | EOD totals (SPX OHLC, VIX, P&L, entry/stop counts, contracts_per_entry) | 1 |
+| `daily_summaries` | EOD totals (SPX OHLC, VIX, P&L, entry/stop counts, contracts_per_entry, **`entries_failed`** v21) | 1 |
+
+> 🔴 **`entries_placed=0` did NOT mean the bot sat the day out — read `entries_failed` too
+> (v21, 2026-11-20).** Five live-seat days since the 2026-10-09 epoch — **10-27, 11-02, 11-04,
+> 11-06, 11-10** — carry real P&L and real commission with `entries_placed=0`,
+> `entries_stopped=0` and zero rows in `trade_entries`/`trade_stops`. On those days **every slot
+> was attempted and every one failed part-way and was unwound**, which cost up to **$2,203 in a
+> single session** while the books recorded the shape of a quiet day.
+>
+> ⚠️ **The totals were never wrong and no identity ever broke** — the failed attempt's round-trip
+> price P&L is in `unattributed_overlay_pnl` (ORDER-010) and its fees in `commission`, and the I5
+> audit *correctly* treats a day whose whole gross IS that residue as reconciled. Only the FACT
+> was unrecorded. Measured epoch-wide on `bl`: **43 failed attempts over 14 days costing
+> -$3,954.80 — 67% of its entire recorded loss came from entries that never became positions.**
+> **22 of 43 failed at leg 3 (short call), 14 at leg 4 (short put)**: the protective longs are
+> bought first *by design*, so a failure leaves the bot holding what it paid for. That ordering
+> is NOT a defect (the alternative leaves a naked short) and was not changed.
+>
+> $3,434 of that was the already-fixed **Nov 2-11 OPRA option-feed lapse** — which is the point,
+> not a mitigation: that incident took five sessions to find, and its own post-mortem concluded
+> *"a blocked bot and an idle bot look identical on the dashboard."* Now `entries_failed` says
+> which. **NULL on a pre-v21 row means "not recorded", 0 means "recorded, none" — do not read
+> NULL as a clean day.** The nightly audit prints one non-gating NOTE naming such days.
 | `spread_snapshots` | Per-entry cost-to-close every ~10s; leg-level mid/bid/ask | ~3,000 |
 | `skipped_entries` | Counterfactual (entries rejected by MKT-011) | 0–3 |
 | `entry_mae_mfe` | Max Adverse / Favorable Excursion per side | 0–6 |

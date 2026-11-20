@@ -688,6 +688,15 @@ class MEICDailyState:
     # on daily_state so it resets with the day, beside the total it reconciles
     # against. Surfaced via `_unattributed_overlay_pnl()`.
     failed_entry_unattributed_pnl: float = 0.0
+    # Count of entry ATTEMPTS that aborted part-way and had to be unwound
+    # (ORDER-010). The companion to `failed_entry_unattributed_pnl`: that field
+    # says how much a failed attempt cost, this one says that one happened at
+    # all. Needed because the cost can legitimately be $0.00 (both 2026-10-12
+    # and 2026-10-21 on the live seat failed an attempt for exactly nothing),
+    # so the dollar channel cannot be read as a presence flag. Written to
+    # `daily_summaries.entries_failed` (schema v21) so a day where every slot
+    # failed stops being indistinguishable from a day the strategy sat out.
+    failed_entry_attempts: int = 0
 
     # Commission tracking (display only - does not affect strategy logic)
     total_commission: float = 0.0  # Running total of all commissions paid today
@@ -2972,6 +2981,19 @@ class MEICStrategy(abc.ABC):
 
         except Exception as e:
             logger.error(f"Entry failed at leg {len(filled_legs) + 1}: {e}")
+
+            # Count the attempt BEFORE any unwind/naked-short handling below,
+            # and with getattr so it cannot raise: this is the only place a
+            # failed attempt is detected, and the whole value of the counter is
+            # that it is recorded even when the handling that follows goes
+            # wrong. An attempt that failed at leg 1 (nothing filled, nothing
+            # to unwind, $0.00 booked) still counts — it consumed a slot.
+            try:
+                self.daily_state.failed_entry_attempts = int(
+                    getattr(self.daily_state, "failed_entry_attempts", 0) or 0
+                ) + 1
+            except Exception:  # noqa: BLE001 — telemetry must never block the unwind
+                pass
 
             # ORDER-002: Critical - check for naked shorts
             has_naked_short = False

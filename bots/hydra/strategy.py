@@ -7188,6 +7188,11 @@ class HydraStrategy(MEICStrategy):
                 "entries_placed": summary.get("entries_completed", 0),
                 "entries_stopped": entries_stopped_per_entry,
                 "entries_expired": entries_expired_per_entry,
+                # v21. Reported even when it is 0, so a clean day asserts
+                # "no attempt failed" instead of leaving the column NULL and
+                # indistinguishable from a row written before this existed.
+                "entries_failed": int(
+                    getattr(self.daily_state, "failed_entry_attempts", 0) or 0),
                 # Routed through _cumulative_tracking_pnl (2026-09-02 metrics-drift
                 # fix) so a carried calendar's DB row doesn't re-book the same open
                 # position's running unrealized mark every day it's held — see
@@ -14131,6 +14136,13 @@ class HydraStrategy(MEICStrategy):
                 # drift — which is precisely the restart that causes it.
                 "failed_entry_unattributed_pnl": float(
                     getattr(self.daily_state, "failed_entry_unattributed_pnl", 0.0) or 0.0),
+                # The attempt COUNT travels with the amount, for the same
+                # reason and in the same save. A restart that preserved the
+                # dollars but reset the count would write a summary saying the
+                # day lost money on zero failed attempts — the contradiction
+                # the column exists to rule out.
+                "failed_entry_attempts": int(
+                    getattr(self.daily_state, "failed_entry_attempts", 0) or 0),
                 "total_commission": self.daily_state.total_commission,
                 "call_stops_triggered": self.daily_state.call_stops_triggered,
                 "put_stops_triggered": self.daily_state.put_stops_triggered,
@@ -16792,6 +16804,8 @@ class HydraStrategy(MEICStrategy):
             # restored total as drift.
             self.daily_state.failed_entry_unattributed_pnl = float(
                 saved_state.get("failed_entry_unattributed_pnl", 0.0) or 0.0)
+            self.daily_state.failed_entry_attempts = int(
+                saved_state.get("failed_entry_attempts", 0) or 0)
             # Restore the Brandon overlay double-book guard ATOMICALLY with the total
             # it protects (same-day-gated by the date check above). Only on Brandon
             # instances that carry the attr (set in __init__ before recovery runs).

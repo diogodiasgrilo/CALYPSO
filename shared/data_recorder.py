@@ -34,7 +34,7 @@ Schema v10 (2026-06-12) adds: a first-class `date` column on spread_snapshots
 backfilled from the timestamp prefix, with an index — so per-day queries and
 per-day maintenance match every other table (date, entry_number).
 
-Current SCHEMA_VERSION = 20 (see the module constant; this docstring intro
+Current SCHEMA_VERSION = 21 (see the module constant; this docstring intro
 describes v10 as an example of the migration pattern, not the current version —
 see the dated comment blocks above each MIGRATION_V{N}_SQL for the full history).
 """
@@ -60,7 +60,7 @@ def _describe_exception(e: Exception) -> str:
 
 
 # Schema version this module expects/creates
-SCHEMA_VERSION = 20
+SCHEMA_VERSION = 21
 
 # ============================================================================
 # Schema Migration SQL
@@ -250,6 +250,38 @@ MIGRATION_V17_SQL = [
     "ALTER TABLE trade_entries ADD COLUMN long_call_mid_at_decision REAL",
     "ALTER TABLE trade_entries ADD COLUMN short_put_mid_at_decision REAL",
     "ALTER TABLE trade_entries ADD COLUMN long_put_mid_at_decision REAL",
+]
+
+MIGRATION_V21_SQL = [
+    # v21 (2026-11-20): `daily_summaries.entries_failed` — the number of entry
+    # ATTEMPTS that aborted part-way and had to be unwound (ORDER-010), as
+    # opposed to entries that were never attempted (a credit-gate skip, already
+    # in `skipped_entries`) or entries that opened (`trade_entries`).
+    #
+    # WHY A COUNT WHEN THE MONEY WAS NEVER MISSING. The dollars were always
+    # recorded — `unattributed_overlay_pnl` carries the failed attempt's
+    # round-trip price P&L and `commission` carries its fees, and the I5 audit
+    # correctly treats a day whose whole gross IS that residue as reconciled,
+    # not as missing detail. What no column held was the FACT THAT IT HAPPENED.
+    # So a day on which seven attempts filled their protective longs, failed to
+    # sell the shorts, and unwound at a loss was written as
+    # `entries_placed=0, entries_stopped=0` — byte-for-byte the shape of a
+    # quiet day the strategy chose to sit out.
+    #
+    # Measured on the live seat (bl) over its 2026-10-09 epoch: 43 failed
+    # attempts across 14 days costing -$3,954.80 against an epoch total of
+    # -$5,882.75, and on FIVE of those days (10-27, 11-02, 11-04, 11-06, 11-10)
+    # every single slot failed, so the day reported zero activity while losing
+    # up to $2,203. $3,434 of that total was the Nov 2-11 OPRA option-feed
+    # lapse, which is exactly the point: the incident that this column would
+    # have made obvious took five sessions to find, and the post-mortem's own
+    # conclusion was that "a blocked bot and an idle bot look identical".
+    # They no longer do.
+    #
+    # Nullable INTEGER, not NOT NULL DEFAULT 0: a historical row genuinely does
+    # not know its failure count, and 0 would assert it was clean. NULL says
+    # "not recorded", 0 says "recorded, and there were none".
+    "ALTER TABLE daily_summaries ADD COLUMN entries_failed INTEGER",
 ]
 
 MIGRATION_V18_SQL = [
@@ -565,7 +597,8 @@ class DataRecorder:
                         entries_placed INTEGER, entries_stopped INTEGER, entries_expired INTEGER,
                         gross_pnl REAL, net_pnl REAL, commission REAL,
                         long_salvage_revenue REAL DEFAULT 0.0, day_type TEXT, day_of_week TEXT,
-                        contracts_per_entry INTEGER NOT NULL DEFAULT 1);
+                        contracts_per_entry INTEGER NOT NULL DEFAULT 1,
+                        entries_failed INTEGER);
                     CREATE TABLE IF NOT EXISTS spread_snapshots (
                         timestamp TEXT NOT NULL, entry_number INTEGER NOT NULL,
                         date TEXT,
@@ -642,6 +675,9 @@ class DataRecorder:
                 if current_version < 18:
                     # v18: SHIFT-FIRST shadow verdict on adjuster decisions
                     migration_sql += MIGRATION_V18_SQL
+                if current_version < 21:
+                    # v21: failed-entry attempt count on daily_summaries
+                    migration_sql += MIGRATION_V21_SQL
 
                 for sql in migration_sql:
                     try:
@@ -1174,6 +1210,9 @@ class DataRecorder:
                 "contracts_per_entry",
                 # v13 per-day unattributed-overlay P&L (Brandon aggregate-only hedge)
                 "unattributed_overlay_pnl",
+                # v21 entry attempts that aborted part-way and were unwound
+                # (ORDER-010). Distinguishes "every slot failed" from "sat out".
+                "entries_failed",
             ]
             placeholders = ", ".join(["?"] * len(cols))
             col_names = ", ".join(cols)
