@@ -71,60 +71,61 @@ def _strat(underlying=None, volatility=None):
 
 
 @pytest.fixture
-def warns():
-    """WARNING+ messages from the module's OWN logger, as a live list.
+def warns(monkeypatch):
+    """Messages the module WOULD log, by replacing its `logger` object.
 
-    DELIBERATELY NOT pytest's log-capture fixture, and this is the reason — it
-    cost a red CI run. `shared/logger_service.LoggerService._setup_logging()`
-    calls `logging.getLogger().handlers.clear()`, which REMOVES pytest's
-    capture handler from the root logger. Any earlier test in the session that
-    constructs a LoggerService therefore blinds that fixture for every test
-    after it — silently, with the record list simply empty.
+    DELIBERATELY NOT the logging framework, in any form, and it took three CI
+    runs to earn that. The subject under test is the MESSAGE CONTENT and the
+    dedup arithmetic — not Python's logging plumbing — so routing the
+    assertions through that plumbing only imports its ambient global state.
 
-    That is order-dependent, so it does not reproduce reliably: this file
-    passed the full local suite (6,666 green) and then failed 13 of 19 in CI,
-    where a different 8 tests skip and the ordering shifts. The product fix was
-    correct and already verified in production; only the measuring instrument
-    was broken.
+    What was tried and failed:
 
-    Attaching a handler to `bots.hydra.base_strategy` directly is immune to all
-    three ways ambient state can hide a record: root handlers being cleared,
-    `propagate` being turned off, and a stale global `logging.disable()`. It
-    also observes the logger the code actually writes to. Restores everything
-    it touched, so it cannot become the next test's version of this bug.
+    1. pytest's `caplog`. Passed the full local suite (6,666 green); CI failed
+       13 of 19 with an empty record list, which reads as "the code logged
+       nothing" and points at product code that was fine.
+    2. A handler attached directly to `bots.hydra.base_strategy`, with the
+       logger's level, `disabled` flag and the global `logging.disable()` all
+       neutralised. Locally that survived every stressor I could construct —
+       raised level, `propagate = False`, `disabled = True`, cleared root
+       handlers — each of which reproduced CI's exact 13-failed/6-passed
+       signature against version 1. CI failed it anyway, and an attached
+       handler seeing nothing rules out all four of those mechanisms.
+
+    So the CI cause remains UNIDENTIFIED, and saying so is the honest position:
+    nothing in product code touches logger state, the suite has ~6,600 tests,
+    and CI skips 8 that a local run executes, so ordering differs. Rather than
+    guess a fourth time, this removes the dependency on the thing that varies.
+
+    Swapping the module's `logger` is hermetic: it drives the REAL `update_spx`
+    / `update_vix` bodies, the REAL format strings, the REAL
+    `_underlying_label()` and the REAL dedup window, and renders each message
+    exactly as logging would (`msg % args`). `monkeypatch` restores it.
     """
+    import bots.hydra.base_strategy as _bs
+
     captured: list[str] = []
 
-    class _Capture(logging.Handler):
-        def emit(self, record):
-            captured.append(record.getMessage())
+    class _Recorder:
+        @staticmethod
+        def _render(msg, args):
+            try:
+                return str(msg) % args if args else str(msg)
+            except Exception:  # a bad format string is itself a defect worth seeing
+                return f"{msg!r} % {args!r}"
 
-    handler = _Capture(level=logging.WARNING)
-    lg = logging.getLogger("bots.hydra.base_strategy")
-    prev_level = lg.level
-    prev_disable = logging.root.manager.disable
-    prev_disabled = lg.disabled
-    # All FOUR mechanisms that can hide a record, neutralised explicitly.
-    # Each was reproduced against the pre-fix file and each produced exactly
-    # CI's signature of 13 failed / 6 passed:
-    #   1. the logger's own level above WARNING — `at_level()` sets ROOT's
-    #      level, not this one's, so it does not help;
-    #   2. an ancestor's `propagate = False` — irrelevant here only because
-    #      the handler is on this logger, not on root;
-    #   3. a stale global `logging.disable()`;
-    #   4. `logger.disabled = True`, which short-circuits `Logger.handle()`
-    #      before any handler runs.
-    logging.disable(logging.NOTSET)
-    lg.disabled = False
-    lg.addHandler(handler)
-    lg.setLevel(logging.WARNING)
-    try:
-        yield captured
-    finally:
-        lg.removeHandler(handler)
-        lg.setLevel(prev_level)
-        lg.disabled = prev_disabled
-        logging.disable(prev_disable)
+        def warning(self, msg, *args, **kw):
+            captured.append(self._render(msg, args))
+
+        # ERROR/CRITICAL captured too: a freshness problem that escalated
+        # should not vanish from a test that is checking freshness messages.
+        error = critical = exception = warning
+
+        def info(self, *a, **k): pass
+        def debug(self, *a, **k): pass
+
+    monkeypatch.setattr(_bs, "logger", _Recorder())
+    return captured
 
 
 # ══════════════════════════════════════════════════════ 1. the label
@@ -181,9 +182,11 @@ class TestTheLabelIsDerived:
     def test_CONTROL_a_hardcoded_label_lies_on_a_SPY_variant(self, warns):
         """Reproduces the defect: the message asserts the symbol instead of
         deriving it, so a SPY variant reports a delayed SPX feed."""
+        import bots.hydra.base_strategy as _bs
         s = _strat(underlying="SPY")
-        logging.getLogger("bots.hydra.base_strategy").warning(
-            "DATA: SPX quote is DELAYED (6509=%r)", "DP")
+        # Emitted through the module's own logger attribute — the same object
+        # the production line uses — so the control exercises the real path.
+        _bs.logger.warning("DATA: SPX quote is DELAYED (6509=%r)", "DP")
         assert s.underlying_symbol == "SPY"
         assert any("SPX quote is DELAYED" in m for m in warns), (
             "the hardcoded line names SPX while the instrument is SPY")
@@ -259,9 +262,9 @@ class TestItIsDeduped:
         # Emitted on the logger UNDER TEST, not this module's, so it travels
         # the same path the real line does — otherwise the control proves
         # nothing about the mechanism it is supposed to be a control for.
-        lg = logging.getLogger("bots.hydra.base_strategy")
+        import bots.hydra.base_strategy as _bs
         for _ in range(100):
-            lg.warning("DATA: SPY quote is DELAYED (6509=%r)", "DP")
+            _bs.logger.warning("DATA: SPY quote is DELAYED (6509=%r)", "DP")
         n = sum("quote is DELAYED" in m for m in warns)
         assert n == 100, "pre-fix, one line per tick for the whole session"
 
@@ -352,149 +355,114 @@ class TestTheStrategyActuallyPassesTheLabel:
 
 # ═════════════════════════════ 4. the instrument, not the thing measured
 class TestTheCaptureSurvivesAmbientLoggingState:
-    """CI went red on 13 of these 19 while the full local suite was green.
+    """CI went red twice on these tests while the full local suite was green.
 
-    The product fix was correct and already running in production. What broke
-    was the MEASURING INSTRUMENT: every test used pytest's log-capture
-    fixture, which only sees a record that reaches a handler on the ROOT
-    logger.
+    Both times the product fix was correct and already running in production;
+    what failed was the MEASURING INSTRUMENT, with the worst possible symptom —
+    an empty capture, which reads as "the code logged nothing" and accuses
+    product code that is fine.
 
-    ⚠️ My first diagnosis was WRONG and is recorded here because the wrong one
-    is plausible: I blamed `LoggerService._setup_logging()`, which really does
-    call `logging.getLogger().handlers.clear()`. But pytest re-installs its
-    capture handler around every test phase, so clearing root handlers does
-    NOT blind it — verified against the pre-fix file, which passed 19/19 under
-    exactly that condition.
+    Attempt 1 used pytest's `caplog` (13 of 19 failed in CI). Attempt 2
+    attached a handler to the module's logger with its level, `disabled` flag
+    and the global `logging.disable()` all neutralised; locally that survived
+    every stressor I could build, and CI failed it anyway — which rules out all
+    of those mechanisms, since an attached handler would have seen the record.
 
-    What DOES blind it, each reproduced against the pre-fix file and each
-    yielding CI's exact signature of 13 failed / 6 passed:
-
-        * the module logger's own level raised above WARNING — `at_level()`
-          sets ROOT's level, not the logger's, so it is no defence;
-        * an ancestor logger with `propagate = False`;
-        * `logger.disabled = True`.
-
-    Which of the three CI hit is still unidentified: nothing in product code
-    does any of them, so it is ambient state from one of ~6,600 tests whose
-    ORDER differs between CI and local (CI skips 8 that a local run executes).
-    Chasing the individual culprit is worth less than making the instrument
-    immune to the whole class, which also stops the next one.
-
-    The failure mode is the worst kind: the capture list is simply EMPTY, so
-    every assertion fails with "no warning was logged" and points at the
-    product code, which was fine.
-
-    These cases reproduce each way ambient state can blind a capture, and
-    assert the fixture still sees the record. Without them the next person to
-    add a test here would reach for the same broken instrument.
+    The CI cause is UNIDENTIFIED. Attempt 3 therefore does not depend on the
+    logging framework at all: it swaps the module's `logger` object. These
+    cases assert that immunity directly, so nobody reintroduces a
+    framework-dependent capture here and rediscovers this the slow way.
     """
 
-    def test_it_survives_root_handlers_being_CLEARED(self, warns):
-        """`LoggerService._setup_logging()`'s own line, verbatim. NOT the CI
-        cause (pytest re-installs its handler), but free to cover."""
-        logging.getLogger().handlers.clear()
-        MarketData.update_spx(_strat(underlying="SPY"), 684.21, availability="DP")
-        assert any("SPY quote is DELAYED" in m for m in warns), (
-            "cleared root handlers blinded the capture — this is the 13-failure "
-            "CI run")
-
-    @staticmethod
-    def _under(pollution):
-        """Apply `pollution`, THEN drive the real `warns` fixture over it.
-
-        The pollution has to land BEFORE the fixture is set up — that is the
-        real sequence, since the offending test runs earlier in the session —
-        and a test body cannot express that, because its own fixtures are
-        already built by the time it executes. (The first version of these two
-        cases polluted inside the body, after setup, and failed for that
-        reason rather than for anything real.) So the fixture's generator is
-        driven by hand here.
-        """
-        lg = logging.getLogger("bots.hydra.base_strategy")
-        saved = (lg.level, lg.disabled, lg.propagate,
-                 logging.root.manager.disable)
-        try:
-            pollution(lg)
-            gen = warns.__wrapped__()          # the undecorated generator
-            captured = next(gen)
-            MarketData.update_spx(_strat(underlying="SPY"), 684.21,
-                                  availability="DP")
-            try:
-                next(gen)
-            except StopIteration:
-                pass
-            return captured
-        finally:
-            lg.level, lg.disabled, lg.propagate = saved[:3]
-            logging.disable(saved[3])
-
-    def test_it_survives_the_logger_LEVEL_being_raised(self):
-        """One of the three conditions that reproduce CI exactly, and the
-        subtle one: `at_level(WARNING)` raises ROOT's level, so a module logger
-        pinned at ERROR filters the record before any handler is consulted.
-        The pre-fix file failed 13 of 19 under precisely this."""
-        got = self._under(lambda lg: lg.setLevel(logging.ERROR))
-        assert any("SPY quote is DELAYED" in m for m in got), got
-
-    def test_it_survives_the_logger_being_DISABLED(self):
-        """`logger.disabled = True` short-circuits `Logger.handle()` before any
-        handler runs. The FIRST version of this very fixture did not survive
-        it — 18 of 24 failed — which is why it is pinned."""
-        def _p(lg):
-            lg.disabled = True
-        got = self._under(_p)
-        assert any("SPY quote is DELAYED" in m for m in got), got
-
-    def test_it_survives_a_global_disable_set_BEFORE_setup(self):
-        got = self._under(lambda lg: logging.disable(logging.CRITICAL))
-        assert any("SPY quote is DELAYED" in m for m in got), got
-
-    def test_it_survives_propagate_being_turned_OFF(self, warns):
-        lg = logging.getLogger("bots.hydra.base_strategy")
-        prev = lg.propagate
-        lg.propagate = False
+    def test_it_is_immune_to_the_global_logging_disable(self, warns):
+        logging.disable(logging.CRITICAL)
         try:
             MarketData.update_spx(_strat(underlying="SPY"), 684.21,
                                   availability="DP")
             assert any("SPY quote is DELAYED" in m for m in warns)
         finally:
-            lg.propagate = prev
+            logging.disable(logging.NOTSET)
 
-    def test_it_survives_a_stale_global_logging_disable(self, warns):
-        """A test that calls `logging.disable(CRITICAL)` and never resets it
-        would suppress every WARNING in the session. The fixture clears it for
-        its own duration and restores it afterwards."""
-        MarketData.update_spx(_strat(underlying="SPY"), 684.21, availability="DP")
+    def test_it_is_immune_to_root_handlers_being_cleared(self, warns):
+        logging.getLogger().handlers.clear()
+        MarketData.update_spx(_strat(underlying="SPY"), 684.21,
+                              availability="DP")
         assert any("SPY quote is DELAYED" in m for m in warns)
 
-    def test_the_fixture_RESTORES_what_it_touched(self, warns):
-        """It must not become the next test's version of this bug."""
+    def test_it_is_immune_to_the_logger_being_DISABLED(self, warns):
+        logging.getLogger("bots.hydra.base_strategy").disabled = True
+        try:
+            MarketData.update_spx(_strat(underlying="SPY"), 684.21,
+                                  availability="DP")
+            assert any("SPY quote is DELAYED" in m for m in warns)
+        finally:
+            logging.getLogger("bots.hydra.base_strategy").disabled = False
+
+    def test_it_is_immune_to_the_logger_LEVEL_being_raised(self, warns):
+        """The mechanism that reproduced CI's signature against attempt 1:
+        `caplog.at_level(WARNING)` raises ROOT's level, not the module
+        logger's, so a logger pinned at ERROR filters the record first."""
         lg = logging.getLogger("bots.hydra.base_strategy")
-        assert any(isinstance(h, logging.Handler) for h in lg.handlers), (
-            "the capture handler should be attached DURING the test")
+        prev = lg.level
+        lg.setLevel(logging.ERROR)
+        try:
+            MarketData.update_spx(_strat(underlying="SPY"), 684.21,
+                                  availability="DP")
+            assert any("SPY quote is DELAYED" in m for m in warns)
+        finally:
+            lg.setLevel(prev)
+
+    def test_it_is_immune_to_a_FILTER_on_the_logger(self, warns):
+        """Not a confirmed CI cause, but the one remaining mechanism that can
+        drop a record after the level and `disabled` checks pass — and it is
+        why attempt 2's reasoning was incomplete."""
+        lg = logging.getLogger("bots.hydra.base_strategy")
+
+        class _DropAll(logging.Filter):
+            def filter(self, record):
+                return False
+
+        f = _DropAll()
+        lg.addFilter(f)
+        try:
+            MarketData.update_spx(_strat(underlying="SPY"), 684.21,
+                                  availability="DP")
+            assert any("SPY quote is DELAYED" in m for m in warns)
+        finally:
+            lg.removeFilter(f)
+
+    def test_the_message_is_RENDERED_as_logging_would(self, warns):
+        """The recorder must apply `msg % args`, or a `%s` placeholder would
+        pass a label assertion while the real log line said literally '%s'."""
+        MarketData.update_spx(_strat(underlying="SPY"), 684.21,
+                              availability="DP")
+        msg = [m for m in warns if "DELAYED" in m][0]
+        assert "%s" not in msg, msg
+        assert "SPY" in msg and "'DP'" in msg, msg
 
     # ---------------------------------------------------------------- CONTROL
-    def test_CONTROL_a_root_based_capture_goes_blind(self):
-        """Reproduces the broken instrument: a handler on the ROOT logger is
-        gone the moment anything clears root's handlers, and the resulting
-        empty list is indistinguishable from 'the code logged nothing'."""
+    def test_CONTROL_a_framework_capture_can_be_silenced(self):
+        """Reproduces the class: any capture that depends on the logging
+        framework can be blinded by ambient state, and the result is an empty
+        list indistinguishable from 'nothing was logged'."""
         seen: list[str] = []
 
         class _H(logging.Handler):
             def emit(self, record):
                 seen.append(record.getMessage())
 
-        root = logging.getLogger()
+        lg = logging.getLogger("bots.hydra.base_strategy")
         h = _H(level=logging.WARNING)
-        root.addHandler(h)
-        root.setLevel(logging.WARNING)
+        lg.addHandler(h)
+        lg.setLevel(logging.WARNING)
+        prev_disabled = lg.disabled
+        lg.disabled = True          # one of several ways; all look identical
         try:
-            root.handlers.clear()  # LoggerService._setup_logging() does this
             MarketData.update_spx(_strat(underlying="SPY"), 684.21,
                                   availability="DP")
             assert seen == [], (
                 "pre-fix: the capture is empty and the failure looks like a "
                 "product bug")
         finally:
-            if h in root.handlers:
-                root.removeHandler(h)
+            lg.disabled = prev_disabled
+            lg.removeHandler(h)

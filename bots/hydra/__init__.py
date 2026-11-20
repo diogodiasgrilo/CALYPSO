@@ -101,18 +101,36 @@ between CI and local (CI skips 8 that a local run executes). Chasing the
 individual culprit is worth less than making the instrument immune to the class,
 which also stops the next one.
 
-**FIX:** a `warns` fixture that attaches its own handler to
-`bots.hydra.base_strategy` and explicitly neutralises all four mechanisms,
-restoring each afterwards so it cannot become the next test's version of this
-bug. The pollution has to be applied BEFORE fixture setup to be realistic — a
-test body cannot express that, since its fixtures are already built — so three
-cases drive the fixture's generator by hand over pre-polluted state. The first
-version of the fixture did NOT survive `disabled = True` (18 of 24 failed),
-which is why that one is pinned.
+**ATTEMPT 2 ALSO FAILED CI**, and its failure is what settled the approach. It
+attached a handler directly to `bots.hydra.base_strategy` with the logger's
+level, its `disabled` flag and the global `logging.disable()` all neutralised.
+Locally that survived every stressor I could construct — each of which had
+reproduced CI's signature against attempt 1 — and CI failed it anyway. **An
+attached handler seeing nothing rules out all of those mechanisms**, so the
+reasoning behind attempt 2 was incomplete, not merely unlucky.
 
-🔑 **The lesson: when every assertion in a new file fails on "nothing was
-logged", suspect the instrument before the subject** — and prefer a handler on
-the logger under test over any fixture that depends on ambient root state.
+**THE CI CAUSE REMAINS UNIDENTIFIED, and that is the honest position.** Nothing
+in product code touches logger state; the suite has ~6,600 tests; CI skips 8
+that a local run executes, so ordering differs. Rather than guess a fourth
+time, attempt 3 removes the dependency on the thing that varies.
+
+**FIX (attempt 3):** a `warns` fixture that `monkeypatch`es the module's
+`logger` attribute with a recorder. It does not touch the logging framework at
+all, so no ambient state can reach it — verified against six stressors
+individually (raised level, `propagate=False`, global `disable`, `disabled`
+flag, cleared root handlers, a drop-all `Filter`) **and all six applied at
+once**: 26/26 each time. It still drives the REAL `update_spx` / `update_vix`
+bodies, the REAL format strings, the REAL `_underlying_label()` and the REAL
+dedup window, and renders `msg % args` exactly as logging would — a test pins
+that, because an unrendered `%s` would satisfy a label assertion while the real
+line said literally "%s". Two mutations confirm it: dropping the rendering
+fails 15 tests, removing the swap fails 21.
+
+🔑 **The lesson, in three parts.** When every assertion in a NEW file fails on
+"nothing was logged", suspect the instrument before the subject. When a fix for
+the instrument also fails, stop diagnosing the environment and remove the
+dependency on it. And a green local suite is not evidence about CI — this one
+was green at 6,666 and then 6,674 across two red runs.
 
 ℹ️ **Deployed to E and H only.** They account for 9,114 of 9,114 occurrences;
 A/B/C/bl/D/F/G emit none, so restarting them mid-session for a cosmetic log
