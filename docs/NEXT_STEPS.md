@@ -5,11 +5,157 @@
 > [`docs/migration/PROJECT_STATUS.md`](migration/PROJECT_STATUS.md) (project-wide state) and the per-effort
 > design docs.
 >
-> **Last updated: 2026-10-09 (Fri, 09:50 ET).** **Read §A-sept first (the live seat changed today),
-> then §A-pent for the rest of the current state.** (§A0 below is the 2026-09-19 snapshot, kept for history.) §A–§D are current. **§0–§10 are the older backlog (2026-07-14 / 07-24 era)** — much of
+> **Last updated: 2026-11-22 (Sat).** **Read §A-oct first — it is the current state AND it
+> corrects §A-pent's PLAN, whose #1 item reads as pending but shipped weeks ago.** Then
+> §A-sept for the live-seat change of 2026-10-09. (§A-pent is the 2026-10-08 snapshot and
+> §A0 the 2026-09-19 one, both kept for history — **do not act on either without checking
+> §A-oct first**.) §A–§D are current. **§0–§10 are the older backlog (2026-07-14 / 07-24 era)** — much of
 > it is done or superseded; **verify against the code before acting on anything there.** Real live
 > items still live in §5 (entry-schedule lock, E calendar-stop analyzer) and §6 (Brandon fill-quality
 > confirmations), which is why those sections are kept rather than deleted.
+
+---
+
+# §A-oct. WHERE WE ARE — 2026-11-22 (Sat)
+
+> 🔴 **This file went 40 days without an update (2026-10-13 → 2026-11-22) and
+> `migration/PROJECT_STATUS.md` went 45, while 86 code commits and 70 user-visible fixes
+> landed.** §A-pent opened with this same complaint about a 9-day gap. It is now the
+> **third** recorded instance, and the cost is no longer hypothetical — see "Corrections to
+> §A-pent's PLAN" below: its **#1 item reads as pending but shipped weeks ago**, and a
+> session on 2026-11-22 came within one step of re-doing it. A doc that CLAUDE.md orders you
+> to read FIRST is load-bearing; when it rots it does not merely fail to help, it actively
+> misdirects.
+
+## Current state — measured 2026-11-22, epoch-honoured
+
+**Live paper seat: `bl`** (since 2026-10-09). Fleet: 11 units active, **0 failed**,
+account **flat**, broker session healthy, VM on `1b540da0`.
+
+⚠️ **Every figure below is summed from that variant's `strategy.metrics_epoch_date`.**
+Quote them with the date attached; they move fast and this file's history is full of stale
+numbers quoted as current.
+
+| var | epoch | days | traded | net | mean/day | t |
+|---|---|---|---|---|---|---|
+| **bl** (live) | 2026-10-09 | 31 | 16 | **−$5,882.75** | −$189.77 | −0.94 |
+| b (B-A, control) | 2026-07-24 | 86 | 64 | −$5,732.15 | −$66.65 | −0.40 |
+| c | 2026-06-11 | 116 | 70 | −$15,415.43 | −$132.89 | −1.66 |
+| **d** | 2026-07-11 | 95 | 21 | −$9,635.75 | −$101.43 | **−2.52** |
+| e | 2026-09-24 | 42 | **0** | −$92.85 | −$2.21 | −1.00 |
+| f | none | 62 | 20 | −$114.50 | −$1.85 | −0.34 |
+| g | none | 62 | 57 | −$50.95 | −$0.82 | −0.01 |
+| h | none | 43 | **2** | +$139.80 | +$3.25 | +1.29 |
+
+**D remains the fleet's only statistically distinguishable result, and it is negative**
+(t = −2.52, consistent with the −2.32/−2.28 recorded earlier). The NO-GO stands on a test.
+Everything else is indistinguishable from zero. **H's +$139.80 is still 2 observations under
+rules it no longer runs** — do not cite it.
+
+🔑 **67% of `bl`'s loss came from entries that never opened.** 43 failed attempts over 14
+days cost **−$3,954.80** of the −$5,882.75. Recorded from 2026-11-20 as
+`daily_summaries.entries_failed` (schema **v21**); **NULL on a pre-v21 row means "not
+recorded", not "a clean day"**.
+
+## Corrections to §A-pent's PLAN — read before acting on it
+
+| # | §A-pent said | actually |
+|---|---|---|
+| 1 | Quote cache TTL 2.0 → 5.0s, "next after-close window" | ✅ **DONE.** `CALYPSO_BROKER_QUOTE_CACHE_S=5.0` is live; cache at **88.5% hit rate** (679k hits / 88k misses), far past the projected 50.2%. A chart-bar cache (67.0%) shipped too (`1d612eec`). |
+| 2 | GEX registered test, "~5 trading days" | **Data has accrued far past that** — 8,757 `gex_decisions` rows on `b` (2026-09-08 → 11-19), 3,209 on `bl`. The test is now very likely resolvable. **NOT yet run.** Decision rule is pre-registered and must not be renegotiated. |
+| 3 | e#4 slot prune / one-entry-a-day, ~12 / ~10 weeks | Still accruing; due ≈ Jan 2027. Nothing to do. |
+| 4 | Snapshot priming call (3.13× amplification) | **Partly addressed** — `d9a61d2a` primes a conid's snapshot cache once per session rather than per read. The deeper warmup redesign still carries P7-audit **H10** ("less is brittle"). |
+| 5 | FUND THE ACCOUNT + Gate-9 commit | **Operator decision 2026-11-22: deliberately DEFERRED** until the 15-clean-day clock nears 15 (it is **0**, broken 2026-11-20). Money in the account changes nothing while the gate cannot pass. Raise it when the streak gets close. |
+
+⚠️ **The rate gate has NOT been re-measured at RTH since 2026-10-08.** `/health`'s
+`rate_gate` is **cumulative since broker start** (2026-11-11), so its 203 ms mean and 76.4%
+waited include nights and weekends and **cannot** be compared with October's 180-second RTH
+samples (857–1,023 ms). The cache almost certainly helped; that is an inference, not a
+measurement. Take an RTH sample before claiming the saturation is resolved.
+
+## What shipped since 2026-10-13 — by theme
+
+**Incidents (all closed).**
+* 🔴 **OPRA option-feed lapse, 2026-11-02 → 11-11** — 30-of-30 entry failures. DATA-002/002b
+  now halt new entries when a feed is not real-time, flagging from *observation* rather than
+  from failed attempts (`103eb462`, `e0263408`, `ba22f57c`, `f250acd8`, `ee05d6b1`).
+  ⚠️ **The equity half of that same event was never restored** — see Open below.
+* 🔴 **A2 over-close net OPENED a position** (`460ae3f3`) — a corrective trade issued off a
+  broker read taken 1s after our own fill; both quantity reads were stale, falsifying the
+  guard's premise. Aftermath: a persistent orphan re-alerted hourly (`8727bb0f`).
+* 🔴 **Calendars settled at MIDNIGHT on their expiry day** (`374360c1`); impact closed —
+  only $96.25 suspect.
+* 🔴 **Settlement booked OTM expiries as ITM on a day-stale SPX** (`7b4d8336`, `732bb922`),
+  −$12,710 vs a true ≈+$1,500; `bl`'s 2026-10-14 record repaired (`473665db`).
+* 🔴 **E silently blocked 18 days by H's bug in a second file** (`c1059ea4`) — "first DB with
+  any history" chose `bl`'s 12 days over A's 175. Fix the CLASS, not the instance.
+
+**Order path.**
+* ORDER-010 cancel/fill race left 5 untracked contracts (`fe971ca8`); a cancelled order
+  reported 0 filled and we believed it (`c43f4cfe`); remainder-sizing over-fill closed at
+  **all three layers** (`2fcd7dc9`).
+* ORDER-DBL: the guard stopped the leg retry but the **entry** retry walked around it
+  (`ae9e82bf`).
+* ENTRY-CHECKPOINT: the stop monitor was blind for a whole entry (`c9bb5763`) — blind-window
+  exposure 78% → 24%; a stop firing mid-leg was billed to the entry's budget (`aceb78e3`).
+* MKT-011: a fillability veto was reported as a thin credit (`c6d750d6`); don't attempt an
+  order whose contracts never resolved (`cc333feb`).
+
+**Correctness + telemetry.**
+* **BROKER-RECONCILE drift decomposes** (`4dce6e3b`) — IBKR's `realizedPnl` **excludes
+  expired legs**, so it was never the same population as our gross. 16/16 categorical.
+* The epoch archive zeroed 7 counters and the self-heal restored 5 (`bc9951a2`).
+* `cascade_gap_seconds` was measuring **overnight** time (`fd23b634`) — treat any value
+  above a few hundred seconds on a pre-fix row as an artefact.
+* The **gating** fleet audit **skipped the live seat** and crashed on 8 of 13 runs
+  (`1515500b`) — a crash also exits 1, so two weeks of crashes read as P&L identity breaks.
+  New exit code **2 = UNAUDITABLE**.
+* `entries_failed` (v21) + the report calling FAILED days a cost (`11ddb1c0`, `0f1aeda1`,
+  `cd8cec70`).
+
+**Alerts.**
+* A failed delivery now **retries** instead of being dropped (`aa58f4bd`) — needed
+  `--retry`, because `RETRY_POLICY_DO_NOT_RETRY` let functions_framework answer 200.
+* The Cloud Function was **discarding every INFO record** for 60+ days (`93fb2b39`).
+* A `str` alert_type **LOST** the alert rather than just skipping the gate (`5d254e81`).
+* Six variants carried a placeholder email and bounced (`d02832f7`); H's phantom CRITICAL +
+  a publish retry that duplicated emails (`a3a92881`); APOLLO/CLIO silenced without stopping
+  their reports (`e4d98a01`).
+
+**Dashboard + iOS widget.**
+* The widget **had never worked** — auth plus six display defects (`f0e0d14e`, `40ccd697`,
+  and follow-ups), now a scoped read-only token and a grouped fleet view (`7650da9c`).
+* Front-end budget: eager JS **−61%**, whole-app re-render removed, request deadlines added
+  (`0a47b83b`); the logo was 571,778 B to draw 32 pixels (`5e846b3b`); 2s polls now answer
+  **304**, saving ~20 MB/hour (`8d8bca44`).
+* 🔴 **2026-11-21: the widget had been serving data frozen at the last dashboard restart**
+  (`2327de39`) — `get_cached() or read_latest()` served the first read forever at six call
+  sites. `/api/health` now reports **`state_file_age_seconds`**, because a plausible date
+  could not be told from a frozen one.
+* The last two `monotonic() - 0.0` throttles (`1b540da0`) — a fresh boot swallowed the first
+  stop-checkpoint and the first 429 alert.
+
+## Open / blocked
+
+| what | state |
+|---|---|
+| 🔴 **SPY real-time (Network B) lapsed 2026-11-02** | Died with OPRA; **OPRA restored 11-11, this never was.** Operator re-enabled 2026-11-22; **verification pending Monday RTH.** A weekend probe cannot confirm it — with no ticks IBKR returns `6509='Z'` for everything. Binary check: E/H delayed lines, 0 = live, ~77 = still lapsed. |
+| **GEX registered test** | Data accrued; test not run. Pre-registered rule, do not renegotiate. |
+| **RTH rate-gate re-measure** | Needed before claiming October's saturation is resolved. |
+| Funding + Gate-9 | Deferred by decision (above). |
+| §A-ter session log | **Stops at 2026-09-21** and is B-era. The `bl` era was deliberately NOT back-filled — reconstructing 40 days of narrative would be invention. The record is `daily_summaries` and `docs/HYDRA_TRADING_JOURNAL.md`. |
+| Disk | 64% after reclaiming 288 MB of verified-duplicate snapshots (2026-11-22). ~1,271 MB of one-per-repair snapshots deliberately KEPT; some cover 06-02 → 07-24, when A and C held the live seat. journald is capped at 2 GB by the systemd default and cannot grow. |
+
+## Traps found while writing this — add to the list before trusting a config read
+
+* **`metrics_epoch_date` lives under the `strategy` block**, not the config root. Reading the
+  root returns `None` and silently gives you **whole-history** numbers: B reads **+$13,697**
+  that way versus **−$5,732** epoch-honoured. This is the *inverse* of the
+  `api_pacing_multiplier` trap §A-pent records (that one falls back to the root). **Both
+  exist; check which applies.**
+* `/health`'s `rate_gate` is cumulative since broker start — not an RTH sample.
+* A `journalctl` read without `sudo` returns **zero lines** for every unit and looks exactly
+  like a silent fleet.
 
 ---
 
@@ -223,7 +369,7 @@ H10), #5 (funding + Gate-9, operator).
 
 ---
 
-# §A-pent. WHERE WE ARE — 2026-10-08 (Thu)
+# §A-pent. WHERE WE ARE — 2026-10-08 (Thu) — ⚠️ SUPERSEDED by §A-oct (its PLAN is partly DONE)
 
 > ⚠️ **This file went 9 days without an update (2026-09-29 → 10-08) while a lot shipped**, and
 > `migration/PROJECT_STATUS.md` went 19. Everything below was recorded in commit messages, the

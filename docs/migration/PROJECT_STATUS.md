@@ -2,23 +2,29 @@
 
 **This file is the single-source-of-truth for the current state of the `hydra-ibkr-standalone` branch.** Any Claude session arriving at this repo should read this file first, before CLAUDE.md. CLAUDE.md is the operator reference (what the bot does, how to deploy, troubleshoot); this file is the *project state* (what's been done, what's in flight, what's blocked).
 
-**Last updated:** 2026-10-08. ⚠️ **The header facts below are current; the dated narrative further down still stops in June/July and is HISTORY, not state.** For the live one-screen picture read [`docs/NEXT_STEPS.md`](../NEXT_STEPS.md) **§A-pent** — it is refreshed per session and this file is not.
-**Base branch:** `hydra-ibkr-standalone` @ `8890686` (2026-09-19 — verify with `git rev-parse HEAD`; this line goes stale by design, so treat a mismatch as normal rather than as a finding).
+**Last updated:** 2026-11-22. ⚠️ **The header facts below are current; the dated narrative further down still stops in June/July and is HISTORY, not state.** For the live one-screen picture read [`docs/NEXT_STEPS.md`](../NEXT_STEPS.md) **§A-oct** — it is refreshed per session and this file is not. (§A-pent, which this file pointed to until 2026-11-22, is now a superseded 2026-10-08 snapshot whose PLAN is partly DONE.)
+**Base branch:** `hydra-ibkr-standalone` @ `1b540da0` (2026-11-22 — verify with `git rev-parse HEAD`; this line goes stale by design, so treat a mismatch as normal rather than as a finding).
 **Feature branches:** none outstanding. `feat/strategy-grouping-spy-calendar` (taxonomy/grouping + Strategy D go-live + Strategy E) is **MERGED** — the "NOT merged" line that stood here until 2026-09-18 was two months stale.
-**Commits ahead of `main`:** 137 (`main` @ `59a1fc7`, merged forward 2026-09-15 with 613 commits, `--no-ff`).
-**Test suite:** **5776 passed / 17 skipped** (2026-10-08). CI runs it on every push (`.github/workflows/ci.yml`) along with a typecheck, a lint ratchet, a 42-surface visual audit, a responsive sweep, and five accessibility/degraded-data browser probes.
+**Commits ahead of `main`:** 494 (`main` @ `59a1fc7`, last merged forward 2026-09-15 with 613 commits, `--no-ff`).
+**Test suite:** **6717 passed / 17 skipped** (2026-11-22). CI runs it on every push (`.github/workflows/ci.yml`) along with a typecheck, a lint ratchet, a 42-surface visual audit, a responsive sweep, and five accessibility/degraded-data browser probes.
 
 > ### ⚠️ THE MOST IMPORTANT CORRECTION TO THIS FILE (2026-09-18)
 > Everything below about go-live sequencing describes **June 2026** and is
 > superseded. The current facts:
-> - **B is the LIVE PAPER SEAT** (`dry_run=false`, 7 contracts, alerts on) and has
->   been since the **2026-07-24 B↔C swap**. The narrative below still says
->   "B/C stay dry-run" and "variant A will auto-flip" — both long dead.
+> - ⚠️ **SUPERSEDED 2026-11-22: the live paper seat is `bl`, NOT B.** It moved on
+>   2026-10-09 (same Brandon code, 12:15–14:45 grid). B keeps id `b`, is displayed
+>   **B-A**, and is now the dry-run **control** its successor is measured against.
+>   This bullet said "B is the LIVE PAPER SEAT" for six weeks after that stopped
+>   being true — in the block this file calls its most important correction.
+>   The narrative below still says "B/C stay dry-run" and "variant A will
+>   auto-flip" — both long dead.
 > - **A and C are dry-run shadows.** D, E, F, G are dry-run-locked.
-> - **EIGHT variants run**, not three: A/B/C (0DTE IC), D/E (multi-day calendars),
->   F (Ghauri mean-reversion), G (naked strangle), **H (long strangle — trades SPY,
->   not SPX)**. H was missing from this list until 2026-10-08, the same omission
->   CLAUDE.md carried until 09-28.
+> - **NINE variants run** (corrected 2026-11-22; said EIGHT): A, **`bl` (live)**,
+>   `b` (B-A, control), C — 0DTE IC · D/E multi-day calendars · F Ghauri
+>   mean-reversion · G naked strangle · **H long strangle (trades SPY, not SPX)**.
+>   H was missing from this list until 2026-10-08, the same omission CLAUDE.md
+>   carried until 09-28 — and `bl` was missing from it until 2026-11-22, which is
+>   the same defect a THIRD time, this time omitting the LIVE SEAT.
 > - **The critical path is FUNDING THE LIVE ACCOUNT** — created, not funded.
 >   Then permissions → market data → a new OAuth keypair (~2wk activation).
 >   4–6 weeks, all calendar, no engineering. Everything else queues behind it.
@@ -32,6 +38,44 @@
 >   credentials exist, `bm` ships `dry_run=true`, and neither unit is installed —
 >   verified on the VM 2026-09-19. See
 >   [`LIVE_MONEY_ARCHITECTURE.md`](LIVE_MONEY_ARCHITECTURE.md).
+
+> ### ⚠️ WHAT MOVED SINCE 2026-10-08 (added 2026-11-22)
+> This file went **45 days** without an update and `NEXT_STEPS.md` went **40**, while **86
+> code commits / 70 user-visible fixes** landed. That is the **third** recorded instance of
+> this exact rot, and it cost something this time: §A-pent's PLAN **#1 reads as pending but
+> shipped weeks ago**, and a session nearly re-did it. Full detail in
+> [`docs/NEXT_STEPS.md`](../NEXT_STEPS.md) **§A-oct**; the state-changing items:
+> - **The live seat is `bl`, not B** (since 2026-10-09) — the same Brandon code on a
+>   12:15–14:45 grid. **B keeps id `b`, is displayed B-A, and is now the dry-run CONTROL.**
+>   ⚠️ The shift is **not validated**: permutation p = 0.597.
+> - **Epoch-honoured records, 2026-11-22:** `bl` −$5,882.75 / 31d / t = −0.94 · `b`
+>   −$5,732.15 / 86d / t = −0.40 · `c` −$15,415.43 / t = −1.66 · **`d` −$9,635.75 /
+>   t = −2.52 (still the fleet's ONLY significant result, still negative)** · `e` 0 entries
+>   in 42 days · `g` t = −0.01 · `h` **2** observations.
+> - 🔑 **67% of `bl`'s loss came from entries that never OPENED** — 43 failed attempts over
+>   14 days, −$3,954.80. Now recorded as `daily_summaries.entries_failed` (schema **v21**);
+>   **NULL on a pre-v21 row means "not recorded", not "a clean day"**.
+> - 🔴 **The OPRA option feed lapsed 2026-11-02 → 11-11** (30-of-30 entry failures).
+>   DATA-002/002b now halt new entries when a feed is not real-time. ⚠️ **The equity half of
+>   the same event — SPY / Network B — was never restored**; operator re-enabled it
+>   2026-11-22, verification pending Monday RTH.
+> - 🔴 **The GATING nightly fleet audit skipped the live seat and crashed on 8 of 13 runs.**
+>   A crash also exits 1, so two weeks of crashes presented as P&L identity breaks. Fixed;
+>   new exit code **2 = UNAUDITABLE**. First green run 2026-11-16.
+> - 🔴 **The iOS widget had been serving data frozen at the last dashboard restart**
+>   (2026-11-21) — `get_cached() or read_latest()` served the first read forever at six call
+>   sites. `/api/health` now reports **`state_file_age_seconds`**, because a plausible date
+>   could not be distinguished from a frozen one. **Gate 6 reads this endpoint.**
+> - **Alert delivery now retries** instead of being silently dropped — and the Cloud Function
+>   had been **discarding every INFO record for 60+ days**.
+> - **Rate gate:** the quote cache is live at **88.5% hit rate** (PLAN #1, done). ⚠️ **No RTH
+>   re-measure since 2026-10-08** — `/health`'s `rate_gate` is cumulative since broker start
+>   and must not be compared with October's RTH samples.
+> - **Funding: deliberately DEFERRED** (operator decision 2026-11-22) until the 15-clean-day
+>   clock nears 15. It is **0**, broken 2026-11-20. Gate 4 remains the binding constraint.
+> - ⚠️ **Trap:** `metrics_epoch_date` lives under the **`strategy` block**, not the config
+>   root. Reading the root yields whole-history numbers — B reads **+$13,697** that way vs
+>   **−$5,732** epoch-honoured. This is the *inverse* of the `api_pacing_multiplier` trap.
 
 > ### ⚠️ WHAT MOVED SINCE 2026-09-19 (added 2026-10-08)
 > This file went **19 days** without an update while a lot shipped. Full detail is

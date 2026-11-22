@@ -11,16 +11,22 @@
 **Failure-recovery first principle:** if you're unsure, **stop what is trading** and **investigate without time pressure**. The bot stopped is safer than the bot wrong.
 
 > ⚠️ **`systemctl stop hydra` does NOT stop trading.** `hydra` is variant **A**, a dry-run
-> shadow (`dry_run: true`) that places no orders — it has been one since the live seat moved to
-> B on 2026-07-24. Stopping it halts nothing while the live seat keeps trading, which is the
-> worst possible outcome for a command you reach for when unsure. This line said
-> `systemctl stop hydra` until 2026-09-19.
+> shadow (`dry_run: true`) that places no orders. Stopping it halts nothing while the live seat
+> keeps trading, which is the worst possible outcome for a command you reach for when unsure.
+> This line said `systemctl stop hydra` until 2026-09-19.
+>
+> 🔴 **And it then said `hydra_variant_b` until 2026-11-22, which was wrong the same way.** The
+> live paper seat moved to **`bl`** on **2026-10-09**; `hydra_variant_b` has been the DRY-RUN
+> control (`B-A`) ever since, so the emergency-stop command in this runbook stopped a shadow and
+> left the live seat trading for six weeks. **Fourth recurrence of this exact defect** — after
+> `systemctl stop hydra` (09-19), the GCS DB backup (`ab63407`), and the nightly gating audit
+> (2026-11-16). When the seat moves, grep every doc for the OLD unit name.
 >
 > ```bash
 > # Stop ALL trading, paper and real money, right now:
-> gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b hydra_variant_bm"
+> gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_bl hydra_variant_bm"
 > # hydra_variant_bm may not exist yet — systemctl will say so and stop the rest. That is fine.
-> # The dry-run variants (hydra, c, d, e, f, g) can be left running; they cannot place an order.
+> # The dry-run variants (hydra, b, c, d, e, f, g, h) can be left running; they cannot place an order.
 > ```
 >
 > Confirm it worked by the account, not by the unit state — `systemctl` says the process is gone,
@@ -174,7 +180,7 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="curl -s http://127.0
 ```
 Then confirm the strategies came back:
 ```bash
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra_variant_b --since '5 minutes ago' --no-pager | grep -c 'not holding a session'"
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u hydra_variant_bl --since '5 minutes ago' --no-pager | grep -c 'not holding a session'"
 # Expected: 0 (they stop waiting once /health reports connected)
 ```
 
@@ -193,10 +199,12 @@ File as P0. (Repeated **410 Gone** during a weekend maintenance window is NOT th
 1. Stop the bot to interrupt the restart loop:
    ```bash
    # `hydra` is variant A — a DRY-RUN shadow. Stopping it alone halts no trading.
-   # Stop the unit(s) that actually place orders: today that is hydra_variant_b (the live
-   # paper seat, dry_run=false), plus hydra_variant_bm once real money runs (see STEP 0).
+   # Stop the unit(s) that actually place orders: today that is hydra_variant_bl (the live
+   # paper seat since 2026-10-09, dry_run=false), plus hydra_variant_bm once real money runs
+   # (see STEP 0). NOTE: hydra_variant_b is `B-A`, a DRY-RUN control since the seat moved —
+   # stopping it halts nothing. This said hydra_variant_b until 2026-11-22.
    # If this runbook concerns one specific variant, substitute that unit instead.
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b"
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_bl"
    ```
 2. Run the auth flow manually to surface the real error:
    ```bash
@@ -274,10 +282,12 @@ Possibilities (in descending likelihood):
 1. Stop the bot:
    ```bash
    # `hydra` is variant A — a DRY-RUN shadow. Stopping it alone halts no trading.
-   # Stop the unit(s) that actually place orders: today that is hydra_variant_b (the live
-   # paper seat, dry_run=false), plus hydra_variant_bm once real money runs (see STEP 0).
+   # Stop the unit(s) that actually place orders: today that is hydra_variant_bl (the live
+   # paper seat since 2026-10-09, dry_run=false), plus hydra_variant_bm once real money runs
+   # (see STEP 0). NOTE: hydra_variant_b is `B-A`, a DRY-RUN control since the seat moved —
+   # stopping it halts nothing. This said hydra_variant_b until 2026-11-22.
    # If this runbook concerns one specific variant, substitute that unit instead.
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b"
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_bl"
    ```
 2. **Verify no working orders** before any force_reset (orders left in the book would be reactivated on bot restart):
    ```bash
@@ -355,10 +365,12 @@ IBKR's snapshot endpoint is having issues. SPX/VIX/options all affected.
 2. If during a regular session: **stop the bot** to prevent placing trades against null data:
    ```bash
    # `hydra` is variant A — a DRY-RUN shadow. Stopping it alone halts no trading.
-   # Stop the unit(s) that actually place orders: today that is hydra_variant_b (the live
-   # paper seat, dry_run=false), plus hydra_variant_bm once real money runs (see STEP 0).
+   # Stop the unit(s) that actually place orders: today that is hydra_variant_bl (the live
+   # paper seat since 2026-10-09, dry_run=false), plus hydra_variant_bm once real money runs
+   # (see STEP 0). NOTE: hydra_variant_b is `B-A`, a DRY-RUN control since the seat moved —
+   # stopping it halts nothing. This said hydra_variant_b until 2026-11-22.
    # If this runbook concerns one specific variant, substitute that unit instead.
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b"
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_bl"
    ```
 3. Wait for IBKR to recover (status page green) + Step-2 probe shows `6509='R'` again.
 4. Restart:
@@ -425,10 +437,12 @@ Each new IBKR Web API session "wins" — older sessions get evicted (Last-In-Win
 1. **Stop the bot** (interrupt the restart loop):
    ```bash
    # `hydra` is variant A — a DRY-RUN shadow. Stopping it alone halts no trading.
-   # Stop the unit(s) that actually place orders: today that is hydra_variant_b (the live
-   # paper seat, dry_run=false), plus hydra_variant_bm once real money runs (see STEP 0).
+   # Stop the unit(s) that actually place orders: today that is hydra_variant_bl (the live
+   # paper seat since 2026-10-09, dry_run=false), plus hydra_variant_bm once real money runs
+   # (see STEP 0). NOTE: hydra_variant_b is `B-A`, a DRY-RUN control since the seat moved —
+   # stopping it halts nothing. This said hydra_variant_b until 2026-11-22.
    # If this runbook concerns one specific variant, substitute that unit instead.
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b"
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_bl"
    ```
 2. **Sign out the other client.** For the IBKR portal: top-right name → Sign Out.
 3. **Kill any orphan probe / `IBClient` Python processes:**
@@ -526,17 +540,20 @@ If `journalctl` shows `json.decoder.JSONDecodeError` on `hydra_state.json` load:
 > (`data/hydra_state.json`, `data/state_snapshots/`, unit `hydra`). For a
 > variant, substitute the variant tree and unit: variant **B** →
 > `data/variant_b/hydra_state.json`, `data/variant_b/state_snapshots/`, unit
-> `hydra_variant_b`; variant **C** → `data/variant_c/...`, unit
+> `hydra_variant_b`; the **live seat `bl`** → `data/variant_bl/...`, unit
+> `hydra_variant_bl`; variant **C** → `data/variant_c/...`, unit
 > `hydra_variant_c`. Restoring A's file over a variant (or vice-versa)
 > corrupts the wrong bot.
 
 1. **Stop the bot** (it's auto-restarting; interrupt the loop):
    ```bash
    # `hydra` is variant A — a DRY-RUN shadow. Stopping it alone halts no trading.
-   # Stop the unit(s) that actually place orders: today that is hydra_variant_b (the live
-   # paper seat, dry_run=false), plus hydra_variant_bm once real money runs (see STEP 0).
+   # Stop the unit(s) that actually place orders: today that is hydra_variant_bl (the live
+   # paper seat since 2026-10-09, dry_run=false), plus hydra_variant_bm once real money runs
+   # (see STEP 0). NOTE: hydra_variant_b is `B-A`, a DRY-RUN control since the seat moved —
+   # stopping it halts nothing. This said hydra_variant_b until 2026-11-22.
    # If this runbook concerns one specific variant, substitute that unit instead.
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b"
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_bl"
    ```
 2. **List available state-file snapshots** (Polish Item 5):
    ```bash
@@ -625,9 +642,10 @@ Expected: the conid mentioned in the alert is NOT in the position list (position
 
 ```bash
 # `hydra` is variant A, a DRY-RUN shadow — stopping it halts no trading.
-# Stop what actually trades: hydra_variant_b today, plus hydra_variant_bm once real
-# money runs (see STEP 0).
-gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b"
+# Stop what actually trades: hydra_variant_bl (the live seat since 2026-10-09), plus
+# hydra_variant_bm once real money runs (see STEP 0). hydra_variant_b is the DRY-RUN
+# control B-A and halts nothing. (Said hydra_variant_b until 2026-11-22.)
+gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_bl"
 ```
 
 **Manually close the naked short via the IBKR portal** (NOT via a script — at this point we don't know what's wrong with the bot's close path):
@@ -753,9 +771,10 @@ row counts are non-zero and close to live; `ensure_schema()` returns `True`; bot
    ```bash
    gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo -u calypso gsutil ls gs://calypso-backups/ | tail -10"
    ```
-2. **Stop the affected unit** (the LIVE variant, not `hydra`, unless A is the one broken):
+2. **Stop the affected unit** (the LIVE variant, not `hydra`, unless A is the one broken —
+   the live seat is **`bl`** since 2026-10-09; this said `hydra_variant_b` until 2026-11-22):
    ```bash
-   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_b"
+   gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo systemctl stop hydra_variant_bl"
    ```
 3. **Snapshot what you are about to overwrite** — you may need it if the backup is worse:
    ```bash

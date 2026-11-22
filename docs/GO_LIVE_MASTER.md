@@ -48,8 +48,16 @@ is each variant's `config_variant_*.json` `dry_run` on the VM; this table is the
 
 **Level-II (real-money) status for B is measured gate-by-gate in [§2-bis](#2-bis-level-ii-real-money-gate-status--measured-2026-09-12) below.**
 
-**Key takeaways:** B is the only live variant (live seat swapped from C on 2026-07-24 —
-[RUNBOOKS.md RB-9](migration/RUNBOOKS.md)); A/C are dry-run; **D and E are BUILDS, not flips** (they have no
+**Key takeaways:** 🔴 **CORRECTED 2026-11-22 — the live variant is `bl`, NOT B.** The seat moved
+on **2026-10-09** (same `BrandonHydraStrategy` code, grid shifted to **12:15 / 12:45 / 13:15 / 13:45 /
+14:15 / 14:45**; 15:15 removed 10-13). **B keeps id `b`, is displayed B-A, and is now the dry-run
+CONTROL** `bl` is measured against. This document said "B is the only live variant" for six weeks
+after that stopped being true, and **the table in §1 below still describes B as LIVE-PAPER** — treat
+that row as historical and read `bl` wherever it says B.
+⚠️ **The grid shift is NOT validated**: a 20,000-shuffle permutation on the per-slot spread gives
+**p = 0.597**, and 13:15 onward had no live record when it was adopted. `bl` exists to generate
+out-of-sample data, not because the shift is proven. **Do not cite in-sample slot figures at a gate.**
+(Live seat swapped from C on 2026-07-24 — [RUNBOOKS.md RB-9](migration/RUNBOOKS.md)); A/C are dry-run; **D and E are BUILDS, not flips** (they have no
 real-order path yet) and are calendar-shaped, so the 0DTE readiness checklist (§5) does not transfer to them —
 they need their own gate.
 
@@ -167,8 +175,17 @@ The measured record, from B's own `backtesting.db`:
 | live, all calendar days | 46 | $6,339 | 1.94 | **0.83** |
 | live, traded days only | 32 | $6,477 | 2.37 | **0.85** |
 
-**The live edge is not statistically distinguishable from zero.** Mean $137.81/day against a
-standard error of $166.36.
+🔴 **THE TABLE ABOVE IS RETIRED — it has since CHANGED SIGN. Do not cite it at any gate.**
+Re-measured epoch-honoured on **2026-11-22**: `b` over its full live era is **−$5,732.15 across
+86 days, mean −$66.65/day, t = −0.40**; the current live seat `bl` is **−$5,882.75 / 31 days /
+t = −0.94**. The +$6,339 figure was first contradicted on 2026-10-06 (−$1,820.10, t = −0.19) and
+moved again by **$1,388 in two days**. Three measurements inside four days all landing differently
+**is** the finding.
+
+**The live edge is not statistically distinguishable from zero** — which was already this
+section's conclusion and is the one part that survived. Neither +$6,339 nor −$5,732 estimates B's
+true edge: noise is ~25–39× the mean, and |t| = 2 needs **~6,100 trading days (~24 years)**. The
+sign of the record depends on which weeks you include. **Do not tune on it.**
 
 And the headline Sharpe decayed monotonically as data arrived — 4.96 (n=9) → 4.33 (n=25, the
 window in which "Sharpe 3.99" was recorded) → 3.61 (n=27) → 2.37 (n=32). **But nothing
@@ -281,7 +298,10 @@ points or 60. There is no fat tail for the cushion to insure. The marginal 20→
 
 What justifies 20 is narrower than a tail story: the protection is **correlated with bad days** —
 a short near its strike at 15:50 on a trend day is the same session other entries already stopped,
-so it trims the worst sessions specifically. Worth a premium while sizing up on a t = 0.83 edge.
+so it trims the worst sessions specifically. Worth a premium while sizing up on an edge whose sign
+is unresolved (⚠️ **this said "a t = 0.83 edge" until 2026-11-22; that figure is retired and now
+measures t = −0.40** — the protection argument stands on the correlation with bad days, NOT on a
+positive edge estimate, and it never needed one).
 It does **not** justify padding past what has been observed.
 
 ⚠️ **Accepted weakness, and the real gap.** 20pt clears the 18.4pt observed max by only 1.6pt

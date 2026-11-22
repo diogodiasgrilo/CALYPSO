@@ -1,8 +1,13 @@
 # CALYPSO — HYDRA on Interactive Brokers
 
-> **🧭 New here / Claude session continuing prior work?** Read [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) **§A0** FIRST —
+> **🧭 New here / Claude session continuing prior work?** Read [`docs/NEXT_STEPS.md`](docs/NEXT_STEPS.md) **§A-oct** FIRST —
 > it is the one-screen current state (what is deployed, what is deployed but UNVERIFIED, what is next, what is
-> blocked on the operator, and the go-live gate board). §A-ter is the live-seat session log. Then read
+> blocked on the operator, and the go-live gate board), and it CORRECTS §A-pent's plan.
+> ⚠️ **This line said "§A0" until 2026-11-22 — and §A0 is the 2026-09-19 snapshot, kept for HISTORY.**
+> The entry point into the whole project pointed at a two-month-old section, so every session (including
+> the ones that wrote the newer sections) was being sent to stale state first. §A-ter is the live-seat
+> session log but **stops at 2026-09-21 and is B-era**; the `bl`-era record is `daily_summaries` and the
+> trading journal. Then read
 > [`docs/migration/PROJECT_STATUS.md`](docs/migration/PROJECT_STATUS.md). It's the single-source-of-truth for *current project state* (what's been done, what's in flight, what's blocked on external gates). THIS file (`CLAUDE.md`) is the *operator reference* (what the bot does, how to deploy, how to troubleshoot). Different purposes — read the status doc first so you know whether to act or wait.
 
 > **Branch state (this branch only — `hydra-ibkr-standalone`).**
