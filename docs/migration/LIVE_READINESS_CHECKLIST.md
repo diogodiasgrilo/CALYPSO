@@ -290,9 +290,16 @@ So Gate 5 is now purely operational.
 - [ ] Dashboard accessible + WebSocket alive
   ```bash
   gcloud compute ssh calypso-bot --zone=us-east1-b --command="curl -sf http://localhost:8001/api/health"
-  # MUST output: {"status":"ok","clients":N,"state_loaded":true,"state_date":"YYYY-MM-DD"}
+  # MUST output: {"status":"ok","clients":N,"state_loaded":true,"state_date":"YYYY-MM-DD",
+  #               "state_file_age_seconds":N}
+  # CHECK state_file_age_seconds, not just the date: during RTH it should be seconds,
+  # and overnight no more than the time since the 00:00 ET daily reset.
   # (This said `"status":"healthy"` until 2026-09-19. The endpoint has never returned that,
-  #  so the gate could only ever be failed by an operator reading it literally.)
+  #  so the gate could only ever be failed by an operator reading it literally.
+  #  ⚠️ And until 2026-11-21 `state_date` came from a cache that could be ARBITRARILY STALE —
+  #  on 2026-11-21 it read 2026-11-17 while every state file on disk read 2026-11-21, and this
+  #  gate still passed, because a plausible date is indistinguishable from a tracked one.
+  #  That is why the age field exists; it is the part of this check that can actually fail.)
   ```
 - [ ] Disk usage < 70%
 - [ ] Memory usage < 80%

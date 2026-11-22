@@ -24,7 +24,7 @@ class LiveStateProvider:
 
     def _get_today_state(self) -> Optional[dict]:
         """Get state if it's for today."""
-        state = self._reader.get_cached() or self._reader.read_latest()
+        state = self._reader.current()
         if not state:
             return None
         if state.get("date") != get_today_et():

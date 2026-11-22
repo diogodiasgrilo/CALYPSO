@@ -67,8 +67,11 @@ async def get_widget_data():
 
     Returns a simplified view optimized for small displays.
     """
-    state = _live_state_reader().get_cached() or _live_state_reader().read_latest()
-    metrics = _live_metrics_reader().get_cached() or _live_metrics_reader().read_latest()
+    # `current()`, not `get_cached() or read_latest()`: nothing polls these
+    # readers, so the old pattern served the first read for the life of the
+    # process and the widget showed 5-day-old numbers (2026-11-21).
+    state = _live_state_reader().current()
+    metrics = _live_metrics_reader().current()
     market = get_current_status()
 
     if not state:

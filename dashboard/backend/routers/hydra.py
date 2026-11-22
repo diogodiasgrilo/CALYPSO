@@ -150,7 +150,7 @@ async def get_entries(date_str: str | None = None, strategy_id: str = Query(defa
         return JSONResponse(status_code=400, content={"error": "Invalid date format. Use YYYY-MM-DD."})
     if date_str is None:
         # Try state file first for live data (primary variant only)
-        state = _live_state_reader().get_cached() or _live_state_reader().read_latest()
+        state = _live_state_reader().current()
         if state and "entries" in state:
             return {"source": "state_file", "entries": state["entries"]}
 
@@ -175,7 +175,7 @@ async def get_summary(strategy_id: str = Query(default="")):
     from dashboard.backend.routers.variants import _summary_from_state
 
     _r = _state_reader_for(strategy_id)
-    state = _r.get_cached() or _r.read_latest()
+    state = _r.current()
     if not state:
         return {"error": "State not available"}
 

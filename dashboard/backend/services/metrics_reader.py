@@ -51,6 +51,11 @@ class MetricsFileReader:
         """Return last successfully read data."""
         return self._last_data
 
+    def current(self) -> Optional[dict]:
+        """The file's contents as they are now. See StateFileReader.current."""
+        fresh = self.read_if_changed()
+        return fresh if fresh is not None else self._last_data
+
     def _read_file(self) -> Optional[dict]:
         try:
             raw = self.file_path.read_text(encoding="utf-8")

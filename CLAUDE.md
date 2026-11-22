@@ -1216,7 +1216,7 @@ Browser → nginx:8080 → React SPA + /api/* proxy → uvicorn:8001 (FastAPI)
 
 | Endpoint | Description |
 |---|---|
-| `GET /api/health` | Health check |
+| `GET /api/health` | Health check — `status`, `clients`, `state_loaded`, `state_date`, **`state_file_age_seconds`** (v2 2026-11-21). Reads the state file LIVE; it used to report a cache that went permanently stale (see the conditional-polling section's callout) |
 | `GET /api/hydra/state` | Current HYDRA state |
 | `GET /api/hydra/bot-config` | Config flags (read directly from `bots/hydra/config/config.json`) |
 | `GET /api/hydra/entries?date=...` | Entries for a date |
@@ -1348,6 +1348,35 @@ auth guard), `tests/test_broadcaster_idle_gating_2026_11_16.py` (7), and vitest
 `conditionalJson` + `useStrategySnapshot` (14). The invariant to read first if any of this is revisited is
 **`test_a_real_content_change_is_never_masked_by_a_304`**. Mutation-verified both ways: removing the pruning,
 the `W/` strip or the 304 branch fails 3–7 tests, and **over-gating the broadcaster's log poll fails too**.
+
+> 🔴 **The idle gating above made `/api/health` report a stale date — and chasing that
+> exposed a FIVE-DAY-OLD iOS widget (fixed 2026-11-21).** Six call sites read state/metrics as
+> `reader.get_cached() or reader.read_latest()`. `get_cached()` returns `_last_data` *without
+> touching disk*, and `read_latest()` was the only thing that filled it — so the **first** request
+> read the file and every one after it got that same snapshot, the `or` arm unreachable, for the
+> life of the process. `read_if_changed()`, the only method that re-reads on an mtime change, is
+> called in **exactly one file** (`ws/broadcaster.py`) on the broadcaster's own readers; nothing
+> refreshed the readers behind `routers/widget.py` or `routers/hydra.py`.
+>
+> **`/api/widget` is the ONLY data source the Scriptable widget has**, so the phone showed
+> whatever was true at its first poll after each dashboard restart — plausible numbers, no error,
+> no staleness marker. Measured: dashboard up since 2026-11-16, so 5 days. `/api/hydra/state` and
+> `/api/hydra/summary` had it too (since 2026-09-17) but the React app doesn't poll them, and
+> `/api/hydra/entries` is only ever called with a `date_str`, which takes the DB path. **No
+> trading data was affected** — the dashboard is read-only and the state files were always right.
+>
+> Fixed with one method, `current()` (refresh on mtime change, else cache), at every such site.
+> ⚠️ **`read_if_changed` is CONSUMING**: it advances the mtime memo, so the caller observes the
+> change and the next caller does not. `/api/health` and `LiveStateProvider` had been handed the
+> **broadcaster's own** reader — calling `current()` there would swallow the change `_poll_state`
+> waits on and silence the WS round that should have pushed it. Both now hold their own reader
+> over the same path; `test_the_broadcaster_signal_is_not_stolen` pins it and its CONTROL proves
+> sharing really does steal the signal.
+>
+> 🔑 **The operator lesson: `state_date` alone could not distinguish "tracking" from "frozen on a
+> plausible date".** That is how it survived — including past **Gate 6** in
+> `LIVE_READINESS_CHECKLIST.md`, which reads this endpoint and whose literal assertion still
+> passed. `/api/health` now also returns **`state_file_age_seconds`**; read that, not the date.
 
 ℹ️ **Measured and deliberately NOT changed** (report, don't tune):
 - `PerformanceMetrics` fetches `/api/metrics/performance` **twice** on load because its effect

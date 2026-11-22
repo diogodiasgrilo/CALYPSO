@@ -1,6 +1,7 @@
 """HYDRA Dashboard — FastAPI application."""
 
 import logging
+import time
 from contextlib import asynccontextmanager
 
 from fastapi import Depends, FastAPI
@@ -17,6 +18,7 @@ from dashboard.backend.routers import (auth as auth_router, hydra, metrics, mark
                                        widget, variants, dc, strategies, long_strangle)
 from dashboard.backend.services import auth_db
 from dashboard.backend.services.live_state import LiveStateProvider
+from dashboard.backend.services.state_reader import StateFileReader
 
 logging.basicConfig(
     level=logging.INFO,
@@ -26,6 +28,14 @@ logger = logging.getLogger("dashboard")
 
 manager = ConnectionManager()
 broadcaster = Broadcaster(manager)
+
+# /api/health reports the state file's REAL freshness, so it needs a live read.
+# It gets its OWN reader over the same path rather than sharing the
+# broadcaster's: `current()` consumes the mtime change that the broadcaster's
+# `_poll_state` waits on, and a health poll that swallowed it would silence the
+# WebSocket round that should have pushed that update. Same reason
+# LiveStateProvider is given its own reader below.
+_health_state_reader = StateFileReader(broadcaster.state_reader.file_path)
 
 
 @asynccontextmanager
@@ -43,7 +53,10 @@ async def lifespan(app: FastAPI):
     ws_router_module.set_dependencies(manager, broadcaster)
 
     # Wire up live data sources for REST endpoints (bridges gap until HOMER runs)
-    live_state = LiveStateProvider(broadcaster.state_reader, db_reader=broadcaster.db_reader)
+    live_state = LiveStateProvider(
+        StateFileReader(broadcaster.state_reader.file_path),
+        db_reader=broadcaster.db_reader,
+    )
     market.set_live_sources(broadcaster.live_ohlc, live_state)
     metrics.set_live_state(live_state)
 
@@ -103,13 +116,33 @@ app.include_router(ws_router_module.router)
 
 @app.get("/api/health")
 async def health():
-    """Health check endpoint."""
-    state = broadcaster.state_reader.get_cached()
+    """Health check endpoint.
+
+    Reads the state file live. It used to report
+    ``broadcaster.state_reader.get_cached()`` — explicitly "without touching
+    disk" — which went permanently stale once the broadcast loops began
+    skipping their reads with no client connected (2026-11-16). On 2026-11-21
+    this endpoint claimed ``state_date: 2026-11-17`` while every state file on
+    disk said 2026-11-21.
+
+    ``state_file_age_seconds`` is here because a date alone cannot tell
+    "tracking" from "frozen on a plausible date" — which is how that went
+    unnoticed, including by the Gate 6 check in LIVE_READINESS_CHECKLIST that
+    reads this endpoint.
+    """
+    state = _health_state_reader.current()
+    age = None
+    try:
+        mtime = _health_state_reader.file_path.stat().st_mtime
+        age = round(max(0.0, time.time() - mtime), 1)
+    except OSError:
+        pass
     return {
         "status": "ok",
         "clients": manager.client_count,
         "state_loaded": state is not None,
         "state_date": state.get("date") if state else None,
+        "state_file_age_seconds": age,
     }
 
 

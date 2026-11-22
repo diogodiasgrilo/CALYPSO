@@ -76,6 +76,32 @@ class StateFileReader:
         """Return last successfully read data without touching disk."""
         return self._last_data
 
+    def current(self) -> Optional[dict]:
+        """The file's contents AS THEY ARE NOW — refresh on change, else cache.
+
+        This is what a request handler wants. The pattern it replaces,
+
+            reader.get_cached() or reader.read_latest()
+
+        reads the file once and then serves that first read forever: once
+        ``get_cached()`` is non-None the ``or`` arm is unreachable, and these
+        readers are module-level singletons, so "forever" means until the
+        process restarts. That froze the iOS widget for 5 days (2026-11-21).
+
+        Cost when nothing moved is the ``stat()`` inside ``read_if_changed``
+        (0.003 ms); a real change costs a 1.7 KB read + parse (0.046 ms),
+        measured on the live seat.
+
+        ⚠️ ``read_if_changed`` is CONSUMING — it advances the mtime memo, so
+        whoever calls it observes the change and the next caller does not. The
+        WebSocket broadcaster relies on that signal to decide whether to push a
+        round, so a request-path caller must hold its OWN reader instance over
+        the path rather than share the broadcaster's. Pinned by
+        ``test_the_broadcaster_signal_is_not_stolen``.
+        """
+        fresh = self.read_if_changed()
+        return fresh if fresh is not None else self._last_data
+
     def get_stop_events(self) -> list[dict]:
         """Return accumulated stop events detected during this session."""
         return list(self._detected_stops)
