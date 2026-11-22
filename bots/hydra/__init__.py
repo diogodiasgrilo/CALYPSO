@@ -9,6 +9,92 @@ Account: paper only on this branch. Saxo Bank has been removed end-to-end
 — see Version History 2.0.0-rc.1 and `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 
 
+### 2026-11-21 — the iOS widget had been frozen since the last dashboard restart
+
+**What was wrong.** Six dashboard call sites read state/metrics as
+
+    reader.get_cached() or reader.read_latest()
+
+`get_cached()` returns the reader's `_last_data` "without touching disk", and at
+these sites `read_latest()` was the only thing that ever filled it. So the FIRST
+request read the file and every request after it was served that same snapshot —
+the `or` arm became unreachable. The readers are module-level singletons keyed on
+the resolved path, so this persisted for the life of the process.
+
+`read_if_changed()` — the one method that re-reads on an mtime change — is called
+in exactly one file, `ws/broadcaster.py`, on the broadcaster's own readers.
+Nothing refreshed the readers behind `routers/widget.py` or `routers/hydra.py`.
+
+**Found** while sweeping the fleet: `/api/health` reported `state_date:
+2026-11-17` on 2026-11-21 while every state file on disk read 2026-11-21.
+
+**What it cost.** `/api/widget` is the ONLY data source the Scriptable widget
+has, so the phone widget served whatever was true at its first poll after each
+dashboard restart — a plausible P&L, no error, no staleness marker. The
+dashboard had been up since 2026-11-16, so it had been 5 days. `/api/hydra/state`
+and `/api/hydra/summary` carried the same defect (landed 2026-09-17) but the
+React app does not poll them. `/api/hydra/entries` is reached only with an
+explicit `date_str`, which takes the DB path, so it was never affected. Nothing
+about the trading record is touched — the dashboard is read-only and the state
+files themselves were always correct.
+
+**Two distinct causes, which is why it hid.** The router readers were never
+refreshed at all (since 2026-07-22). `/api/health` read the BROADCASTER's cache,
+which WAS refreshed until the 2026-11-16 idle-gating change stopped the poll
+loops from reading with no client connected — so health went stale that day,
+and that newer symptom is what exposed the older defect behind it.
+
+**The fix.** One named method, `current()`, on both readers: refresh when mtime
+moved, else serve the cache. Every "give me the file as it is now" site uses it.
+Freshness costs a `stat()` (0.003 ms) unchanged, or a 1.7 KB read + parse
+(0.046 ms) changed — measured on the live seat, so there was nothing to trade
+away.
+
+⚠️ **`read_if_changed` is CONSUMING** — it advances the mtime memo, so whoever
+calls it observes the change and the next caller does not. `/api/health` and
+`LiveStateProvider` had been handed the broadcaster's OWN reader; calling
+`current()` on that instance from a request handler would swallow the change
+`_poll_state` waits on and silence the WebSocket round that should have pushed
+it. Both now hold their own reader over the same path.
+`test_the_broadcaster_signal_is_not_stolen` is the pin, and its CONTROL proves a
+shared reader really does steal the signal.
+
+`/api/health` also now returns `state_file_age_seconds`. A date alone cannot
+distinguish "tracking" from "frozen on a plausible date" — which is exactly how
+this survived, including past the Gate 6 check in `LIVE_READINESS_CHECKLIST.md`
+that reads this endpoint and whose literal assertion still passed.
+
+Pinned by `tests/test_dashboard_stale_reader_2026_11_21.py` (22 tests);
+10 mutations verified, including both race reintroductions.
+
+
+### 2026-11-21 — the last two `monotonic() - 0.0` throttles
+
+Closes the two sites reported on 2026-11-20. `time.monotonic()` is seconds since
+BOOT, so a throttle defaulting to `0.0` compares against machine uptime: on a
+freshly-booted host `now - 0.0` falls inside any short window and the guard
+reports "done recently" for something that has never run, swallowing the FIRST
+occurrence. On this VM (~256 days up, monotonic ≈ 22,000,000) the same code
+always fires, which is why only a fresh CI container could expose it.
+
+* `base_strategy._entry_checkpoint` — the safety-adjacent one. It runs a stop
+  check at each quiescent rung of entry placement, cutting a blind window from
+  78% of a stop's 54-second warning time to 24% (2026-10-25). Skipping the first
+  checkpoint of a process meant a bot restarted into a moving market had no
+  checkpoint protection for its first 15 seconds of placement — the exact
+  scenario the mechanism exists for.
+* `strategy._alert_rate_penalty` — swallowed the first HIGH operator alert for an
+  IBKR 429 penalty box when the process started within 120s of a boot, i.e.
+  during a restart storm, which is when a 429 is most likely.
+
+Fix: a `None` sentinel — "never happened" must not be representable as a
+timestamp, because every timestamp is a real point on the monotonic clock.
+Pinned by `tests/test_monotonic_uptime_throttles_2026_11_21.py` (16 tests),
+including a scan asserting no `_last_*` throttle defaults to a number again.
+4 mutations verified, both reverts AND both over-corrections (removing the
+throttle entirely fails too, so the fix cannot become a no-op).
+
+
 ### 2026-11-20 (second same-day change) — "SPX quote is DELAYED" about a SPY quote, 9,114 times
 
 **What was wrong.** `MarketData.update_spx` / `update_vix` are SPX-shaped NAMES

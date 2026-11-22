@@ -3362,8 +3362,15 @@ class MEICStrategy(abc.ABC):
         if not getattr(_ds, "active_entries", None):
             return                      # nothing open to protect
         now = time.monotonic()
-        last = getattr(self, "_last_entry_checkpoint_at", 0.0)
-        if now - last < self.ENTRY_CHECKPOINT_MIN_GAP_S:
+        # None, not 0.0: time.monotonic() is seconds since BOOT, so on a
+        # freshly-started machine `now - 0.0` is a SMALL number and the throttle
+        # reads "checked recently" for a check that has never run — skipping the
+        # FIRST checkpoint of the process, which is exactly the blind window
+        # this mechanism exists to close. Invisible on a long-uptime VM (now is
+        # ~22,000,000s there, so it always passes) and guaranteed on a fresh
+        # boot. Same defect, same fix as the four freshness warnings (2026-11-20).
+        last = getattr(self, "_last_entry_checkpoint_at", None)
+        if last is not None and now - last < self.ENTRY_CHECKPOINT_MIN_GAP_S:
             return                      # throttle: the gate is already ~83% saturated
         self._in_entry_checkpoint = True
         self._last_entry_checkpoint_at = now

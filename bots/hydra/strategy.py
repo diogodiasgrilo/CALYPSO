@@ -5341,8 +5341,12 @@ class HydraStrategy(MEICStrategy):
         # no throttle). Fire at most once per ~2 min so the operator gets one
         # clean signal, not a storm.
         now = time.monotonic()
-        last = getattr(self, "_last_rate_penalty_alert_at", 0.0)
-        if now - last < 120:
+        # None, not 0.0 — see _entry_checkpoint: monotonic() is uptime, so a
+        # 0.0 default swallows the FIRST alert when the process starts within
+        # 120s of a machine boot, which is precisely when a restart storm makes
+        # a 429 most likely.
+        last = getattr(self, "_last_rate_penalty_alert_at", None)
+        if last is not None and now - last < 120:
             return
         self._last_rate_penalty_alert_at = now
         try:
