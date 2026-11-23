@@ -62,7 +62,7 @@ recorded", not "a clean day"**.
 | # | §A-pent said | actually |
 |---|---|---|
 | 1 | Quote cache TTL 2.0 → 5.0s, "next after-close window" | ✅ **DONE.** `CALYPSO_BROKER_QUOTE_CACHE_S=5.0` is live; cache at **88.5% hit rate** (679k hits / 88k misses), far past the projected 50.2%. A chart-bar cache (67.0%) shipped too (`1d612eec`). |
-| 2 | GEX registered test, "~5 trading days" | **Data has accrued far past that** — 8,757 `gex_decisions` rows on `b` (2026-09-08 → 11-19), 3,209 on `bl`. The test is now very likely resolvable. **NOT yet run.** Decision rule is pre-registered and must not be renegotiated. |
+| 2 | GEX registered test, "~5 trading days" | ✅ **RUN 2026-11-22 — VERDICT: KEEP the gate, hypothesis FAILED.** n = **67** vetoes (required 25). Vetoed **11/67 = 16.4%** vs distance-matched benchmark **78/282 = 27.7%** — direction met, but **p = 0.0232 ≥ α 0.01**, so the rule returns KEEP. **No code change; the SKIP stays enabled.** Per the prereg it is **not retried** with a longer window, arm or statistic. 🔑 The in-sample finding (0/23, p = 0.0062) **would have cleared**; tripling the sample reversed the decision — see [`PREREG_GEX_GATE_2026_09_29.md`](PREREG_GEX_GATE_2026_09_29.md) § RESULT. |
 | 3 | e#4 slot prune / one-entry-a-day, ~12 / ~10 weeks | Still accruing; due ≈ Jan 2027. Nothing to do. |
 | 4 | Snapshot priming call (3.13× amplification) | **Partly addressed** — `d9a61d2a` primes a conid's snapshot cache once per session rather than per read. The deeper warmup redesign still carries P7-audit **H10** ("less is brittle"). |
 | 5 | FUND THE ACCOUNT + Gate-9 commit | **Operator decision 2026-11-22: deliberately DEFERRED** until the 15-clean-day clock nears 15 (it is **0**, broken 2026-11-20). Money in the account changes nothing while the gate cannot pass. Raise it when the streak gets close. |
@@ -140,7 +140,7 @@ measurement. Take an RTH sample before claiming the saturation is resolved.
 | what | state |
 |---|---|
 | 🔴 **SPY real-time (Network B) lapsed 2026-11-02** | Died with OPRA; **OPRA restored 11-11, this never was.** Operator re-enabled 2026-11-22; **verification pending Monday RTH.** A weekend probe cannot confirm it — with no ticks IBKR returns `6509='Z'` for everything. Binary check: E/H delayed lines, 0 = live, ~77 = still lapsed. |
-| **GEX registered test** | Data accrued; test not run. Pre-registered rule, do not renegotiate. |
+| ~~GEX registered test~~ | ✅ **CLOSED 2026-11-22 — KEEP the gate, hypothesis FAILED** (p = 0.0232 vs α 0.01, n = 67). Not retried. ⚠️ "KEEP" ≠ validated: the test only asked whether there was enough evidence to REMOVE the SKIP, and there was not. A future question must be a NEW prereg. |
 | **RTH rate-gate re-measure** | Needed before claiming October's saturation is resolved. |
 | Funding + Gate-9 | Deferred by decision (above). |
 | §A-ter session log | **Stops at 2026-09-21** and is B-era. The `bl` era was deliberately NOT back-filled — reconstructing 40 days of narrative would be invention. The record is `daily_summaries` and `docs/HYDRA_TRADING_JOURNAL.md`. |
@@ -432,7 +432,7 @@ already correct fleet-wide (A 2.5 · B 2.5 · C 2.0 · D 2.5 · E 2.5 · F 2.0 �
 | # | what | when | needs |
 |---|---|---|---|
 | 1 | **Quote cache TTL 2.0 → 5.0s** — 31% → 50.2% hits, index 1.68 → 1.11 GETs/s | next after-close window | broker restart; env knob, reversible |
-| 2 | **GEX gate registered test** — **14/25** out-of-sample vetoes | **~5 trading days (~1 wk)** | nothing; it accrues |
+| 2 | ~~**GEX gate registered test** — **14/25** out-of-sample vetoes~~ ⚠️ **RESOLVED 2026-11-22: KEEP, hypothesis FAILED** (see §A-oct) | ~~**~5 trading days (~1 wk)**~~ done | nothing further |
 | 3 | e#4 slot prune — **3/27** · one-entry-a-day — **5/40** | ~12 / ~10 weeks | nothing; they accrue |
 | 4 | Snapshot **priming call** (the 3.13× amplification) | needs design, not a quick edit | ⚠️ P7-audit **H10**: warmup is calibrated, "less is brittle", it caused the 2026-05-18 failure |
 | 5 | **FUND THE ACCOUNT** + the Gate-9 approval commit | blocked on operator | — |
@@ -440,6 +440,11 @@ already correct fleet-wide (A 2.5 · B 2.5 · C 2.0 · D 2.5 · E 2.5 · F 2.0 �
 **Decision rule for #2 is pre-registered and must not be renegotiated:** disable SKIP only if the
 vetoed breach rate stays ≤ the distance-matched benchmark at **p < 0.01**. Current evidence says
 the gate's vetoes are *safer* than its approvals (0/23 vs 26/131 breached, p = 0.0062).
+⚠️ **SUPERSEDED 2026-11-22 — that was the IN-SAMPLE finding and it did not survive.** The
+registered out-of-sample test returned vetoed **11/67 = 16.4%** against a benchmark of
+**27.7%**, **p = 0.0232**, which does NOT clear α = 0.01 → **KEEP the gate, hypothesis
+FAILED, not retried.** The direction held; the magnitude collapsed from a 0% breach rate to
+16.4%. Do not quote the 0.0062 as current evidence.
 
 ## Standing constraints
 

@@ -167,3 +167,51 @@ so this reasoning can be challenged rather than merely asserted. If someone
 disagrees with the exit-path argument, the place to say so is **now**, not after
 reading the number.
 
+
+---
+
+# RESULT — recorded 2026-11-22. **KEEP the gate. The hypothesis is FAILED.**
+
+Run: `python -m scripts.gex_gate_verdict` (variant `b`, the registered arm, unpooled).
+
+| | in-sample (what generated the hypothesis) | **out-of-sample (the registered test)** |
+|---|---|---|
+| vetoed (SKIP) | **0 / 23 = 0.0%** | **11 / 67 = 16.4%** |
+| benchmark (KEPT, distance-matched ±10pt) | 26 / 131 = 19.8% | 78 / 282 = 27.7% |
+| n (vetoes) | 23 | **67** — required 25 |
+| p (one-sided binomial) | **0.0062** | **0.0232** |
+| against α = 0.01 | would have CLEARED | **does NOT clear** |
+
+**Decision, by the rule as written** (`vetoed ≤ benchmark AND p < 0.01` ⇒ disable):
+the direction condition is met — 16.4% is well under 27.7% — but **p = 0.0232 ≥ 0.01**, so
+the rule returns **KEEP**. Per §"On keep", the hypothesis is **recorded FAILED and is not
+retried** with a longer window, a different arm, or a P&L statistic. The SKIP action stays
+enabled. **No code change was made.**
+
+## What actually happened to the effect
+
+**The direction held; the magnitude collapsed.** The hypothesis rested on a vetoed breach
+rate of **exactly zero** — 0-for-23, which is why it reached p = 0.0062 on so few
+observations. Out of sample the vetoed arm breaches **16.4%** of the time. Vetoed strikes do
+still breach less than comparable allowed ones (ratio 0.59), so the gate is probably not
+pure noise, but "its vetoes are significantly SAFER than its approvals" — the in-sample
+sentence above — is **not** what the registered sample shows at the registered α.
+
+🔑 **This is the pre-registration earning its keep, and it is worth stating plainly: the
+early look and the full sample disagree on the DECISION.** At n = 23 the evidence said
+disable, at p = 0.0062. At n = 67 it says keep, at p = 0.0232. Had anyone stopped at the
+favourable count — which §"THREE GUARDS" #1 exists specifically to prevent, by refusing to
+print breach rates below n = 25 — this project would have disabled a live entry-time safety
+action on an effect that did not survive tripling the sample.
+
+⚠️ **Do not read "KEEP" as "the gate is validated."** It is not. The registered test asked
+only whether there was enough evidence to *remove* the SKIP, and there was not. The gate
+remains on by default, with its claim ("this strike is in danger") still unproven and its
+cost in skipped entries still real. What is settled is that **this hypothesis, with this
+statistic, is closed.** A future question about the gate must be a new, separately
+pre-registered one — not this one re-run with more data.
+
+ℹ️ Superseded by this result: the note in `CLAUDE.md` and `docs/NEXT_STEPS.md` §A-pent
+reading *"Current evidence says the gate's vetoes are safer than its approvals (0/23 vs
+26/131 breached, p = 0.0062)"*. That was the in-sample finding, correctly labelled as such
+at the time; it is no longer the current evidence.

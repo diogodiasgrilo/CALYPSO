@@ -746,6 +746,20 @@ D and E both subclass `bots/hydra/calendar_strategy_base.py` (`CalendarStrategyB
 
 **Brandon Trojan Horse features (LIVE on B/C):** take-profit at 80% credit captured, GEX-aware strike adjuster (skips sides inside accel zones, shifts toward decel walls), GEX breach exit (closes IC after sustained 90s breach of decel wall), defensive overlay (debit spread / butterfly hedge), delta-target strike selection anchored to 8δ from the live Polygon chain (replaces HYDRA's OTM-multiplier).
 
+> ℹ️ **The GEX accel-zone SKIP has been formally tested and it STAYS ON — but it is NOT
+> validated (2026-11-22).** `PREREG_GEX_GATE_2026_09_29` asked only whether there was enough
+> evidence to *remove* the skip. Out of sample, vetoed strikes breached **11/67 = 16.4%**
+> against a distance-matched benchmark of **78/282 = 27.7%** — the direction the hypothesis
+> needed, but **p = 0.0232 against a pre-registered α of 0.01**, so the rule returned
+> **KEEP** and the hypothesis is **recorded FAILED and not retried**. No code changed.
+>
+> 🔑 **The in-sample finding would have gone the other way.** It rested on **0 breaches in
+> 23** vetoes (p = 0.0062); tripling the sample moved the vetoed rate to 16.4% and the
+> decision from "disable" to "keep". Quote the out-of-sample figure, never the 0-for-23 — and
+> note that a veto's claim ("this strike is in danger") remains unproven while its cost in
+> skipped entries is real. Any further question about the gate needs a NEW pre-registration,
+> not this one re-run. Full record: [`docs/PREREG_GEX_GATE_2026_09_29.md`](docs/PREREG_GEX_GATE_2026_09_29.md) § RESULT.
+
 Only HYDRA's credit+buffer stop runs in `hydra_stop_shadow` on B/C — parallel for head-to-head journal comparison, never acts on B/C.
 
 **Dashboard:** a main-page **strategy picker** (Header, grouped dropdown from `/api/strategies/meta`) switches the live view between variants; **group tabs** at `/comparison/:groupId` render a group-aware head-to-head (the credit-IC renderer for `ic_0dte`, a debit-calendar renderer for `calendar_multiday`). The taxonomy-aware **`/api/strategies`** API (`/meta`, `/{id}/snapshot`, `/groups/{group_id}/comparison`) plus the existing `/api/dc/*` (D's isolated calendar DB) and `/api/variants/health` back these. **EOD auto-update:** the cumulative + end-of-day cards re-fetch automatically at the close (no reload). The legacy `/comparison` page is still gated by `DASHBOARD_COMPARISON_MODE_ENABLED=true`. End-of-day `VARIANT_COMPARISON_DAILY` Telegram alert from variant A + on-demand group-scoped `/compare`.
