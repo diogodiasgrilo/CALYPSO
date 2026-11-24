@@ -118,6 +118,41 @@ _GEX_FORCE_REFRESH_SIBLING_WINDOW_S = 30
 _GEX_MAX_STRIKE_AGE_S = 45
 
 
+def gex_cap_binding_message(
+    candidates_found: int,
+    cap: int,
+    hydrated_contracts: int,
+    contributed_strikes: int,
+) -> str:
+    """The 'hydration cap binding' line, with CONTRACTS and STRIKES kept apart.
+
+    Extracted 2026-11-23 so the units are testable. The bug it replaces printed
+    ``contributed`` — ``len(profile.strikes)``, a STRIKE count — into a slot
+    labelled "hydrated" beside ``candidates_found`` and ``cap``, which are
+    CONTRACT counts. The live seat therefore logged
+
+        "286 candidates found, only 144 hydrated (cap=250)"
+
+    which is impossible on its face: 144 is BELOW the cap, so the cap cannot be
+    what limited it. At ~2 contracts per strike, 144 strikes is ~288 contracts —
+    essentially the whole candidate set — so a 12.6% exclusion (36 of 286) was
+    being presented as a ~50% hydration collapse.
+
+    This is the SAME units defect the comment above ``not_hydrated`` records
+    fixing on 2026-09-11, repeated in the adjacent block. Keeping the formatting
+    here, with named parameters, is what makes a third recurrence a test
+    failure instead of a plausible-looking log line.
+    """
+    excluded = max(0, candidates_found - cap)
+    return (
+        f"Brandon GEX hydration cap binding: {candidates_found} candidate "
+        f"contract(s) qualified, cap={cap}, so {excluded} were EXCLUDED — "
+        f"{hydrated_contracts} contract(s) hydrated with greeks/IV, contributing "
+        f"{contributed_strikes} strike(s) to this GEX profile (contracts and "
+        f"strikes are different units: ~2 contracts per strike)"
+    )
+
+
 class BrandonHydraStrategy(HydraStrategy):
     """HYDRA with Brandon Jones's Trojan Horse iron condor enhancements."""
 
@@ -3153,13 +3188,27 @@ class BrandonHydraStrategy(HydraStrategy):
             # numbers) so every occurrence fingerprints identically and
             # actually gets deduped instead of alerting fresh each time.
             if candidates_found > self.brandon_gex_max_contracts_to_hydrate:
-                logger.warning(
-                    "Brandon GEX hydration cap binding: %d candidates found, "
-                    "only %d hydrated (cap=%d) — %d real near-the-money "
-                    "contract(s) excluded from this GEX profile",
-                    candidates_found, contributed, self.brandon_gex_max_contracts_to_hydrate,
-                    candidates_found - self.brandon_gex_max_contracts_to_hydrate,
-                )
+                # UNITS BUG, fixed 2026-11-23 — the SAME defect the comment
+                # ~40 lines above records fixing on 2026-09-11, repeated in this
+                # block. `contributed` is `len(profile.strikes)`, a STRIKE
+                # count, and it was being printed into a slot labelled
+                # "hydrated" beside `candidates_found` and the cap, which are
+                # CONTRACT counts. A chain carries ~2 contracts per strike, so
+                # the line read "286 candidates found, only 144 hydrated
+                # (cap=250)" — arithmetically impossible on its face (144 is
+                # below the cap, so the cap cannot be what limited it) and it
+                # presented a 12.6% exclusion as a ~50% hydration collapse.
+                # 144 strikes is ~288 contracts, i.e. essentially everything.
+                #
+                # Report the two units separately and label them, exactly as
+                # the 09-11 fix did for `not_hydrated`. `hydrated_contracts` is
+                # the real contract-level figure; the strike count stays, named.
+                logger.warning("%s", gex_cap_binding_message(
+                    candidates_found=candidates_found,
+                    cap=self.brandon_gex_max_contracts_to_hydrate,
+                    hydrated_contracts=with_greeks_or_iv,
+                    contributed_strikes=contributed,
+                ))
                 self._brandon_send_telegram(
                     message=(
                         f"{candidates_found} real, liquid, near-the-money contracts qualified "

@@ -9,6 +9,105 @@ Account: paper only on this branch. Saxo Bank has been removed end-to-end
 — see Version History 2.0.0-rc.1 and `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 
 
+### 2026-11-23 — two telemetry lines reported the wrong number
+
+Both found in Monday's logs during an end-of-day review. Same family: the
+NUMBERS came from the wrong variable, so each line was internally impossible and
+a reader acting on it would have acted wrongly. Neither changed a trading
+decision; both changed what an operator would have believed.
+
+**1. MONITOR-STARVED counted exposure AFTER the blocking call.**
+`main.py` timed `run_strategy_check()` and, on a long block, read
+`daily_state.active_entries` to report how many entries were at risk — reading
+it *afterwards*. So a block that WAS the placement of the day's first entry
+reported "1 open entry" for a window in which the book was flat, then took the
+`> 0` branch and escalated to a WARNING plus a `MONITOR_STARVED` safety event,
+while the else-branch three lines below correctly says a flat book "carries no
+stop risk".
+
+Measured on the live seat 2026-11-23: three events, 161s / 185s / 246s. The
+246s block ran **13:44:58 → 13:49:04** and e#1 filled at **13:49:02**, so the
+position existed for **2 of 246 seconds** and nothing was left unmonitored. The
+other two had 2 and 3 entries genuinely open, with 5 and 4 ENTRY-CHECKPOINT stop
+checks inside them. **All three rendered identically**, so the false alarm was
+indistinguishable from the real ones — which is the whole cost.
+
+Exposure is now sampled BEFORE the call. An entry born mid-block is reported
+separately (`+N opened during it, not exposed for most of the window`) rather
+than ignored: the checkpoint cannot protect a position that does not exist yet,
+so counting it as exposed overstates the risk, while hiding it would understate
+what the block did.
+
+**2. The GEX cap warning mixed CONTRACTS with STRIKES.**
+`brandon/strategy.py` printed `contributed` — `len(profile.strikes)`, a STRIKE
+count — into a slot labelled "hydrated", beside `candidates_found` and the cap,
+which are CONTRACT counts:
+
+    "286 candidates found, only 144 hydrated (cap=250)"
+
+Impossible on its face: **144 is below the cap**, so the cap cannot be what
+limited it. At ~2 contracts per strike, 144 strikes is ~288 contracts —
+essentially the whole candidate set — so a **12.6% exclusion (36 of 286) read as
+a ~50% hydration collapse.**
+
+🔴 This is the SAME units defect the comment above `not_hydrated` records fixing
+on **2026-09-11**, repeated in the adjacent block ~40 lines later. That comment
+even states the rule it broke: *"A chain carries ~2 contracts per strike, so the
+two counts are never directly comparable."*
+
+**Both were extracted into named functions** — `main.monitor_starved_report` and
+`brandon.strategy.gex_cap_binding_message` — because inline in a loop the only
+available assertion was a source grep, and **a grep cannot tell whether the
+right VARIABLE reached the right SLOT**, which is the entire defect. The wiring
+tests parse the call sites with `ast` and assert the actual arguments, so
+passing the strike count as `hydrated_contracts` is now a test failure.
+
+Pinned by `tests/test_monitor_starved_and_gex_units_2026_11_23.py` (22 tests);
+10 mutations verified. ⚠️ One of those mutations found a flaw in the TEST: a bare
+`"0 were EXCLUDED" in msg` is satisfied by `"-150 were EXCLUDED"`, because the
+0 of 150 substring-matches — so removing the `max(0, …)` floor passed until the
+assertion was anchored on the preceding `"so "`.
+
+**Deliberately NOT changed, and reported instead:** the cap VALUE itself
+(`strategy.brandon.gex.max_contracts_to_hydrate` = 250) against ~287 qualifying
+candidates. 36 real near-the-money contracts are genuinely excluded from every
+refresh, and the alert text even suggests raising it — but that is a THRESHOLD,
+i.e. a tune, and the 2026-09-27 config freeze governs it. Raising it also
+increases Polygon load and rate-gate pressure. Measured and written up for the
+operator; not moved overnight on one day's logs.
+
+🔴 **The extraction broke SEVEN pre-existing tests, and that is the most
+useful thing in this entry.** `tests/test_monitor_starved_2026_10_22.py`
+asserted on main.py's inline SOURCE TEXT — `"if _open > 0:" in tail`,
+`"{_cover}" in tail`, `"{_iter_elapsed:.0f}s" in tail`. Moving the identical
+logic into a function broke all seven while every invariant they existed to
+protect still held.
+
+And they could never have caught the defect: the text was exactly as they
+demanded, and the NUMBER in it was wrong. A test that pins the spelling of a log
+line cannot see that the wrong variable is being spelled.
+
+They are now behavioural assertions against `monitor_starved_report`, keeping
+their original names and intent, plus two new ones the conversion made possible
+(an unreadable book must not escalate, and the message must VARY with checkpoint
+coverage rather than merely contain a placeholder). The timer-bracketing test
+became an ordering check instead of a regex, because bookkeeping lines
+legitimately sit inside the bracket and a brittle pattern over them is what made
+it fail a behaviour-preserving change. All 10 mutations still fail against both
+files, so the gate was strengthened rather than loosened.
+
+**Also added:** `scripts/sample_rate_gate_rth.py` plus a one-shot
+`rate-gate-sample.timer`, to close §A-oct's last open item. `/health`'s
+`rate_gate` counters are cumulative since broker start, so the only way to get
+an RTH rate is to difference two reads a known interval apart — which requires
+being alive during RTH. The timer uses a **single absolute date** rather than a
+recurring expression: an earlier draft paired `Tue..Fri` with
+`ExecStartPost=-systemctl disable` to self-remove, which could not have worked
+(the service runs as `calypso`; `disable` needs root), so the `-` would have
+swallowed a permission error every run while the unit claimed to be one-shot.
+A unit file can assert something false just as easily as a log line can.
+
+
 ### 2026-11-21 — the iOS widget had been frozen since the last dashboard restart
 
 **What was wrong.** Six dashboard call sites read state/metrics as

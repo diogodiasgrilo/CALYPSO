@@ -1,0 +1,26 @@
+[Unit]
+Description=Fire the one-shot RTH rate-gate sample once, mid-session
+Documentation=file:///opt/calypso/scripts/sample_rate_gate_rth.py
+
+[Timer]
+# A SINGLE ABSOLUTE DATE, not a recurring expression. systemd will never fire
+# this again after it elapses, so the one-shot cannot become permanent noise and
+# nothing has to remember to disable it.
+#
+# An earlier draft used `OnCalendar=Tue..Fri` plus
+# `ExecStartPost=-/usr/bin/systemctl disable ...` to self-remove. That could
+# not have worked: the service runs as User=calypso and `systemctl disable`
+# needs root, so the `-` prefix would have swallowed a permission error every
+# run and the timer would have kept firing daily while claiming to be one-shot.
+# A unit file can assert something false just as easily as a log line can.
+#
+# 16:10 UTC = 11:10 ET — inside RTH, and deliberately NOT on top of a bl entry
+# slot (12:15-14:45 ET), so it measures the ordinary steady state rather than
+# the burst an entry attempt creates.
+OnCalendar=2026-11-24 16:10:00 UTC
+Persistent=false
+AccuracySec=30s
+Unit=rate-gate-sample.service
+
+[Install]
+WantedBy=timers.target

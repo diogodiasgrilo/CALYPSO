@@ -1,0 +1,26 @@
+[Unit]
+Description=CALYPSO one-shot RTH rate-gate sample (read-only)
+Documentation=file:///opt/calypso/scripts/sample_rate_gate_rth.py
+# Why a one-shot: /health's rate_gate counters are CUMULATIVE since the broker
+# started, so the only way to get an RTH rate out of them is to difference two
+# reads a known interval apart — which requires being alive during RTH. See
+# docs/NEXT_STEPS.md §A-oct ("RTH rate-gate re-measure").
+#
+# This unit reads ONE loopback HTTP endpoint. It imports no trading code, holds
+# no IBKR session, and cannot place, cancel or modify an order.
+After=calypso-broker.service
+Wants=calypso-broker.service
+
+[Service]
+Type=oneshot
+User=calypso
+Group=calypso
+WorkingDirectory=/opt/calypso
+# 180s window plus headroom; the sampler sleeps between its two reads.
+TimeoutStartSec=400
+ExecStart=/opt/calypso/.venv/bin/python -m scripts.sample_rate_gate_rth --window 180
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadOnlyPaths=/opt/calypso

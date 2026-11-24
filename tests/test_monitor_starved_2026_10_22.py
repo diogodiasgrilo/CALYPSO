@@ -39,6 +39,23 @@ sys.path.insert(0, ROOT)
 
 SRC = open(os.path.join(ROOT, "bots/hydra/main.py")).read()
 
+# ⚠️ CONVERTED 2026-11-23. Seven tests in this file asserted on main.py's inline
+# SOURCE TEXT — `"if _open > 0:" in tail`, `"{_cover}" in tail`,
+# `"{_iter_elapsed:.0f}s" in tail`. When the report builder was extracted into
+# `monitor_starved_report()` (behaviour unchanged), all seven broke, while the
+# invariants they were meant to protect still held.
+#
+# Worse, they could not see the bug the extraction was done to fix: exposure was
+# being read AFTER the blocking call, so a flat book reported "1 open entry" and
+# escalated to a safety event. The text was exactly as these tests demanded and
+# the number was still wrong.
+#
+# They are now behavioural assertions against the function. Same invariants,
+# same names, able to fail for the right reason. See
+# tests/test_monitor_starved_and_gex_units_2026_11_23.py and the
+# `source_grep_tests_are_blind` note.
+from bots.hydra.main import monitor_starved_report  # noqa: E402
+
 
 class TestTheThresholdIsBetweenTheMeasuredModes:
     def test_it_exists_at_module_level(self):
@@ -59,14 +76,19 @@ class TestItIsWiredAroundTheRightCall:
         sleep at the bottom of the loop and never mean anything."""
         # The checkpoint counter is captured between the start mark and the
         # call (2026-10-26); allow bookkeeping lines but NOT another call.
-        m = re.search(
-            r"_iter_started = time\.monotonic\(\)\s*\n"
-            r"(?:\s*_cp_before = [^\n]*\n)?\s*"
-            r"action = strategy\.run_strategy_check\(\)\s*\n\s*"
-            r"_iter_elapsed = time\.monotonic\(\) - _iter_started", SRC)
-        assert m, "the timer must bracket run_strategy_check() and nothing else"
-        # and nothing expensive may sit inside the bracket
-        assert "broker." not in m.group(0), "a broker call is inside the timer"
+        # Ordering, not an exact text shape: bookkeeping lines (the checkpoint
+        # counter 2026-10-26, the exposure sample 2026-11-23) legitimately sit
+        # between the start mark and the call, and a brittle regex over them is
+        # what made this test break on a behaviour-preserving refactor.
+        i_start = SRC.index("_iter_started = time.monotonic()")
+        i_call = SRC.index("action = strategy.run_strategy_check()")
+        i_end = SRC.index("_iter_elapsed = time.monotonic() - _iter_started")
+        assert i_start < i_call < i_end, "the timer must bracket the call"
+        bracket = SRC[i_start:i_end]
+        assert "broker." not in bracket, "a broker call is inside the timer"
+        # exactly ONE call is timed, so the window cannot silently widen
+        assert bracket.count("strategy.run_strategy_check()") == 1
+        assert "time.sleep" not in bracket, "the loop's sleep is inside the timer"
 
     def test_it_uses_a_MONOTONIC_clock(self):
         """Wall-clock would report a spurious multi-hour spell across a DST
@@ -81,24 +103,24 @@ class TestSeverityTracksWhetherPositionsAreOPEN:
     would train the reader to ignore the one that matters."""
 
     def test_open_positions_WARN_and_log_a_safety_event(self):
-        i = SRC.index("MONITOR-STARVED: the trading loop blocked")
-        tail = SRC[i:i + 1600]
-        assert "if _open > 0:" in tail
-        assert "logger.warning(_msg)" in tail
-        assert "MONITOR_STARVED" in tail, "must be a queryable safety event"
+        level, _ = monitor_starved_report(569, 1, 1, 0)
+        assert level == "warning"
+        # the caller must still raise a queryable safety event on that branch
+        i = SRC.index('_level == "warning"')
+        assert "MONITOR_STARVED" in SRC[i:i + 700], "not a queryable safety event"
+        assert "logger.warning(_msg)" in SRC[i:i + 700]
 
     def test_a_flat_book_is_INFO_not_a_warning(self):
-        i = SRC.index("MONITOR-STARVED: the trading loop blocked")
-        tail = SRC[i:i + 1600]
-        assert "logger.info(_msg)" in tail
+        level, _ = monitor_starved_report(569, 0, 0, 0)
+        assert level == "info"
+        assert "logger.info(_msg)" in SRC, "the info branch is gone"
 
     def test_the_message_states_the_DURATION_and_the_position_count(self):
         """Both numbers are the finding. 'The loop was slow' is not actionable;
         '569s with 1 open entry' is."""
-        i = SRC.index("MONITOR-STARVED: the trading loop blocked")
-        tail = SRC[i:i + 400]
-        assert "{_iter_elapsed:.0f}s" in tail
-        assert "{_open}" in tail
+        _, msg = monitor_starved_report(569, 1, 1, 0)
+        assert "569s" in msg
+        assert "1 open entry" in msg
 
 
 class TestObservabilityCannotBreakTheTradingLoop:
@@ -106,8 +128,16 @@ class TestObservabilityCannotBreakTheTradingLoop:
     raises is worse than no counter. Both reads here are defended."""
 
     def test_the_position_count_read_is_guarded(self):
-        i = SRC.index("_open = len(getattr(strategy.daily_state")
-        assert "except Exception" in SRC[i:i + 260]
+        """BOTH reads now — before and after the call (2026-11-23)."""
+        for var in ("_open_before = len(", "_open_after = len("):
+            i = SRC.index(var)
+            assert "except Exception" in SRC[i:i + 300], f"{var} is unguarded"
+
+    def test_an_unreadable_book_cannot_invent_a_count(self):
+        """The guards set -1. That must not render as exposure or as a delta."""
+        level, msg = monitor_starved_report(200, -1, -1, 0)
+        assert level == "info", "a failed read must not escalate to a warning"
+        assert "opened during it" not in msg
 
     def test_the_safety_event_call_is_guarded(self):
         i = SRC.index('"MONITOR_STARVED",')
@@ -142,17 +172,19 @@ class TestItDerivesCoverageRatherThanAssertingBlindness:
         assert "_cp_ran = getattr(strategy, \"entry_checkpoints_run\", 0) - _cp_before" in SRC
 
     def test_the_blind_claim_is_conditional_on_zero_checkpoints(self):
-        i = SRC.index("_cover = (")
-        block = SRC[i:i + 420]
-        assert "if _cp_ran else" in block, "blindness is still asserted unconditionally"
-        assert "ENTRY-CHECKPOINT" in block, "a covered window does not say so"
+        _, blind = monitor_starved_report(191, 1, 1, 0)
+        assert "no stop check" in blind, "blindness is not claimed when it should be"
+        _, covered = monitor_starved_report(191, 1, 1, 3)
+        assert "no stop check" not in covered, (
+            "blindness is still asserted unconditionally")
+        assert "ENTRY-CHECKPOINT" in covered, "a covered window does not say so"
 
     def test_the_message_uses_the_derived_clause(self):
-        i = SRC.index("MONITOR-STARVED: the trading loop blocked for")
-        tail = SRC[i:i + 300]
-        assert "{_cover}" in tail, "the message does not use the derived text"
-        assert "no stop check, MKT-046" not in tail, (
-            "the hardcoded blindness claim is still inline")
+        """The clause must come from the checkpoint count, not be hardcoded."""
+        _, a = monitor_starved_report(191, 1, 1, 0)
+        _, b = monitor_starved_report(191, 1, 1, 5)
+        assert a != b, "the message does not vary with checkpoint coverage"
+        assert "5 stop check(s) ran inside it" in b
 
     def test_the_counter_increments_in_the_checkpoint(self):
         import inspect

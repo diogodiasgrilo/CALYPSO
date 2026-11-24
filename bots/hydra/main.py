@@ -52,6 +52,53 @@ from datetime import datetime
 # silent and only genuine starvation is reported.
 MONITOR_STARVED_WARN_S = 120.0
 
+
+def monitor_starved_report(
+    elapsed_s: float,
+    open_before: int,
+    open_after: int,
+    checkpoints_ran: int,
+) -> tuple[str, str]:
+    """Build the MONITOR-STARVED line and the level it deserves.
+
+    Returns ``(level, message)`` where level is ``"warning"`` or ``"info"``.
+
+    Extracted 2026-11-23 so the derivation is testable. It lived inline in the
+    monitoring loop, where the only way to assert it was to grep the source —
+    and a source scan cannot tell whether the right VARIABLE reaches the right
+    SLOT, which is precisely the bug that prompted this.
+
+    ``open_before`` is the exposure. The caller must sample it BEFORE the
+    blocking call: read afterwards, an entry the block ITSELF created counts as
+    though it had been at risk throughout, which both overstates the risk and
+    escalates a flat-book block to a WARNING plus a MONITOR_STARVED safety
+    event. Live seat 2026-11-23: a 246s block ran 13:44:58->13:49:04 while e#1
+    filled at 13:49:02, so the position existed for 2 of 246 seconds.
+
+    An entry born mid-block is reported, not ignored — the ENTRY-CHECKPOINT
+    cannot protect a position that does not exist yet, so counting it as exposed
+    is wrong, but hiding it would understate what the block did.
+    """
+    cover = (
+        f"{checkpoints_ran} stop check(s) ran inside it (ENTRY-CHECKPOINT)"
+        if checkpoints_ran else
+        "no stop check, MKT-046 confirmation or cushion read ran in that window"
+    )
+    born = (open_after - open_before
+            if open_before >= 0 and open_after >= 0 else 0)
+    msg = (
+        f"MONITOR-STARVED: the trading loop blocked for {elapsed_s:.0f}s with "
+        f"{open_before} open entr{'y' if open_before == 1 else 'ies'} AT RISK"
+        + (f" (+{born} opened during it, not exposed for most of the window)"
+           if born > 0 else "")
+        + f" — {cover}"
+    )
+    # Flat for the window => no stop risk, even if it ENDED by opening a
+    # position. Still recorded (it delays entries), but not a warning and not a
+    # safety event.
+    return ("warning" if open_before > 0 else "info"), msg
+
+
 # Ensure project root is in path for imports when running as script
 _project_root = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 if _project_root not in sys.path:
@@ -1074,43 +1121,37 @@ def run_bot(config: dict, dry_run: bool = False, check_interval: int = 1, config
                 # chance, so zero is luck, not safety).
                 _iter_started = time.monotonic()
                 _cp_before = getattr(strategy, "entry_checkpoints_run", 0)
+                # Exposure must be sampled BEFORE the call, not after it.
+                # `active_entries` read afterwards counts an entry the block
+                # ITSELF created as though it had been at risk throughout —
+                # see the derivation below.
+                try:
+                    _open_before = len(
+                        getattr(strategy.daily_state, "active_entries", ()) or ())
+                except Exception:  # noqa: BLE001
+                    _open_before = -1
                 action = strategy.run_strategy_check()
                 _iter_elapsed = time.monotonic() - _iter_started
                 _cp_ran = getattr(strategy, "entry_checkpoints_run", 0) - _cp_before
                 if _iter_elapsed >= MONITOR_STARVED_WARN_S:
                     try:
-                        _open = len(getattr(strategy.daily_state, "active_entries", ()) or ())
+                        _open_after = len(
+                            getattr(strategy.daily_state, "active_entries", ()) or ())
                     except Exception:  # noqa: BLE001
-                        _open = -1
-                    # DERIVED, not asserted. The ENTRY-CHECKPOINT (2026-10-25)
-                    # runs stop checks INSIDE run_strategy_check, so a long
-                    # iteration no longer implies a blind one — and this line
-                    # claimed blindness regardless. The checkpoint does NOT
-                    # shorten this number; it changes what happened during it.
-                    _cover = (
-                        f"{_cp_ran} stop check(s) ran inside it (ENTRY-CHECKPOINT)"
-                        if _cp_ran else
-                        "no stop check, MKT-046 confirmation or cushion read "
-                        "ran in that window"
-                    )
-                    _msg = (
-                        f"MONITOR-STARVED: the trading loop blocked for "
-                        f"{_iter_elapsed:.0f}s with {_open} open entr"
-                        f"{'y' if _open == 1 else 'ies'} — {_cover}"
-                    )
-                    if _open > 0:
+                        _open_after = -1
+                    _level, _msg = monitor_starved_report(
+                        _iter_elapsed, _open_before, _open_after, _cp_ran)
+                    if _level == "warning":
                         logger.warning(_msg)
                         try:
                             strategy._log_safety_event(
                                 "MONITOR_STARVED",
                                 f"loop blocked {_iter_elapsed:.0f}s with "
-                                f"{_open} open entries",
+                                f"{_open_before} open entries",
                             )
                         except Exception:  # noqa: BLE001
                             pass  # never let observability break the loop
                     else:
-                        # Flat book: the same block carries no stop risk. Worth
-                        # recording (it still delays entries) but not a warning.
                         logger.info(_msg)
 
                 consecutive_errors = 0

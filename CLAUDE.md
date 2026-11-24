@@ -1639,6 +1639,28 @@ hitting it now logs `Brandon GEX chain TRUNCATED`, with
 `max_pages` again — do not loosen the 4.0δ floor, which is the guard that
 stopped bad trades being placed.
 
+> ⚠️ **Do not confuse that with `Brandon GEX hydration cap binding`, and do not
+> read its old wording literally (fixed 2026-11-23).** Until then the line said
+> e.g. *"286 candidates found, only 144 hydrated (cap=250)"* — which is
+> **impossible on its face**, because 144 is BELOW the cap, so the cap cannot be
+> what limited it. The second number was `len(profile.strikes)`, a **STRIKE**
+> count, printed into a slot labelled "hydrated" beside two **CONTRACT** counts.
+> At ~2 contracts per strike, 144 strikes ≈ 288 contracts, i.e. essentially
+> everything hydrated. **It made a 12.6% exclusion look like a ~50% hydration
+> collapse.** (Same units defect as the one fixed 2026-09-11 for `not_hydrated`,
+> repeated in the adjacent block.) The line now names its units.
+>
+> ℹ️ **The underlying fact is real but much smaller, and it is a TUNE, not a
+> defect — left for the operator.** `strategy.brandon.gex.max_contracts_to_hydrate`
+> is **250** while ~**287** contracts qualify per refresh, so ~**36 real
+> near-the-money contracts are excluded from every GEX profile** (measured on
+> `bl`, 9 refreshes on 2026-11-23). Those contribute **zero** to the picture the
+> accel-zone adjuster and the defensive-hedge gate both read. The alert text
+> itself suggests raising the cap — but it is a threshold under the 2026-09-27
+> **config freeze**, and raising it increases Polygon load and rate-gate
+> pressure, so it was deliberately NOT moved. Decide it on its own evidence, not
+> on one day's logs.
+
 ### Stop loss closed at wrong amount
 
 **Cause:** Probably NOT the C1 bug anymore (action paths gate on `*_uic`, not `*_position_id`). Check: was the entry merged with another at the same strike? IBKR (like Saxo) merges positions at the same (conid, side); the older order_id gets deleted, the newer one keeps its ID with increased Amount. Look for `_get_position_amount` / `_is_position_shared` log lines around the stop time.
