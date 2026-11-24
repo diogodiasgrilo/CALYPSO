@@ -985,6 +985,24 @@ Full deployment guide: [`docs/ALERTING_SETUP.md`](docs/ALERTING_SETUP.md).
 
 5 autonomous agents on systemd timers. The 4 narrative agents (APOLLO, HERMES, HOMER, CLIO) use `shared/claude_client.py` for the Claude API. **HERMES/CLIO/HOMER read the live variant's SQLite `backtesting.db` directly** (`shared/sheets_db_shim.py`, `agents_config.json` `data_source: "db"` / `read_db` pointing at `data/variant_<live>/backtesting.db` — repointed to `variant_bl` at the 2026-10-09 swap; **this one is a manual step on every seat swap**, the agents do not follow `live_seat_id()`), not Google Sheets — `google_sheets.enabled=false` on every variant including the live seat; Sheets writes were retired in favor of the DB path (functionally complete 2026-07-17, see the Backtesting Database section). `shared/sheets_reader.py` remains as the legacy/fallback path for `data_source: "sheets"`. ARGUS is a bash health-check script (`services/argus/health_check.sh`, launched via `/bin/bash` in `argus.service`) that reads the state file and emits alerts (`notify.py`) — it uses neither the Claude API nor the DB/Sheets read path.
 
+> ⚠️ **ARGUS's alert dedup had NEVER worked — fixed 2026-11-23.** `notify.py`
+> wrote `argus_alert_state.json` into `data/`, but `argus.service` runs
+> `ProtectSystem=strict` with **`ReadOnlyPaths=/opt/calypso/data`**, so every
+> write failed `[Errno 30] Read-only file system`, was swallowed by the
+> (deliberate) fail-open handler, and the state file **never existed**. Since
+> `_recently_alerted()` then always returns False, `ARGUS_DEDUP_WINDOW_S = 3600`
+> was a no-op and a **sustained** failure would alert on every 15-minute tick —
+> **96/day where 24 was intended.** Now written to `intel/argus/`, the directory
+> the unit already grants; **do not "fix" this by adding `data/` to
+> `ReadWritePaths`** — a health checker should not have write access to the
+> trading data directory, and a test rejects that specific change.
+>
+> ℹ️ **An ARGUS `Health Check Failed` HIGH alert right after a fleet restart is
+> expected, not a fault.** It polls every 15 min and will catch the fleet
+> mid-restart; it passes again on the next cycle. Seen 2026-10-01 and again
+> 2026-11-23. Confirm with `systemctl start argus.service` once the fleet is
+> settled, then `systemctl reset-failed argus.service` to clear the red.
+
 | Agent | Service | Schedule | Purpose |
 |-------|---------|----------|---------|
 | APOLLO | `apollo.service` | 8:30 AM ET weekdays | Pre-market scout (overnight news, VIX, expected move) |

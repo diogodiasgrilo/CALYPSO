@@ -9,6 +9,54 @@ Account: paper only on this branch. Saxo Bank has been removed end-to-end
 — see Version History 2.0.0-rc.1 and `docs/migration/HYDRA_STANDALONE_REWRITE_PLAN.md`.
 
 
+### 2026-11-23 (second same-day change) — ARGUS could never persist its dedup state
+
+**Found by my own deploy, which is the only reason it surfaced.** A 9-way fleet
+restart at 22:57 ET made ARGUS fail for one 15-minute cycle (it polls the bot
+process and caught the fleet mid-restart; it passed again immediately after, and
+the three runs before it were PASS). That single failure was the first time in
+the journal's retention window that ARGUS had tried to WRITE anything — and the
+write failed:
+
+    Could not persist ARGUS alert state: [Errno 30] Read-only file system:
+    '/opt/calypso/data/argus_alert_state.json.tmp'
+
+`services/argus/notify.py` wrote its alert-dedup state into `data/`.
+`deploy/argus.service` runs `ProtectSystem=strict` with
+**`ReadOnlyPaths=/opt/calypso/data`** and `ReadWritePaths=/opt/calypso/intel/argus`.
+So every write had always failed, was swallowed by the deliberately fail-open
+handler, and **`argus_alert_state.json` had never existed on the VM.**
+
+**What it cost.** `ARGUS_DEDUP_WINDOW_S = 3600` promises "re-ping a persistent
+failure at most once/hour". With nothing persisted, `_recently_alerted()` always
+returns False, so a SUSTAINED health failure alerts on **every timer tick — 96
+alerts/day where 24 was intended.** Latent, because it needs a failure lasting
+more than one cycle to show.
+
+**The fix moves the file to the directory the unit already grants** rather than
+adding `data/` to `ReadWritePaths`. A health checker has no business with write
+access to the trading data directory, and that `ReadOnlyPaths` entry is
+deliberate — the lazy fix would have traded a dedup bug for a sandbox hole.
+
+Pinned by `tests/test_argus_state_is_writable_2026_11_23.py` (7 tests). The test
+**derives the answer from the unit file** — it parses `argus.service` and asserts
+the state path falls under a granted `ReadWritePaths=` and not under a
+`ReadOnlyPaths=`. Hard-coding "intel/argus" would re-break the moment either
+side moved, which IS the bug: the code and the sandbox disagreed and nothing
+compared them. One test explicitly rejects the widen-the-sandbox fix. 5
+mutations verified.
+
+⚠️ **My own slip, recorded because the mutation pass caught it and review did
+not:** the edit inserted the new `os.makedirs(...)` line TWICE, adjacently.
+Functionally harmless (it is idempotent) but it meant mutation R3 deleted one
+copy and left the other, so "drop the makedirs" passed and looked like a test
+gap rather than a duplicated line. Deduped; R3 then failed correctly.
+
+ℹ️ The ARGUS failure itself needs no fix — it was my restart, and a HIGH
+`Health Check Failed` alert went out at 22:58 ET as a result. That alert is
+correct behaviour reporting a real (if self-inflicted) condition.
+
+
 ### 2026-11-23 — two telemetry lines reported the wrong number
 
 Both found in Monday's logs during an end-of-day review. Same family: the

@@ -40,7 +40,23 @@ FALLBACK_CONFIG_PATH = os.path.join(_project_root, "bots", "hydra", "config", "c
 # the last alert's fingerprint + timestamp to a small state file and skip the
 # send if the SAME failure already alerted within ARGUS_DEDUP_WINDOW_S. A
 # genuinely NEW failure (different message) fingerprints differently and sends.
-ARGUS_STATE_PATH = os.path.join(_project_root, "data", "argus_alert_state.json")
+# `intel/argus/`, NOT `data/` — fixed 2026-11-23. `argus.service` declares
+# `ProtectSystem=strict` with `ReadOnlyPaths=/opt/calypso/data` and
+# `ReadWritePaths=/opt/calypso/intel/argus`, so every write here failed with
+# `[Errno 30] Read-only file system` and was swallowed by the fail-open handler
+# below. The state file had NEVER existed on the VM.
+#
+# Consequence: `ARGUS_DEDUP_WINDOW_S` below promises "at most once/hour", but
+# with nothing persisted the dedup is a no-op and a SUSTAINED failure alerts on
+# every 15-minute timer tick — 96 alerts/day where 24 was intended. Found when a
+# 9-way fleet restart on 2026-11-23 made ARGUS fail for one cycle, which was the
+# first time in the journal's retention that it had tried to write at all.
+#
+# The fix moves the file to the directory the unit ALREADY grants rather than
+# widening the sandbox: a health checker has no business with write access to the
+# trading data directory, and `ReadOnlyPaths=/opt/calypso/data` is deliberate.
+ARGUS_STATE_PATH = os.path.join(
+    _project_root, "intel", "argus", "argus_alert_state.json")
 ARGUS_DEDUP_WINDOW_S = 3600  # re-ping a persistent failure at most once/hour
 _VOLATILE_RE = re.compile(r"\$?\s?-?\d[\d,]*(?:\.\d+)?%?")
 
