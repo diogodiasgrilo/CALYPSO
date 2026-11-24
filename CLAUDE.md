@@ -1125,6 +1125,35 @@ exit code is the unit's).
 
 First green run, 2026-11-16: `ok BL OK — 26 summary days, 42 entries — all identities hold`.
 
+**The non-gating telemetry check also audits the FEEDS (added 2026-11-24).** Same failure shape as
+everything else in that script, one layer down: the instruments can be recording perfectly while the
+prices going into them are 20 minutes stale. Per variant, for the last session that actually had
+regular hours, it counts the strategies' own delayed-quote warnings:
+
+| result | meaning |
+|---|---|
+| **0** delayed warnings in RTH | real-time — the one healthy answer |
+| **>0** | `FEED_DELAYED`, naming the symbol **and** which of the three subscriptions to check |
+| **no RTH lines at all** | `UNCHECKED` — never reported as "ok" |
+
+> 🔑 **That last row is the whole design, not a nicety.** A zero has two causes — the feed is fine, or
+> nobody looked — and a silent detector is indistinguishable from a restored subscription. That is
+> exactly why the 2026-11-23 verification had to prove the detector was live (E priced SPY at 723.65,
+> and the same code emitted the warning at 15:58 the Friday before) before its 0 was believed.
+> Reporting an unexamined day as healthy is how the 2026-11-02 lapse survived **20 days**.
+>
+> ℹ️ **Non-gating by intent.** A delayed feed on two dry-run-locked strategies must not fail the unit
+> that gates real money. It reports; it does not gate.
+>
+> ⚠️ The log directory is read from each variant's **`logging.log_dir`**, not derived from
+> `HYDRA_VARIANT_ID` — that key BEATS the variant id, which is how `bl` spent its first days writing
+> into `b`'s log file. A checker that guessed the path by convention would audit the wrong strategy.
+>
+> Pinned by `tests/test_feed_freshness_audit_2026_11_24.py` (25 tests, 9 mutations verified). One of
+> its controls renders the **real** format string out of `base_strategy.py` and caught, on its first
+> run, that the warning uses `(6509=%r)` rather than `(6509='%s')` — the regex happened to be right,
+> but only by luck.
+
 > 🔴 **FIXED 2026-11-16, and the impact was worse than first recorded: this check's `--alert` had never
 > delivered a single alert.** `audit_telemetry_health` passed `alert_type="data_quality"` as a **string** where
 > `AlertService` expects the `AlertType` enum, and every run logged
@@ -1670,16 +1699,46 @@ stopped bad trades being placed.
 > collapse.** (Same units defect as the one fixed 2026-09-11 for `not_hydrated`,
 > repeated in the adjacent block.) The line now names its units.
 >
-> ℹ️ **The underlying fact is real but much smaller, and it is a TUNE, not a
-> defect — left for the operator.** `strategy.brandon.gex.max_contracts_to_hydrate`
-> is **250** while ~**287** contracts qualify per refresh, so ~**36 real
-> near-the-money contracts are excluded from every GEX profile** (measured on
-> `bl`, 9 refreshes on 2026-11-23). Those contribute **zero** to the picture the
-> accel-zone adjuster and the defensive-hedge gate both read. The alert text
-> itself suggests raising the cap — but it is a threshold under the 2026-09-27
-> **config freeze**, and raising it increases Polygon load and rate-gate
-> pressure, so it was deliberately NOT moved. Decide it on its own evidence, not
-> on one day's logs.
+> ✅ **DECIDED 2026-11-24 — the cap STAYS at 250, and it is measured, not deferred.**
+> The truncation sorts **by open interest, descending** (`gex_provider.py`:
+> `candidates.sort(key=open_interest, reverse=True)` then `[:cap]`) — and **GEX is
+> directly proportional to OI**, so the cap drops precisely the contracts that
+> contribute least. Measured against the live SPX 0DTE chain (spot 7167.55, 247
+> in-window qualifying contracts, 197,689 total OI):
+>
+> | tail dropped | share of total OI | median distance from spot | within 25pt |
+> |---|---|---|---|
+> | **36** (a day like 11-23) | **1.57%** | **142.6pt** | 2 of 36 |
+> | 76 (a day like 11-18) | 5.92% | 192.6pt | 6 of 76 |
+>
+> The **top 36 by OI carry 46.5%**. Raising the cap would buy ~1.6% more of the
+> quantity GEX is proportional to, concentrated 142pt out where gamma is
+> microscopic. **Not worth a code change.**
+>
+> ⚠️ **Corrected 2026-11-24 — the note this replaces was wrong in four ways, and
+> every one of them pointed toward raising the cap:**
+> 1. *"~36 real **near-the-money** contracts"* — they are **far OTM**: 142.6pt
+>    median, and only **2 of 36** within 25pt (OI 126 and 92, against 197,689).
+> 2. *"excluded from **every** GEX profile"* — the cap **binds intermittently**.
+>    From `bl`'s own `gex_profile_snapshots`: 11-23 cand 285–288 (binding), 11-18
+>    314–326 (binding), but 11-17 207–216, 11-16 221–230 and 11-12 212–221 **did
+>    not bind at all**, nor did 11-24 (247). It was generalised from one day.
+> 3. *"a threshold under the 2026-09-27 config freeze"* — **it is a CODE DEFAULT.**
+>    `max_contracts_to_hydrate`, `oi_threshold`, `spot_window_pct` and `max_pages`
+>    are **all absent from config_variant_{bl,b,c}.json**, so the freeze never
+>    applied and changing it would be a code change, not a config tweak.
+> 4. *"raising it increases Polygon load **and rate-gate pressure**"* — Polygon is
+>    a **different provider**; GEX hydration never touches IBKR's 5/s rate gate.
+>
+> 🔑 **Same units trap as the bug in the paragraph above, one level up.** That one
+> printed STRIKES into a slot labelled CONTRACTS; this one reasoned about a
+> **contract COUNT** (36 of 287 = 12.6%, which sounds material) when the decision
+> turns on **OI SHARE** (1.57%, which is not). Check the denominator the mechanism
+> actually uses before calling an exclusion material.
+>
+> ℹ️ The alert text still suggests raising the cap. That wording is now known to
+> over-state the case — it reports counts, which is the wrong denominator — so
+> **treat a `cap binding` line as informational, not as a recommendation.**
 
 ### Stop loss closed at wrong amount
 

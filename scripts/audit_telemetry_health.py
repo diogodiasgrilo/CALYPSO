@@ -24,7 +24,27 @@ reads is the exact failure this exists to catch, so it was rewritten to check a
 short list of instruments that are known to matter, each with the condition
 under which it SHOULD be populated and a note on what its absence once cost.
 
-Read-only. Opens every database with mode=ro.
+IT ALSO CHECKS THE FEEDS (added 2026-11-24). Same shape, one layer down: the
+instruments can be recording perfectly while the PRICES going into them are 20
+minutes stale. The IBKR market-data subscriptions behind this fleet have lapsed
+twice (2026-07-06, 2026-11-02) and neither lapse raised anything -- IBKR does
+not error, it silently serves delayed data. The second ran 20 days and was
+found only because somebody went looking, helped along by a warning that named
+the wrong instrument. `audit_data_feed_freshness` reads what the strategies
+already log, per variant, for the last session that actually had regular hours.
+
+    0 delayed warnings in RTH   -> real-time, the one healthy answer
+    >0                          -> FEED_DELAYED, naming the symbol AND which
+                                   of the three subscriptions to go check
+    no RTH lines at all         -> UNCHECKED, never "ok"
+
+That last line is the whole design. A zero has two causes -- the feed is fine,
+or nobody looked -- and a silent detector is indistinguishable from a restored
+subscription. Reporting an unexamined day as healthy is how a lapse survives
+three weeks. Non-gating by intent: a delayed feed on two dry-run-locked
+strategies must not fail the unit that gates real money.
+
+Read-only. Opens every database with mode=ro, and reads log files.
 
 Usage:
     python -m scripts.audit_telemetry_health
@@ -35,6 +55,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 from pathlib import Path
@@ -143,6 +164,114 @@ def _dashboard_baseline(vid: str) -> str:
         global _BASELINE_UNAVAILABLE
         _BASELINE_UNAVAILABLE = f"{type(e).__name__}: {e}"
         return ""
+
+
+# --- data-feed freshness -------------------------------------------------
+#
+# Added 2026-11-24. The IBKR market-data subscriptions behind this fleet have
+# lapsed TWICE (2026-07-06 and 2026-11-02), and NEITHER lapse raised anything:
+# IBKR does not error, it silently serves 15-20 minute delayed data. The second
+# one ran 20 days and was found only because somebody went looking. The whole
+# detection was "a human remembers to grep", which is the same gap this script
+# was written to close for the DB instruments.
+#
+# Three feeds, three SEPARATE subscriptions — one account event can drop several
+# and they are restored independently (OPRA came back 11-11, Network B 11-23),
+# so each is named in the finding rather than lumped as "market data".
+_FEED_SUBSCRIPTION = {
+    "SPY": "Network B (NYSE American, BATS, ARCA, IEX + Regional)",
+    "SPX": "CME S&P Indices bundle",
+    "VIX": "CME S&P Indices bundle",
+}
+
+# The symbol is CAPTURED, not assumed. Until 2026-11-20 this line hardcoded
+# "SPX" while E and H trade SPY, so 9,114 warnings over four days named the
+# wrong instrument and anyone grepping for a SPY problem found nothing. A check
+# that re-assumed the symbol would inherit that blindness.
+_DELAYED_RE = re.compile(r"DATA: (\w+) quote is DELAYED \(6509='([^']*)'\)")
+
+# RTH only. Outside it a delayed or frozen flag is normal and expected, so
+# counting the whole file would produce a finding every single night.
+_RTH_FROM, _RTH_TO = "09:30:00", "16:00:00"
+
+# How many recent dated logs to look back through for the last real session.
+# Covers a long weekend plus a holiday without reporting on a stale day.
+_FEED_LOOKBACK_FILES = 6
+
+
+def _variant_log_dir(root: Path, vid: str) -> Path:
+    """Where this variant ACTUALLY writes, read from its config.
+
+    Deliberately not built from `HYDRA_VARIANT_ID`. `logging.log_dir` BEATS the
+    variant id, which is how `bl` spent its first days writing into `b`'s log
+    file (fixed 2026-10-09). A checker that derives the path by convention
+    would read the wrong file and report on the wrong strategy.
+    """
+    name = f"config_variant_{vid}.json" if vid else "config.json"
+    cfg = root / "bots" / "hydra" / "config" / name
+    try:
+        log_dir = ((json.loads(cfg.read_text()).get("logging") or {})
+                   .get("log_dir") or "")
+    except Exception:  # noqa: BLE001 — a missing/unparsable config is not fatal
+        log_dir = ""
+    if log_dir:
+        p = Path(log_dir)
+        return p if p.is_absolute() else root / p
+    return root / "logs" / (f"hydra_variant_{vid}" if vid else "hydra")
+
+
+def audit_data_feed_freshness(root: Path, vid: str):
+    """Did the last real session serve REAL-TIME quotes for every symbol?
+
+    Returns findings, never a bare bool. The hard part is not counting the
+    warnings — it is that **a zero has two causes**: the feed is healthy, or
+    nothing was looked at. A silent detector and a fixed subscription produce
+    the identical 0, which is why the 11-23 verification had to prove the
+    detector was live before the 0 was believed. So "no RTH lines at all"
+    reports UNCHECKED, never ok.
+    """
+    d = _variant_log_dir(root, vid)
+    if not d.is_dir():
+        return []
+    logs = sorted(d.glob("bot.log.20*-*-*"), reverse=True)[:_FEED_LOOKBACK_FILES]
+    if not logs:
+        return []
+
+    for path in logs:
+        try:
+            lines = path.read_text(errors="replace").splitlines()
+        except OSError as exc:
+            return [("UNCHECKED", f"feed/{path.name}",
+                     f"log could not be read ({type(exc).__name__}) — feed "
+                     f"freshness NOT checked for this variant")]
+        rth = [ln for ln in lines
+               if len(ln) > 19 and _RTH_FROM <= ln[11:19] <= _RTH_TO]
+        if not rth:
+            continue  # holiday, weekend, or the variant was not running
+
+        hits = {}
+        for ln in rth:
+            m = _DELAYED_RE.search(ln)
+            if m:
+                sym, flag = m.group(1), m.group(2)
+                hits.setdefault(sym, [0, flag])
+                hits[sym][0] += 1
+        if not hits:
+            return []  # the one genuinely healthy answer
+        out = []
+        for sym, (n, flag) in sorted(hits.items()):
+            sub = _FEED_SUBSCRIPTION.get(sym, "the subscription for this symbol")
+            out.append((
+                "FEED_DELAYED", f"feed/{sym}",
+                f"{n} delayed-quote warning(s) (6509='{flag}') during RTH on "
+                f"{path.name.split('.')[-1]} — {sym} is NOT real-time. Check "
+                f"{sub} in Client Portal. This does not error on its own and "
+                f"has lapsed twice before (2026-07-06, 2026-11-02)."))
+        return out
+
+    return [("UNCHECKED", "feed",
+             f"no RTH log lines in the last {len(logs)} dated log(s) — feed "
+             f"freshness NOT checked (holiday, or this variant is not running)")]
 
 
 def audit_variant(root: Path, vid: str, days: int):
@@ -286,6 +415,16 @@ def main(argv=None):
             # the unit prefixes this check with `-` — so the abort was silent.
             found = [("UNAUDITABLE", f"variant {name}",
                       f"audit raised {type(exc).__name__}: {exc} — NOT audited")]
+        # Contained SEPARATELY from the DB audit on purpose: the feed check
+        # reads log files, so its failure modes (missing dir, unreadable log)
+        # are unrelated, and one must not be able to suppress the other.
+        try:
+            found = list(found) + audit_data_feed_freshness(root, vid)
+        except Exception as exc:  # noqa: BLE001
+            found = list(found) + [
+                ("UNCHECKED", "feed",
+                 f"feed-freshness check raised {type(exc).__name__}: {exc} "
+                 f"— NOT checked")]
         if not found:
             print(f"  {name:<2} ok")
             continue
