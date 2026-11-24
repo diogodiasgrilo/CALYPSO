@@ -1622,7 +1622,9 @@ gcloud compute ssh calypso-bot --zone=us-east1-b --command="sudo journalctl -u h
 > rate-limit to one line per 5 min, disclosing the suppression. Control flow is unchanged: a `D`
 > flag still accepts the price and advances the freshness clock.
 
-**Cause 2:** IBKR data-sharing toggle hasn't propagated. Run `scripts/probe_ibkr_market_data.py` — it dumps SPY and SPX/VIX side by side. **Current account reality (as of 2026-07-06):** SPX + VIX return **real-time** (6509 first char `R`) while SPY returns **delayed** (`6509='DP'`) — this account holds the index real-time subscription but NOT a US-equity one. So a SPY `DP` alongside SPX/VIX on `R` is the **expected steady state**, not a fault; SPY is NOT a free-real-time control on this account (the inverse of the probe's original premise). If SPX/VIX themselves go metadata-only/`DP`, that's the real regression to chase.
+**Cause 2:** a **missing or lapsed market-data subscription** — ours, self-serve, and it does not error. Run `scripts/probe_ibkr_market_data.py`, which dumps SPY and SPX/VIX side by side. **Account reality as of 2026-11-23: SPX, VIX *and SPY* are all real-time** (6509 first char `R`). SPX/VIX come from the CME S&P Indices bundle, SPX+SPY *options* from OPRA, and **SPY underlying from "NYSE American, BATS, ARCA, IEX, and Regional Exchanges (Network B)"**. Any of them reading `DP` is a **lapsed subscription to chase**, not a steady state.
+
+> ⚠️ **Corrected 2026-11-24: this said a SPY `DP` was the "expected steady state, not a fault" — and it was wrong from the day it was written.** It was dated 2026-07-06, the evening *before* the operator subscribed to Network B; verification landed 07-07 and this line never followed. So for ~5 months the operator reference told readers to **ignore** the exact symptom of a lapsed equity feed — and when Network B really did lapse on 2026-11-02 it went unchased for **20 days**, helped by a log line that mislabelled the SPY quote as "SPX" (fixed 2026-11-20). Network B has now lapsed **twice** (2026-07-06, 2026-11-02; restored 2026-11-23, verified by E/H delayed-line counts going 158/162 → **0/0**), so treat it as a recurring billing/classification failure. **Three feeds, three separate subscriptions — one account event can drop several and they come back separately, so check each.**
 
 **Cause 3:** No real-time entitlement for the conid (or stale conid). The `_snapshot_with_preflight` warmup-exhaustion WARNING logs distinguish: "metadata-only" = entitlement/conid issue, "empty list" = service outage (P7-audit M17).
 
@@ -1761,8 +1763,10 @@ source .venv/bin/activate
 python scripts/probe_ibkr_market_data.py 2>&1 | tee scripts/probe_mktdata_$(date +%H%M%S).log
 ```
 
-It dumps SPY and SPX/VIX side by side. Output interpretation (**account reality as of 2026-07-06:** SPX/VIX are real-time, SPY is delayed — the inverse of the probe's original "SPY = free-realtime control" premise):
-- **SPX/VIX `R`, SPY `DP`** → expected steady state on this account (index realtime subscription present, no US-equity one). NOT a fault.
+It dumps SPY and SPX/VIX side by side. Output interpretation (**account reality as of 2026-11-23: all three are real-time** — SPX/VIX via the CME index bundle, SPY via Network B):
+- **SPX/VIX `R`, SPY `R`/`Rp`** → the healthy state. All three feeds entitled.
+- **SPX/VIX `R`, SPY `DP`** → **Network B has lapsed** — chase it (self-serve, Client Portal → Market Data Subscriptions). This is NOT a steady state; the doc claimed it was until 2026-11-24, which is why the 2026-11-02 lapse went 20 days unnoticed. ⚠️ Cheaper check with no tooling: E and H log it themselves — `grep -c "quote is DELAYED"` over their RTH log, where **0 = live and ~77 = lapsed**.
+- ⚠️ **A weekend probe proves nothing.** With no live ticks IBKR returns `6509='Z'` (frozen) for *everything*, so SPY not showing `DP` on a Saturday is not evidence. Read it during RTH.
 - **SPX/VIX NO DATA / `DP`** → the real regression — index entitlement or data-sharing lapsed; chase this.
 - **Everything NO DATA** → broader broker-data-sharing / session issue
 - Always check field 6509 first char: `R`=real-time, `D`=delayed, `Z`=frozen.
